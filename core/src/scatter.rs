@@ -54,7 +54,7 @@ impl Medium {
         // directions that can leave is that much narrower); so the two shares are tied together, and a
         // body that absorbs nothing gives back exactly what arrives.
         let back = 1.0 - enters / (ior * ior);
-        let (sig_s, sig_a) = material::scatter_rgb([p.body_r, p.body_g, p.body_b], p.sss_depth * crate::material::sss_fit(scale), p.sss, p.sss_spread);
+        let (sig_s, sig_a) = material::scatter_rgb([p.body_r, p.body_g, p.body_b], p.sss_depth * crate::material::sss_fit(scale), p.sss, p.sss_spread, p.sss_forward);
         let _ = sc;
         Self { sig_s, sig_a, hold: (1.0 + back) / (1.0 - back), enters, ior, mottle: p.mottle.clamp(0.0, 1.0) }
     }

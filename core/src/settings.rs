@@ -241,6 +241,9 @@ settings! {
     /// (0 = as light that scatters does; towards 1, as a dyed body glows its colour just under the skin
     /// and through thin parts: wax)
     sss_hue, "sssHue", 0.0;
+    /// how much the body scatters forward (the mean cosine of its scattering, 0 = every way alike, up to
+    /// 0.95): wax and skin scatter forward
+    sss_forward, "sssForward", 0.0;
     /// 1 = with a milky body the picture is exposed for it, as a photographer exposes for the subject: a
     /// white matte surface facing the brightest way comes to white (never darker than set; glass is not
     /// affected, as it shows the lights themselves)

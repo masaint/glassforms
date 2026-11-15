@@ -543,13 +543,20 @@ pub fn sss_fit(scale: f64) -> f64 {
 /// gives a thick piece the body's colour, when the colours scatter differently (`sssSpread`): colour c
 /// travels (its wavelength / 550 nm)^(4 x spread) times as far between scatterings as green does, as
 /// light scattered by particles small against the wavelength does at spread 1.
-pub fn scatter_rgb(colour: [f64; 3], depth: f64, amount: f64, spread: f64) -> ([f64; 3], [f64; 3]) {
+///
+/// `forward` (0 to 0.95): how much the body scatters forward (the mean cosine of its scattering, g), as
+/// wax does. By the similarity rule a body that scatters forward spreads light as one that scatters
+/// evenly with (1 - g) times as many scatterings; its absorption stays as the body's colour asks. So
+/// light gets further in and through thin parts, and on that longer way takes on more of the body's
+/// colour: thin parts lit from behind glow in it (wax goes amber), and a thick piece is a little deeper.
+pub fn scatter_rgb(colour: [f64; 3], depth: f64, amount: f64, spread: f64, forward: f64) -> ([f64; 3], [f64; 3]) {
+    let keep = 1.0 - forward.clamp(0.0, 0.95);
     let spread = spread.clamp(0.0, 1.0);
     let mut s = [0.0; 3];
     let mut a = [0.0; 3];
     for (c, nm) in [610.0f64, 550.0, 465.0].into_iter().enumerate() {
         let sc = scatter(colour, depth * (nm / 550.0).powf(4.0 * spread), amount);
-        s[c] = sc.sigma_s;
+        s[c] = sc.sigma_s * keep;
         a[c] = sc.sigma_a[c];
     }
     (s, a)
@@ -624,7 +631,7 @@ pub fn uniforms(p: &Settings, scale: f64) -> [f32; MU_FLOATS] {
     // (the last: the index of a thin wall's own glass)
     put(4, [sc.sigma_s, sc.reach, WALK_EVENTS, p.ior]);
     // the scattering and absorption of each colour (they differ when the colours scatter differently)
-    let (ss3, sa3) = scatter_rgb([p.body_r, p.body_g, p.body_b], p.sss_depth * crate::material::sss_fit(scale), p.sss, p.sss_spread);
+    let (ss3, sa3) = scatter_rgb([p.body_r, p.body_g, p.body_b], p.sss_depth * crate::material::sss_fit(scale), p.sss, p.sss_spread, p.sss_forward);
     put(5, [sa3[0], sa3[1], sa3[2], p.sss_hue.clamp(0.0, 1.0)]);
     put(6, [ss3[0], ss3[1], ss3[2], 0.0]);
     // (the last: how uneven the colour is, read with the surface's wear)
@@ -799,7 +806,7 @@ pub const RESET: &[(&str, f64)] = &[
     ("density", 1.0), ("fit", 0.0), ("spectrum", 0.0), ("rough", 0.0), ("roughRef", 0.0),
     ("film", 0.0), ("filmIor", 1.33), ("filmVar", 0.0), ("filmScale", 1.0), ("filmFlow", 0.0), ("filmDrain", 0.0), ("filmSky", 0.5),
     ("coat", 0.0), ("coatIor", 1.5), ("metal", 0.0), ("hollow", 0.0), ("bodyR", 1.0), ("bodyG", 1.0), ("bodyB", 1.0),
-    ("sss", 0.0), ("sssDepth", 0.2), ("sssWalk", 0.0), ("sssSpread", 0.0), ("sssHue", 0.0), ("sharp", 1.0), ("age", 1.0), ("edgeWear", 0.0), ("cavity", 0.0), ("cavityR", 0.35), ("cavityG", 0.27), ("cavityB", 0.2), ("scratches", 0.0), ("swirls", 0.0), ("peel", 0.0), ("smudges", 0.0), ("dust", 0.0), ("brush", 0.0), ("mottle", 0.0),
+    ("sss", 0.0), ("sssDepth", 0.2), ("sssWalk", 0.0), ("sssSpread", 0.0), ("sssHue", 0.0), ("sssForward", 0.0), ("sharp", 1.0), ("age", 1.0), ("edgeWear", 0.0), ("cavity", 0.0), ("cavityR", 0.35), ("cavityG", 0.27), ("cavityB", 0.2), ("scratches", 0.0), ("swirls", 0.0), ("peel", 0.0), ("smudges", 0.0), ("dust", 0.0), ("brush", 0.0), ("mottle", 0.0),
     ("bubbles", 0.0), ("bubbleSize", 0.03), ("bubbleEven", 0.5), ("bubbleShape", 0.0), ("bubbleSeed", 1.0),
     ("glow", 0.0), ("glowR", 1.0), ("glowG", 0.32), ("glowB", 0.08), ("glowCore", 0.5),
     ("grin", 0.0), ("grinDepth", 0.02), ("biref", 0.0), ("birefAz", 0.0), ("birefEl", 90.0),
@@ -1062,6 +1069,7 @@ pub static CONTROLS: &[Control] = &[
     ctl("sssDepth", "light travels", Slider, 0.01, 2.0, 0.005, true, Lab("inside"), "How far light gets inside a milky body between scatterings: small = dense and chalky, large = soft and deep."),
     costly(ctl("sssWalk", "true scattering", Switch, 0.0, 1.0, 1.0, false, Lab("inside"), "Follow the light as it wanders inside the body instead of estimating it. Grainy until the picture settles: for still views and video.")),
     ctl("sssSpread", "colours travel apart", Slider, 0.0, 1.0, 0.01, true, Lab("inside"), "0: every colour travels as far inside the body. Towards 1 blue is scattered sooner and red goes deeper, as in milk glass and wax: a bluish edge, a warm glow in the shade and where light comes through."),
+    ctl("sssForward", "scatters forward", Slider, 0.0, 0.95, 0.01, true, Lab("inside"), "How much the body scatters light onwards rather than every way, as wax does: light gets further in and through thin parts, taking on more of the body's colour on the way (thin wax lit from behind glows amber)."),
     ctl("sssHue", "colour under the skin", Slider, 0.0, 1.0, 0.01, true, Lab("inside"), "How far the light scattered inside takes on the body's colour at every depth, not only deep in it: towards 1 a dyed body glows its colour just under the surface and through thin parts, as wax does."),
     ctl("meter", "expose for the body", Switch, 0.0, 1.0, 1.0, false, Lab("inside"), "Expose the picture for a milky body, as a photographer exposes for the subject: a white surface facing the brightest light comes out white. The lights glass is lit by are made to be seen in it, and a body that only gathers them would look grey."),
     ctl("sssDetail", "light detail", Slider, 96.0, 256.0, 32.0, false, Lab("inside"), "How fine the volume is in which a milky body's light is worked out (cells along a side). Finer follows thin pieces better; it is worked out again whenever the lights or the shape move, and costs more the finer it is."),
@@ -1154,7 +1162,7 @@ pub fn applies(name: &str, p: &Settings) -> bool {
         "spectrum" | "sss" => !metal && !v.hollow,
         "bodyR" | "bodyG" | "bodyB" => metal || v.sss,
         "sssDepth" | "sssWalk" => v.sss,
-        "sssSpread" | "sssHue" => v.sss && !v.walk,
+        "sssSpread" | "sssHue" | "sssForward" => v.sss && !v.walk,
         "meter" => v.sss,
         "sssDetail" => v.sss && !v.walk,
         "filmIor" | "filmVar" | "filmScale" => v.film,
