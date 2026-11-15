@@ -649,6 +649,8 @@ fn sheetOf(i: i32) -> Sheet {
   sh.e1 = across1(sh.a);
   sh.e2 = across2(sh.a);
   sh.r = rs * select(0.16 + 0.32 * r2.z, 0.55 + 0.55 * r2.z, big);
+  // (ice's sheets run far)
+  sh.r *= 1.0 + 0.7 * upr;
   let r3 = ten3(ihash(h + 3u));
   let kap = (0.06 + 0.45 * curve) * (0.3 + 0.7 * r3.x) / sh.r;
   sh.k1 = kap * select(-1.0, 1.0, r3.y > 0.5 * (1.0 - curve));

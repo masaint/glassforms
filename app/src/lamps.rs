@@ -28,6 +28,7 @@ pub struct LampU {
 pub struct LampsU {
     pub n: [f32; 4],
     pub floor: [f32; 4],
+    pub plane: [f32; 4],
     pub l: [LampU; MAX_LAMPS],
 }
 
@@ -84,7 +85,8 @@ pub fn weave_shadows(src: &str) -> String {
 }
 
 /// What the tracer is told of the lamps as the state has them now (in the camera's frame).
-pub fn uniforms(st: &State) -> LampsU {
+/// `floor`: the floor as it stands, if there is one: its height in the room and how far out it melts away.
+pub fn uniforms(st: &State, floor: Option<(f64, f64)>) -> LampsU {
     let mut u = LampsU::zeroed();
     let mut seen = 0u32;
     for (i, l) in st.lamps.iter().take(MAX_LAMPS).enumerate() {
@@ -103,6 +105,12 @@ pub fn uniforms(st: &State) -> LampsU {
     let p = &st.p;
     u.n = [st.lamps.len().min(MAX_LAMPS) as f32, seen as f32, st.p.cast_soft as f32, 0.0];
     u.floor = [(p.floor_r * p.floor_gain) as f32, (p.floor_g * p.floor_gain) as f32, (p.floor_b * p.floor_gain) as f32, 0.0];
+    // (a mirror floor shows what stands on it, not light falling on it)
+    if let Some((height, fade)) = floor.filter(|_| p.floor_mirror < 0.5) {
+        let m = st.room_m();
+        u.floor[3] = fade as f32;
+        u.plane = [m[1] as f32, m[4] as f32, m[7] as f32, height as f32];
+    }
     u
 }
 
@@ -162,7 +170,7 @@ mod tests {
 
     #[test]
     fn the_uniform_block_is_as_the_shader_has_it() {
-        // two vec4s, then eight lamps of four vec4s each
-        assert_eq!(std::mem::size_of::<LampsU>(), 16 * 2 + 8 * 4 * 16);
+        // three vec4s, then eight lamps of four vec4s each
+        assert_eq!(std::mem::size_of::<LampsU>(), 16 * 3 + 8 * 4 * 16);
     }
 }

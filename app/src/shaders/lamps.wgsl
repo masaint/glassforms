@@ -18,6 +18,8 @@ struct LampsU {
   n: vec4f,                 // x: how many lamps;  y: which of them the camera sees (bits);
                             // z: how large a lamp is taken to be for the shadows it casts (castSoft)
   floor: vec4f,             // rgb: what a floor gives back of the light falling on it (its colour)
+                            // w: how far from the room's middle it has melted away (0: there is no floor)
+  plane: vec4f,             // the floor as the camera sees it: xyz the way up from it, w its height along that
   l: array<LampU, 8>,
 }
 @group(0) @binding(44) var<uniform> lamps: LampsU;
@@ -84,7 +86,43 @@ fn lampsOn(ro: vec3f, rd: vec3f, tMax: f32, spread: f32) -> vec4f {
 // The lights along rd from where the ray set out: what lies behind a lamp is hidden by it.
 fn lampsEnv(far: vec3f, rd: vec3f) -> vec3f {
   let c = lampsOn(gRo, rd, 1e9, 0.0);
-  return far * (1.0 - min(c.a, 1.0)) + c.rgb;
+  return (far + lampsFloor(rd)) * (1.0 - min(c.a, 1.0)) + c.rgb;
+}
+
+// The pools of the lamps' light on a floor, as a ray leaving the glass downwards sees them. The glass sees
+// the floor by direction, painted into the lights' map; a lamp's pool has a place, so where the ray meets
+// the floor is worked out and the pool there added (unshadowed: the shadows of the bodies on it are seen
+// on the floor itself), melting away with the floor far out.
+fn lampsFloor(rd: vec3f) -> vec3f {
+  if (lamps.floor.w <= 0.0) { return vec3f(0.0); }
+  let up = lamps.plane.xyz;
+  let dn = dot(rd, up);
+  if (dn > -1e-4) { return vec3f(0.0); }
+  let t = (lamps.plane.w - dot(gRo, up)) / dn;
+  if (t <= 0.0) { return vec3f(0.0); }
+  let x = gRo + rd * t;
+  let across = length(x - up * dot(x, up));
+  let melt = 1.0 - smoothstep(0.35 * lamps.floor.w, lamps.floor.w, across);
+  return lamps.floor.rgb * lampsPool(x, up) * (0.31830989 * melt);
+}
+
+// The light a matte surface at p facing n gathers from the lamps, unshadowed (lampsDiffuse, without the
+// march towards each lamp).
+fn lampsPool(p: vec3f, n: vec3f) -> vec3f {
+  var e = vec3f(0.0);
+  let count = i32(lamps.n.x);
+  for (var i = 0; i < 8; i++) {
+    if (i >= count) { break; }
+    let L = lamps.l[i];
+    let d = L.p.xyz - p;
+    let d2 = dot(d, d);
+    let l = d * inverseSqrt(max(d2, 1e-8));
+    let cosn = dot(n, l);
+    if (cosn <= 0.0) { continue; }
+    let area = 3.14159265 * L.u.w * max(L.u.w, select(0.0, L.v.w, L.p.w > 0.5));
+    e += L.rgb.rgb * (area * cosn / max(d2, area + 1e-4));
+  }
+  return e;
 }
 // The same for a reading spread by sig (radians): a rough surface's, a milky body's.
 fn lampsSoft(far: vec3f, rd: vec3f, sig: f32) -> vec3f {

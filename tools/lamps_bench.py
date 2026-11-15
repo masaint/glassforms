@@ -1,6 +1,6 @@
 """What lamps cost: a turning 4K frame of plain glass without lamps, with one, and with four, in turn.
 
-usage: python tools/lamps_bench.py <exe> [rounds=3]
+usage: python tools/lamps_bench.py <exe> [rounds] [name=value ...]
 Each case is timed `rounds` times, interleaved, and the quickest kept (other work on the GPU only ever
 slows a run). Prints milliseconds a frame and the ratio to no lamps.
 """
@@ -10,6 +10,7 @@ import sys
 
 exe = sys.argv[1]
 rounds = int(sys.argv[2]) if len(sys.argv) > 2 else 3
+extra = sys.argv[3:]          # more settings for every run (a floor, say)
 SHAPES = [('thomas', ['scene=attractors', 'preset=thomas']), ('gyroid', ['scene=surfaces', 'preset=gyroid'])]
 CASES = [
     ('no lamps', []),

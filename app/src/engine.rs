@@ -521,7 +521,7 @@ impl Engine {
         changed |= self.stage_upkeep();
         // where the lamps stand as the camera sees them (they move in the picture when the view or the lights turn)
         if near {
-            let lu = crate::lamps::uniforms(&self.state);
+            let lu = crate::lamps::uniforms(&self.state, self.stage_floor().map(|f| (f.height, f.fade)));
             if self.last_lamps != Some(lu) {
                 self.renderer.set_lamps(&lu);
                 self.last_lamps = Some(lu);

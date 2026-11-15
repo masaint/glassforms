@@ -634,12 +634,12 @@ pub const STUDIOS_MORE: &[Studio] = &[
     Studio {
         id: "metal",
         name: "Metal: strips and flags",
-        about: "for metals: two tall strip lights and a soft box overhead, everything else dark, so that reflections run from white to black across the form",
+        about: "for metals: two tall strip lights and a soft box overhead with crisp edges, as real ones have, everything else dark, so that reflections run from white to black across the form",
         lights: &[
-            [-70.0, 15.0, 7.0, 55.0, 3.2, 3.2, 3.3, 0.85],
-            [75.0, 25.0, 5.0, 45.0, 2.4, 2.4, 2.5, 0.85],
-            [0.0, 82.0, 45.0, 22.0, 1.6, 1.6, 1.65, 0.7],
-            [150.0, 10.0, 4.0, 30.0, 0.9, 0.9, 0.95, 0.9],
+            [-70.0, 15.0, 7.0, 55.0, 3.2, 3.2, 3.3, 0.2],
+            [75.0, 25.0, 5.0, 45.0, 2.4, 2.4, 2.5, 0.2],
+            [0.0, 82.0, 45.0, 22.0, 1.6, 1.6, 1.65, 0.15],
+            [150.0, 10.0, 4.0, 30.0, 0.9, 0.9, 0.95, 0.3],
         ],
         ambient: [0.0, 0.0, 0.0],
         settings: &[
