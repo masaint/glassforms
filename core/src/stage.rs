@@ -711,7 +711,18 @@ impl crate::state::State {
             return true;
         }
         match studio_index(v).or_else(|| v.trim().parse::<usize>().ok()) {
-            Some(i) => self.apply_studio(i),
+            Some(i) => {
+                let done = self.apply_studio(i);
+                // a studio made for glass, asked for with a metal or a milky body: the studio for that
+                // material instead (as choosing the material while a studio is up does), whichever of the
+                // two was given first
+                if done && i < STUDIOS.len() {
+                    let m = crate::material::Variant::of(&self.p);
+                    let want = if m.metal { Some("metal") } else if m.sss { Some("translucent") } else { None };
+                    if let Some(j) = want.and_then(studio_index) { self.apply_studio(j); }
+                }
+                done
+            }
             None => false,
         }
     }
