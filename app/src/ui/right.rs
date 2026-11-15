@@ -19,7 +19,8 @@ pub const DETAIL_MOVING: [u32; 5] = [192, 256, 320, 384, 512];
 const INSET: f32 = 9.0;
 /// Where the detail buttons begin, leaving room for their name.
 const DETAIL_INDENT: f32 = 68.0;
-/// The fewest lines of buttons the list of shapes keeps when the panel is short of room.
+/// The fewest lines of buttons the list of shapes keeps when the panel is short of room (one layer; with
+/// several, one line).
 const LIST_LEAST: f32 = 3.0;
 
 /// A whole number with commas between its thousands.
@@ -103,8 +104,11 @@ fn shapes(ui: &mut Ui, st: &mut State, px: &mut Panels) -> f32 {
     let (width, pad, font) = (ui.available_width(), egui::vec2(8.0, 3.0), mono(SIZE));
     // whole lines of buttons only: as many as the height left over holds
     let line = button_size(ui, "x", &font, pad).y + RUN_SPACE;
-    let lines = ((px.room_h - px.right_rest - 1.0 + RUN_SPACE) / line).floor().max(LIST_LEAST);
-    let list = egui::ScrollArea::vertical().id_salt("shapes").max_height(lines * line - RUN_SPACE).auto_shrink([false, true]).show(ui, |ui| {
+    // (with several layers the joins and the animation need the room: the list may shrink to the one line
+    // that holds the chosen shape, and scrolls within its box)
+    let least = if st.layer_count() > 1 { 1.0 } else { LIST_LEAST };
+    let lines = ((px.room_h - px.right_rest - 1.0 + RUN_SPACE) / line).floor().max(least);
+    let list = egui::ScrollArea::vertical().id_salt("shapes").max_height(lines * line - RUN_SPACE).min_scrolled_height(line - RUN_SPACE).auto_shrink([false, true]).show(ui, |ui| {
         ui.set_width(width);
         let items: Vec<Item> = st.family().presets.iter().enumerate().map(|(i, p)| Item::new(p.name, i == chosen).reveal(moved && i == chosen)).collect();
         button_run(ui, Id::unique("shapes"), 0.0, &items, pad, &font, 0.0)
@@ -177,7 +181,9 @@ fn maths(ui: &mut Ui, st: &State, px: &mut Panels) {
             // whatever its size, a line stands as tall as the others
             paragraph(ui, line, mono(size), BRIGHT, 11.5 * LINE / size, INSET);
         }
-        if !note.is_empty() {
+        // the word about the shape: shown while it is the only one (with several layers the room goes to
+        // the joins; hovering over the equations still says it)
+        if !note.is_empty() && st.layer_count() < 2 {
             gap(ui, 4.0);
             paragraph(ui, note, sans(SMALL), FAINT, 1.4, INSET);
         }
@@ -191,6 +197,10 @@ fn maths(ui: &mut Ui, st: &State, px: &mut Panels) {
         }
         gap(ui, 6.0);
         side_bar(ui, left, top, ui.cursor().top(), 0.45);
+        if !note.is_empty() && st.layer_count() > 1 {
+            let at = Rect::from_min_max(Pos2::new(left, top), Pos2::new(left + ui.available_width(), ui.cursor().top()));
+            ui.interact(at, Id::unique("maths note"), Sense::hover()).on_hover_text(note);
+        }
     }
     gap(ui, 8.0);
 }

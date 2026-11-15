@@ -1548,6 +1548,8 @@ def layers_are_added_selected_hidden_exchanged_and_removed():
     add = 'wait:3;%s;wait:5' % press(r['layer:add'])
     two = look(add, 'layers_two')
     d, r2, L2 = two[0], two[0]['rects'], two[0]['layers']
+    # with two layers the right panel still needs no scrolling at 1600 x 900: the joins and the animation are in view
+    assert d['panels']['right'] <= d['panels']['room'] + 0.5 and within(r2['group:joins'], r2['right']) and within(r2['group:animate'], r2['right']), 'with two layers the right panel scrolls: %s' % d['panels']
     assert len(L2['list']) == 2 and L2['selected'] == 2 and L2['bodies'] == [[1, 2]] and not L2['plain'] and L2['open'] == '12', L2
     assert L2['combos'][0]['op'] == 'join' and L2['combos'][0]['title'] == '%s + %s' % (L2['list'][0]['title'], L2['list'][1]['title']), L2['combos']
     assert d['family'] == L2['list'][1]['family'] != 'attractors' and d['error'] is None, 'the picker below does not show the new layer\'s shape: %s' % d['family']
