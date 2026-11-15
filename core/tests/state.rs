@@ -332,3 +332,60 @@ fn an_old_setup_file_still_loads() {
     assert!(s.rig_is_default() && s.hdri.is_none());
     assert_eq!((s.p.clay, s.p.hdri_gain, s.p.hdri_blur, s.p.hdri_show, s.p.hdri_lights, s.p.light_gain), (0.0, 1.0, 0.5, 0.0, 0.0, 1.0));
 }
+
+/// The range a default track is made with is centred on where the knob rests, so making tracks again
+/// after the animation has played and stopped mid-trip (as loading a setup, or a fresh set of tracks,
+/// does) never moves it.
+#[test]
+fn default_tracks_made_again_after_playing_keep_their_range() {
+    let mut s = State::new();
+    let knots = s.families.iter().position(|f| f.id == "knots").unwrap();
+    s.set_scene(knots);
+    let key = "knots/trefoil/@thick";
+    let first = (s.tracks[key].from, s.tracks[key].to);
+    let k = s.active().into_iter().find(|k| k.key == key).unwrap();
+    let rest = s.get(&k.r);
+    for round in 0..40 {
+        s.set_playing(true);
+        // stop somewhere different along the trip each time
+        for _ in 0..(37 + 11 * round) { s.tick(1.0 / 60.0); }
+        s.set_playing(false);
+        assert_ne!(s.get(&k.r), rest, "the knob should have been left mid-trip");
+        // the tracks are made afresh, as a setup without them leaves them to be
+        s.tracks.clear();
+        s.set_scene(knots);
+        let now = (s.tracks[key].from, s.tracks[key].to);
+        assert_eq!(now, first, "round {round}: the range moved");
+        assert_eq!(s.resting(&k), rest);
+    }
+    // a value set by hand is a new resting place, and the next track made is centred on it
+    s.tracks.clear();
+    s.user_set(&k, 1.2, false);
+    s.set_scene(knots);
+    let tr = &s.tracks[key];
+    assert!(((tr.from + tr.to) / 2.0 - 1.2).abs() < 1e-9);
+}
+
+/// A setup that keeps its own tracks loads them exactly as saved, off-centre ranges and all, even after
+/// the animation has played.
+#[test]
+fn a_setup_s_own_tracks_load_as_saved() {
+    let mut s = State::new();
+    let knots = s.families.iter().position(|f| f.id == "knots").unwrap();
+    s.set_scene(knots);
+    s.set_playing(true);
+    for _ in 0..100 { s.tick(1.0 / 60.0); }
+    s.set_playing(false);
+    if let Some(tr) = s.tracks.get_mut("knots/trefoil/@thick") { tr.from = 0.81; tr.to = 1.47; tr.period = 9.5; }
+    let text = s.setup_json();
+    let saved: Vec<(String, f64, f64, f64, bool)> = s.tracks.iter().map(|(k, t)| (k.clone(), t.from, t.to, t.period, t.on)).collect();
+    let mut t = State::new();
+    for _ in 0..3 {
+        t.apply_setup_json(&text).unwrap();
+        let got: Vec<(String, f64, f64, f64, bool)> = t.tracks.iter().map(|(k, t)| (k.clone(), t.from, t.to, t.period, t.on)).collect();
+        assert_eq!(got, saved);
+        t.set_playing(true);
+        for _ in 0..77 { t.tick(1.0 / 60.0); }
+        t.set_playing(false);
+    }
+}

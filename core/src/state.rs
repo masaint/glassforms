@@ -273,6 +273,8 @@ pub struct VideoKeep {
     theta: f64,
     lphi: f64,
     vals: Vec<(Knob, f64)>,
+    /// what the animation had last written, as it was before the render wrote over it
+    moved: BTreeMap<String, f64>,
     lens_live: f64,
     pub plan: LoopPlan,
     turns_spin: f64,
@@ -303,6 +305,11 @@ pub struct State {
     pub clock: f64,
     /// knob key -> its track
     pub tracks: BTreeMap<String, Track>,
+    /// knob key -> the value the animation last gave that knob, and the value the knob had before the
+    /// animation moved it (its resting value). A knob that still holds what the animation gave it was
+    /// left mid-trip; one that holds anything else was set by hand or by a setup, and that is its rest.
+    moved: BTreeMap<String, f64>,
+    rest: BTreeMap<String, f64>,
     /// a video is being rendered: everything is played exactly as it loops
     pub rendering: bool,
     /// the shape must be built again, this carefully
@@ -352,7 +359,7 @@ impl State {
         let rigs = families.iter().map(|f| Rig { lights: f.lights.clone(), ambient: f.ambient }).collect();
         let mut s = Self {
             families, fam, shapes, stack: Stack::new(), parked: vec![None], p: Settings::default(), render: RenderOpts::default(),
-            r0: I3, theta: 0.0, r: I3, lphi: 0.0, playing: false, clock: 0.0, tracks: BTreeMap::new(),
+            r0: I3, theta: 0.0, r: I3, lphi: 0.0, playing: false, clock: 0.0, tracks: BTreeMap::new(), moved: BTreeMap::new(), rest: BTreeMap::new(),
             rendering: false, want: None, cut: true, flash_planes: false, rigs, lights_rev: 0, hdri: None, body_mats: Default::default(),
             first_scene: true, args: args.to_vec(), auto,
         };
@@ -1086,11 +1093,22 @@ impl State {
     pub fn ensure_track(&mut self, k: &Knob, i: usize, stops: Option<(f64, f64)>) {
         if self.tracks.contains_key(&k.key) { return; }
         let h = 0.125 * (k.hi - k.lo);
-        let m = (k.hi - h).min((k.lo + h).max(self.get(&k.r)));
+        // (centred on where the knob rests, not on wherever an earlier animation left it: otherwise
+        // every time tracks are made again after a stop, the range would move on by part of a trip)
+        let m = (k.hi - h).min((k.lo + h).max(self.resting(k)));
         let (from, to) = stops.unwrap_or((m - h, m + h));
         let period = (14.0 * (1.0 + 0.29 * i as f64) * 10.0).round() / 10.0;
         self.tracks.insert(k.key.clone(), Track { on: true, period, from, to, phase: 0.0, ease: -1, at: 2 });
         self.rephase(k);
+    }
+    /// The value a knob rests at: the one it had before the animation moved it, if it still holds what
+    /// the animation last gave it; otherwise the value it holds.
+    pub fn resting(&self, k: &Knob) -> f64 {
+        let now = self.get(&k.r);
+        match (self.moved.get(&k.key), self.rest.get(&k.key)) {
+            (Some(m), Some(r)) if *m == now => *r,
+            _ => now,
+        }
     }
     /// Choose where in its trip a track is, so that it carries on from the value its slider shows now.
     pub fn rephase(&mut self, k: &Knob) {
@@ -1125,7 +1143,11 @@ impl State {
             let p = tr.period / self.p.speed;
             let per = if l > 0.0 { anim::snap(l, p) } else { p };
             let v = tr.value(self.clock, per, all).max(k.lo).min(k.hi);
+            let rest = self.resting(&k);
+            self.rest.insert(k.key.clone(), rest);
             self.set(&k.r, v);
+            let now = self.get(&k.r);
+            self.moved.insert(k.key.clone(), now);
             if k.shape { shape = true; }
         }
         shape
@@ -1170,6 +1192,7 @@ impl State {
         let keep = VideoKeep {
             playing: self.playing, clock: self.clock, theta: self.theta, lphi: self.lphi,
             vals: self.active().into_iter().map(|k| { let v = self.get(&k.r); (k, v) }).collect(),
+            moved: self.moved.clone(),
             lens_live: self.p.lens_n, turns_spin: turns(self.p.spin), turns_lspin: turns(self.p.lspin), plan,
         };
         self.playing = false;
@@ -1195,6 +1218,8 @@ impl State {
         self.theta = keep.theta;
         self.lphi = keep.lphi;
         for (k, v) in &keep.vals { self.set(&k.r, *v); }
+        // (the knobs are back where the animation had left them: they rest where they rested before)
+        self.moved = keep.moved;
         self.rendering = false;
         self.update_r();
         self.want = Some(Detail::Full);
