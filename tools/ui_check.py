@@ -307,15 +307,18 @@ def a_slider_is_dragged_with_the_pointer():
     d = run('wait:2')
     slot = d['rects']['slot:P.disp']
     y = (slot[1] + slot[3]) / 2
-    least, most, _ = d['ranges']['P.disp']
+    least, most, step = d['ranges']['P.disp']
     x = at(slot, least, most, 0.3)
     d2 = run('wait:2;pdown:%.2f,%.2f;pup' % (x, y))
     assert close(d2['knobs']['P.disp'], 0.3, 1e-9), 'a press at 0.3 gave %s' % d2['knobs']['P.disp']
     d3 = run('wait:2;pdown:%.2f,%.2f;pmove:%.2f,%.2f;pmove:%.2f,%.2f;pup' % (x, y, x + 30, y - 40, slot[2] + 200, y - 80))
     assert close(d3['knobs']['P.disp'], most), 'dragged past the end it gave %s' % d3['knobs']['P.disp']
-    # with shift held the handle does not jump to the press, and moves a tenth as far as the pointer
+    # with shift held the handle does not jump to the press, and moves a tenth as far as the pointer: 35.5
+    # points of pointer are 3.55 of handle, worth what 3.55 points of the slot's travel are (the slot's
+    # width comes from the window, which sets it by the panel's layout), on the slider's steps
     fine = run('wait:2;spdown:%.2f,%.2f;pmove:%.2f,%.2f;pmove:%.2f,%.2f;pup' % (slot[2] - 10, y, slot[2] - 10 + 20, y, slot[2] - 10 + 35.5, y + 9))
-    assert close(fine['knobs']['P.disp'], 0.09 + (most - least) / 20, 1e-9), 'shift-dragged by half the slider it went from 0.09 to %s' % fine['knobs']['P.disp']
+    want = round((0.09 + 3.55 * (most - least) / (slot[2] - slot[0] - 9.0)) / step) * step
+    assert close(fine['knobs']['P.disp'], want, 1e-6), 'shift-dragged 35.5 points it went from 0.09 to %s, not %s' % (fine['knobs']['P.disp'], want)
     after = run('wait:2;spdown:%.2f,%.2f;pmove:%.2f,%.2f;pup;pdown:%.2f,%.2f;pup' % (slot[2] - 10, y, slot[2] + 5, y, x, y))
     assert close(after['knobs']['P.disp'], 0.3, 1e-9), 'after a shift-drag a plain press gave %s' % after['knobs']['P.disp']
     # the wave button, pressed with the pointer
@@ -326,7 +329,7 @@ def a_slider_is_dragged_with_the_pointer():
     assert within(b, d['rects']['right']), b
     d5 = run('wait:2;pdown:%.2f,%.2f;pup;wait:3' % (b[2] - 4.5, (b[1] + b[3]) / 2))
     assert d5['knobs']['attractors/thomas/b'] > d['knobs']['attractors/thomas/b'], 'a press at the end of the shape\'s slider left it at %s' % d5['knobs']['attractors/thomas/b']
-    return 'a press sets 0.300, a drag past the end %.3f, with shift a drag of half the slider adds a twentieth of it (%.3f); the wave button lights; the shape\'s b goes to %.4f' % (
+    return 'a press sets 0.300, a drag past the end %.3f, with shift a drag of 35.5 points moves a tenth as far (%.3f); the wave button lights; the shape\'s b goes to %.4f' % (
         most, fine['knobs']['P.disp'], d5['knobs']['attractors/thomas/b'])
 
 

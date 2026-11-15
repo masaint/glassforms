@@ -330,6 +330,14 @@ fn kinds_override() -> &'static [Option<core::Kind>] {
     })
 }
 
+/// For checks: `GLASSFORMS_CAST_UNDER=off` leaves out the shade the bodies standing over a floor give it by
+/// hiding part of the light from all round (`castUnder`), so that what the lights' own shadows and the
+/// caustics do to the floor can be measured alone.
+fn under_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| std::env::var("GLASSFORMS_CAST_UNDER").as_deref() == Ok("off"))
+}
+
 /// A plain floor for checks and for looking, when the environment asks for one
 /// (`GLASSFORMS_CAST_FLOOR=height[,raised[,half]]`: its height under the shape's middle, how many degrees
 /// the camera is raised above it, half the width of the patch of it that is lit; `-1.3,35,4` if only a
@@ -564,7 +572,8 @@ impl Engine {
             // (and the share of it that comes from all round, not from the lights: the backdrop, the light from
             // everywhere, a picture; the bodies standing over the floor hide part of that too, softly)
             let all_round = 1.0 - shares.iter().zip(&lit.lights).map(|(sh, l)| core::lum(l.rgb) * sh).sum::<f64>() / core::lum(total).max(1e-9);
-            u.floor_total = [total[0] as f32, total[1] as f32, total[2] as f32, (all_round.clamp(0.0, 1.0) * strength) as f32];
+            let under = if under_off() { 0.0 } else { all_round.clamp(0.0, 1.0) * strength };
+            u.floor_total = [total[0] as f32, total[1] as f32, total[2] as f32, under as f32];
             // and as the light meets it: in the object's frame
             let room_to_obj = mul(&cam_to_obj, &f.m);
             floor_in = Some(FloorIn {

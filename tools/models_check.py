@@ -248,7 +248,8 @@ if wanted('smooth'):
                 own = exe('--model-info', coarse)['report']['smooth']
                 none = probe.ripple(coarse, fine, 512, ['p.smooth=0'], where)
                 melted = probe.ripple(coarse, fine, 512, ['p.smooth=%g' % own], where)
-                ok = own > 0 and melted[0] <= 0.5 * none[0] and melted[0] <= 0.2
+                # (a mesh fine enough to show no facets even unmelted passes as it is)
+                ok = own > 0 and melted[0] <= 0.2 and (melted[0] <= 0.5 * none[0] or none[0] <= 0.2)
                 say('%s shows no facets at the smoothing its mesh calls for' % name, ok, 'melted by %g, its normals are %.3f degrees (median) off those of the same shape cut four times finer; with no melting %.3f' % (own, melted[0], none[0]))
             except Exception as e:
                 say('%s shows no facets at the smoothing its mesh calls for' % name, False, str(e)[:300])

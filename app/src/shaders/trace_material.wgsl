@@ -400,7 +400,8 @@ fn shadeM(ro: vec3f, rd_in: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f 
     fv = frMetalV(fv, frBend(p, n, fp, rd));
     let fo = frFollow(fv);
     let lit0 = frMetalLit(dir, frMid(rd, n), fv, b);
-    let lit = mix(frMetalHid(p, n, frMid(rd, n), fv, lit0, R), lit0, fo);
+    let hid = frMetalHid(p, n, frMid(rd, n), fv, lit0, R);
+    let lit = mix(hid, lit0, fo);
 //#else
 //#if FILM
     let lit = filmEnv(mir, filmLod(p, n, cosi));
@@ -424,8 +425,9 @@ fn shadeM(ro: vec3f, rd_in: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f 
       break;
     }
 //#if ROUGH
-    // the part of a wide lobe that is not followed to the next surface
-    col += thr * R * lit * (1.0 - fo);
+    // the part of a wide lobe that is not followed to the next surface: the lights less what the shape
+    // hides of them (its middle has just met the shape, so the unhidden lights would be far too bright)
+    col += thr * R * hid * (1.0 - fo);
     thr *= fo;
     fp = t2 * sqrt(fv);
 //#endif

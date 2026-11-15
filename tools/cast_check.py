@@ -37,7 +37,10 @@ measures the same with nothing standing in: a porcelain slab under a lens of cro
      shape drawn as the glass it is: the floor is unchanged where nothing reaches; the lens's shadow
      lies where the lens stands between the lamp and the floor; its caustic gives back the share of the
      shadow's light that the same lens gives back on the slab (two different ways of keeping the light:
-     a volume there, a map of the plane here), and splits colours
+     a volume there, a map of the plane here), and splits colours. These are measured with the floor's
+     shade from the bodies hiding the light from all round above it (castUnder) left out
+     (GLASSFORMS_CAST_UNDER=off); that shade is checked on its own: only darker, no more than that
+     light's share, a pool round the lens, the caustic unchanged over it
  11  bodies with materials of their own (`B2.material=...`), drawn as what they are: the report names each
      body's kind and what it casts by its material; on porcelain a crown-glass lens's caustic gives back
      most of what its shadow took and never more; a gold lens throws the same shadow and gives back less
@@ -165,13 +168,18 @@ def lum(rgb):
     return rgb @ np.array([0.2126, 0.7152, 0.0722])
 
 
-def floor(name, args, height):
+def floor(name, args, height, under=False):
     """The same over a plain floor seen from straight above, the shape drawn as the glass it is: (the
     floor's light per pixel, where each pixel's ray meets the floor, a mask of the floor's pixels that
-    lie well inside the lit patch, the distance to the glass for the pixels that show it, the report)."""
+    lie well inside the lit patch, the distance to the glass for the pixels that show it, the report).
+    Without `under` the floor is not shaded by the bodies hiding part of the light from all round above
+    it (castUnder: GLASSFORMS_CAST_UNDER=off), so that the lamp's shadow and the caustic are measured alone."""
     path = os.path.join(OUT, name)
     half = 3.0
-    out = run(EXE, ['--still', path + '.png', '--hdr', path + '.hdr'] + args, {'GLASSFORMS_CAST_FLOOR': '%g,90,%g' % (height, half)})
+    env = {'GLASSFORMS_CAST_FLOOR': '%g,90,%g' % (height, half)}
+    if not under:
+        env['GLASSFORMS_CAST_UNDER'] = 'off'
+    out = run(EXE, ['--still', path + '.png', '--hdr', path + '.hdr'] + args, env)
     raw = np.fromfile(path + '.hdr', dtype=np.uint8)
     w, h = np.frombuffer(raw[:8].tobytes(), dtype=np.uint32)
     a = np.frombuffer(raw[8:].tobytes(), dtype=np.float32).reshape(h, w, 4)
@@ -367,6 +375,20 @@ def main():
     check(dark.sum() > 2000 and lee > 0.98 and untouched == 0, "the lens's shadow on the floor: %d pixels, %.1f%% of them on the far side of the lens from the lamp, none on the lamp's side" % (dark.sum(), lee * 100))
     deep = float(np.percentile(ratio[dark], 10))
     check(deep < 0.3, 'in it the floor keeps %.0f%% of its light (the light from everywhere: under 30%%)' % (deep * 100))
+    # The floor is also shaded where the lens stands over it by the part of the light from all round that
+    # the lens hides (castUnder): never more than that light's share of the floor's (what the floor keeps
+    # where the lamp is wholly hidden), only ever darker, a pool round the lens itself rather than thrown
+    # along the lamp's direction, and the same with the caustic as without it.
+    fu, _, _, _, _ = floor('floor_shadow_under', base + ['castCaustics=0'], top, under=True)
+    fcu, _, _, _, _ = floor('floor_caustic_under', base, top, under=True)
+    sky = float(ratio[dark].min())
+    shade = (lum(fs) - lum(fu)) / level
+    pool = inside & (shade > 0.5 * max(float(shade[inside].max()), 1e-9))
+    off_centre = float(np.hypot(p[..., 0][pool].mean() - centre[0], p[..., 1][pool].mean() - centre[1])) if pool.any() else 9.0
+    # (as a share of the light there, caustic included: the brightest of it is hundreds of times the floor's)
+    same = float((np.abs((lum(fcu) - lum(fu)) - (lum(fc) - lum(fs))) / np.maximum(lum(fc), level))[inside].max())
+    check(shade[inside].min() > -1e-3 and 0.002 < shade[inside].max() <= sky + 0.005 and off_centre < 0.15 and same < 0.01,
+          "the light from all round hidden by the lens shades the floor under it by up to %.1f%% of the floor's light (that light is %.1f%% of it), a pool %.2f from the lens's middle; the caustic is the same over it (within %.2f%%)" % (shade[inside].max() * 100, sky * 100, off_centre, same * 100))
     taken_f = (f0 - fs)[inside].sum(axis=0)
     back_f = (fc - fs)[inside].sum(axis=0)
     share_f = back_f / taken_f

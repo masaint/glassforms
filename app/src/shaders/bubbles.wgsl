@@ -35,9 +35,10 @@ fn u01(h: u32) -> f32 { return f32(h >> 8u) / 16777216.0; }
 // the field at voxel `id` with the bubbles taken out; d0: the field there as it stands
 fn carve(id: vec3u, d0: f32) -> f32 { return carveWith(id, d0, b, 0); }
 
-// ... with the bubbles `b` describes, in the body whose distances are channel k of src (the scene's own
-// volume has one channel; the bodies' volume one for each body)
-fn carveWith(id: vec3u, d0: f32, b: B, k: i32) -> f32 {
+// ... with the bubbles `b` describes, in the body whose distances are channel `ch` of src (the scene's own
+// volume has one channel; the bodies' volume one for each body). (`ch` must not share a name with the
+// loop over the cells below: a loop counter of that name would hide it and read the wrong channel.)
+fn carveWith(id: vec3u, d0: f32, b: B, ch: i32) -> f32 {
   let vox = 2.0 * b.hb / b.res;
   // at the surface or outside it: nothing changes
   if (d0 > -0.5 * vox) { return d0; }
@@ -60,7 +61,7 @@ fn carveWith(id: vec3u, d0: f32, b: B, k: i32) -> f32 {
     let lv = length(v);
     if (lv - r * far > best) { continue; }
     // does it fit? The field at its centre says how deep inside the body that is.
-    let room = -textureSampleLevel(src, lin, ctr / (2.0 * b.hb) + 0.5, 0.0)[k] - b.margin;
+    let room = -textureSampleLevel(src, lin, ctr / (2.0 * b.hb) + 0.5, 0.0)[ch] - b.margin;
     r = min(r, room / far);
     if (r < 1.2 * vox) { continue; }                  // too small to draw
     // the distance to it: a ball, a needle (a ball swept along an axis) or a disc with a rounded rim

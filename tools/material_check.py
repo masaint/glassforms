@@ -137,7 +137,19 @@ def costs():
     """A turning frame of each material against plain glass on the same shape. Each pair is timed three
     times in turn and the least of each kept: another program on the GPU only ever makes a run slower.
     The bounds are what was measured at 4K on the gyroid with room to spare; they mean something only
-    when nothing else is using the GPU (see --costs above)."""
+    when nothing else is using the GPU (see --costs above).
+    Three bounds were set again from measurements (2026-11-15, here at 2560 x 1440, timed alone) after
+    the method they time was replaced by design:
+    - frost 0.3: roughness drawn the live way, as a cone carried along the path (frost.wgsl), costs most
+      at middling roughness (wider cones end paths early): x 2.32 to 2.35, x 2.62 in the build it was
+      made in; bound 2.6.
+    - jade: a milky body is lit by its light volume (scatter.wgsl), which a turning view works out afresh
+      every frame (7.5 ms of a 8.6 ms frame here); x 1.69 to 1.79 (x 1.62 in the build it was made in, the
+      rest from the casting the light volume now takes: unify); bound 2.0.
+    - jade by true scattering: the walk now follows the light until it leaves or is swallowed (up to
+      256 turns, back in through the surface: x 3.25 alone), the denoiser is on by default (+2 ms), and
+      jade's roughness of 0.08 drawn the live way costs the walking tracer another 4 ms (it cost nothing
+      under the earlier roughness); x 4.05 to 4.32; bound 4.8."""
     def ms(s):
         return json.loads(run(['--bench', '40', 'w=2560', 'h=1440'] + s.split()).strip().splitlines()[-1])['ms']
 
@@ -150,7 +162,7 @@ def costs():
     for what, s, limit in (
         ('the material path with nothing switched on', 'coat=1 coatIor=1', 1.25), ('a clear coat', 'coat=1', 1.3), ('a thin film', 'film=400 filmVar=0.4', 1.4),
         ('colour by wavelength', 'material=ruby', 1.3), ('glow', 'glow=2', 1.3), ('bubbles', 'bubbles=0.2', 1.4),
-        ('frost 0.3', 'rough=0.3', 2.3), ('frost 0.6', 'rough=0.6', 2.9), ('jade', 'material=jade', 0.8), ('jade by true scattering', 'material=truejade', 1.3),
+        ('frost 0.3', 'rough=0.3', 2.6), ('frost 0.6', 'rough=0.6', 2.9), ('jade', 'material=jade', 2.0), ('jade by true scattering', 'material=truejade', 4.8),
         ('gold', 'material=gold', 0.6), ('satin gold', 'material=satingold', 0.7), ('double refraction', 'biref=-0.17', 2.4), ('a graded index', 'grin=0.35', 2.8),
     ):
         r = ratio(GYROID, s)
@@ -226,10 +238,21 @@ try:
     check(s1 < 0.5 * s0, 'roughness blurs a mirror', 'sharpness %.4f -> %.4f' % (s0, s1))
     r = level(rough) / level(mir)
     check(0.85 < r < 1.2, 'roughness leaves a mirror as bright as it was (within 15%)', 'level x %.3f' % r)
-    # the softened lights stand in for sampling them: the two ways agree
+    # the live way (a cone of light carried from surface to surface, the lights read softened by its
+    # width: frost.wgsl) stands in for sampling facets at random: the two ways agree. On a ball, where
+    # nothing of the shape is mirrored in itself, they must agree closely: that is the energy each
+    # reflection keeps. On the gyroid the live way also has to estimate how much of a wide lobe the shape
+    # hides and what the hidden part sees (no random rays to find out), so it is held more loosely: its
+    # level within the bounds it had, its picture within 0.4 (it was 0.2 while metals took their direction
+    # by sampling, which made the two ways the same method; the cone is 0.21 apart at frost 0.2 and 0.7,
+    # 0.33 at 0.4, where the lobe is half followed and half estimated).
+    ball = 'scene=solids preset=superellipsoid p.p=2 p.q=2 dist=5.2 material=mirror rough=0.4'
+    bl, bref = still(ball, frames=96), still(ball + ' roughRef=1', frames=320)
+    d, r = apart(bl, bref), level(bl) / level(bref)
+    check(d < 0.2 and 0.97 < r < 1.03, 'a rough mirror ball by the live way matches one by sampling alone (as bright, within 3%)', 'apart %.3f, level x %.3f' % (d, r))
     ref = still(GYROID + ' material=mirror rough=0.4 roughRef=1', frames=320)
     d, r = apart(rough, ref), level(rough) / level(ref)
-    check(d < 0.2 and 0.88 < r < 1.14, 'a rough mirror by softened lights matches one by sampling alone', 'apart %.3f, level x %.3f' % (d, r))
+    check(d < 0.4 and 0.88 < r < 1.14, 'a rough mirror gyroid by the live way is near one by sampling alone', 'apart %.3f, level x %.3f' % (d, r))
     # frosted glass: blurred, and within reach of sampling alone
     clear = still(GYROID, frames=64)
     frost = still(GYROID + ' rough=0.5', frames=160)
@@ -301,10 +324,16 @@ try:
     c = colour(jade)
     check(c[1] > 1.2 * c[0] and c[1] > 1.2 * c[2], 'jade is green', 'rgb %.3f %.3f %.3f' % tuple(c))
     check(sharpness(jade) < 0.5 * sharpness(solid), 'a milky body hides what is behind it', 'sharpness %.4f -> %.4f' % (sharpness(solid), sharpness(jade)))
-    milk = 'sss=1 sssDepth=0.05 bodyR=0.9 bodyG=0.9 bodyB=0.9 disp=0 rough=0.4'
+    # Lit from behind (one lamp beyond the shape, a little light from all round): light that gets through
+    # a thin piece is what is seen, so thin is brighter. (Lit from the front a thick piece can be brighter,
+    # since more of the light is scattered back: under the family's own lights, which come from all round,
+    # true scattering makes thin only 5% brighter, too little to tell from the light volume's own error in
+    # pieces a few scattering lengths thick. Measured: lamp behind, true scattering thin x 1.43, the light
+    # volume x 1.24; lamp in front, x 0.81 and x 0.60.)
+    milk = 'sss=1 sssDepth=0.05 bodyR=0.9 bodyG=0.9 bodyB=0.9 disp=0 rough=0.4 rig=0,10,3,3,40,40,40,0.5 ambient=0.02,0.02,0.02'
     thin_b = level(still(THOMAS + ' thick=0.5 ' + milk, frames=24))
     thick_b = level(still(THOMAS + ' thick=2.5 ' + milk, frames=24))
-    check(thin_b > 1.03 * thick_b, 'a milky body is brighter where it is thin', 'level %.4f thin, %.4f thick' % (thin_b, thick_b))
+    check(thin_b > 1.1 * thick_b, 'a milky body lit from behind is brighter where it is thin', 'level %.4f thin, %.4f thick' % (thin_b, thick_b))
     # the estimate and the light followed as it wanders tell the same story
     for mat in ('jade', 'milk'):
         est = still(CUBE + ' material=%s' % mat, frames=32)

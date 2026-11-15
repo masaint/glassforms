@@ -58,7 +58,52 @@ POINTS = [
 assert len(POINTS) == 127
 
 
-def teapot(facet=0.03, bottom=False, y_up=True):
+def bernstein(t):
+    s = 1.0 - t
+    return (s * s * s, 3 * s * s * t, 3 * s * t * t, t * t * t)
+
+
+def teapot(n=12, bottom=False, y_up=True):
+    """The teapot as (vertices, triangles): `n` steps along each side of a patch. Without `bottom` it is
+    Newell's own 28 patches: no bottom, a gap round the lid, spout and handle pushed into the body."""
+    verts, tris, index = [], [], {}
+
+    def vertex(p):
+        key = tuple(round(c, 6) + 0.0 for c in p)
+        if key not in index:
+            index[key] = len(verts)
+            verts.append(key)
+        return index[key]
+
+    parts = ['rim', 'body', 'lid', 'handle', 'spout'] + (['bottom'] if bottom else [])
+    for part in parts:
+        mirrors = [(1, 1), (1, -1)] if part in ('handle', 'spout') else [(1, 1), (-1, 1), (1, -1), (-1, -1)]
+        for patch in PATCHES[part]:
+            ctrl = [POINTS[i] for i in patch]
+            grid = []
+            for a in range(n + 1):
+                bu = bernstein(a / n)
+                row = []
+                for b in range(n + 1):
+                    bv = bernstein(b / n)
+                    row.append(tuple(sum(bu[i] * bv[j] * ctrl[i * 4 + j][c] for i in range(4) for j in range(4)) for c in range(3)))
+                grid.append(row)
+            for sx, sy in mirrors:
+                ids = [[vertex((sx * p[0], sy * p[1], p[2])) for p in row] for row in grid]
+                # as the patches are written their faces look inward; a mirror turns a face over
+                flip = (sx * sy) > 0
+                for a in range(n):
+                    for b in range(n):
+                        q = (ids[a][b], ids[a + 1][b], ids[a + 1][b + 1], ids[a][b + 1])
+                        for t in ((q[0], q[1], q[2]), (q[0], q[2], q[3])):
+                            if len(set(t)) == 3:
+                                tris.append((t[0], t[2], t[1]) if flip else t)
+    if y_up:
+        verts = [(x, z, -y) for x, y, z in verts]
+    return verts, tris
+
+
+def teapot_even(facet=0.03, bottom=False, y_up=True):
     """The teapot as (vertices, triangles), two arrays, with facets no wider than `facet` anywhere.
 
     `facet` is measured as the program will show the teapot: in the stage's units, where the corner
@@ -119,6 +164,41 @@ def teapot(facet=0.03, bottom=False, y_up=True):
     if y_up:
         xyz = np.stack([xyz[:, 0], xyz[:, 2], -xyz[:, 1]], axis=1) + 0.0
     return xyz, tri
+
+
+# ---- plain shapes -------------------------------------------------------------------------------------
+def write_fine_teapot(path, n=160):
+    """The same teapot at `n` steps a side, worked out all at once and written as a binary PLY (every
+    patch with corners of its own: the program merges them). For comparing a coarser teapot against."""
+    import numpy as np
+    t = np.arange(n + 1) / n
+    basis = np.stack([(1 - t) ** 3, 3 * (1 - t) ** 2 * t, 3 * (1 - t) * t ** 2, t ** 3], axis=1)        # (n + 1, 4)
+    a, b = np.meshgrid(np.arange(n), np.arange(n), indexing='ij')
+    quad = np.stack([a * (n + 1) + b, (a + 1) * (n + 1) + b, (a + 1) * (n + 1) + b + 1, a * (n + 1) + b + 1], axis=-1).reshape(-1, 4)
+    pts, tris = [], []
+    for part in ('rim', 'body', 'lid', 'handle', 'spout'):
+        mirrors = [(1, 1), (1, -1)] if part in ('handle', 'spout') else [(1, 1), (-1, 1), (1, -1), (-1, -1)]
+        for patch in PATCHES[part]:
+            ctrl = np.array([POINTS[i] for i in patch], dtype=np.float64).reshape(4, 4, 3)
+            grid = np.einsum('ai,bj,ijc->abc', basis, basis, ctrl).reshape(-1, 3)
+            for sx, sy in mirrors:
+                at = sum(len(p) for p in pts)
+                p = grid * np.array([sx, sy, 1.0])
+                pts.append(np.stack([p[:, 0], p[:, 2], -p[:, 1]], axis=1))                           # z up becomes y up
+                q = quad + at
+                order = (0, 2, 1, 0, 3, 2) if sx * sy > 0 else (0, 1, 2, 0, 2, 3)
+                tris.append(q[:, order].reshape(-1, 3))
+    xyz = np.concatenate(pts).astype('<f4')
+    tri = np.concatenate(tris)
+    faces = np.zeros(len(tri), dtype=[('n', 'u1'), ('v', '<i4', (3,))])
+    faces['n'] = 3
+    faces['v'] = tri
+    head = 'ply\nformat binary_little_endian 1.0\nelement vertex %d\nproperty float x\nproperty float y\nproperty float z\nelement face %d\nproperty list uchar int vertex_indices\nend_header\n' % (len(xyz), len(tri))
+    with open(path, 'wb') as f:
+        f.write(head.encode('ascii'))
+        f.write(xyz.tobytes())
+        f.write(faces.tobytes())
+    return len(tri)
 
 
 # ---- plain shapes -------------------------------------------------------------------------------------
@@ -247,8 +327,10 @@ def write_obj(path, mesh, comment='', digits=6):
     with open(path, 'w', newline='\n') as f:
         for line in comment.splitlines():
             f.write('# %s\n' % line)
-        f.write(''.join(form % tuple(p) for p in v))
-        f.write(''.join('f %d %d %d\n' % (a + 1, b + 1, c + 1) for a, b, c in t))
+        for p in v:
+            f.write(form % tuple(p))
+        for a, b, c in t:
+            f.write('f %d %d %d\n' % (a + 1, b + 1, c + 1))
 
 
 def normal(a, b, c):
@@ -285,14 +367,7 @@ def write_ply(path, mesh, binary=True, comment=''):
     head += 'element vertex %d\nproperty float x\nproperty float y\nproperty float z\nelement face %d\nproperty list uchar int vertex_indices\nend_header\n' % (len(v), len(t))
     with open(path, 'wb') as f:
         f.write(head.encode('ascii'))
-        if binary and hasattr(v, 'dtype'):
-            # arrays: written whole
-            import numpy as np
-            f.write(np.asarray(v, dtype='<f4').tobytes())
-            faces = np.zeros(len(t), dtype=[('n', 'u1'), ('v', '<i4', (3,))])
-            faces['n'], faces['v'] = 3, t
-            f.write(faces.tobytes())
-        elif binary:
+        if binary:
             f.write(b''.join(struct.pack('<3f', *p) for p in v))
             f.write(b''.join(struct.pack('<B3i', 3, *tri) for tri in t))
         else:
@@ -488,8 +563,8 @@ def owl(level=6):
 def samples(out):
     os.makedirs(out, exist_ok=True)
     write_ply(os.path.join(out, 'owl.ply'), owl(), binary=True, comment='A made-up owl with four holes in its base, as a scanner leaves them. Written by tools/models_make.py.')
-    write_obj(os.path.join(out, 'teapot.obj'), teapot(40, bottom=False),
-              "The Utah teapot: Martin Newell's 28 Bezier patches (1975, public domain), 40 steps a side.\n"
+    write_obj(os.path.join(out, 'teapot.obj'), teapot_even(0.01, bottom=False),
+              "The Utah teapot: Martin Newell's 28 Bezier patches (1975, public domain), facets no wider than 0.01.\n"
               'As Newell left it: no bottom, a gap round the lid, and the spout and handle pushed into the body.\n'
               'Written by tools/models_make.py.')
     write_ply(os.path.join(out, 'goblet.ply'), goblet(), binary=True, comment='A stemmed glass as a single sheet, open at the mouth and under the foot. Written by tools/models_make.py.')
