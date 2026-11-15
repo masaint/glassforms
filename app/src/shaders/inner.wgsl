@@ -1113,12 +1113,15 @@ fn grains(pos: vec3f, dir: vec3f, s: f32) -> Play {
     // than stopping at a line
     var seam = 0.1 + 0.9 * smoothstep(0.05, 0.7, (sqrt(dm.d2) - sqrt(dm.d1)) * cw);
     // (where the colour runs on, neighbouring domains meet without a dark seam between)
-    seam = mix(seam, 0.75 + 0.25 * seam, flow);
+    seam = mix(seam, 0.45 + 0.55 * seam, flow);
     // and within a domain the colour is not even: bright cores, places nearly dark, so the body shows
     // through between and across patches
     var lit = 0.1 + 0.9 * smoothstep(0.15, 0.6, vnoise3(xw * 0.55 + 7.0 * ten3(ihash(dm.h + 3u)), seed + 9u));
     // (and little of the body shows between: most of the stone is colour, bright and less bright)
-    lit = mix(lit, 0.25 + 0.75 * lit, flow);
+    // (but in broad patches, with the dark body between: a photographed stone is colour broken by dark, not
+    // filled edge to edge)
+    let opPatch = smoothstep(0.32, 0.62, vnoise3(xw * 0.2 + 3.1, seed + 23u));
+    lit = mix(lit, (0.12 + 0.88 * opPatch) * (0.3 + 0.7 * lit), flow);
     let rp = ten3(ihash(dm.h));
     let rq = ten3(ihash(dm.h + 7u));
     let o = toObj(pos + dir * t);
@@ -1139,14 +1142,14 @@ fn grains(pos: vec3f, dir: vec3f, s: f32) -> Play {
     let sg = sAlong - dot(sAlong, pd) * pd;
     if (flow > 0.0 && dot(sg, sg) > 1e-4) { sa = normalize(mix(sa * sign(dot(sa, sg) + 1e-6), normalize(sg), flow)); }
     let sb = cross(pd, sa);
-    let sn = vnoise3(vec3f(dot(xw, sa) * 0.35, dot(xw, sb) * 4.5, xw.y * 1.5), seed + 3u);
-    let fl = vnoise3(vec3f(dot(xw, sa) * 1.3, dot(xw, sb) * 9.0, xw.y * 3.0), seed + 4u);
+    let sn = vnoise3(vec3f(dot(xw, sa) * mix(0.35, 1.6, flow), dot(xw, sb) * 4.5, xw.y * 1.5), seed + 3u);
+    let fl = vnoise3(vec3f(dot(xw, sa) * mix(1.3, 4.5, flow), dot(xw, sb) * 9.0, xw.y * 3.0), seed + 4u);
     // flakes: small pieces drawn out along the streaks, of a size that differs from domain to domain,
     // with ragged edges, each tilted its own way within the domain's spread, so that a domain glitters
     // piece by piece; a faint seam of body between them
     // (where the colour runs on, finer: a field is made of many small flecks, not a few broad strokes)
     let fz = mix(0.6, 1.6, rq.y) * (1.0 + 0.7 * flow);
-    let fq = vec3f(dot(xw, sa) * 1.3, dot(xw, sb) * 3.8, xw.y * 3.2) * fz + 0.9 * vec3f(sn - 0.5, fl - 0.5, sn - fl);
+    let fq = vec3f(dot(xw, sa) * mix(1.3, 3.0, flow), dot(xw, sb) * 3.8, xw.y * 3.2) * fz + 0.9 * vec3f(sn - 0.5, fl - 0.5, sn - fl);
     let gr = nearest(fq, seed);
     let gh = ten3(ihash(gr.h));
     let spread = 0.22 + 0.7 * (1.0 - iu.playE.y);
@@ -1156,7 +1159,7 @@ fn grains(pos: vec3f, dir: vec3f, s: f32) -> Play {
     let flake = select(0.45, 1.0, gh.z < 0.82) * (0.55 + 0.45 * smoothstep(0.0, 0.06, sqrt(gr.d2) - sqrt(gr.d1))) * (0.5 + 0.5 * fine);
     // (where the colour runs on, the streaks shade it rather than cut it into lines)
     let cut = smoothstep(0.4, 0.6, sn) * (0.55 + 0.45 * smoothstep(0.3, 0.7, fl));
-    let streak = mix(1.0, mix(cut, 0.35 + 0.65 * cut, flow), iu.playF.y) * flake;
+    let streak = mix(1.0, mix(cut, 0.6 + 0.4 * cut, flow), iu.playF.y) * flake;
     let tilt = 0.2 * bend + gt + iu.playF.y * 0.3 * vec2f(sn - 0.5, fl - 0.5);
     let gd = normalize(pd + tilt.x * e1 + tilt.y * e2);
     let vis = exp(-iu.playD.rgb * t);
@@ -1211,8 +1214,8 @@ fn grains(pos: vec3f, dir: vec3f, s: f32) -> Play {
       let hf = vnoise3(q, seed + 21u) + 0.45 * vnoise3(q * 2.3 + 5.1, seed + 22u);
       let hueRun = opalRun(fract(1.1 * hf + 0.1 * (rp.x - 0.5) + 0.31 * f32(seed & 7u)));
       let lamOwn = 430.0 + 270.0 * fract(rp.x + 0.37 * rq.z);
-      let lamD = mix(lamOwn, hueRun, flow) + mix(45.0, 25.0, flow) * ((cd - lo) / (hi - lo) - 0.5) + mix(12.0, 8.0, flow) * (gh.z - 0.5)
-        + mix(70.0, 15.0, flow) * (vnoise3(xw * 0.4, seed + 10u) - 0.5);
+      let lamD = mix(lamOwn, hueRun, flow) + mix(45.0, 25.0, flow) * ((cd - lo) / (hi - lo) - 0.5) + mix(12.0, 40.0, flow) * (gh.z - 0.5)
+        + mix(70.0, 30.0, flow) * (vnoise3(xw * 0.4, seed + 10u) - 0.5);
       rhoD = clamp(specW(lamD) * iu.white.rgb * (iu.white.w * iu.playB.w), vec3f(0.0), vec3f(1.0)) * share * gate;
       // flake by flake it glows more or less
       // (a few flakes much brighter than the rest: the patch glitters rather than glowing as one fill)
@@ -1222,7 +1225,9 @@ fn grains(pos: vec3f, dir: vec3f, s: f32) -> Play {
       let wl = vec3f(0.2126, 0.7152, 0.0722);
       // (where the colour runs on, the fields are as bright as the flashes of the stones photographed:
       // broad, and lit from much of the room at once)
-      glow = (1.0 + 0.8 * flow) * rhoD * each * (iu.playF.w * max(dot(envL(reflect(dir, fromObj(pd)), 0.8), wl), around) * picBoost + iu.playF.z * dot(inside, wl));
+      glow = (1.0 + 0.7 * flow) * rhoD * each * (iu.playF.w * max(dot(envL(reflect(dir, fromObj(pd)), 0.8), wl), around) * picBoost + iu.playF.z * dot(inside, wl));
+      // (where the colour runs on, seen through the stone's own faint haze: less pure than a painted hue)
+      glow = mix(glow, vec3f(dot(glow, wl)), 0.12 * flow);
     }
     out.light += out.keep * (best + glow) * vis;
     out.keep *= 1.0 - max(bestRho, rhoD) * vis;
