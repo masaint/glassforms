@@ -488,7 +488,7 @@ fn clayM(p: vec3f, rd: vec3f) -> vec3f {
 //#if ROUGH
   return F * (seen(reflect(rd, n), spreadR()) + skyOf(reflect(rd, n))) + (1.0 - F) * clay(p, rd);
 //#else
-  return F * (filmEnv(reflect(rd, n), filmLod(p, n, c)) + skyOf(reflect(rd, n))) + (1.0 - F) * clay(p, rd);
+  return F * (mirrorEnv(reflect(rd, n), mirrorLod(p, n, c)) + skyOf(reflect(rd, n))) + (1.0 - F) * clay(p, rd);
 //#endif
 //#else
   return F * seen(reflect(rd, n), spreadR()) + (1.0 - F) * clay(p, rd);
@@ -598,7 +598,7 @@ fn shadeM(ro: vec3f, rd_in: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f 
     let lit = mix(hid, lit0, fo);
 //#else
 //#if FILM
-    let lit = filmEnv(mir, filmLod(p, n, cosi));
+    let lit = mirrorEnv(mir, mirrorLod(p, n, cosi));
 //#else
 //#if WEAR
     let lit = wearSee(rd, wr, p, cosi) * (wr.keep * wr.tint);
@@ -1007,7 +1007,7 @@ fn beyondM(ro_in: vec3f, rd_in: vec3f, ior: f32, sig_in: f32) -> vec3f {
     col += thr * F * (frFar(rd, n, p, sig, fp) + skyFar(reflect(rd, n)));
 //#else
     // (seen through the body: the picture at a middling level, without measuring how the surface bends)
-    col += thr * F * (filmEnv(reflect(rd, n), 3.0) + skyFar(reflect(rd, n)));
+    col += thr * F * (mirrorEnv(reflect(rd, n), 3.0) + skyFar(reflect(rd, n)));
 //#endif
 //#else
     col += thr * F * frFar(rd, n, p, sig, fp);
@@ -1191,7 +1191,7 @@ fn shadeM(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
 //#if ROUGH
   let envF = envT + skyOf(reflect(rd, n));
 //#else
-  let envF = filmEnv(reflect(rd, n), filmLod(p, n, cosi)) + skyOf(reflect(rd, n));
+  let envF = mirrorEnv(reflect(rd, n), mirrorLod(p, n, cosi)) + skyOf(reflect(rd, n));
 //#endif
 //#else
   let fd = 0.0;

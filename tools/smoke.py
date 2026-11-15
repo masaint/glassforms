@@ -23,6 +23,15 @@ CASES = [
     ('material-frosted', ['scene=surfaces', 'preset=gyroid', 'material=frosted']),
     ('material-satingold', ['material=satingold']),
     ('material-jade', ['scene=surfaces', 'preset=gyroid', 'material=jade']),
+    ('photo-chrome-picture', ['material=chrome', 'hdri=hdri/suburban_garden_4k.exr', 'hdriShow=1']),
+    ('photo-brushed-picture', ['scene=models', 'preset=teapot', 'material=brushed', 'hdri=hdri/suburban_garden_4k.exr']),
+    ('photo-brushed-studio', ['material=brushed', 'studio=white']),
+    ('photo-gold-coat-wear', ['material=gold', 'coat=1', 'film=300', 'wear=1', 'brush=1', 'hdri=hdri/suburban_garden_4k.exr']),
+    ('photo-porcelain-picture', ['scene=models', 'preset=teapot', 'material=porcelain', 'hdri=hdri/suburban_garden_4k.exr']),
+    ('photo-jade-mottle', ['material=jade', 'studio=lavender']),
+    ('photo-milk-sharp-off', ['material=milk', 'sharp=0', 'wear=1', 'hdri=hdri/suburban_garden_4k.exr']),
+    ('photo-clear-wear', ['material=satin', 'wear=0.5', 'brush=0.5', 'mottle=1']),
+    ('photo-bodies-wear', ['scene=knots', 'preset=trefoil', 'layer=algebraic:heart', 'L2.size=0.7', 'J12.op=apart', 'B2.material=jade', 'B2.wear=1', 'B1.material=brushed', 'hdri=hdri/suburban_garden_4k.exr']),
     ('two-bodies', ['scene=knots', 'preset=trefoil', 'layer=algebraic:heart', 'L2.size=0.7', 'J12.op=apart', 'B2.material=gold']),
     ('cast', ['scene=knots', 'preset=trefoil', 'clay=1', 'cast=2']),
     ('camera-fisheye', ['proj=fisheye']),
@@ -88,6 +97,12 @@ for name, args in CASES:
         r = subprocess.run(cmd, cwd=NATIVE, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=180)
         ok = r.returncode == 0 and os.path.exists(png)
         msg = ''
+        if ok and name.startswith('photo-'):
+            # (a surface whose reflections were not read comes out black: the picture must not be dark)
+            from PIL import Image
+            grey = Image.open(png).convert('L')
+            if sum(grey.histogram()[40:]) < 0.02 * grey.width * grey.height:
+                ok, r = False, subprocess.CompletedProcess(cmd, 1, '', 'the picture is nearly black')
         if ok:
             try:
                 rep = json.loads(r.stdout.strip().splitlines()[-1])

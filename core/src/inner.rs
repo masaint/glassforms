@@ -281,12 +281,16 @@ pub fn uniforms(p: &Settings, scale: f64, pixel: f64, tint: [f64; 3]) -> [f32; I
     let (size, cover, roll0) = (pat.size, pat.cover, pat.roll);
     let grain = p.play_size.clamp(0.005, 3.0) * unit * size;
     let glitter = p.play_pattern.round() as i64 == GLITTER;
+    // a little opal play is a few patches of colour rather than faint colour all over: below 1, `play`
+    // takes away patches as well as dimming those left
+    let amount = p.play.clamp(0.0, 1.0);
+    let (cover, strength) = if glitter { (cover, amount) } else { (cover * (0.3 + 0.7 * amount), (0.4 + 0.6 * amount) * if amount > 0.0 { 1.0 } else { 0.0 }) };
     put(r, [1.0 / grain, cover, p.play_seed.round().rem_euclid(4096.0), if glitter { 1.0 } else { 0.0 }]);
     // grains finer than a pixel cannot be told apart: their play is faded out as they get there
     // (a platelet is a point of light, and may be smaller than a pixel before it fades)
     let seen = if glitter { (grain / pixel.max(1e-9) - 0.3).clamp(0.0, 1.0) } else { ((grain / pixel.max(1e-9) - 1.0) / 2.0).clamp(0.0, 1.0) };
     let roll = roll0 + (1.0 - roll0) * p.play_roll.clamp(0.0, 1.0);
-    put(r + 1, [0.5 * grain, p.play.clamp(0.0, 1.0) * seen, roll, OPAL_GAIN]);
+    put(r + 1, [0.5 * grain, strength * seen, roll, OPAL_GAIN]);
     let soft = if glitter { 0.02 + 0.3 * p.play_soft.clamp(0.0, 1.0) } else { 0.05 + 0.6 * p.play_soft.clamp(0.0, 1.0) };
     put(r + 2, [opal_longest_nm(p.play_colour), soft, 0.0, 0.0]);
     // what the body takes from light on its way to a grain and back, per unit of length: the body's

@@ -420,7 +420,6 @@ pub fn joins(ui: &mut Ui, st: &mut State, px: &mut Panels) {
 pub fn placement(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     let i = st.stack.sel;
     let as_built = st.stack.layers[i].place.is_identity();
-    if st.layer_count() < 2 && as_built { return; }
     // (a sub-group of the shape: detail, folded at first)
     px.sub(ui, "placement", "placement", if as_built { "as it is built" } else { "moved" }, |ui, px| placement_rows(ui, st, px, i, as_built));
 }
@@ -437,6 +436,12 @@ fn placement_rows(ui: &mut Ui, st: &mut State, px: &mut Panels, i: usize, as_bui
     ui.scope(|ui| {
         // nothing to put back while the layer is where it is built
         if as_built { ui.disable(); }
-        if button(ui, place, Id::unique("placement reset"), "reset", false, font).on_hover_text("this layer back where it is built: centred, unturned, full size").clicked() { st.reset_placement(i); }
+        if button(ui, place, Id::unique("placement reset"), "reset", false, font.clone()).on_hover_text("this layer back where it is built: centred, unturned, full size").clicked() { st.reset_placement(i); }
     });
+    // the handles over the picture, for moving, turning and sizing this layer by hand
+    let word = if px.handles.on { "hide handles" } else { "handles" };
+    let hsize = button_size(ui, word, &font, egui::vec2(8.0, 2.0));
+    let hplace = Rect::from_min_size(Pos2::new(place.left() - 8.0 - hsize.x, place.top()), hsize);
+    px.note("placement:handles", hplace);
+    if button(ui, hplace, Id::unique("placement handles"), word, px.handles.on, font).on_hover_text("arrows, squares and rings over the picture to drag this layer about (G). T: move, turn or size; Ctrl: in steps; Shift: finely; Esc: put them away. While they show, a click on a shape selects its layer").clicked() { px.handles.toggle(); }
 }

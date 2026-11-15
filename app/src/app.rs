@@ -301,6 +301,8 @@ enum Gesture {
     Turn,
     Pan,
     Roll,
+    /// one of the handles over the picture has been taken hold of
+    Handle,
 }
 struct Drag {
     kind: Gesture,
@@ -737,7 +739,12 @@ impl App {
         let (down, delta, at, mods) = ctx.input(|i| (picture.is_pointer_button_down_on(), i.pointer.delta(), i.pointer.latest_pos(), i.modifiers));
         if down && self.drag.is_none() {
             let (right, middle) = ctx.input(|i| (i.pointer.button_down(PointerButton::Secondary), i.pointer.button_down(PointerButton::Middle)));
-            let kind = if right || mods.shift { Gesture::Pan } else if middle || mods.ctrl { Gesture::Roll } else { Gesture::Turn };
+            // (a press on one of the handles takes hold of it, whatever keys are held: they mean steps or finely)
+            let handle = if right || middle { None } else { at.and_then(|p| self.px.handles.hit(st, self.full, p)) };
+            let kind = if let (Some(part), Some(p)) = (handle, at) {
+                self.px.handles.begin(st, self.full, p, part);
+                Gesture::Handle
+            } else if right || mods.shift { Gesture::Pan } else if middle || mods.ctrl { Gesture::Roll } else { Gesture::Turn };
             self.drag = Some(Drag { kind, moved: 0.0, at: at.unwrap_or(self.full.center()) });
         } else if let Some(d) = &mut self.drag {
             if down {
@@ -749,12 +756,20 @@ impl App {
                         Gesture::Turn => st.drag_turn(dx, dy),
                         Gesture::Pan => st.drag_pan(dx, dy, self.full.height() as f64),
                         Gesture::Roll => st.drag_roll(dx),
+                        Gesture::Handle => self.px.handles.drag(st, self.full, d.at, mods.ctrl, mods.shift),
                     }
                 }
             } else {
-                // let go: a press that hardly moved is a click, which focuses where it landed
-                if d.kind == Gesture::Turn && d.moved < 4.0 && st.p.aperture > 0.0 {
-                    let (fx, fy) = ((d.at.x / self.full.width()) as f64, (d.at.y / self.full.height()) as f64);
+                // let go: a press that hardly moved is a click, which focuses where it landed (while the
+                // handles show, it selects the layer whose shape is there; with Alt held it focuses still)
+                let (fx, fy) = ((d.at.x / self.full.width()) as f64, (d.at.y / self.full.height()) as f64);
+                if d.kind == Gesture::Handle {
+                    self.px.handles.end(st);
+                } else if d.kind == Gesture::Turn && d.moved < 4.0 && self.px.handles.on && !mods.alt {
+                    if let Some(i) = crate::ui::handles::pick_layer(&self.engine, fx, fy) {
+                        if i != self.engine.state.stack.sel { self.engine.state.select_layer(i); }
+                    }
+                } else if d.kind == Gesture::Turn && d.moved < 4.0 && st.p.aperture > 0.0 {
                     self.engine.pick_focus(fx, fy);
                 }
                 self.drag = None;
@@ -764,6 +779,8 @@ impl App {
         if picture.double_clicked() { st.reset_view(); }
         if let Some(d) = &self.drag {
             ctx.set_cursor_icon(if d.kind == Gesture::Pan { CursorIcon::Move } else { CursorIcon::Grabbing });
+        } else if picture.hovered() && self.px.handles.hover.is_some() {
+            ctx.set_cursor_icon(CursorIcon::PointingHand);
         } else if picture.hovered() {
             ctx.set_cursor_icon(CursorIcon::Grab);
         }
@@ -815,8 +832,16 @@ impl App {
                     let full = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!full));
                 }
-                // Esc puts away the nearest thing: the help if it is open, otherwise the fullscreen
+                // G: the handles over the picture; T: what they do (move, turn, size)
+                G => self.px.handles.toggle(),
+                T => {
+                    if self.px.handles.on { self.px.handles.mode = self.px.handles.mode.next(); } else { self.px.handles.on = true; }
+                }
+                // Esc puts away the nearest thing: a drag of a handle (the layer goes back), the help if it
+                // is open, the handles, otherwise the fullscreen
+                Escape if self.px.handles.cancel(st) => {}
                 Escape if self.px.help_open => self.px.help_open = false,
+                Escape if self.px.handles.on => self.px.handles.toggle(),
                 Escape => {
                     if ctx.input(|i| i.viewport().fullscreen.unwrap_or(false)) {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
@@ -1759,6 +1784,11 @@ impl eframe::App for App {
                 self.full
             };
             ui.painter().image(id, rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+        }
+        // over it: the handles, if they are asked for
+        if self.video.is_none() {
+            let pointer = ctx.input(|i| i.pointer.hover_pos());
+            self.px.handles.paint(ui.painter(), &self.engine.state, self.full, pointer);
         }
         // over it, at the foot: the quiet line of figures, hidden with the panels
         if !(self.px.hide_left && self.px.hide_right) { overlay::foot(ui, &mut self.px, self.full); }

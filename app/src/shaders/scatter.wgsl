@@ -303,14 +303,10 @@ fn cs_inject(@builtin(global_invocation_id) id: vec3u) {
       // A wide beam arrives at many angles at once: the wider it is, the more it is given what light
       // from all round gets in on average, in place of what gets in at its middle's angle.
       let wide = clamp(1.6 * tanA, 0.0, 1.0);
-      // (the march back from the cell, when it is made, also says how much body lies beyond this piece)
-      var back: Way;
-      var backed = false;
+      let c = dot(away, w);
       if (dense < 1.0) {
         // ---- followed back from the cell
         let m = way(p, w, tanA, 0.5 * h, false, h, least, keep);
-        back = m;
-        backed = true;
         // Inside the cell: its stretch of the beam in four pieces. Each of the beam's parts crosses so
         // much more body there; what a part loses between coming to the cell and leaving it is light
         // that the cell holds. (A part of the beam is inside the body or it is not: a beam passing the
@@ -332,26 +328,21 @@ fn cs_inject(@builtin(global_invocation_id) id: vec3u) {
           got *= mix(enters(clamp(dot(face, w), 0.05, 1.0)), su.zb.w, wide);
         }
         light += su.beams[b].rgb.rgb * got * (1.0 - dense) * castThrough(p, w, tanA);
-      }
-      let c = dot(away, w);
-      if (dense > 0.0 && c < -0.03) {
-        // ---- put in at the far side: the beam comes into this piece of the body through its other face
-        // (in a thin piece the cell lies within reach of both; through a thick one nothing gets across)
-        let fc = -c;
-        let s = farFace / fc;
-        let ci = sqrt(1.0 - (1.0 - fc * fc) / (su.k.w * su.k.w));
-        let half = 0.5 * h / ci;
-        if (least * (s - half) < 10.0) {
-          let start = inside + w * (s + 0.75 * h);
-          var reaches = vec3f(0.0);
-          if (backed) {
+        if (dense > 0.0 && c < -0.03) {
+          // ---- put in at the far side: the beam comes into this piece of the body through its other
+          // face (in a thin piece the cell lies within reach of both; through a thick one nothing gets
+          // across). The march back from the cell has measured the body in the way, this piece and any
+          // beyond it; beyond the far face is what the beam crossed before it got here. (Where the body
+          // is so dense that no cell is followed back, nothing gets across a piece a cell thick anyway.)
+          let fc = -c;
+          let s = farFace / fc;
+          let ci = sqrt(1.0 - (1.0 - fc * fc) / (su.k.w * su.k.w));
+          let half = 0.5 * h / ci;
+          if (least * (s - half) < 10.0) {
             let o = max(s - 0.5 * h, 0.0);
-            reaches = (exp(-st * max(back.a.x - o, 0.0)) + exp(-st * max(back.a.y - o, 0.0)) + exp(-st * max(back.a.z - o, 0.0)) + exp(-st * max(back.b.x - o, 0.0)) + exp(-st * max(back.b.y - o, 0.0)) + exp(-st * max(back.b.z - o, 0.0))) / 6.0;
-          } else {
-            let m = way(start, w, tanA, 0.0, true, h, least, keep);
-            reaches = (exp(-st * m.a.x) + exp(-st * m.a.y) + exp(-st * m.a.z) + exp(-st * m.b.x) + exp(-st * m.b.y) + exp(-st * m.b.z)) / 6.0;
+            let reaches = (exp(-st * max(m.a.x - o, 0.0)) + exp(-st * max(m.a.y - o, 0.0)) + exp(-st * max(m.a.z - o, 0.0)) + exp(-st * max(m.b.x - o, 0.0)) + exp(-st * max(m.b.y - o, 0.0)) + exp(-st * max(m.b.z - o, 0.0))) / 6.0;
+            light += su.beams[b].rgb.rgb * reaches * (dense * fc * mix(enters(fc), su.zb.w, wide)) * (exp(-st * max(s - half, 0.0)) - exp(-st * (s + half))) * castThrough(p, w, tanA);
           }
-          light += su.beams[b].rgb.rgb * reaches * (dense * fc * mix(enters(fc), su.zb.w, wide)) * (exp(-st * max(s - half, 0.0)) - exp(-st * (s + half))) * castThrough(start, w, tanA);
         }
       }
       if (dense > 0.0 && shell && c > 0.03) {
@@ -388,7 +379,7 @@ fn cs_inject(@builtin(global_invocation_id) id: vec3u) {
         var sTop = top / max(c, 0.03);
         var sBottom = bottom / max(c, 0.03);
         if (c < 0.03) {
-          if (c > -2.0) { continue; }
+          if (c > -0.03) { continue; }
           fc = -c;
           let s = farFace / fc;
           if (least * (s - 0.5 * h / fc) > 10.0) { continue; }
@@ -653,7 +644,7 @@ fn cs_finish(@builtin(global_invocation_id) id: vec3u) {
   // The calibration: each cell as a share of what it held in the furnace against what it should have
   // held there. (Kept within bounds: where the furnace's cell holds next to nothing, outside the body,
   // its share says nothing.)
-  if (su.ab.w > 1e9) {
+  if (su.ab.w > 0.0) {
     let f = textureLoad(calibTex, me, 0).g;
     v *= clamp(su.ab.w / max(f, 1e-6), 0.5, 3.0);
   }

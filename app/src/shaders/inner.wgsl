@@ -18,7 +18,7 @@ struct IU {
   crackC: vec4f,      // x: how far a rough face spreads what it sends back, radians   y: 0 = a mirror .. 1 = a white veil
                       // z: the width of a pixel at the shape, in cells   w: turns allowed along one path
   spec: array<vec4f, 8>,      // the spectrum in eight bands: rgb = the band's share of white, w = its wavelength, nm
-  playA: vec4f,       // x: grains per unit of length   y: the share of grains that send light back   z: which arrangement
+  playA: vec4f,       // x: grains per unit of length   y: the share of patches (platelets: of cells) that send light back   z: which arrangement
                       // w: 1 = flat mirror platelets instead of opal's grains
   playB: vec4f,       // x: the step between the places looked at along a ray   y: how strongly   z: how far
                       // neighbouring grains share a direction   w: how much more than its share of white a grain sends back
@@ -344,7 +344,9 @@ fn cracks(pos: vec3f, dir: vec3f, s: f32, n: f32) -> Crack {
           let fv = xf - og0;
           let fth = vnoise2(vec2f(atan2(fv.y, fv.x) * 70.0 + 9.0 * jag, length(fv) * 3.0), sd + 17u);
           let fray = mix(smoothstep(0.35, 0.65, fth), 1.0, smoothstep(0.05, 0.25, edge));
-          let open = smoothstep(0.22, 0.6, sw) * fray * (0.6 + 0.4 * smoothstep(0.15, 0.5, vnoise2(xf * 6.5, sd + 19u)));
+          // (a thin gap swells gently, so its colour bands are broad; a wide one is held open in patches)
+          let thin = 1.0 - smoothstep(1500.0, 4000.0, iu.crackB.x);
+          let open = mix(smoothstep(0.22, 0.6, sw), clamp(0.55 + 1.2 * (sw - 0.5), 0.0, 1.0), thin) * fray * (0.6 + 0.4 * smoothstep(0.15, 0.5, vnoise2(xf * 6.5, sd + 19u)));
           let wide = iu.crackB.x * (0.5 + m3.z);
           let gap = wide * prof * open;
           // the faces' own relief: shallow ripples in rings about where the break began (glass), fine
@@ -372,7 +374,7 @@ fn cracks(pos: vec3f, dir: vec3f, s: f32, n: f32) -> Crack {
           let hstep = 0.03;
           let sx = fbm2((xf + vec2f(hstep, 0.0)) * 1.7 + 3.3, sd + 11u);
           let sy = fbm2((xf + vec2f(0.0, hstep)) * 1.7 + 3.3, sd + 11u);
-          let dopen = length(vec2f(sx - sw, sy - sw)) / hstep * 2.5 * g;
+          let dopen = length(vec2f(sx - sw, sy - sw)) / hstep * mix(2.5, 1.2, thin) * g;
           let dgap = wide * ((1.0 - ee) / max(prof, 0.03) * 2.2 * open + prof * dopen) * px;
           let back = fromObj(fromLat(reflect(dl, nl)));
           let ext = exp(-u.absorb.xyz * tt);
@@ -543,6 +545,8 @@ fn grains(pos: vec3f, dir: vec3f, s: f32) -> Play {
     // light. The spacing differs a little from grain to grain.
     let e1 = across1(gd);
     let e2 = across2(gd);
+    // (the streaks run their own way in each patch)
+    let sa = sphereDir(ten3(ihash(ph + 5u)).xy);
     let rho0 = iu.playE.w * iu.playB.y;
     let vis = exp(-iu.playD.rgb * t);
     var took = vec3f(0.0);
@@ -554,12 +558,13 @@ fn grains(pos: vec3f, dir: vec3f, s: f32) -> Play {
       }
       // stacking faults: inside a grain the layers waver a little in fine streaks along them, so a grain
       // lights up in streaks and points rather than all over, and its hue shifts a little across it
-      let sv = dot(xw, vec3f(0.83, 0.31, -0.46)) * 7.0 + 2.2 * sin(dot(xw, vec3f(-0.2, 0.9, 0.4)) * 3.1 + f32(j));
-      pn = normalize(pn + 0.09 * sin(sv) * e1 + 0.09 * sin(1.7 * sv + 2.0 * rg.x + xw.y * 5.0) * e2);
+      let sv = dot(xw, sa) * 7.0 + 2.2 * sin(dot(xw, vec3f(-0.2, 0.9, 0.4)) * 3.1 + f32(j));
+      let sw2 = sin(sv) * sin(0.37 * sv + 3.1 * xw.z + 1.3 * sin(2.3 * xw.x));
+      pn = normalize(pn + 0.08 * sw2 * e1 + 0.06 * sin(1.7 * sv + 2.0 * rg.x + xw.y * 5.0) * sin(0.6 * sv + xw.x) * e2);
       if (dot(pn, od) > 0.0) { pn = -pn; }
       let gw = fromObj(pn);
       let lam = iu.playC.x * abs(dot(dir, gw)) * (0.93 + 0.07 * rg.z);
-      if (lam < 385.0 || lam > 715.0) { continue; }
+      if (lam < 425.0 || lam > 715.0) { continue; }
       let rho = clamp(specW(lam) * iu.white.rgb * (iu.white.w * iu.playB.w), vec3f(0.0), vec3f(1.0)) * rho0;
       out.light += out.keep * rho * envL(reflect(dir, gw), iu.playC.y) * vis;
       took += rho;
