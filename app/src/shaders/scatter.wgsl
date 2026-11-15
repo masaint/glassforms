@@ -189,6 +189,8 @@ struct Way {
 // part of the body loses the share of itself that hits it, not all of itself.
 // `outside`: the beam starts outside the body; else it starts in the piece of body its cell is in.
 // `keep`: see sdfKeep.
+// (a lamp stands at a place: a march back towards it stops there. Set only around a lamp's beam.)
+var<private> wayMax: f32 = 1e9;
 fn way(p: vec3f, w: vec3f, tanA: f32, t0: f32, outside: bool, h: f32, least: f32, keep: vec4f) -> Way {
   var o: Way;
   o.a = vec3f(0.0);
@@ -203,7 +205,7 @@ fn way(p: vec3f, w: vec3f, tanA: f32, t0: f32, outside: bool, h: f32, least: f32
   var clear = false;                      // the march got out of the shape's bound, or the beam was used up
   for (var i = 0u; i < su.steps; i++) {
     let q = p + w * t;
-    if (dot(q, q) > su.st.w) { clear = true; break; }
+    if (dot(q, q) > su.st.w || t > wayMax) { clear = true; break; }
     let dq = sdfKeep(q, keep);
     if (!known && dq > 0.0) {
       known = true;
@@ -298,8 +300,20 @@ fn cs_inject(@builtin(global_invocation_id) id: vec3u) {
       keep[own] = 1.0;
     }
     for (var b = 0u; b < su.nb; b++) {
-      let w = su.beams[b].dir.xyz;
-      let tanA = su.beams[b].dir.w;
+      var w = su.beams[b].dir.xyz;
+      var tanA = su.beams[b].dir.w;
+      var brgb = su.beams[b].rgb.rgb;
+      wayMax = 1e9;
+      if (su.beams[b].rgb.w > 0.5) {
+        // a lamp: from this cell, towards where it stands; as wide as it looks from here; as strong as its
+        // light is over the distance squared (and the march back to it stops at it)
+        let dv = su.beams[b].dir.xyz - p;
+        let dist = max(length(dv), 1e-3);
+        w = dv / dist;
+        tanA = su.beams[b].dir.w / dist;
+        brgb = brgb / (dist * dist);
+        wayMax = dist;
+      }
       // A wide beam arrives at many angles at once: the wider it is, the more it is given what light
       // from all round gets in on average, in place of what gets in at its middle's angle.
       let wide = clamp(1.6 * tanA, 0.0, 1.0);
@@ -327,7 +341,7 @@ fn cs_inject(@builtin(global_invocation_id) id: vec3u) {
           let face = normalize(e.xyy * sdf(m.came + e.xyy) + e.yyx * sdf(m.came + e.yyx) + e.yxy * sdf(m.came + e.yxy) + e.xxx * sdf(m.came + e.xxx) + vec3f(1e-12));
           got *= mix(enters(clamp(dot(face, w), 0.05, 1.0)), su.zb.w, wide);
         }
-        light += su.beams[b].rgb.rgb * got * (1.0 - dense) * castThrough(p, w, tanA);
+        light += brgb * got * (1.0 - dense) * castThrough(p, w, tanA);
         if (dense > 0.0 && c < -0.03) {
           // ---- put in at the far side: the beam comes into this piece of the body through its other
           // face (in a thin piece the cell lies within reach of both; through a thick one nothing gets
@@ -341,7 +355,7 @@ fn cs_inject(@builtin(global_invocation_id) id: vec3u) {
           if (least * (s - half) < 10.0) {
             let o = max(s - 0.5 * h, 0.0);
             let reaches = (exp(-st * max(m.a.x - o, 0.0)) + exp(-st * max(m.a.y - o, 0.0)) + exp(-st * max(m.a.z - o, 0.0)) + exp(-st * max(m.b.x - o, 0.0)) + exp(-st * max(m.b.y - o, 0.0)) + exp(-st * max(m.b.z - o, 0.0))) / 6.0;
-            light += su.beams[b].rgb.rgb * reaches * (dense * fc * mix(enters(fc), su.zb.w, wide)) * (exp(-st * max(s - half, 0.0)) - exp(-st * (s + half))) * castThrough(p, w, tanA);
+            light += brgb * reaches * (dense * fc * mix(enters(fc), su.zb.w, wide)) * (exp(-st * max(s - half, 0.0)) - exp(-st * (s + half))) * castThrough(p, w, tanA);
           }
         }
       }
@@ -351,9 +365,10 @@ fn cs_inject(@builtin(global_invocation_id) id: vec3u) {
         let reaches = (exp(-st * m.a.x) + exp(-st * m.a.y) + exp(-st * m.a.z) + exp(-st * m.b.x) + exp(-st * m.b.y) + exp(-st * m.b.z)) / 6.0;
         // (inside, the beam is bent towards the surface's facing: it dies away along that steeper path)
         let ci = sqrt(1.0 - (1.0 - c * c) / (su.k.w * su.k.w));
-        light += su.beams[b].rgb.rgb * reaches * (dense * c * mix(enters(c), su.zb.w, wide)) * (exp(-st * (top / ci)) - exp(-st * (bottom / ci))) * castThrough(above, w, tanA);
+        light += brgb * reaches * (dense * c * mix(enters(c), su.zb.w, wide)) * (exp(-st * (top / ci)) - exp(-st * (bottom / ci))) * castThrough(above, w, tanA);
       }
     }
+    wayMax = 1e9;
     // ---- light from all round, and from the body itself
     // Two more kinds of light come through the surface near the cell. The rest of the lighting, which
     // is in no beam: faint light from all round, a little stronger from one side. And the body's own

@@ -143,8 +143,8 @@ fn seenH(rd: vec3f, sig: f32, h: f32, facets: f32) -> vec3f {
   let d = toEnv(rd);
   let uv = vec2f(atan2(d.z, d.x) * 0.15915494 + 0.5, acos(clamp(d.y, -1.0, 1.0)) * 0.31830989);
   let s2 = sqrt(min(sig * sig + 11.0 * min(sig * sig, facets * a * a), 4.0));
-  let l1 = clamp(select(log2(max(sig, 1e-6) / T0), sig / (2.0 * T0), sig < 2.0 * T0), 0.0, 7.0);
-  let l2 = clamp(select(log2(max(s2, 1e-6) / T0), s2 / (2.0 * T0), s2 < 2.0 * T0), 0.0, 7.0);
+  let l1 = clamp(select(log2(max(sig, 1e-6) / T0), sig / (2.0 * T0), sig < 2.0 * T0), 0.0, 9.0);
+  let l2 = clamp(select(log2(max(s2, 1e-6) / T0), s2 / (2.0 * T0), s2 < 2.0 * T0), 0.0, 9.0);
   var c = mix(textureSampleLevel(softTex, softSmp, uv, l1).rgb, textureSampleLevel(softTex, softSmp, uv, l2).rgb, h);
 //#if PICTURE
   let p1 = clamp(log2(sqrt(sig * sig + mu.pic.z * mu.pic.z) / mu.pic.y), 0.0, mu.pic.w);
@@ -169,9 +169,9 @@ fn seen(rd: vec3f, sig: f32) -> vec3f {
 // meet; with an environment picture, its softest level towards d.)
 fn frAll(d: vec3f) -> vec3f {
 //#if PICTURE
-  return textureSampleLevel(softTex, softSmp, vec2f(0.5, 0.5), 7.0).rgb + textureSampleLevel(pictureTex, pictureSmp, toEnv(d), mu.pic.w).rgb * mu.pic.x;
+  return textureSampleLevel(softTex, softSmp, vec2f(0.5, 0.5), 9.0).rgb + textureSampleLevel(pictureTex, pictureSmp, toEnv(d), mu.pic.w).rgb * mu.pic.x;
 //#else
-  return textureSampleLevel(softTex, softSmp, vec2f(0.5, 0.5), 7.0).rgb;
+  return textureSampleLevel(softTex, softSmp, vec2f(0.5, 0.5), 9.0).rgb;
 //#endif
 }
 //#if !BODIES

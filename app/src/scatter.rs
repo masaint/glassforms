@@ -166,6 +166,12 @@ pub struct Scatter {
     calibrated: Option<Calibrated>,
     /// false: the light volume is used as it is worked out, without the calibration (for comparing)
     pub calibrate: bool,
+    /// the box the shape's volume (and so the light volume) spans: [-hb, hb] (larger than ever when the
+    /// layers are placed far out)
+    pub hb: f64,
+    /// the lamps standing in the scene, for the light worked out (not the furnace's): where each stands in
+    /// the lights' own frame, its radius, and the light it sends (radiance times the area of its disc)
+    pub lamps: Vec<[f64; 7]>,
 }
 
 /// What a calibration depends on: the shape (its volume, its changes, the channel), the cells a side, and
@@ -177,6 +183,7 @@ struct Calibrated {
     chan: usize,
     res: u32,
     medium: [u64; 4],
+    hb: u64,
 }
 
 /// The lighting of a furnace: white light of brightness 1 from every direction, as the light volume
@@ -305,14 +312,16 @@ impl Scatter {
         self.levels.len() - 1
     }
 
-    fn numbers(res: u32, light: &Lighting, m: &Medium, to_shape: &[f64; 9], pick: [[f32; 4]; 2], shading: Shading, correct: bool) -> ScatterU {
+    #[allow(clippy::too_many_arguments)]
+    fn numbers(res: u32, light: &Lighting, m: &Medium, to_shape: &[f64; 9], pick: [[f32; 4]; 2], shading: Shading, correct: bool, hb: f64, lamps: &[[f64; 7]]) -> ScatterU {
         let beams = &light.beams;
-        let h = 2.0 * HB / res as f64;
+        let h = 2.0 * hb / res as f64;
+        let bound = BOUND as f64 * hb / HB;
         let (st, d, zb) = (m.sig_t(), m.diffusion(), m.beyond());
         let f = |v: [f64; 3], w: f64| [v[0] as f32, v[1] as f32, v[2] as f32, w as f32];
         let mut u = ScatterU {
-            res: res as f32, hb: HB as f32, nb: beams.len().min(MAX_BEAMS) as u32, steps: 64,
-            st: f(st, (BOUND * BOUND) as f64),
+            res: res as f32, hb: hb as f32, nb: (beams.len() + lamps.len()).min(MAX_BEAMS) as u32, steps: 64,
+            st: f(st, bound * bound),
             ss: f(m.sig_s, over(res)),
             k: f([0, 1, 2].map(|i| h * h / d[i]), m.ior),
             zb: f([0, 1, 2].map(|i| h / zb[i]), m.enters),
@@ -342,6 +351,16 @@ impl Scatter {
             let d = [0, 1, 2].map(|k| r[k * 3] * b.dir[0] + r[k * 3 + 1] * b.dir[1] + r[k * 3 + 2] * b.dir[2]);
             u.beams[i] = BeamU { dir: [d[0] as f32, d[1] as f32, d[2] as f32, b.tan as f32], rgb: [b.rgb[0] as f32, b.rgb[1] as f32, b.rgb[2] as f32, 0.0] };
         }
+        // The lamps, after the beams: a beam whose direction, width and strength each cell works out from
+        // where the lamp stands (scatter.wgsl). dir: where it stands, in the shape's frame, and its radius;
+        // rgb: the light it sends, and 1 to say it is a lamp.
+        for (i, l) in lamps.iter().enumerate() {
+            let k = beams.len().min(MAX_BEAMS) + i;
+            if k >= MAX_BEAMS { break; }
+            let r = to_shape;
+            let p = [0, 1, 2].map(|a| r[a * 3] * l[0] + r[a * 3 + 1] * l[1] + r[a * 3 + 2] * l[2]);
+            u.beams[k] = BeamU { dir: [p[0] as f32, p[1] as f32, p[2] as f32, l[3] as f32], rgb: [l[4] as f32, l[5] as f32, l[6] as f32, 1.0] };
+        }
         u
     }
 
@@ -362,10 +381,13 @@ impl Scatter {
     /// scattering changes.
     #[allow(clippy::too_many_arguments)]
     pub fn solve(&mut self, vol: &Volume, shape_no: u64, light: &Lighting, m: &Medium, to_shape: &[f64; 9], res: u32, chan: usize, cast: Option<&Casting>) {
-        let key = Calibrated { view: vol.view.clone(), shape_no, chan, res, medium: [m.sig_s[0].to_bits(), m.hold.to_bits(), m.enters.to_bits(), m.ior.to_bits()] };
+        let key = Calibrated { view: vol.view.clone(), shape_no, chan, res, medium: [m.sig_s[0].to_bits(), m.hold.to_bits(), m.enters.to_bits(), m.ior.to_bits()], hb: self.hb.to_bits() };
         if self.calibrate && self.calibrated.as_ref() != Some(&key) {
             let clear = Medium { sig_a: [0.0; 3], mottle: 0.0, ..*m };
+            // (the furnace has no lamps: its light is white from everywhere)
+            let lamps = std::mem::take(&mut self.lamps);
             self.run(vol, shape_no, furnace(), &clear, to_shape, res, chan, None, false);
+            self.lamps = lamps;
             let l = self.levels.iter().find(|l| l.res == res).expect("just worked out");
             let mut enc = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("scatter: calibration") });
             enc.copy_texture_to_texture(l.out.texture().as_image_copy(), l.calib.texture().as_image_copy(), wgpu::Extent3d { width: res, height: res, depth_or_array_layers: res });
@@ -412,7 +434,7 @@ impl Scatter {
         for (n, &i) in ids.iter().enumerate() {
             // (only the finest volume is calibrated: the smaller ones serve as its start, and as the body's
             // own light, in the furnace as in the light worked out)
-            gpu.queue.write_buffer(&self.levels[i].u, 0, bytemuck::bytes_of(&Self::numbers(sizes[n], light, m, to_shape, pick, shading, correct && n + 1 == sizes.len())));
+            gpu.queue.write_buffer(&self.levels[i].u, 0, bytemuck::bytes_of(&Self::numbers(sizes[n], light, m, to_shape, pick, shading, correct && n + 1 == sizes.len(), self.hb, &self.lamps)));
         }
         let cast_views = [cast.map_or(&self.blank, |c| &c.bodies).clone(), cast.and_then(|c| c.light.as_ref()).unwrap_or(&self.blank).clone()];
         if let Some((pipe, g, n)) = &fresh_copy {

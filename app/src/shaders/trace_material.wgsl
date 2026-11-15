@@ -74,11 +74,11 @@ fn tabAt(lam: f32) -> vec4f {
 // and has no grain. With an environment picture, its own softer levels are read the same way and added.
 @group(0) @binding(10) var softTex: texture_2d<f32>;
 @group(0) @binding(11) var softSmp: sampler;
-const T0: f32 = 0.024543693;
+const T0: f32 = 0.0061359232;
 fn envL(rd: vec3f, sig: f32) -> vec3f {
   let d = toEnv(rd);
   let uv = vec2f(atan2(d.z, d.x) * 0.15915494 + 0.5, acos(clamp(d.y, -1.0, 1.0)) * 0.31830989);
-  let lv = clamp(select(log2(max(sig, 1e-6) / T0), sig / (2.0 * T0), sig < 2.0 * T0), 0.0, 7.0);
+  let lv = clamp(select(log2(max(sig, 1e-6) / T0), sig / (2.0 * T0), sig < 2.0 * T0), 0.0, 9.0);
 //#if PICTURE
   // (the picture is already softened by mu.pic.z for the glass: the two spreads add as squares)
   let lp = clamp(log2(sqrt(sig * sig + mu.pic.z * mu.pic.z) / mu.pic.y), 0.0, mu.pic.w);
@@ -115,6 +115,11 @@ fn sunGlint(d: vec3f, w: f32) -> vec3f {
 // The curvature is measured from the distance field: three lookups a few voxels out across the
 // surface, a third of a turn apart, give its greatest bend whichever way that lies.
 fn mirrorLod(p: vec3f, n: vec3f, c: f32) -> f32 {
+  return clamp(log2(mirrorWide(p, n, c) / mu.pic.y), 0.0, mu.pic.w);
+}
+//#endif
+// (the width, radians, of the patch of surroundings one pixel's worth of the surface mirrors)
+fn mirrorWide(p: vec3f, n: vec3f, c: f32) -> f32 {
   let h = 3.0 * (2.0 * HB / u.vres);
   // any two directions across n (Duff et al. 2017)
   let sg = select(-1.0, 1.0, n.z >= 0.0);
@@ -133,8 +138,9 @@ fn mirrorLod(p: vec3f, n: vec3f, c: f32) -> f32 {
   let far = length(p - vec3f(0.0, 0.0, u.dist));
   let pixel = 2.0 * u.tan_fov / u.res.y;
   let wide = pixel * (1.0 + 2.0 * bend * far / max(c, 0.25));
-  return clamp(log2(0.4 * wide / mu.pic.y), 0.0, mu.pic.w);
+  return 0.4 * wide;
 }
+//#if PICTURE
 // The surroundings as a mirror (a metal, a film, a glaze) shows them along rd: the picture itself at that level; and,
 // when the family's lights are kept lit beside the picture, the lights' map. (Otherwise that map holds
 // only the soft glow that stands in for the picture's sun in the glass. A mirror wants the sun itself,
@@ -149,8 +155,20 @@ fn mirrorEnv(rd: vec3f, lod: f32) -> vec3f {
   return c;
 }
 //#else
+//#if ENVL
+// Without a picture: the lights' map as finely as it is painted for the softened copies (four times the
+// glass's own: material.rs, env_levels; the map the glass reads is too coarse for a mirror, which shows
+// a studio's soft box and horizon as sharp as they are), at the level one pixel's worth of the surface
+// mirrors.
+fn mirrorLod(p: vec3f, n: vec3f, c: f32) -> f32 { return clamp(log2(mirrorWide(p, n, c) / T0), 0.0, 9.0); }
+fn mirrorEnv(rd: vec3f, lod: f32) -> vec3f {
+  let e = toEnv(rd);
+  return textureSampleLevel(softTex, softSmp, vec2f(atan2(e.z, e.x) * 0.15915494 + 0.5, acos(clamp(e.y, -1.0, 1.0)) * 0.31830989), lod).rgb;
+}
+//#else
 fn mirrorLod(p: vec3f, n: vec3f, c: f32) -> f32 { return 0.0; }
 fn mirrorEnv(rd: vec3f, lod: f32) -> vec3f { return env(rd); }
+//#endif
 //#endif
 
 // What a polished surface that is not glass mirrors along rd at p (facing n, met at cosine c): with an
@@ -160,6 +178,10 @@ fn mirrorEnv(rd: vec3f, lod: f32) -> vec3f { return env(rd); }
 fn sharpEnv(rd: vec3f, p: vec3f, n: vec3f, c: f32) -> vec3f {
 //#if PICTURE
   if (mu.more.y > 0.5) { return mirrorEnv(rd, mirrorLod(p, n, c)); }
+//#else
+//#if ENVL
+  if (mu.more.y > 0.5) { return mirrorEnv(rd, mirrorLod(p, n, c)); }
+//#endif
 //#endif
   return env(rd);
 }
@@ -406,7 +428,7 @@ fn wearRead(rd: vec3f, lod: f32, sig: f32) -> vec3f {
     var c = textureSampleLevel(pictureTex, pictureSmp, d, l).rgb * mu.pic.x + sunGlint(d, max(sig, mu.pic.y * exp2(lod)));
     if (mu.film5.y > 0.5) {
       let uv = vec2f(atan2(d.z, d.x) * 0.15915494 + 0.5, acos(clamp(d.y, -1.0, 1.0)) * 0.31830989);
-      c += textureSampleLevel(softTex, softSmp, uv, clamp(select(log2(max(sig, 1e-6) / T0), sig / (2.0 * T0), sig < 2.0 * T0), 0.0, 7.0)).rgb;
+      c += textureSampleLevel(softTex, softSmp, uv, clamp(select(log2(max(sig, 1e-6) / T0), sig / (2.0 * T0), sig < 2.0 * T0), 0.0, 9.0)).rgb;
     }
     return c;
   }

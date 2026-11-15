@@ -402,7 +402,7 @@ pub fn tracer_parts(v: &Variant, material_wgsl: &str, picture: bool, clay: bool)
     flags.extend(v.inner.flags());
     flags.push(("FINE", fine));
     flags.push(("MONO", v.mono));
-    flags.push(("ENVL", v.rough || v.sss || v.wear || v.inner.soft_lights()));
+    flags.push(("ENVL", v.rough || v.sss || v.wear || v.metal || v.coat || v.inner.soft_lights()));
     flags.push(("PICTURE", picture));
     flags.push(("CLAY", clay));
     // a film around air (a soap bubble) has a tracer of its own, in film.wgsl

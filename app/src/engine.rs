@@ -46,6 +46,9 @@ pub const MAX_ACCUM_CLAY: u32 = 96;
 /// at CLAY_PEAK, keeping the differences between one facet and the next.
 /// The light a white matte surface gathers facing the brightest way (luminance), looked for over
 /// directions spread evenly round the sphere.
+/// How many times finer each way the lights' map is painted for its softened copies than for the glass.
+const FINE: usize = 4;
+
 fn matte_peak(matte: &[[f32; 4]; 9]) -> f64 {
     let lum = |c: [f64; 3]| 0.2126 * c[0].max(0.0) + 0.7152 * c[1].max(0.0) + 0.0722 * c[2].max(0.0);
     const N: usize = 600;
@@ -242,6 +245,25 @@ impl Engine {
     }
 
     /// Paint the lights' map if what it is painted from has changed. True if the map changed.
+    /// The lights' map painted again FINE times as finely each way, as `paint_lights` paints it, for the
+    /// softened copies (whose first level a mirror reads: the glass's own map is too coarse for a mirror
+    /// to show a studio's soft box and horizon sharp).
+    fn paint_fine(&mut self) -> Vec<f32> {
+        let p = &self.state.p;
+        let rig = self.picture.is_none() || p.hdri_lights > 0.5;
+        let (w, h) = (FINE * env::ENV_W, FINE * env::ENV_H);
+        let r = self.state.rig();
+        let mut px = if rig { env::paint_gain(&r.lights, r.ambient, p.light_gain, w, h) } else { env::paint(&[], [0.0; 3], w, h) };
+        if let Some(pic) = &self.picture {
+            env::add_glows(&mut px, &pic.glows, p.hdri_gain, hdri::blur_sigma(p.hdri_blur), w, h);
+        }
+        if !self.painted.as_ref().is_some_and(|k| k.stage.is_empty()) {
+            let extra = self.picture.as_ref().map_or([0.0; 3], |pic| crate::stage::picture_on_floor(&pic.sh, p.hdri_gain, &self.state));
+            self.stage.paint(&self.state, &mut px, w, h, extra);
+        }
+        px
+    }
+
     fn paint_lights(&mut self) -> bool {
         let p = &self.state.p;
         let rig = self.picture.is_none() || p.hdri_lights > 0.5;
@@ -526,15 +548,16 @@ impl Engine {
             self.state.want = Some(Detail::Full);
         }
         if v.bodies > 0 {
+            if (v.rough || v.sss || v.wear || v.metal || v.coat || v.inner.soft_lights()) && !self.soft_ok && !self.painted_px.is_empty() {
+                let fine = self.paint_fine();
+                self.renderer.soften_lights(&fine, (FINE * env::ENV_W) as u32, (FINE * env::ENV_H) as u32);
+                self.soft_ok = true;
+                changed = true;
+            }
             let Some(mats) = self.state.body_materials() else { return changed };
             // (a material fitted to the shape is fitted to its own body)
             if self.body_thick.is_none() && mats.iter().any(|m| m.fit > 0.5) { self.body_thick = self.measure_bodies(); }
             let thick = self.body_thick.clone().unwrap_or_default();
-            if (v.rough || v.sss || v.wear || v.inner.soft_lights()) && !self.soft_ok && !self.painted_px.is_empty() {
-                self.renderer.soften_lights(&self.painted_px, env::ENV_W as u32, env::ENV_H as u32);
-                self.soft_ok = true;
-                changed = true;
-            }
             let mut numbers = material::bodies_uniforms(&mats, &thick);
             if let Some(pic) = &self.picture {
                 // (every body reads the picture's softer levels from its own numbers)
@@ -562,8 +585,9 @@ impl Engine {
         if v.plain() { return changed; }
         // rough and milky materials read softened copies of the lights' map: made when first wanted, and
         // again when the map is painted anew
-        if (v.rough || v.sss || v.wear || v.inner.soft_lights()) && !self.soft_ok && !self.painted_px.is_empty() {
-            self.renderer.soften_lights(&self.painted_px, env::ENV_W as u32, env::ENV_H as u32);
+        if (v.rough || v.sss || v.wear || v.metal || v.coat || v.inner.soft_lights()) && !self.soft_ok && !self.painted_px.is_empty() {
+            let fine = self.paint_fine();
+                self.renderer.soften_lights(&fine, (FINE * env::ENV_W) as u32, (FINE * env::ENV_H) as u32);
             self.soft_ok = true;
             changed = true;
         }
