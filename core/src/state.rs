@@ -338,6 +338,7 @@ pub struct State {
     pub body_mats: [Option<Box<Settings>>; material::MAX_BODIES],
     first_scene: bool,
     pub(crate) args: Vec<(String, String)>,
+    #[allow(dead_code)]
     auto: bool,
 }
 
@@ -446,6 +447,9 @@ impl State {
     /// Show another family. The first time, settings start from scratch; after that the camera, lights
     /// and picture stay as they were set and only the family's own defaults are applied.
     pub fn set_scene(&mut self, idx: usize) {
+        // (what is moving keeps moving: the animation is stopped only while the family changes, and
+        // started again on the new one)
+        let was_playing = self.playing;
         if self.playing { self.set_playing(false); }
         self.fam = idx.min(self.families.len() - 1);
         if self.stack.sel != 0 {
@@ -453,6 +457,7 @@ impl State {
             self.cut = true;
             self.default_tracks();
             self.want = Some(Detail::Full);
+            if was_playing { self.set_playing(true); }
             return;
         }
         let d = self.scene_defaults();
@@ -481,10 +486,15 @@ impl State {
                 let r = self.p.rot;
                 self.p.rot = [arg_num(&args, "rx").unwrap_or(r[0]), arg_num(&args, "ry").unwrap_or(r[1]), arg_num(&args, "rz").unwrap_or(r[2])];
             }
-            if self.auto && arg_num(&args, "spin").is_none() { self.p.spin = 0.0; }
+            // the view does not turn by itself until asked to (space, or the spin knob)
+            if arg_num(&args, "spin").is_none() { self.p.spin = 0.0; }
             self.first_scene = false;
         } else {
+            // (the spin as it was set: a family's own speed is only what space starts it at)
+            let (spin, spin_mode) = (self.p.spin, self.p.spin_mode);
             self.apply_defaults(&d);
+            self.p.spin = spin;
+            self.p.spin_mode = spin_mode;
         }
         self.theta = 0.0;
         self.clock = 0.0;
@@ -500,6 +510,7 @@ impl State {
         }
         self.default_tracks();
         self.want = Some(Detail::Full);
+        if was_playing { self.set_playing(true); }
     }
 
     /// Make the shape of a named material (a position in `material::NAMED`): the glass of the family that
@@ -893,7 +904,7 @@ impl State {
     /// Space: start or stop the spin.
     pub fn toggle_spin(&mut self) {
         let d = self.scene_defaults();
-        let own = match d.iter().find(|(n, _)| *n == "spin") { Some((_, Setting::Num(x))) if *x != 0.0 => *x, _ => Settings::default().spin };
+        let own = match d.iter().find(|(n, _)| *n == "spin") { Some((_, Setting::Num(x))) if *x != 0.0 => *x, _ => 0.3 };
         self.p.spin = if self.p.spin != 0.0 { 0.0 } else { own };
     }
 

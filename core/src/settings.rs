@@ -60,7 +60,7 @@ settings! {
     /// camera roll about its line of sight, degrees
     roll, "roll", 0.0;
     /// radians a second
-    spin, "spin", 0.35;
+    spin, "spin", 0.0;
     /// 0 = tumble (the shape also rocks as it turns), 1 = turntable (straight round the vertical)
     spin_mode, "spinMode", 0.0;
     /// 0 = the lights stay with the room, 1 = they turn with the shape
