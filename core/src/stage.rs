@@ -663,8 +663,8 @@ pub const STUDIOS_MORE: &[Studio] = &[
         ambient: [0.02, 0.02, 0.024],
         settings: &[
             ("backdrop", 1.0), ("backGain", 1.0), ("backSpread", 30.0),
-            ("backTopR", 0.03), ("backTopG", 0.03), ("backTopB", 0.035),
-            ("backMidR", 0.06), ("backMidG", 0.055), ("backMidB", 0.06),
+            ("backTopR", 0.012), ("backTopG", 0.012), ("backTopB", 0.014),
+            ("backMidR", 0.025), ("backMidG", 0.023), ("backMidB", 0.025),
             ("backLowR", 0.02), ("backLowG", 0.02), ("backLowB", 0.022),
             ("floor", 1.0), ("floorFade", 12.0),
             ("tone", 1.0), ("exposure", 1.0), ("bloom", 0.12), ("vignette", 0.3), ("saturation", 1.0),

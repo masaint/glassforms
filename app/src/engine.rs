@@ -503,7 +503,12 @@ impl Engine {
         self.meter = 1.0;
         // (not where a backdrop or the picture is seen behind the shape: the picture is then exposed for
         // what lies behind, as it is in a studio, and brightening it would wash everything out)
-        let seen_behind = self.state.p.backdrop > 0.5 || (self.picture.is_some() && self.state.p.hdri_show > 0.5);
+        // A dark backdrop is no reason: the body is the subject on it, as in the studio for translucent
+        // bodies.
+        let q = &self.state.p;
+        let lum = |r: f64, g: f64, b: f64| 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        let back = q.back_gain * lum(q.back_top_r, q.back_top_g, q.back_top_b).max(lum(q.back_mid_r, q.back_mid_g, q.back_mid_b)).max(lum(q.back_low_r, q.back_low_g, q.back_low_b));
+        let seen_behind = (q.backdrop > 0.5 && back > 0.15) || (self.picture.is_some() && q.hdri_show > 0.5);
         if v.mat.sss && !clay && self.state.p.meter > 0.5 && !seen_behind {
             let matte = env::sh_terms(&self.lighting_sh(), env::SH_MATTE);
             let peak = matte_peak(&matte);
