@@ -407,7 +407,7 @@ impl Engine {
             denoise: crate::denoise::wanted(&mat, clay, p.denoise),
             near,
             // (the box only grows for layers that are combined: one plain layer is where it is built)
-            box_q: if self.state.plain() { 0 } else { (self.state.box_k() * 4.0).round() as u8 },
+            grown: !self.state.plain() && self.state.box_k() > 1.0,
         };
         // 3. is that tracer built? If not it is being built: carry on as things were
         // (and with the lens that is on: the plain one, or the first ray traced through the camera's own arithmetic)
@@ -859,20 +859,19 @@ impl Engine {
             self.state.stack.box_held = Some(want);
             return;
         };
-        let q = |k: f64| if self.state.plain() { 0 } else { (k * 4.0).round() as u8 };
+        let plain = self.state.plain();
+        let grown = |k: f64| !plain && k > 1.0;
         if held == want {
-            // a layer nearing the stage's edge: the tracer for the next size up is built beforehand, so that
-            // crossing it changes nothing but the size
-            let need = self.state.stack.box_need();
-            if !self.state.plain() && held < gf_core::layers::BOX_MAX && need > held - 0.12 {
-                let next = (held + gf_core::layers::BOX_STEP).min(gf_core::layers::BOX_MAX);
-                self.renderer.prepare(crate::render::Variant { box_q: q(next), ..self.renderer.variant() });
+            // a layer nearing the edge of the stage as it always was: the tracer for a larger one is built
+            // beforehand (one serves every larger size), so that crossing it changes nothing but the size
+            if !grown(held) && !plain && self.state.stack.box_need() > 0.9 {
+                self.renderer.prepare(crate::render::Variant { grown: true, ..self.renderer.variant() });
             }
             return;
         }
-        let v = crate::render::Variant { box_q: q(want), ..self.renderer.variant() };
-        // (a plain layer, or a tracer that has not been chosen yet: nothing to wait for)
-        if self.state.plain() || self.renderer.variant().box_q == q(want) || self.renderer.prepare(v) {
+        // a new size: at once if the tracer for it is the one in use or is ready, otherwise once it is
+        let v = crate::render::Variant { grown: grown(want), ..self.renderer.variant() };
+        if plain || self.renderer.variant().grown == grown(want) || self.renderer.prepare(v) {
             self.state.stack.box_held = Some(want);
             if self.state.want.is_none() { self.state.want = Some(if self.state.playing { Detail::Anim } else { Detail::Full }); }
         }
@@ -925,7 +924,8 @@ impl Engine {
             ns: (p.ns + 0.5).floor() as i32,
             nb: (p.nb + 0.5).floor() as i32,
             lens_n: (p.lens_n + 0.5).floor() as i32,
-            pad: [0; 3],
+            // (the box the scene's volume spans, read by a tracer built for a larger stage than ever)
+            pad: [0, 0, (self.state.scene_hb() as f32).to_bits() as i32],
             cam: crate::camera::tracer_cam(p, !self.focus_after()),
         };
         if p.hollow > 0.5 && p.metal < 0.5 {

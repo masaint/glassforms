@@ -61,12 +61,17 @@ pub fn caustic_lights(st: &State, to_obj: &gf_core::math::Mat3, hb: f64) -> Vec<
         let area = std::f64::consts::PI * r * r;
         let k = area / (dist * dist) / std::f64::consts::PI;
         let rad = l.radiance();
+        // a lamp among the bodies (inside the ball they fit in) sends its rays every way: then each ray
+        // stands for 4 pi / n^2 of the sphere, which over the grid's cells (2h / n)^2 is pi / h^2 per unit
+        let h = 1.47 * hb / gf_core::HB;
+        let inside = dist < h;
+        let k = if inside { area / (h * h) } else { k };
         let one = crate::cast_light::OneU {
             dir: [dir[0] as f32, dir[1] as f32, dir[2] as f32, ((r / dist) * st.p.cast_soft) as f32],
-            u: [a[0] as f32, a[1] as f32, a[2] as f32, (1.47 * hb / gf_core::HB) as f32],
+            u: [a[0] as f32, a[1] as f32, a[2] as f32, h as f32],
             v: [b[0] as f32, b[1] as f32, b[2] as f32, 0.0],
             rgb: [(rad[0] * k) as f32, (rad[1] * k) as f32, (rad[2] * k) as f32, 0.0],
-            at: [p[0] as f32, p[1] as f32, p[2] as f32, 1.0],
+            at: [p[0] as f32, p[1] as f32, p[2] as f32, if inside { 2.0 } else { 1.0 }],
         };
         out.push((one, gf_core::cast::lum(rad) * area / (dist * dist)));
     }

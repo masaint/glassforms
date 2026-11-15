@@ -515,6 +515,14 @@ impl State {
         }
         n.apply(&mut self.p);
         self.p.mat = i as f64;
+        // While a studio is up, a metal gets the studio for metals and a milky body the one for
+        // translucent bodies (an even studio shows a mirror nothing but itself, and lights a milky body
+        // only from the outside); glass keeps whatever studio there is.
+        if self.p.backdrop > 0.5 {
+            let v = material::Variant::of(&self.p);
+            let want = if v.metal { Some("metal") } else if v.sss { Some("translucent") } else { None };
+            if let Some(i) = want.and_then(crate::stage::studio_index) { self.apply_studio(i); }
+        }
         true
     }
     // ---- a material for each body ----------------------------------------------------------------

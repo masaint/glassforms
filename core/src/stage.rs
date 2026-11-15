@@ -624,9 +624,58 @@ pub const STUDIOS: &[Studio] = &[
     },
 ];
 
+/// Studios for what is not glass, chosen for a material when a studio is up (`State::set_material`).
+/// A mirror shows only its surroundings, so metal is lit as a product photographer lights it: tall
+/// strip lights whose light falls off along their length, and the rest of the room dark (black flags at
+/// the sides and behind the camera), so that the reflections run from white to near black across the
+/// form. A milky body is lit by a key light from the front and a strong light from behind, on dark, so
+/// that its thin parts and edges glow with the light that comes through.
+pub const STUDIOS_MORE: &[Studio] = &[
+    Studio {
+        id: "metal",
+        name: "Metal: strips and flags",
+        about: "for metals: two tall strip lights and a soft box overhead, everything else dark, so that reflections run from white to black across the form",
+        lights: &[
+            [-70.0, 15.0, 7.0, 55.0, 3.2, 3.2, 3.3, 0.85],
+            [75.0, 25.0, 5.0, 45.0, 2.4, 2.4, 2.5, 0.85],
+            [0.0, 82.0, 45.0, 22.0, 1.6, 1.6, 1.65, 0.7],
+            [150.0, 10.0, 4.0, 30.0, 0.9, 0.9, 0.95, 0.9],
+        ],
+        ambient: [0.0, 0.0, 0.0],
+        settings: &[
+            ("backdrop", 1.0), ("backGain", 1.0), ("backSpread", 22.0), ("backWrap", 70.0), ("backHigh", 45.0),
+            ("backTopR", 0.55), ("backTopG", 0.56), ("backTopB", 0.6),
+            ("backMidR", 0.16), ("backMidG", 0.16), ("backMidB", 0.17),
+            ("backLowR", 0.02), ("backLowG", 0.02), ("backLowB", 0.022),
+            ("floor", 1.0), ("floorFade", 10.0),
+            ("tone", 1.0), ("exposure", 1.0), ("bloom", 0.1), ("vignette", 0.25), ("saturation", 1.0),
+        ],
+    },
+    Studio {
+        id: "translucent",
+        name: "Translucent: key and back light",
+        about: "for milky bodies: a key light from the front left, a strong soft light from behind, on dark, so that thin parts and edges glow",
+        lights: &[
+            [130.0, 30.0, 14.0, 14.0, 2.2, 2.2, 2.2, 0.6],
+            [-10.0, 20.0, 16.0, 16.0, 7.0, 6.8, 6.4, 0.6],
+            [-80.0, 5.0, 40.0, 30.0, 0.15, 0.15, 0.17, 0.8],
+        ],
+        ambient: [0.02, 0.02, 0.024],
+        settings: &[
+            ("backdrop", 1.0), ("backGain", 1.0), ("backSpread", 30.0),
+            ("backTopR", 0.03), ("backTopG", 0.03), ("backTopB", 0.035),
+            ("backMidR", 0.06), ("backMidG", 0.055), ("backMidB", 0.06),
+            ("backLowR", 0.02), ("backLowG", 0.02), ("backLowB", 0.022),
+            ("floor", 1.0), ("floorFade", 12.0),
+            ("tone", 1.0), ("exposure", 1.0), ("bloom", 0.12), ("vignette", 0.3), ("saturation", 1.0),
+        ],
+    },
+];
+
 /// The place of a studio in `STUDIOS` by its id.
 pub fn studio_index(id: &str) -> Option<usize> {
-    STUDIOS.iter().position(|s| s.id == id.trim())
+    // (the studios for metals and milky bodies are counted after the others)
+    STUDIOS.iter().chain(STUDIOS_MORE.iter()).position(|s| s.id == id.trim())
 }
 
 impl crate::state::State {
@@ -641,7 +690,7 @@ impl crate::state::State {
     /// Set up a studio (a place in `STUDIOS`): its lights become the lights of the family that is up,
     /// the rest goes into the settings. False if there is no such studio.
     pub fn apply_studio(&mut self, i: usize) -> bool {
-        let Some(s) = STUDIOS.get(i) else { return false };
+        let Some(s) = STUDIOS.get(i).or_else(|| STUDIOS_MORE.get(i.wrapping_sub(STUDIOS.len()))) else { return false };
         let rig = self.rig_mut();
         rig.lights = s.lights();
         rig.ambient = s.ambient;

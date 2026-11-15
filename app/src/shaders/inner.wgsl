@@ -658,6 +658,8 @@ fn sheetOf(i: i32) -> Sheet {
   sh.kind = select(select(2, 1, kk < 0.72), 0, kk < 0.36);
   // (a crystal's great sheets split along its planes as often as not)
   if (big && unit1(ihash(h + 6u)) < 0.5) { sh.kind = 2; }
+  // (ice's sheets are open cracks with rough white faces)
+  if (upr > 0.0) { sh.kind = 0; }
   if (sh.kind == 2 && curve > 0.5) { sh.kind = 0; }
   if (sh.kind == 2) {
     sh.k1 *= 0.15;
@@ -749,7 +751,8 @@ fn fractures(pos: vec3f, dir: vec3f, s: f32, n: f32) -> Crack {
       // a fan's sheet: from its line inward, widening, in a ragged half round
       edge = min(1.0 - length(vec2f(x2.x * 1.4, x2.y)), x2.y + 0.05);
     } else {
-      let sq = 0.45 + 0.5 * rq.y;
+      // (long and narrow in ice)
+      let sq = mix(0.45 + 0.5 * rq.y, 0.18 + 0.2 * rq.y, smoothstep(0.3, 0.6, iu.crackC.y));
       let ca = cos(6.2831853 * rq.z);
       let sa = sin(6.2831853 * rq.z);
       edge = 1.0 - length(vec2f(ca * x2.x + sa * x2.y, (ca * x2.y - sa * x2.x) / sq));
@@ -821,8 +824,8 @@ fn fractures(pos: vec3f, dir: vec3f, s: f32, n: f32) -> Crack {
     if (iu.crackC.y > 0.0) {
       let streaky = smoothstep(0.3, 0.7, fbm2(vec2f(xf.x * 1.2, xf.y * 5.0) + 1.5 * jag, sd + 29u));
       // (a thin layer of scatterers: faint seen face on, dense seen edge on)
-      let k = iu.crackC.y * prof * (0.1 + 0.9 * streaky * streaky);
-      V = vec3f(0.85 * (1.0 - exp(-0.35 * k / max(ci, 0.04))));
+      let k = iu.crackC.y * prof * (0.35 + 0.65 * streaky);
+      V = vec3f(0.85 * (1.0 - exp(-0.12 * k / max(ci, 0.03))));
     }
     if (sh.kind == 1) {
       let xs = xf * (sh.r / (0.1 * rs));
@@ -836,9 +839,14 @@ fn fractures(pos: vec3f, dir: vec3f, s: f32, n: f32) -> Crack {
       V = max(V, vec3f(0.5 * prof * patchy * (0.2 + 0.8 * mix(0.35, lines, 0.5 * broken) * dots)));
     }
     R *= 1.0 - V;
+    // (ice's rough faces scatter what a clean break would mirror)
+    R *= 1.0 - 0.85 * smoothstep(0.3, 0.6, iu.crackC.y);
     let back = fromObj(reflect(d, nl));
     let ext = exp(-u.absorb.xyz * tt);
-    if (faceCross(&out, tt, R, V, fracSeen(back, 0.04 + 0.1 * thin), crackAll(back), crackSeen(dir), back, ext)) { break; }
+    // (a veil of countless scatterers is lit from the whole room; looks first: it reads white even where
+    // the lights round about are dim, as the white sheets in lake ice do)
+    let veilLit = max(crackAll(back), vec3f(dot(crackAll(-back), vec3f(0.2126, 0.7152, 0.0722)))) * (1.0 + 2.0 * iu.crackC.y);
+    if (faceCross(&out, tt, R, V, fracSeen(back, 0.04 + 0.1 * thin), veilLit, crackSeen(dir), back, ext)) { break; }
   }
   return out;
 }
