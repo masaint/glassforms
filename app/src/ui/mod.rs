@@ -8,16 +8,18 @@
 //!   widgets   buttons, menus, sliders, the range of an animated slider, floating windows
 //!   knob      one slider's row, with its wave button and what appears under it when lit
 //!   right     the right panel: the families, the family's shapes, the mathematics of the one chosen (for a
-//!             model: its file, and what was found on examining it), its own sliders, how finely it is built
+//!             model: its file, and what was found on examining it), its own sliders
 //!   layers    several shapes in one space: the layers at the head of the right panel, how they are joined,
 //!             where each is placed
 //!   animate   the foot of the right panel: play, time, speed, easing, spin, the loop
-//!   left      the left panel: material, light, camera, object, quality, and folded away video and file
+//!   left      the left panel: material, light, camera (with the view), and folded away the output (still,
+//!             setup, quality with the shape's detail, video)
 //!   camera    the camera group of the left panel: lens, focus, where it stands, exposure, the lens's character
 //!   studio    the light room's studio (backdrop, floor) and shadows and caustics; a body's own casting switches
 //!   material  what the shape is made of: the material group at the head of the left panel, and the
 //!             materials lab, a floating window with the rest of a material's controls
-//!   room      the light room: a floating window with everything about the lights
+//!   room      the light room: a floating window with everything about the light (surroundings, floor,
+//!             lights, shadows and caustics, turning)
 //!   gizmo     the ball that shows where the lights are
 //!   overlay   the line of figures at the foot of the window, and the help with its "?"
 //!   store     what is remembered between runs

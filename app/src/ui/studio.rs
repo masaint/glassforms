@@ -52,18 +52,15 @@ pub fn cast_row(ui: &mut Ui, st: &mut State, px: &mut Panels) {
 pub fn casting(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     let now = mode(st);
     let says = match (now, px.casting.on, px.casting.focusing) {
-        (0, ..) => "off".to_owned(),
+        (0, ..) => "off · switched in the light group".to_owned(),
         (_, false, _) if !px.casting.receivers => "nothing to fall on".to_owned(),
         (_, false, _) => "nothing casts".to_owned(),
         (m, true, f) => format!("{}{}", MODES[m].0, if f { " · caustics" } else { "" }),
     };
     if !px.group_saying(ui, "room-cast", "shadows and caustics", &says) { return; }
     // (whether anything casts is switched in the light group, beside the lights' brightness)
-    if mode(st) == 0 {
-        note(ui, "Off. Switched on in the light group of the left panel (shadows: by body, or all); how strong and how fine they are is set here then.");
-        gap(ui, 2.0);
-        return;
-    }
+    // (off, the title says where it is switched on; how strong and how fine they are is set here then)
+    if mode(st) == 0 { return; }
     if mode(st) > 0 && !px.casting.receivers {
         note(ui, "Nothing in the picture gathers light diffusely (clay, a milky body, a floor): there is nothing for a shadow to fall on.");
     }
@@ -264,7 +261,6 @@ pub fn surroundings(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     match around(st) {
         Around::Nothing => {
             if let Some(why) = px.lighting.error.clone() { paragraph(ui, &why, sans(SMALL), ERROR_TEXT, 1.4, 0.0); }
-            note(ui, "Black all round. A studio backdrop or an environment picture lights the glass from all round, and can be seen behind it.");
         }
         Around::Studio => {
             // the studios, each with its own lights, backdrop, floor and tone

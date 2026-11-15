@@ -461,21 +461,15 @@ def the_light_room_opens_moves_and_closes():
     # closed with its cross
     c = run('room:open;wait:4;%s;wait:3' % press(d['rects']['room:close']), size=BIG)
     assert not c['room']['open'] and 'room' not in c['rects'], 'the cross did not close it'
-    # the yaw slider that stays in the left panel is the same yaw, and with the room open both sliders answer
-    slot = base['rects']['slot:P.lyaw']
-    q = run('wait:2;' + on(base, 'P.lyaw', 90), size=BIG)
-    assert close(q['lights']['yaw'], 90, 0.01), 'the quick yaw slider gave %s' % q['lights']['yaw']
-    both = d['rects']
-    quick, full = both['slot:P.lyaw'], both['room/slot:P.lyaw']
-    assert within(quick, both['left']) and within(full, room), (quick, full)
-    q2 = run('room:open;wait:4;%s;wait:2' % on(d, 'P.lyaw', 90), size=BIG)
+    # the light's yaw is in the light room only (the left panel keeps the one-press things)
+    assert 'slot:P.lyaw' not in base['rects'] and within(d['rects']['room/slot:P.lyaw'], room), 'the light yaw is not in the light room alone'
     q3 = run('room:open;wait:4;%s;wait:2' % on(d, 'P.lyaw', 180, 'room/'), size=BIG)
-    assert close(q2['lights']['yaw'], 90, 0.01) and close(q3['lights']['yaw'], 180, 0.01), 'with the room open the two yaw sliders gave %s and %s' % (q2['lights']['yaw'], q3['lights']['yaw'])
+    assert close(q3['lights']['yaw'], 180, 0.01), 'the yaw slider in the light room gave %s' % q3['lights']['yaw']
     q4 = run('room:open;wait:4;%s;wait:2' % on(d, 'P.lpitch', 45, 'room/'), size=BIG)
     assert close(q4['lights']['pitch'], 45, 0.01), 'the pitch slider of the light room gave %s' % q4['lights']['pitch']
     room = [round(v) for v in room]
-    return 'opens from its button clear of the panels at %s, %d tall, all of it in view; the ball gives yaw %.1f, pitch %.1f; dragged by its title it moves by 150, 220 and stays in the window; the cross closes it; the quick slider sets yaw %.0f, and with the room open it and the one in the room both answer (%.0f, %.0f)' % (
-        room[:2], room[3] - room[1], l['yaw'], l['pitch'], q['lights']['yaw'], q2['lights']['yaw'], q3['lights']['yaw'])
+    return 'opens from its button clear of the panels at %s, %d tall, all of it in view; the ball gives yaw %.1f, pitch %.1f; dragged by its title it moves by 150, 220 and stays in the window; the cross closes it; its yaw slider (the only one) sets yaw %.0f' % (
+        room[:2], room[3] - room[1], l['yaw'], l['pitch'], q3['lights']['yaw'])
 
 
 @check
@@ -1793,7 +1787,7 @@ def the_arrangement_is_as_designed():
         notes.append('%d x %d points (left %d, right %d of %d)' % (w, h, p['left'], p['right'], p['room']))
     # every group opens and folds from its title, and opened they are all still reachable by scrolling
     d = run('wait:2', size=BIG)
-    opened = run('wait:2;' + ';'.join('%s;wait:2' % press(d['rects']['group:' + g]) for g in ('camera', 'output')) + ';wait:2', size=BIG)
+    opened = run('wait:2;' + ';'.join('%s;wait:2' % press(d['rects']['group:' + g]) for g in ('output', 'camera')) + ';wait:2', size=BIG)
     assert 'camera' not in opened['closed'] and 'output' not in opened['closed'] and 'slot:P.dist' in opened['rects'] and 'slot:R.0' in opened['rects'], opened['closed']
     shut = run('wait:2;%s;wait:3' % press(d['rects']['group:material']), size=BIG)
     assert 'material' in shut['closed'] and 'slot:P.ior' not in shut['rects'], 'a press on the material title did not fold it'
@@ -1805,7 +1799,7 @@ def the_arrangement_is_as_designed():
     assert everything['closed'] == [] and everything['panels']['left'] > everything['panels']['room'], 'with everything open the left panel should need to scroll'
     lights = run('room:open;wait:4', size=BIG)['rects']
     assert all('room/slot:P.' + k in lights for k in ('lyaw', 'lpitch', 'lroll', 'lspin')), 'the light room lacks the lights\' sliders'
-    return 'material (the named materials, the glass, the way into the lab) and light open on the left, the camera folded under them, video and file folded at its foot; the shape and animate on the right; nothing scrolls at %s; every group opens from its title and every slider there was is still there' % ', '.join(notes)
+    return 'material (the named materials, the glass, the way into the lab) and light open on the left, the camera and the output (still, setup, quality, video) folded under them; the shape and animate on the right; nothing scrolls at %s; every group opens from its title and every slider there was is still there' % ', '.join(notes)
 
 
 @check
