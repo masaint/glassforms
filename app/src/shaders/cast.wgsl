@@ -57,6 +57,8 @@ const CAST_STRIDE: f32 = 0.7;         // the longest stride
 // where the body touches the surface and widens with distance as a real one does.
 // A body that lets some light through (milky, or clear and not casting caustics) is not simply in the
 // way: the length of the ray inside it is measured, and the light is dimmed and coloured by that.
+// (a light at a place, not at infinity: the march stops where it stands. Set only around a lamp's march.)
+var<private> castMax: f32 = 1e9;
 fn castShadow(ro: vec3f, rd: vec3f, w: f32) -> vec3f {
   let b = dot(ro, rd);
   let h = b * b - (dot(ro, ro) - BOUND * BOUND);
@@ -78,7 +80,7 @@ fn castShadow(ro: vec3f, rd: vec3f, w: f32) -> vec3f {
     let dt = clamp(min(min(a.x, a.y), min(a.z, a.w)), cu.k.w, CAST_STRIDE);
     s += dt * step(d, vec4f(0.0));
     t += dt;
-    if (t > tFar) { break; }
+    if (t > tFar || t > castMax) { break; }
   }
   let x = clamp(0.5 - 0.5 * r, vec4f(0.0), vec4f(1.0));
   let cover = x * x * (3.0 - 2.0 * x) * cu.casts;

@@ -1059,7 +1059,8 @@ fn grains(pos: vec3f, dir: vec3f, s: f32) -> Play {
         rhoIn = clamp(specW(lamIn) * iu.white.rgb * (iu.white.w * iu.playB.w), vec3f(0.0), vec3f(1.0)) * share;
       }
     }
-    out.light += out.keep * (best + rhoIn * iu.playF.z * inside) * vis;
+    // (flake by flake it glows more or less, as each faces the light inside more or less squarely)
+    out.light += out.keep * (best + rhoIn * (iu.playF.z * (0.15 + 0.85 * gh.y * gh.y) * (0.4 + 0.6 * fine)) * inside) * vis;
     out.keep *= 1.0 - max(bestRho, rhoIn) * vis;
   }
   return out;

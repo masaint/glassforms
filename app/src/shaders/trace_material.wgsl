@@ -245,7 +245,7 @@ fn wearAt(p: vec3f, n: vec3f) -> Wear {
     let fine = 1.0 - smoothstep(0.3, 1.0, px * 380.0);
     let coarse = 1.0 - smoothstep(0.3, 1.0, px * 110.0);
     let line = wNoise(vec3f(r.x, y * 380.0, r.y)) * fine + 0.6 * wNoise(vec3f(r.x * 0.4 + 7.0, y * 110.0, r.y * 0.4 + 3.0)) * coarse;
-    w.n = normalize(w.n + w.b * (0.05 * br * line));
+    w.n = normalize(w.n + w.b * (0.09 * br * line));
     w.aniso = br * (0.03 + 0.05 * (1.0 - 0.5 * (fine + coarse)));
   }
   let mo = mu.sssC.w;
@@ -276,13 +276,15 @@ fn wearSee(rd_in: vec3f, w: Wear, p: vec3f, c: f32) -> vec3f {
   let mir = reflect(rd_in, w.n);
   if (w.aniso <= 0.0) { return wearRead(mir, lod, w.sig); }
   // (a tilt of the surface by e turns the reflection by 2e; each look stands for a quarter of the spread)
-  let s = sqrt(w.sig * w.sig + w.aniso * w.aniso);
-  var c4 = vec3f(0.0);
-  for (var k = 0; k < 4; k++) {
-    let e = (f32(k) - 1.5) * 0.75 * w.aniso;
-    c4 += wearRead(reflect(rd_in, normalize(w.n + w.b * e)), lod, s);
+  // (six looks, each softened by a third of the spread across the lines: a drawn-out highlight with a
+  // defined core, not a fog)
+  let s = sqrt(w.sig * w.sig + 0.11 * w.aniso * w.aniso);
+  var c6 = vec3f(0.0);
+  for (var k = 0; k < 6; k++) {
+    let e = (f32(k) - 2.5) * 0.4 * w.aniso;
+    c6 += wearRead(reflect(rd_in, normalize(w.n + w.b * e)), lod, s);
   }
-  return 0.25 * c4;
+  return c6 / 6.0;
 }
 //#endif
 

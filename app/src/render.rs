@@ -174,6 +174,8 @@ fn tracer_from(template: &str, m: &March, v: Variant, profile: bool) -> String {
     // the lamps, and then what the bodies cast, are put in last (never into the default tracer)
     let src = if v.near { crate::lamps::weave(&src) } else { src };
     let src = if v.cast { crate::cast::weave(&src).unwrap_or(src) } else { src };
+    // (and with both, the lamps' shadows)
+    let src = if v.cast && v.near { crate::lamps::weave_shadows(&src) } else { src };
     // a rough clear body's tracer also writes, beside the picture, how far what is seen through the
     // surface is to be blurred afterwards (frost.rs)
     let src = if rough_split(&v, profile) { frost::with_aux(&src) } else { src };

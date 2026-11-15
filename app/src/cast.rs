@@ -612,8 +612,17 @@ impl Engine {
                     u: [uo[0] as f32, uo[1] as f32, uo[2] as f32, (1.47 * hb / HB) as f32],
                     v: [vo[0] as f32, vo[1] as f32, vo[2] as f32, 0.0],
                     rgb: [(l.rgb[0] * b) as f32, (l.rgb[1] * b) as f32, (l.rgb[2] * b) as f32, 0.0],
+                    at: [0.0; 4],
                 });
                 weights.push(l.weight());
+            }
+            // the lamps: their rays spread from where each stands, through a grid across the middle of the
+            // scene (a lamp among the bodies sends light only that way); their light there is what a white
+            // surface facing them at the middle would show
+            let lamp_ones = crate::lamps::caustic_lights(&self.state, &to_obj, hb);
+            for (one, w) in lamp_ones.into_iter().rev() {
+                ones.insert(0, one);
+                weights.insert(0, w);
             }
             let m = self.state.march();
             let Some((_, coarse)) = self.cast.bodies.as_ref() else { return false };

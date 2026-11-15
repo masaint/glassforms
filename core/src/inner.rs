@@ -347,7 +347,7 @@ pub fn uniforms(p: &Settings, scale: f64, pixel: f64, tint: [f64; 3]) -> [f32; I
     put(r + 12, [pat.flat, pat.together, pat.patch, GRAIN_R]);
     // (a milky body holds light going every way: about its whiteness times how milky it is, doubled for
     // light that has gone back and forth)
-    let held = if p.sss > 0.0 { 30.0 * p.sss.clamp(0.0, 1.0) * (p.body_r + p.body_g + p.body_b).clamp(0.0, 3.0) / 3.0 } else { 0.0 };
+    let held = if p.sss > 0.0 { 70.0 * p.sss.clamp(0.0, 1.0) * (p.body_r + p.body_g + p.body_b).clamp(0.0, 3.0) / 3.0 } else { 0.0 };
     put(r + 13, [pat.warp, pat.streak, held, 0.0]);
 
     // ---- volume fractures: a few great sheets, more smaller ones, and from 0.45 on a fan of five

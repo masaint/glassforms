@@ -910,7 +910,7 @@ pub static NAMED: &[Named] = &[
     named!("titanium", "titanium", "metal", "Measured optical constants (Johnson & Christy).", [("metal", me(7)), ("mottle", 0.15)]),
     named!("iron", "iron", "metal", "Measured optical constants (Johnson & Christy).", [("metal", me(8)), ("mottle", 0.15)]),
     named!("tungsten", "tungsten", "metal", "Optical constants read from a published figure (Weaver, Olson & Lynch).", [("metal", me(9)), ("mottle", 0.15)]),
-    named!("brushed", "satin steel", "metal", "Iron with a fine, even roughness.", [("metal", me(8)), ("rough", 0.12), ("brush", 1.0)]),
+    named!("brushed", "satin steel", "metal", "Iron with a fine, even roughness.", [("metal", me(8)), ("rough", 0.0), ("brush", 1.0)]),
     named!("satingold", "satin gold", "metal", "Gold, lightly matted.", [("metal", me(2)), ("rough", 0.26), ("brush", 0.4), ("mottle", 0.2)]),
     named!("anodised", "anodised titanium", "metal", "Titanium under its own clear oxide: the colour is interference alone and follows the oxide's thickness.", [("metal", me(7)), ("film", 55.0), ("filmIor", 2.4), ("filmVar", 0.45), ("filmScale", 0.7), ("filmSky", 0.8), ("rough", 0.2)]),
     named!("heatsteel", "heat-coloured steel", "metal", "Steel blued in a flame: its oxide grows thicker towards the heat, straw to purple to blue.", [("metal", me(8)), ("film", 66.0), ("filmIor", 2.3), ("filmVar", 0.25), ("filmScale", 0.5), ("filmDrain", 0.06), ("filmSky", 0.8), ("rough", 0.12)]),

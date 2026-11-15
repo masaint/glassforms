@@ -15,7 +15,8 @@ struct LampU {
   rgb: vec4f,               // its radiance;  w: the share of its size over which its edge fades
 }
 struct LampsU {
-  n: vec4f,                 // x: how many lamps;  y: which of them the camera sees (bits)
+  n: vec4f,                 // x: how many lamps;  y: which of them the camera sees (bits);
+                            // z: how large a lamp is taken to be for the shadows it casts (castSoft)
   floor: vec4f,             // rgb: what a floor gives back of the light falling on it (its colour)
   l: array<LampU, 8>,
 }
@@ -114,7 +115,7 @@ fn lampsDiffuse(p: vec3f, n: vec3f) -> vec3f {
       area = 4.0 * L.u.w * L.v.w * max(-dot(l, cross(L.u.xyz, L.v.xyz)), 0.0);
     }
     // (no nearer than the lamp's own size: a surface touching it is not lit without end)
-    e += L.rgb.rgb * (area * cosn / max(d2, area + 1e-4));
+    e += L.rgb.rgb * (area * cosn / max(d2, area + 1e-4)) * lampShadow(p, n, L.p.xyz, max(L.u.w, select(0.0, L.v.w, L.p.w > 0.5)));
   }
   return e;
 }
@@ -139,3 +140,7 @@ fn lampsSeen(ro: vec3f, rd: vec3f, tMax: f32) -> vec4f {
   return c;
 }
 var<private> lampNear: f32;
+
+// How much of a lamp of radius r at `at` the bodies let through to p (a surface facing n). Nothing is in
+// the way unless something casts: then this is replaced by a march towards the lamp (lamps.rs: SHADOW).
+fn lampShadow(p: vec3f, n: vec3f, at: vec3f, r: f32) -> vec3f { return vec3f(1.0); }

@@ -31,6 +31,53 @@ pub struct LampsU {
     pub l: [LampU; MAX_LAMPS],
 }
 
+/// The lamps' shadows, in a tracer into which what the bodies cast is woven (cast.wgsl): the march
+/// towards a light, from the surface to the lamp and no further, with the lamp taken as large as
+/// `castSoft` says (lamps.wgsl: `lamps.n.z`).
+const SHADOW_STUB: &str = "fn lampShadow(p: vec3f, n: vec3f, at: vec3f, r: f32) -> vec3f { return vec3f(1.0); }";
+const SHADOW: &str = "fn lampShadow(p: vec3f, n: vec3f, at: vec3f, r: f32) -> vec3f {
+  let d = at - p;
+  let dist = length(d);
+  let ro = toObj(p) + toObj(n) * cu.k.z;
+  castMax = dist;
+  let s = castShadow(ro, toObj(d / max(dist, 1e-6)), max(r / max(dist, 1e-3) * lamps.n.z, 0.002));
+  castMax = 1e9;
+  return s;
+}";
+
+/// The lamps as light that casts caustics (cast_light.wgsl: `One` with `at`), each with how much light
+/// it sends (to choose among lights when there are many). `to_obj`: the lights' frame -> the object's.
+pub fn caustic_lights(st: &State, to_obj: &gf_core::math::Mat3, hb: f64) -> Vec<(crate::cast_light::OneU, f64)> {
+    let mut out = Vec::new();
+    for l in st.lamps.iter().take(MAX_LAMPS) {
+        let p = gf_core::math::apply(to_obj, l.pos);
+        let dist = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
+        if dist < 1e-3 { continue; }
+        let dir = p.map(|c| c / dist);
+        let (a, b) = gf_core::cast::across(dir);
+        let r = l.reach_radius();
+        // its light at the middle of the scene: radiance times the solid angle it covers there, as a white
+        // surface facing it shows it (over pi)
+        let area = std::f64::consts::PI * r * r;
+        let k = area / (dist * dist) / std::f64::consts::PI;
+        let rad = l.radiance();
+        let one = crate::cast_light::OneU {
+            dir: [dir[0] as f32, dir[1] as f32, dir[2] as f32, ((r / dist) * st.p.cast_soft) as f32],
+            u: [a[0] as f32, a[1] as f32, a[2] as f32, (1.47 * hb / gf_core::HB) as f32],
+            v: [b[0] as f32, b[1] as f32, b[2] as f32, 0.0],
+            rgb: [(rad[0] * k) as f32, (rad[1] * k) as f32, (rad[2] * k) as f32, 0.0],
+            at: [p[0] as f32, p[1] as f32, p[2] as f32, 1.0],
+        };
+        out.push((one, gf_core::cast::lum(rad) * area / (dist * dist)));
+    }
+    out
+}
+
+/// The lamps' shadows put into a tracer with lamps and casting both woven in.
+pub fn weave_shadows(src: &str) -> String {
+    src.replace(SHADOW_STUB, SHADOW)
+}
+
 /// What the tracer is told of the lamps as the state has them now (in the camera's frame).
 pub fn uniforms(st: &State) -> LampsU {
     let mut u = LampsU::zeroed();
@@ -49,7 +96,7 @@ pub fn uniforms(st: &State) -> LampsU {
         if l.seen { seen |= 1 << i; }
     }
     let p = &st.p;
-    u.n = [st.lamps.len().min(MAX_LAMPS) as f32, seen as f32, 0.0, 0.0];
+    u.n = [st.lamps.len().min(MAX_LAMPS) as f32, seen as f32, st.p.cast_soft as f32, 0.0];
     u.floor = [(p.floor_r * p.floor_gain) as f32, (p.floor_g * p.floor_gain) as f32, (p.floor_b * p.floor_gain) as f32, 0.0];
     u
 }

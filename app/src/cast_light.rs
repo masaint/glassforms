@@ -94,6 +94,9 @@ pub struct OneU {
     /// the brightness of a white surface facing the light; where its rays' landings begin among all the
     /// lights' (filled in when the grids are laid out)
     pub rgb: [f32; 4],
+    /// a lamp: where it stands in the object's frame, and 1 (its rays spread from there); 0 for a light
+    /// at infinity
+    pub at: [f32; 4],
 }
 
 #[repr(C)]

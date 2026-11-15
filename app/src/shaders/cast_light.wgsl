@@ -62,6 +62,8 @@ struct One {
   v: vec4f,          // xyz: the other way   w: rays a side
   rgb: vec4f,        // rgb: the light it sends through a unit of area facing it, as the brightness of a white
                      //      surface there   w: where its rays' landings begin in `hits`
+  at: vec4f,         // a lamp: xyz where it stands (object's frame), w = 1; its rays spread from there through
+                     // the grid, which then lies across the middle of the scene (w = 0: a light at infinity)
 }
 struct Ones {
   list: array<One, 16>,
@@ -287,8 +289,13 @@ fn cs_follow(@builtin(global_invocation_id) id: vec3u) {
   for (var k = 0u; k < W; k++) { hits[base + k] = none; }
   // this ray of the grid: parallel to all the others, from the light's side of the scene
   let g = (vec2f(id.xy) + 0.5) / f32(n) * 2.0 - 1.0;
-  let d = -one.dir.xyz;
-  let o = (g.x * one.u.xyz + g.y * one.v.xyz) * one.u.w + one.dir.xyz * BOUND;
+  var d = -one.dir.xyz;
+  var o = (g.x * one.u.xyz + g.y * one.v.xyz) * one.u.w + one.dir.xyz * BOUND;
+  if (one.at.w > 0.5) {
+    // a lamp: from where it stands, through this point of the grid across the middle
+    d = normalize((g.x * one.u.xyz + g.y * one.v.xyz) * one.u.w - one.at.xyz);
+    o = one.at.xyz;
+  }
   let b = dot(o, d);
   let h = b * b - (dot(o, o) - BOUND * BOUND);
   if (h <= 0.0) { return; }
