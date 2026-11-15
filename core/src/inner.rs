@@ -356,6 +356,9 @@ pub fn uniforms(p: &Settings, scale: f64, pixel: f64, tint: [f64; 3]) -> [f32; I
 
     // ---- volume fractures: a few great sheets, more smaller ones, and from 0.45 on a fan of five
     let (nfan, nbig, nmed) = fracture_counts(p.fractures);
+    // (ice cracks in many more sheets than a crystal does)
+    let nmed = (nmed as f64 * (1.0 + 3.0 * ((p.crack_rough - 0.3) / 0.3).clamp(0.0, 1.0))).round() as usize;
+    let nmed = nmed.min(48 - nfan - nbig);
     put(r + 14, [gap_nm(p.crack_open), SHAPE, p.crack_seed.round().rem_euclid(4096.0), (nfan + nbig + nmed) as f64]);
     put(r + 15, [nfan as f64, nbig as f64, 0.0, 0.0]);
     u

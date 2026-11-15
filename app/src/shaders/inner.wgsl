@@ -686,7 +686,7 @@ fn sheetRoots(sh: Sheet, o: vec3f, d: vec3f) -> vec2f {
 }
 
 // The fractures crossed by the stretch from pos along dir, s long, in a body of index n: as cracks().
-const FRAC_MAX: i32 = 24;
+const FRAC_MAX: i32 = 48;
 const FRAC_HITS: i32 = 6;
 fn fractures(pos: vec3f, dir: vec3f, s: f32, n: f32) -> Crack {
   var out: Crack;
@@ -699,8 +699,8 @@ fn fractures(pos: vec3f, dir: vec3f, s: f32, n: f32) -> Crack {
   let rs = iu.fracA.y;
   let count = min(i32(iu.fracA.w), FRAC_MAX);
   // every crossing along the stretch, then taken nearest first
-  var ts: array<f32, 48>;
-  var ids: array<i32, 48>;
+  var ts: array<f32, 64>;
+  var ids: array<i32, 64>;
   var m = 0;
   let t0 = 2e-3 * rs;
   for (var i = 0; i < count; i++) {
@@ -711,7 +711,7 @@ fn fractures(pos: vec3f, dir: vec3f, s: f32, n: f32) -> Crack {
     let rt = sheetRoots(sh, o, d);
     for (var e = 0; e < 2; e++) {
       let tt = rt[e];
-      if (tt > t0 && tt <= s && m < 48) {
+      if (tt > t0 && tt <= s && m < 64) {
         ts[m] = tt;
         ids[m] = i;
         m++;
