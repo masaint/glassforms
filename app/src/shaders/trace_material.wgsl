@@ -311,7 +311,7 @@ fn wearAt(p: vec3f, n: vec3f) -> Wear {
         }
       }
     }
-    w.n = normalize(w.n + fromObj(across) * (0.25 * tilt));
+    w.n = normalize(w.n + fromObj(across) * (0.12 * tilt));
     w.sig += scrA * keepIt * 0.012;
   }
   // ---- 4. polishing swirls: rings round a few pad centres, seen as arcs round a sharp highlight

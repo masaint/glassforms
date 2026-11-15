@@ -248,10 +248,14 @@ pub fn pattern(p: &Settings) -> Pattern {
         1 => (0.4, 0.65, 0.0, 0.7, 0.3, 2.5, 0.35, 0.5),
         2 => (1.4, 1.0, 0.55, 0.5, 0.9, 4.0, 0.45, 0.8),
         3 => (0.6, 0.3, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0),
-        _ => (1.0, 0.8, 0.0, 0.6, 0.7, 3.5, 0.12, 0.6),
+        _ => (1.0, 0.9, 0.0, 0.6, 0.7, 3.5, 0.12, 0.6),
     };
     Pattern { size, cover, roll, flat, together, patch, warp, streak }
 }
+
+/// How brightly an opal's domains show the broad light round about (looks first: in photographs the play
+/// of colour is the brightest thing on the stone under any ordinary light).
+pub const OPAL_BROAD: f64 = 5.0;
 
 /// How much of its band a grain of opal sends back at the middle of the band.
 pub const GRAIN_R: f64 = 0.9;
@@ -347,8 +351,8 @@ pub fn uniforms(p: &Settings, scale: f64, pixel: f64, tint: [f64; 3]) -> [f32; I
     put(r + 12, [pat.flat, pat.together, pat.patch, GRAIN_R]);
     // (a milky body holds light going every way: about its whiteness times how milky it is, doubled for
     // light that has gone back and forth)
-    let held = if p.sss > 0.0 { 70.0 * p.sss.clamp(0.0, 1.0) * (p.body_r + p.body_g + p.body_b).clamp(0.0, 3.0) / 3.0 } else { 0.0 };
-    put(r + 13, [pat.warp, pat.streak, held, 0.0]);
+    let held = if p.sss > 0.0 { 12.0 * p.sss.clamp(0.0, 1.0) * (p.body_r + p.body_g + p.body_b).clamp(0.0, 3.0) / 3.0 } else { 0.0 };
+    put(r + 13, [pat.warp, pat.streak, held, OPAL_BROAD]);
 
     // ---- volume fractures: a few great sheets, more smaller ones, and from 0.45 on a fan of five
     let (nfan, nbig, nmed) = fracture_counts(p.fractures);

@@ -479,10 +479,13 @@ impl Engine {
         // way, brought to white (1 before the tone curve: about 230 of 255 after it). Only ever brighter
         // than set, and at most four times: a rig made for glass is dim for a body that only gathers light.
         self.meter = 1.0;
-        if v.mat.sss && !clay && self.state.p.meter > 0.5 {
+        // (not where a backdrop or the picture is seen behind the shape: the picture is then exposed for
+        // what lies behind, as it is in a studio, and brightening it would wash everything out)
+        let seen_behind = self.state.p.backdrop > 0.5 || (self.picture.is_some() && self.state.p.hdri_show > 0.5);
+        if v.mat.sss && !clay && self.state.p.meter > 0.5 && !seen_behind {
             let matte = env::sh_terms(&self.lighting_sh(), env::SH_MATTE);
             let peak = matte_peak(&matte);
-            if peak > 1e-6 { self.meter = (1.0 / peak).clamp(1.0, 4.0) as f32; }
+            if peak > 1e-6 { self.meter = (0.85 / peak).clamp(1.0, 3.0) as f32; }
         }
         if self.last_lu != Some(lu) {
             self.renderer.set_light(&lu);
@@ -842,6 +845,39 @@ impl Engine {
         }
     }
 
+    /// The stage's size, in a live view: when the layers ask for another (a layer dragged across a step),
+    /// the tracer for it is built on another thread while everything stays at the old size; when it is
+    /// ready, the volumes are built at the new size and the tracer changes with them, in the same frame.
+    /// (Stills and videos wait for every tracer, so they take the size asked for at once.)
+    fn box_upkeep(&mut self) {
+        let want = self.state.stack.box_k();
+        if self.hdri_wait {
+            self.state.stack.box_held = None;
+            return;
+        }
+        let Some(held) = self.state.stack.box_held else {
+            self.state.stack.box_held = Some(want);
+            return;
+        };
+        let q = |k: f64| if self.state.plain() { 0 } else { (k * 4.0).round() as u8 };
+        if held == want {
+            // a layer nearing the stage's edge: the tracer for the next size up is built beforehand, so that
+            // crossing it changes nothing but the size
+            let need = self.state.stack.box_need();
+            if !self.state.plain() && held < gf_core::layers::BOX_MAX && need > held - 0.12 {
+                let next = (held + gf_core::layers::BOX_STEP).min(gf_core::layers::BOX_MAX);
+                self.renderer.prepare(crate::render::Variant { box_q: q(next), ..self.renderer.variant() });
+            }
+            return;
+        }
+        let v = crate::render::Variant { box_q: q(want), ..self.renderer.variant() };
+        // (a plain layer, or a tracer that has not been chosen yet: nothing to wait for)
+        if self.state.plain() || self.renderer.variant().box_q == q(want) || self.renderer.prepare(v) {
+            self.state.stack.box_held = Some(want);
+            if self.state.want.is_none() { self.state.want = Some(if self.state.playing { Detail::Anim } else { Detail::Full }); }
+        }
+    }
+
     /// Focus is done to the finished picture (`dof` = 1), not by the tracer's lens (`dof` = 0).
     fn focus_after(&self) -> bool {
         self.state.p.dof >= 0.5
@@ -963,6 +999,7 @@ impl Engine {
     pub fn frame(&mut self, canvas_w: u32, canvas_h: u32, dt: f64) -> Did {
         self.resize(canvas_w, canvas_h);
         if !self.state.rendering { self.state.tick(dt); }
+        self.box_upkeep();
         self.bake_wanted();
         self.light_upkeep();
         if std::mem::take(&mut self.state.cut) { self.cut = true; self.dirty = true; }

@@ -299,6 +299,10 @@ pub struct Stack {
     /// options are kept from the moment they are first changed; until then a combination has the defaults
     pairs: BTreeMap<u8, PairOpts>,
     junctions: BTreeMap<u8, JunctionOpts>,
+    /// The stage's size the volumes are built for, while it lags the size the layers ask for (`box_k`):
+    /// a live view keeps the old size until the tracer for the new one is ready, then changes both
+    /// together. None: the size asked for, at once (stills and videos, which wait for every tracer).
+    pub box_held: Option<f64>,
 }
 impl Default for Stack {
     fn default() -> Self {
@@ -321,7 +325,7 @@ pub struct StackSetup {
 impl Stack {
     /// One layer, placed as it is built.
     pub fn new() -> Self {
-        Self { layers: vec![Layer::default()], sel: 0, pairs: BTreeMap::new(), junctions: BTreeMap::new() }
+        Self { layers: vec![Layer::default()], sel: 0, pairs: BTreeMap::new(), junctions: BTreeMap::new(), box_held: None }
     }
     pub fn len(&self) -> usize {
         self.layers.len()
@@ -344,15 +348,23 @@ impl Stack {
     /// layer's shape fits in a ball of 1.4 times its size about its place): 1 while they all lie within
     /// the stage as it always was, otherwise grown in steps, up to BOX_MAX.
     pub fn box_k(&self) -> f64 {
-        let need = self
+        let need = self.box_need();
+        if need <= 1.0 { 1.0 } else { ((need / BOX_STEP).ceil() * BOX_STEP).min(BOX_MAX) }
+    }
+    /// How many times larger than ever the stage would have to be, exactly (not yet in steps).
+    pub fn box_need(&self) -> f64 {
+        self
             .layers
             .iter()
             .map(|l| {
                 let p = l.place.pos;
                 ((p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt() + 1.4 * l.place.size.abs()) / STAGE_R
             })
-            .fold(1.0f64, f64::max);
-        if need <= 1.0 { 1.0 } else { ((need / BOX_STEP).ceil() * BOX_STEP).min(BOX_MAX) }
+            .fold(1.0f64, f64::max)
+    }
+    /// The stage's size the volumes are built for now (see `box_held`).
+    pub fn box_now(&self) -> f64 {
+        self.box_held.unwrap_or_else(|| self.box_k())
     }
     pub fn combos(&self) -> Vec<u8> {
         let all = (1u8 << self.layers.len()) - 1;
@@ -520,7 +532,7 @@ impl Stack {
         let mut c = Combine {
             n, inv: [[0.0; 12]; 4], scale: [1.0; 4], show: [false; 4], morph: [[0.0; 4]; 4], term: [[0.0; 4]; 4], gap: [[0.0; 4]; 4],
             kc: [[0.0; 4]; 4], ku: [[0.0; 4]; 4], prof: [[3; 4]; 4], tfill: [0.0; 4], treach: [0.0; 4], qfill: 0.0, qreach: 0.0,
-            body: [0; 4], bodies: 1, box_k: self.box_k(),
+            body: [0; 4], bodies: 1, box_k: self.box_now(),
         };
         let bodies = self.bodies();
         c.bodies = bodies.len().max(1);
@@ -1480,14 +1492,15 @@ impl State {
     pub fn scene_res(&self, mode: Detail) -> u32 {
         let res = (0..self.layer_count()).map(|i| self.layer_res(i, mode)).max().unwrap_or(crate::state::RES_FULL);
         // a grown stage at the same detail, as far as memory allows
-        let k = self.box_k();
+        let k = self.stack.box_now();
         if k == 1.0 { return res; }
         let cap = if matches!(mode, Detail::Full) { BOX_RES_FULL } else { BOX_RES_ANIM };
         valid_res((res as f64 * k).min(cap.max(res as f64)))
     }
-    /// How many times larger than ever the stage is: 1 unless layers are placed far out (`Stack::box_k`).
+    /// How many times larger than ever the stage is, as the volumes are built now: 1 unless layers are
+    /// placed far out (`Stack::box_k`, `Stack::box_held`).
     pub fn box_k(&self) -> f64 {
-        self.stack.box_k()
+        self.stack.box_now()
     }
     /// The scene's volume spans [-scene_hb, scene_hb] on each axis.
     pub fn scene_hb(&self) -> f64 {

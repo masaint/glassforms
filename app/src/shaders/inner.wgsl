@@ -37,6 +37,7 @@ struct IU {
                       // one domain share a direction   z: a domain's width, in grains   w: the stacking's reflectance in its band
   playF: vec4f,       // x: how ragged the domains' outlines are   y: how strongly stacking faults streak the colour
                       // z: how much light a milky body holds inside, as a share of the light from all round
+                      // w: how brightly each domain shows the broad light round about
   fracA: vec4f,       // x: a volume fracture's widest gap, nm   y: the shape's radius   z: which arrangement   w: how many sheets
   fracB: vec4f,       // x: how many of them make a fan   y: how many are great ones
 }
@@ -1048,21 +1049,34 @@ fn grains(pos: vec3f, dir: vec3f, s: f32) -> Play {
         bestRho = rho;
       }
     }
-    // A milky body is full of light going every way, scattered within it; the stacking sends back its
-    // band of that too, so in white opal the colour shows even where no light outside is mirrored. That
-    // light meets the layers at every angle; what a flake shows of it is taken at an angle partly its
-    // domain's own and partly how squarely the eye meets the domain's layers (so domains glow orange, green or
-    // blue, not all the longest colour, red, and change as the stone turns).
-    var rhoIn = vec3f(0.0);
-    if (iu.playF.z > 0.0) {
-      let lamIn = iu.playC.x * spacing * (0.52 + 0.16 * rp.x + 0.3 * abs(dot(od, pd)) + 0.04 * gh.z);
-      if (lamIn >= 425.0 && lamIn <= 715.0) {
-        rhoIn = clamp(specW(lamIn) * iu.white.rgb * (iu.white.w * iu.playB.w), vec3f(0.0), vec3f(1.0)) * share;
-      }
+    // Looks first. In a photograph the play of colour is the brightest thing on an opal under any
+    // ordinary light, not only where a lamp is mirrored: a stone's domains are lit from the whole room,
+    // and light scattered inside a milky body lights them from within. So besides the mirrored lamps
+    // above, each domain glows with its own colour lit by the broad light round about (and, in a milky
+    // body, the light inside it), over its own window of angles: as the stone turns its hue runs a
+    // little within the window and goes out abruptly beyond it, and another domain comes on.
+    let cd = abs(dot(od, pd));
+    let lo = 0.02 + 0.45 * rq.y;
+    let hi = lo + 0.6 + 0.3 * rp.y;
+    let gate = smoothstep(lo, lo + 0.025, cd) * (1.0 - smoothstep(hi, hi + 0.025, cd));
+    var glow = vec3f(0.0);
+    var rhoD = vec3f(0.0);
+    if (gate > 0.0 && iu.playF.w > 0.0) {
+      // the domain's own colour, all hues alike likely, running a little across its window
+      let lamD = 430.0 + 270.0 * fract(rp.x + 0.37 * rq.z) + 45.0 * ((cd - lo) / (hi - lo) - 0.5) + 12.0 * (gh.z - 0.5);
+      rhoD = clamp(specW(lamD) * iu.white.rgb * (iu.white.w * iu.playB.w), vec3f(0.0), vec3f(1.0)) * share * gate;
+      // flake by flake it glows more or less
+      let each = (0.3 + 0.7 * gh.y) * (0.45 + 0.55 * fine);
+      // (lit by how bright the light round about is, not by its colour: a green garden does not leave only
+      // the green domains alight)
+      let wl = vec3f(0.2126, 0.7152, 0.0722);
+      glow = rhoD * each * (iu.playF.w * dot(envL(reflect(dir, fromObj(pd)), 0.8), wl) + iu.playF.z * dot(inside, wl));
     }
-    // (flake by flake it glows more or less, as each faces the light inside more or less squarely)
-    out.light += out.keep * (best + rhoIn * (iu.playF.z * (0.15 + 0.85 * gh.y * gh.y) * (0.4 + 0.6 * fine)) * inside) * vis;
-    out.keep *= 1.0 - max(bestRho, rhoIn) * vis;
+    out.light += out.keep * (best + glow) * vis;
+    out.keep *= 1.0 - max(bestRho, rhoD) * vis;
+    // (and where a domain glows, less of the milky body behind it shows through: its colour stands out
+    // as it does in a photograph, not as a wash over white)
+    out.keep *= 1.0 - 0.6 * gate * share * vis;
   }
   return out;
 }
