@@ -436,27 +436,19 @@ fn body_name(st: &State, layers: &[usize]) -> String {
     layers.iter().map(|l| st.layer_title(*l)).collect::<Vec<_>>().join(" + ")
 }
 
-/// The bodies of the scene, when there is more than one: a button each, named by its layers, with a dot
-/// of its material's colour. The lit one is the body whose material is shown; a press shows another's
-/// (by selecting that body's first layer, so the panels follow).
-fn bodies_row(ui: &mut Ui, st: &mut State, px: &mut Panels) {
+/// Whose material the lab shows, when the scene has more than one body: "body 2 · Icosahedron", with the
+/// dot of its material. Which body it is is chosen in the layers list (a press on a row, or on a body's dot).
+fn body_line(ui: &mut Ui, st: &State, px: &mut Panels) {
     let bodies = st.bodies();
     if bodies.len() < 2 { return; }
-    let now = st.body_of(st.stack.sel);
-    let names: Vec<String> = bodies.iter().map(|layers| body_name(st, layers)).collect();
-    let items: Vec<Item> = bodies
-        .iter()
-        .zip(&names)
-        .enumerate()
-        .map(|(k, (layers, name))| {
-            let made = if layers[0] == 0 || st.body_own(layers[0]) { body_material(st, layers[0]).to_owned() } else { "the first body's material".to_owned() };
-            Item::new(name, k == now).colour(body_colour(st, layers[0])).tip(format!("body {}: {name}, of {made}", k + 1))
-        })
-        .collect();
-    let run = button_run(ui, Id::unique(("bodies", px.place)), 0.0, &items, egui::vec2(7.0, 2.0), &mono(SIZE), 0.0);
-    for (k, place) in run.places.iter().enumerate() { px.note(format!("{}body:{}", px.whose(), k + 1), *place); }
-    if let Some(k) = run.clicked { st.select_layer(bodies[k][0]); }
-    gap(ui, 6.0);
+    let k = st.body_of(st.stack.sel);
+    let r = row(ui, 17.0);
+    px.note(format!("{}body", px.whose()), r);
+    dot(ui, Pos2::new(r.left() + 5.5, r.center().y), body_colour(st, bodies[k][0]), false);
+    let text = format!("body {} · {}", k + 1, body_name(st, &bodies[k]));
+    text_in(ui, Rect::from_min_max(Pos2::new(r.left() + 16.0, r.top()), r.max), Align2::LEFT_CENTER, &text, mono(SIZE), BRIGHT);
+    ui.interact(r, Id::unique("lab body"), Sense::hover()).on_hover_text("the body of the layer selected in the layers list: choose another there");
+    gap(ui, 4.0);
 }
 
 /// A body other than the first is made of the first body's material until it is given one of its own:
@@ -911,36 +903,9 @@ fn stack_rows(ui: &mut Ui, st: &mut State, px: &mut Panels, rows: &[Row], knobs:
                 control(ui, st, px, at, knobs);
             }
         });
-        // light followed by chance (true scattering) is cleaned by the denoiser, which has its own switch
-        if *name == "sssWalk" && grainy(st) {
-            let top = ui.cursor().top() + 1.0;
-            let space = Rect::from_min_size(Pos2::new(left + UNDER, ui.cursor().top()), egui::vec2(ui.available_width() - UNDER, 4000.0));
-            set_label_width(ui, names - UNDER);
-            ui.scope_builder(egui::UiBuilder::new().max_rect(space), |ui| {
-                ui.set_width(space.width());
-                denoise_row(ui, st, px);
-            });
-            side_bar(ui, left + 2.0, top, ui.cursor().top() - 1.0, 0.3);
-        }
     }
     if let Some(top) = run { side_bar(ui, left + 2.0, top, ui.cursor().top() - 1.0, 0.3); }
     set_label_width(ui, names);
-}
-
-/// Is anything drawn by chance, which the denoiser cleans: true scattering (the material shown, or the
-/// scene's), or roughness by sampling alone?
-fn grainy(st: &State) -> bool {
-    [settings(st), &st.p].iter().any(|p| p.get("sssWalk").is_some_and(|v| v > 0.5)) || st.p.get("roughRef").is_some_and(|v| v > 0.5)
-}
-
-/// The denoiser's switch (one for the whole picture).
-fn denoise_row(ui: &mut Ui, st: &mut State, px: &mut Panels) {
-    let on = st.p.get("denoise").unwrap_or(1.0) > 0.5;
-    let run = button_run(ui, Id::unique(("denoise", px.place)), label_width(ui) + COL_GAP, &[Item::new("off", !on), Item::new("on", on)], egui::vec2(7.0, 2.0), &mono(SIZE), 24.0);
-    let tip = "Cleans the grain of light followed by chance (true scattering) while the view moves and in the first frames of a still one, and switches itself off as the picture settles: the settled picture is the same either way.";
-    knob::name(ui, Rect::from_min_size(run.rect.min, egui::vec2(label_width(ui), run.rect.height())), Id::unique(("denoise name", px.place)), "denoise", SIZE, tip);
-    for (place, word) in run.places.iter().zip(["off", "on"]) { px.note(format!("{}denoise:{word}", px.whose()), *place); }
-    if let Some(i) = run.clicked { st.p.set("denoise", i as f64); }
 }
 
 /// The head of the lab: which material this is, and the way back to it as named.
@@ -966,10 +931,13 @@ pub fn lab(ctx: &egui::Context, st: &mut State, px: &mut Panels, full: Rect) {
         if px.rendering { ui.disable(); }
         set_label_width(ui, LAB_LABEL);
         px.place = "lab";
-        // whose material: a button for each body when there is more than one
+        // whose material: the body the selected layer belongs to (chosen in the layers list), named
         gap(ui, 3.0);
-        bodies_row(ui, st, px);
+        body_line(ui, st, px);
         head(ui, st, px);
+        // the named materials, open here (folded in the panel)
+        gap(ui, 3.0);
+        named(ui, st, px);
         own_row(ui, st, px);
         let mine = own(st);
         ui.scope(|ui| {
@@ -981,13 +949,13 @@ pub fn lab(ctx: &egui::Context, st: &mut State, px: &mut Panels, full: Rect) {
             let knobs = sliders(st);
             for (layer, l) in STACK.iter().enumerate() {
                 let says = layer_says(layer, &recipe(settings(st)));
-                if px.group_saying(ui, &lab_fold(l.title), l.title, &says) {
+                if px.window_group(ui, &lab_fold(l.title), l.title, &says) {
                     stack_rows(ui, st, px, &layer_rows(layer), &knobs);
                 }
             }
         });
         // what the body casts on the others: its own two switches
-        if px.group(ui, "lab-casts", "casts", "") {
+        if px.window_group(ui, "lab-casts", "casts", "") {
             let layer = body(st);
             studio::switches(ui, st, px, layer);
         }

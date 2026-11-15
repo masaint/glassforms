@@ -13,7 +13,8 @@
 //!                               picture, video, file (left); detail, animate (right); material-chooser (the
 //!                               named materials); lab-made of, lab-surface, lab-on it, lab-in it and
 //!                               lab-special optics (the layers of the materials lab)
-//!   room:<open|close>           the light room;  lab:<open|close>  the materials lab;  help:<open|close>  the help
+//!   room:<open|close>           the light room;  lab:<open|close>  the materials lab;  camera:<open|close>  the
+//!                               camera window;  help:<open|close>  the help
 //!   light:<n>                   choose light n (from 1) in the light room
 //!   add-layer                   press the "+" of the layers
 //!   join:<tag>                  open that combination's row in the joins (join:12, join:123); join:none shuts them
@@ -84,6 +85,7 @@ pub enum Act {
     /// the light room, or the help: open (true) or closed
     Room(bool),
     Lab(bool),
+    Camera(bool),
     Help(bool),
     /// choose a light in the light room (counted from 1)
     Light(usize),
@@ -176,7 +178,7 @@ pub fn parse(text: &str) -> Result<Vec<Act>, String> {
             }
             "p" => { let (k, v) = named(name, arg)?; Act::Setting(k.into(), num(name, v)?) }
             "fold" => Act::Fold(arg.into()),
-            "room" | "lab" | "help" => {
+            "room" | "lab" | "camera" | "help" => {
                 let open = match arg {
                     "open" => true,
                     "close" => false,
@@ -185,6 +187,7 @@ pub fn parse(text: &str) -> Result<Vec<Act>, String> {
                 match name {
                     "room" => Act::Room(open),
                     "lab" => Act::Lab(open),
+                    "camera" => Act::Camera(open),
                     _ => Act::Help(open),
                 }
             }

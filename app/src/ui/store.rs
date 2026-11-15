@@ -13,20 +13,21 @@ pub const FILE_NAME: &str = "glassforms-ui.json";
 /// Which arrangement of the panels this program has. A file written for an earlier arrangement keeps
 /// everything it says except which groups are folded: its groups were other groups, in other places,
 /// and folding them the old way would hide what this arrangement means a newcomer to see.
-pub const ARRANGEMENT: u32 = 4;
+pub const ARRANGEMENT: u32 = 5;
 
 /// Every group that folds: those of the left panel from the top, those of the right, those of the light room.
 /// (The chooser of named materials and the layers of the materials lab fold too. They are not listed
 /// here: the material's own code names them, see `material::folds`.)
-pub const GROUPS: [&str; 17] = [
-    "material", "light", "camera", "camera-character", "camera-grade", "output", "quality", "video", "joins", "placement", "animate",
-    "room-surround", "room-floor", "room-lights", "room-cast", "room-turn", "lab-casts",
+pub const GROUPS: [&str; 21] = [
+    "material", "light", "picture", "quality", "video", "placement", "joins", "animate", "animate-more", "room-surround", "room-floor", "room-lights", "room-cast",
+    "room-turn", "lab-casts", "cam-lens", "cam-focus", "cam-view", "cam-exposure", "camera-grade", "camera-character",
 ];
 
-/// The groups that start folded away: what is set once or seldom. Material and light on the left and the
-/// animation on the right start open; inside the camera, the lens's character and the grade are folded;
-/// inside the output, quality and video.
-pub const FOLDED_AT_FIRST: [&str; 7] = ["camera", "camera-character", "camera-grade", "output", "quality", "video", "placement"];
+/// What starts folded away: the picture section (it says its lens and size when folded) and the
+/// sub-groups (detail: quality, video, placement, easing and loop, the chooser of named materials, the
+/// camera's grade and lens character). Material and light on the left and the animation on the right
+/// start open.
+pub const FOLDED_AT_FIRST: [&str; 8] = ["picture", "quality", "video", "placement", "animate-more", "material-chooser", "camera-grade", "camera-character"];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -45,6 +46,9 @@ pub struct Store {
     /// the same for the materials lab
     pub lab_open: bool,
     pub lab_at: Option<[f32; 2]>,
+    /// the same for the camera window
+    pub camera_open: bool,
+    pub camera_at: Option<[f32; 2]>,
     /// how videos are made
     pub video: RenderOpts,
     /// where videos are written; None = the "renders" folder beside the program
@@ -60,7 +64,7 @@ impl Default for Store {
     fn default() -> Self {
         Self {
             arrangement: ARRANGEMENT, closed: FOLDED_AT_FIRST.iter().map(|g| g.to_string()).collect(), window: None, maximized: false,
-            room_open: false, room_at: None, lab_open: false, lab_at: None, video: RenderOpts::default(), folder: None, setup_folder: None, still_folder: None, still_16: false,
+            room_open: false, room_at: None, lab_open: false, lab_at: None, camera_open: false, camera_at: None, video: RenderOpts::default(), folder: None, setup_folder: None, still_folder: None, still_16: false,
         }
     }
 }
@@ -146,15 +150,15 @@ mod tests {
     fn groups_fold_and_unfold() {
         let mut s = Store::default();
         assert!(!s.is_closed("material") && !s.is_closed("light") && !s.is_closed("animate"), "{:?}", s.closed);
-        assert!(s.is_closed("video") && s.is_closed("output") && s.is_closed("camera"));
-        s.fold("camera");
+        assert!(s.is_closed("video") && s.is_closed("picture") && s.is_closed("material-chooser"));
+        s.fold("picture");
         s.fold("material");
-        assert!(!s.is_closed("camera") && s.is_closed("material"));
+        assert!(!s.is_closed("picture") && s.is_closed("material"));
     }
 
     #[test]
     fn a_file_with_parts_missing_is_still_read() {
-        let s = Store::read(r#"{ "arrangement": 4, "closed": ["animate"], "video": { "fps": 24 } }"#);
+        let s = Store::read(r#"{ "arrangement": 5, "closed": ["animate"], "video": { "fps": 24 } }"#);
         assert_eq!(s.closed, vec!["animate".to_string()]);
         assert_eq!((s.video.fps, s.video.samples, s.window, s.room_open, s.room_at), (24, RenderOpts::default().samples, None, false, None));
         assert_eq!((s.lab_open, s.lab_at), (false, None));

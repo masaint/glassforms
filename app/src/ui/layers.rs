@@ -421,7 +421,13 @@ pub fn placement(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     let i = st.stack.sel;
     let as_built = st.stack.layers[i].place.is_identity();
     if st.layer_count() < 2 && as_built { return; }
-    if !px.group(ui, "placement", "placement", if as_built { "as it is built" } else { "moved" }) { return; }
+    // (a sub-group of the shape: detail, folded at first)
+    px.sub(ui, "placement", "placement", if as_built { "as it is built" } else { "moved" }, |ui, px| placement_rows(ui, st, px, i, as_built));
+}
+
+/// The rows of the placement: the layer's place, turn and size (the turn of the whole view is the
+/// camera's, and called "view turn"), and the reset.
+fn placement_rows(ui: &mut Ui, st: &mut State, px: &mut Panels, i: usize, as_built: bool) {
     for k in st.place_knobs(i) { knob::knob_row(ui, st, &k, px); }
     let font = mono(SIZE);
     let size = button_size(ui, "reset", &font, egui::vec2(8.0, 2.0));

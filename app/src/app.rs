@@ -774,6 +774,7 @@ impl App {
                 }
                 L => self.px.store.room_open = !self.px.store.room_open,
                 M => self.px.store.lab_open = !self.px.store.lab_open,
+                K => self.px.store.camera_open = !self.px.store.camera_open,
                 C => st.p.clay = if st.p.clay > 0.5 { 0.0 } else { 1.0 },
                 F1 => self.px.help_open = !self.px.help_open,
                 R => st.reset_view(),
@@ -881,6 +882,7 @@ impl App {
         if !(px.hide_left && px.hide_right) {
             room::show(ctx, st, px, self.full);
             material::lab(ctx, st, px, self.full);
+            crate::ui::camera::window(ctx, st, px, self.full);
             overlay::help(ctx, px, st.families.len(), self.full);
         }
         // something went wrong building the shape: say so over the picture (the shape before stays up).
@@ -1207,6 +1209,7 @@ impl App {
             }
             Act::Room(open) => self.px.store.room_open = open,
             Act::Lab(open) => self.px.store.lab_open = open,
+            Act::Camera(open) => self.px.store.camera_open = open,
             Act::Light(n) => {
                 if n > st.rig().lights.len() { return Err(format!("light: there are only {} lights", st.rig().lights.len())); }
                 self.px.light = n - 1;
@@ -1507,6 +1510,7 @@ impl App {
                              "says": crate::ui::camera::summary(st, self.px.aspect) });
         let more = json!({
             "lab": { "open": self.px.store.lab_open, "at": self.px.store.lab_at },
+            "cameraWindow": { "open": self.px.store.camera_open, "at": self.px.store.camera_at },
             "model": { "is": st.is_model(), "needsFile": st.needs_file(st.stack.sel), "path": st.model_file(st.stack.sel), "known": self.px.model.known, "file": self.px.model.file,
                        "line": self.px.model.line, "tip": self.px.model.tip, "shell": self.px.model.shell, "foundShell": self.px.model.found_shell, "ownSmooth": self.px.model.own_smooth,
                        "reading": self.px.model.reading, "error": self.px.model.error, "said": self.px.model.said,

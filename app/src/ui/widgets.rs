@@ -718,6 +718,42 @@ pub fn group_title(ui: &mut Ui, id: Id, title: &str, closed: bool, says: &str) -
     (resp.clicked(), r)
 }
 
+/// The heading of a group inside a panel's section: small lowercase words, the same as the camera's
+/// headings always were. It does not fold.
+pub fn group_heading(ui: &mut Ui, text: &str) -> Rect {
+    gap(ui, 6.0);
+    let r = row(ui, 14.0);
+    text_in(ui, r, Align2::LEFT_CENTER, text, mono(10.0), FAINT);
+    gap(ui, 1.0);
+    r
+}
+
+/// The heading of something that folds below a section: a group in a floating window, or a sub-group.
+/// The small arrow and the lowercase words of the joins' rows; `says` at the right. Returns true when
+/// pressed, and where it is.
+pub fn fold_heading(ui: &mut Ui, id: Id, title: &str, closed: bool, says: &str) -> (bool, Rect) {
+    gap(ui, 4.0);
+    let r = row(ui, 17.0);
+    let resp = ui.interact(r, id, Sense::click());
+    let hot = resp.hovered();
+    if hot { ui.ctx().set_cursor_icon(CursorIcon::PointingHand); }
+    let ink = if hot { BRIGHT } else { FAINT };
+    let c = Pos2::new(r.left() + 4.5, r.center().y);
+    let tip = if closed {
+        vec![c + egui::vec2(-1.3, -3.0), c + egui::vec2(2.3, 0.0), c + egui::vec2(-1.3, 3.0)]
+    } else {
+        vec![c + egui::vec2(-3.0, -1.5), c + egui::vec2(3.0, -1.5), c + egui::vec2(0.0, 2.2)]
+    };
+    ui.painter().add(Shape::convex_polygon(tip, ink, Stroke::NONE));
+    let w = text_width(ui, title, &mono(10.5));
+    text_in(ui, Rect::from_min_max(Pos2::new(r.left() + 13.0, r.top()), r.max), Align2::LEFT_CENTER, title, mono(10.5), ink);
+    if !says.is_empty() {
+        text_in(ui, Rect::from_min_max(Pos2::new(r.left() + 13.0 + w + 12.0, r.top()), r.max), Align2::RIGHT_CENTER, says, mono(10.0), if hot { DIM } else { HINT });
+    }
+    gap(ui, 1.0);
+    (resp.clicked(), r)
+}
+
 /// A title inside a floating window, over the controls that belong together (it does not fold). `says`:
 /// a few words at its right.
 pub fn section(ui: &mut Ui, title: &str, says: &str) -> Rect {

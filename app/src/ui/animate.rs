@@ -86,18 +86,6 @@ pub fn show(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     if moved.released { scrub_done(st); }
     knob::knob_row(ui, st, &State::engine_knob("speed"), px);
 
-    // how the travelling sliders ease, unless one has an easing of its own
-    gap(ui, 4.0);
-    let eases: Vec<String> = EASES.iter().map(|e| e.to_string()).collect();
-    if let Some(i) = pick(ui, Id::unique("ease all"), "ease all", &eases, st.p.easing().0) {
-        st.p.ease = i as f64;
-        st.rephase_all();
-    }
-    if let Some(i) = choice(ui, Id::unique("eased at"), "eased at", &["start", "finish", "both"], st.p.easing().1 as usize) {
-        st.p.ease_at = i as f64;
-        st.rephase_all();
-    }
-
     // the shape turning by itself, whether or not the animation plays
     gap(ui, 4.0);
     knob::knob_row(ui, st, &State::engine_knob("spin"), px);
@@ -108,26 +96,40 @@ pub fn show(ui: &mut Ui, st: &mut State, px: &mut Panels) {
         st.set_r(&r);
     }
 
-    // the loop everything fits into: its length (a number, or nothing to have it worked out), whether
-    // what plays here is held to it as a video will be, and what it comes to
-    gap(ui, 4.0);
-    let r = row(ui, 24.0);
-    label(ui, r, "loop s");
-    let field = beside_label(ui, r, 22.0);
-    let id = Id::unique("loop length");
-    px.note("loop", field);
-    if !ui.memory(|m| m.has_focus(id)) {
-        px.loop_text = if st.p.loop_len > 0.0 { format!("{}", st.p.loop_len) } else { String::new() };
-    }
-    let edit = egui::TextEdit::singleline(&mut px.loop_text).id(id).hint_text("auto").font(mono(SIZE)).text_color(BRIGHT).margin(egui::Margin::symmetric(5, 2)).align(Align2::LEFT_CENTER).desired_width(field.width());
-    if ui.put(field, edit).changed() {
-        let v = px.loop_text.trim().parse::<f64>().ok().filter(|v| v.is_finite() && *v > 0.0);
-        st.p.loop_len = v.unwrap_or(0.0);
-    }
-    if let Some(i) = choice(ui, Id::unique("play it"), "play it", &["freely", "as looped"], js_round(st.p.lock) as usize) {
-        st.p.lock = i as f64;
-    }
-    gap(ui, 3.0);
-    paragraph(ui, &plan_text(st), mono(SMALL), BUTTON, LINE, 0.0);
+    // how the travelling sliders ease, and the loop everything fits into: detail, folded
+    let says = if st.p.loop_len > 0.0 { format!("loop {} s", st.p.loop_len) } else { String::new() };
+    px.sub(ui, "animate-more", "easing and loop", &says, |ui, px| {
+        // how the travelling sliders ease, unless one has an easing of its own
+        let eases: Vec<String> = EASES.iter().map(|e| e.to_string()).collect();
+        if let Some(i) = pick(ui, Id::unique("ease all"), "ease all", &eases, st.p.easing().0) {
+            st.p.ease = i as f64;
+            st.rephase_all();
+        }
+        if let Some(i) = choice(ui, Id::unique("eased at"), "eased at", &["start", "finish", "both"], st.p.easing().1 as usize) {
+            st.p.ease_at = i as f64;
+            st.rephase_all();
+        }
+
+        // the loop everything fits into: its length (a number, or nothing to have it worked out), whether
+        // what plays here is held to it as a video will be, and what it comes to
+        let r = row(ui, 24.0);
+        label(ui, r, "loop s");
+        let field = beside_label(ui, r, 22.0);
+        let id = Id::unique("loop length");
+        px.note("loop", field);
+        if !ui.memory(|m| m.has_focus(id)) {
+            px.loop_text = if st.p.loop_len > 0.0 { format!("{}", st.p.loop_len) } else { String::new() };
+        }
+        let edit = egui::TextEdit::singleline(&mut px.loop_text).id(id).hint_text("auto").font(mono(SIZE)).text_color(BRIGHT).margin(egui::Margin::symmetric(5, 2)).align(Align2::LEFT_CENTER).desired_width(field.width());
+        if ui.put(field, edit).changed() {
+            let v = px.loop_text.trim().parse::<f64>().ok().filter(|v| v.is_finite() && *v > 0.0);
+            st.p.loop_len = v.unwrap_or(0.0);
+        }
+        if let Some(i) = choice(ui, Id::unique("play it"), "play it", &["freely", "as looped"], js_round(st.p.lock) as usize) {
+            st.p.lock = i as f64;
+        }
+        gap(ui, 3.0);
+        paragraph(ui, &plan_text(st), mono(SMALL), BUTTON, LINE, 0.0);
+    });
     gap(ui, 1.0);
 }

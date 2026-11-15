@@ -46,9 +46,11 @@ BIG = (1600, 900)
 runs = 0
 
 # the groups that fold, from the top of each panel, and the ones folded when nothing is remembered
-LEFT_GROUPS = ['material', 'light', 'camera', 'output']
-RIGHT_GROUPS = ['joins', 'placement', 'animate']
-FOLDED = ['camera', 'camera-character', 'camera-grade', 'output', 'placement', 'quality', 'video']
+LEFT_GROUPS = ['material', 'light', 'picture']
+RIGHT_GROUPS = ['placement', 'joins', 'animate']
+FOLDED = ['animate-more', 'camera-character', 'camera-grade', 'material-chooser', 'picture', 'placement', 'quality', 'video']
+# the chooser of named materials opened in the panel (it is folded at first)
+CHOOSER = 'fold:material-chooser;'
 
 
 def command(script='', pairs=(), frames=5, shot=None, flags=(), size=(W, H), scale=1, dump=None):
@@ -654,7 +656,7 @@ def a_material_is_chosen_by_name():
     groups = list(dict.fromkeys(m['group'] for m in named))
     of = lambda g: [m['id'] for m in named if m['group'] == g]
     listed = lambda d: [k[4:] for k in d['rects'] if k.startswith('mat:')]
-    glass = look('wait:3', 'mat_glass')
+    glass = look(CHOOSER + 'wait:3', 'mat_glass')
     d, r = glass[0], glass[0]['rects']
     m = d['material']
     assert (m['id'], m['group'], m['changed'], m['showing']) == ('glass', 'glass', False, 'glass') and m['groups'] == groups, m
@@ -668,11 +670,11 @@ def a_material_is_chosen_by_name():
     assert 'glass' in listed(d) and set(listed(d)) <= set(of('glass')), 'the list shows %s' % listed(d)
     # a group's button brings up its materials and chooses nothing
     browse = '%s;wait:3' % press(r['mat-group:metal'])
-    b = run('wait:3;' + browse, size=BIG)
+    b = run(CHOOSER + 'wait:3;' + browse, size=BIG)
     assert b['material']['showing'] == 'metal' and b['material']['id'] == 'glass' and b['settings']['metal'] == 0, b['material']
     assert 'gold' in listed(b) and set(listed(b)) <= set(of('metal')), 'the metal button shows %s' % listed(b)
     # each has a dot of its own colour: gold's is yellow, silver's is not
-    metals = look('wait:3;' + browse, 'mat_metals')
+    metals = look(CHOOSER + 'wait:3;' + browse, 'mat_metals')
 
     def dot(key):
         x0, y0, x1, y1 = metals[0]['rects'][key]
@@ -682,26 +684,26 @@ def a_material_is_chosen_by_name():
     assert gold_dot[0] - gold_dot[2] > 40 and abs(silver_dot[0] - silver_dot[2]) < 25, 'the dots of gold and silver are %s and %s' % (gold_dot.round(), silver_dot.round())
     # pressed, it is what the shape is made of
     choose = browse + ';%s;wait:3' % press(b['rects']['mat:gold'])
-    gold = look('wait:3;' + choose + ';ready;wait:3', 'mat_gold')
+    gold = look(CHOOSER + 'wait:3;' + choose + ';ready;wait:3', 'mat_gold')
     g = gold[0]
     assert (g['material']['id'], g['material']['changed'], g['material']['showing']) == ('gold', False, 'metal') and g['settings']['metal'] >= 2, g['material']
     assert [x['words'] for x in g['material']['recipe']] == ['gold'], 'gold has the recipe %s' % g['material']['recipe']
     assert apart_by(glass, gold) > 3, 'gold looks like glass (%.2f grey levels apart)' % apart_by(glass, gold)
     # a slider moved makes it "changed"; pressing the material again puts it back as named
     frost = choose + ';' + on(g, 'P.rough', 0.4) + ';wait:3'
-    c = run('wait:3;' + frost, size=BIG)
+    c = run(CHOOSER + 'wait:3;' + frost, size=BIG)
     assert c['material']['changed'] and close(c['knobs']['P.rough'], 0.4, 0.011), 'frosted, gold is %s with frost %s' % (c['material']['changed'], c['knobs']['P.rough'])
-    again = run('wait:3;' + frost + ';%s;wait:3' % press(c['rects']['mat:gold']), size=BIG)
+    again = run(CHOOSER + 'wait:3;' + frost + ';%s;wait:3' % press(c['rects']['mat:gold']), size=BIG)
     assert not again['material']['changed'] and again['knobs']['P.rough'] == 0 and again['material']['id'] == 'gold', 'pressed again, gold has frost %s' % again['knobs']['P.rough']
     # every group's button brings up that group, its first material in view
     for grp in groups:
-        t = run('wait:3;%s;wait:3' % press(r['mat-group:' + grp]), size=BIG)
+        t = run(CHOOSER + 'wait:3;%s;wait:3' % press(r['mat-group:' + grp]), size=BIG)
         assert t['material']['showing'] == grp and of(grp)[0] in listed(t) and set(listed(t)) <= set(of(grp)), 'the %s button shows %s' % (grp, listed(t))
         assert within(t['rects']['materials'], t['rects']['left']) and all(within(t['rects']['mat:' + i], t['rects']['materials']) for i in listed(t)), 'the %s list is out of place' % grp
     # a long group scrolls inside the list: the wheel over it brings the last metal up, where it can be pressed
     last = of('metal')[-1]
     lx, ly = mid(b['rects']['materials'])
-    wheel = 'wait:3;%s;wheelat:%.1f,%.1f,900;wait:70' % (browse, lx, ly)
+    wheel = CHOOSER + 'wait:3;%s;wheelat:%.1f,%.1f,900;wait:70' % (browse, lx, ly)
     scrolled = run(wheel, size=BIG)
     assert 'mat:' + last not in b['rects'] and 'mat:' + last in scrolled['rects'], 'the wheel over the list did not bring %s up: %s' % (last, listed(scrolled))
     assert scrolled['panels']['left'] <= scrolled['panels']['room'] + 0.5 and scrolled['rects']['left'] == b['rects']['left'], 'the wheel moved the panel instead'
@@ -709,15 +711,16 @@ def a_material_is_chosen_by_name():
     assert picked['material']['id'] == last, 'pressing %s chose %s' % (last, picked['material']['id'])
     # chosen from elsewhere (a script, a setup), its group comes up and it is brought into view
     far = of('metal')[-3]
-    j = run('arg:material=%s;ready;wait:70' % far, size=BIG)
+    j = run(CHOOSER + 'arg:material=%s;ready;wait:70' % far, size=BIG)
     assert j['material']['id'] == far and j['material']['showing'] == 'metal' and 'mat:' + far in j['rects'], 'chosen by a script, %s is not in view: %s' % (far, listed(j))
-    # a press on the line that names the material folds the chooser away under it, and another brings it back;
-    # folded, the sliders move up and the choice is remembered
+    # the chooser is folded at first in the panel; a press on the line that names the material folds it away
+    # again, and another brings it back; folded, the sliders move up and the choice is remembered
+    assert 'mat-group:glass' not in run('wait:3', size=BIG)['rects'], 'the chooser is open at first in the panel'
     fold = press(r['mat-name'])
-    f1 = run('wait:3;%s;wait:3' % fold, size=BIG)
+    f1 = run(CHOOSER + 'wait:3;%s;wait:3' % fold, size=BIG)
     assert not f1['material']['chooser'] and 'material-chooser' in f1['closed'] and not listed(f1) and 'mat-group:glass' not in f1['rects'], 'a press on the name did not fold the chooser'
     assert f1['rects']['slot:P.ior'][1] < r['slot:P.ior'][1] - 100 and 'recipe' in f1['rects'], 'folded, the sliders did not move up'
-    f2 = run('wait:3;%s;wait:3;%s;wait:3' % (fold, press(f1['rects']['mat-name'])), size=BIG)
+    f2 = run(CHOOSER + 'wait:3;%s;wait:3;%s;wait:3' % (fold, press(f1['rects']['mat-name'])), size=BIG)
     assert f2['material']['chooser'] and 'glass' in listed(f2), 'a second press did not bring the chooser back'
     # a setup keeps it, changed or not
     setup = os.path.join(OUT, 'material_setup.json')
@@ -837,7 +840,7 @@ def the_materials_lab_is_the_material_layer_by_layer():
             key = where[c['kind']] % name
             assert c['layer'] == x['layer'], '%s is in %s but says %s' % (name, x['layer'], c['layer'])
             if c['shown']:
-                assert key in r and within(r[key], lab), 'the lab has no %s for %s (%s)' % (c['kind'], name, key)
+                assert key in r, 'the lab has no %s for %s (%s)' % (c['kind'], name, key)
                 ys.append(r[key][1])
                 shown += 1
             else:
@@ -845,7 +848,7 @@ def the_materials_lab_is_the_material_layer_by_layer():
                 hidden.append(name)
     assert ys == sorted(ys) and hidden, 'the lab is out of order: %s' % ys
     assert mat['says'] == {'made of': 'glass', 'surface': 'polished', 'on it': 'nothing', 'in it': 'nothing', 'special optics': 'none'}, mat['says']
-    assert within(r['lab/reset'], lab) and within(r['lab/recipe:0'], lab), 'the head of the lab is not in view'
+    assert within(r['lab/reset'], lab) and within(r['lab/recipe:0'], lab) and 'lab/mat-group:glass' in r, 'the head of the lab (with its chooser) is not in view'
     # a part switched on shows the rest of its controls under its switch, set in a little
     filmed = run('lab:open;wait:4;%s;wait:4' % on(d, 'P.film', 300, 'lab/'), size=BIG)
     fr = filmed['rects']
@@ -859,8 +862,8 @@ def the_materials_lab_is_the_material_layer_by_layer():
     assert not shut['lab']['open'] and 'lab' not in shut['rects'], 'the cross did not close it'
     assert 'lab' not in run('lab:open;wait:3;key:h;wait:3')['rects'], 'it is still shown with the panels hidden'
     # dragged by its title it goes where it is put, and it cannot be lost over the edge of the window
-    # (all but its first layer folded, so that there is room to move it down)
-    short = 'lab:open;' + ';'.join('fold:lab-' + g for g in layers[1:]) + ';wait:4'
+    # (its layers folded, so that there is room to move it down)
+    short = 'lab:open;' + ';'.join('fold:lab-' + g for g in layers) + ';wait:4'
     s0 = run(short, size=BIG)['rects']
     bar = s0['lab:bar']
     x, y = bar[0] + 60, (bar[1] + bar[3]) / 2
@@ -987,47 +990,47 @@ def focus_is_blurred_afterwards_or_traced_through_the_lens():
         return float(shot[1][y0:y1, x0:x1].mean())
 
     # with everything sharp there is nothing to choose: the camera group offers to open the lens, and no more
-    sharp = run('fold:camera;wait:3', size=BIG)
+    sharp = run('camera:open;wait:3', size=BIG)
     assert sharp['settings']['dof'] == 1 and sharp['settings']['aperture'] == 0, sharp['settings']['dof']
-    assert 'dof:on' in sharp['rects'] and not any(k in sharp['rects'] for k in ('focus:clean', 'focus:exact', 'slot:P.lensN', 'slot:P.av')), 'the camera group shows controls of a lens that is not there'
+    assert 'cam/dof:on' in sharp['rects'] and not any(k in sharp['rects'] for k in ('cam/focus:clean', 'cam/focus:exact', 'cam/slot:P.lensN', 'cam/slot:P.av')), 'the camera shows controls of a lens that is not there'
     # a lens open: the blur is made afterwards unless asked otherwise; the choice is under the f-stop and the
     # band (the material group folded away, so that the camera's focus rows are in view)
-    lens = 'set:aperture=0.15;p:blades=6;fold:material;fold:camera;wait:4'
+    lens = 'set:aperture=0.15;p:blades=6;camera:open;fold:cam-lens;wait:4'
     filling = ('scene=surfaces',)
     clean = look(lens, 'focus_clean', pairs=filling)
     r = clean[0]['rects']
-    assert clean[0]['settings']['dof'] == 1 and within(r['focus:clean'], r['left']) and within(r['focus:exact'], r['left']), 'the choice is not in view'
-    assert r['slot:P.av'][1] < r['slot:P.focus'][1] < r['slot:P.band'][1] < r['focus:clean'][1] < r['slot:P.lensN'][1], 'the focus rows are out of order'
-    for key in ('slot:P.av', 'slot:P.focus', 'slot:P.band', 'slot:P.lensN', 'slot:P.subjectLog'):
-        assert within(r[key], r['left']), '%s is not in view' % key
-    exact = look('%s;%s;wait:3' % (lens, press(r['focus:exact'])), 'focus_exact', pairs=filling)
+    assert clean[0]['settings']['dof'] == 1 and within(r['cam/focus:clean'], r['camera']) and within(r['cam/focus:exact'], r['camera']), 'the choice is not in view'
+    assert r['cam/slot:P.av'][1] < r['cam/slot:P.focus'][1] < r['cam/slot:P.band'][1] < r['cam/focus:clean'][1] < r['cam/slot:P.lensN'][1], 'the focus rows are out of order'
+    for key in ('cam/slot:P.av', 'cam/slot:P.focus', 'cam/slot:P.band', 'cam/slot:P.lensN', 'cam/slot:P.subjectLog'):
+        assert within(r[key], r['camera']), '%s is not in view' % key
+    exact = look('%s;%s;wait:3' % (lens, press(r['cam/focus:exact'])), 'focus_exact', pairs=filling)
     e = exact[0]['rects']
     assert exact[0]['settings']['dof'] == 0, 'pressing "exact" left dof at %s' % exact[0]['settings']['dof']
     apart_modes = apart_by(clean, exact)
     assert apart_modes > 2, 'through the lens the picture is the same as blurred afterwards (%.2f grey levels apart)' % apart_modes
-    again = look('%s;%s;wait:8;%s;wait:3' % (lens, press(r['focus:exact']), press(e['focus:clean'])), 'focus_clean_again', pairs=filling)
+    again = look('%s;%s;wait:8;%s;wait:3' % (lens, press(r['cam/focus:exact']), press(e['cam/focus:clean'])), 'focus_clean_again', pairs=filling)
     assert again[0]['settings']['dof'] == 1 and apart_by(clean, again) < apart_modes / 3, 'clean again is %.2f from clean before (the two modes are %.2f apart)' % (apart_by(clean, again), apart_modes)
     # with no lens the two modes are the same picture
     none_a, none_b = look('wait:3', 'focus_none_1', pairs=filling), look('wait:3', 'focus_none_0', pairs=filling + ('dof=0',))
     assert apart_by(none_a, none_b) < 0.01, 'with no lens the two modes differ by %.3f' % apart_by(none_a, none_b)
     # rays through the lens count only when rays go through the lens: greyed and unanswering otherwise,
     # in the camera group and in the video group
-    rays = r['slot:P.lensN']
-    assert e['slot:P.lensN'] == rays, 'the rows moved between the two modes'
-    video = 'set:aperture=0.15;fold:material;fold:output;fold:video;wait:4'
+    rays = r['cam/slot:P.lensN']
+    assert e['cam/slot:P.lensN'] == rays, 'the rows moved between the two modes'
+    video = 'set:aperture=0.15;fold:material;fold:picture;fold:video;wait:4'
     v_clean, v_exact = look(video, 'focus_video_clean', pairs=filling), look(video + ';p:dof=0;wait:3', 'focus_video_exact', pairs=filling)
     greyed = (dim(clean, rays) / dim(exact, rays), dim(v_clean, v_clean[0]['rects']['video lens']) / dim(v_exact, v_exact[0]['rects']['video lens']))
     assert max(greyed) < 0.8, 'the lens rays are not greyed when the blur is made afterwards: %.2f and %.2f of their brightness' % greyed
-    try_rays = on(clean[0], 'P.lensN', 6) + ';wait:2'
+    try_rays = on(clean[0], 'P.lensN', 6, 'cam/') + ';wait:2'
     a = run('%s;%s' % (lens, try_rays), size=BIG, pairs=filling)['settings']
-    b = run('%s;%s;wait:3;%s' % (lens, press(r['focus:exact']), try_rays), size=BIG, pairs=filling)['settings']
+    b = run('%s;%s;wait:3;%s' % (lens, press(r['cam/focus:exact']), try_rays), size=BIG, pairs=filling)['settings']
     assert a['lensN'] == 1 and b['lensN'] == 6, 'the lens rays slider: %s when the blur is made afterwards, %s through the lens' % (a['lensN'], b['lensN'])
     # the shape of the opening and its turn are with the lens's character, at the foot of the group: the
     # turn answers in both modes
-    character = 'set:aperture=0.15;p:blades=6;fold:material;fold:camera;fold:camera-character;wait:4;scroll:left=3000;wait:3'
+    character = 'set:aperture=0.15;p:blades=6;camera:open;fold:cam-lens;fold:cam-focus;fold:cam-view;fold:cam-exposure;fold:camera-character;wait:4'
     t = run(character, size=BIG, pairs=filling)
-    assert within(t['rects']['slot:P.bokehRot'], t['rects']['left']), 'the blade turn is not in view at the foot of the panel'
-    try_turn = on(t, 'P.bokehRot', 90) + ';wait:2'
+    assert within(t['rects']['cam/slot:P.bokehRot'], t['rects']['camera']), 'the blade turn is not in view in the camera window'
+    try_turn = on(t, 'P.bokehRot', 90, 'cam/') + ';wait:2'
     a = run('%s;%s' % (character, try_turn), size=BIG, pairs=filling)['settings']
     b = run('%s;p:dof=0;wait:3;%s' % (character, try_turn), size=BIG, pairs=filling)['settings']
     assert a['bokehRot'] == 90 and b['bokehRot'] == 90, 'the blade turn did not answer in both modes: %s, %s' % (a['bokehRot'], b['bokehRot'])
@@ -1040,7 +1043,7 @@ def focus_is_blurred_afterwards_or_traced_through_the_lens():
     run('set:aperture=0.05;p:dof=0;save-setup:%s' % setup)
     kept = run('load-setup:%s;wait:3' % setup)['settings']
     assert kept['dof'] == 0 and kept['aperture'] == 0.05, 'a setup saved with the traced lens came back with dof %s' % kept['dof']
-    return 'the choice sits under the f-stop, focus and band once the lens is open; "exact" changes the picture by %.1f grey levels and "clean" brings it back to within %.1f; with no lens the two are the same; the lens rays (camera and video) are greyed to %.0f%% and %.0f%% and do not answer when the blur is made afterwards, the blade turn answers in both; a click focuses in both; a setup keeps it' % (
+    return 'in the camera window the choice sits under the f-stop, focus and band once the lens is open; "exact" changes the picture by %.1f grey levels and "clean" brings it back to within %.1f; with no lens the two are the same; the lens rays (camera and video) are greyed to %.0f%% and %.0f%% and do not answer when the blur is made afterwards, the blade turn answers in both; a click focuses in both; a setup keeps it' % (
         apart_modes, apart_by(clean, again), 100 * greyed[0], 100 * greyed[1])
 
 
@@ -1057,7 +1060,7 @@ def each_body_has_a_material_of_its_own():
     # the dot of the second body opens the lab on that body; the lab's head names both bodies and says which
     d = run(TWO_BODIES + 'wait:6;%s;wait:4' % press(r['layer:2:material']), size=BIG, pairs=TWO_PAIRS)
     lr, mat = d['rects'], d['material']
-    assert d['lab']['open'] and mat['body'] == 2 and not mat['own'] and 'lab/body:1' in lr and 'lab/body:2' in lr, 'the lab did not open on the second body: %s' % mat['body']
+    assert d['lab']['open'] and mat['body'] == 2 and not mat['own'] and 'lab/body' in lr and not any(k.startswith('lab/body:') for k in lr), 'the lab did not open on the second body, named: %s' % mat['body']
     assert 'own:on' in lr, 'the left material group does not follow the selected body'
     # given a material of its own, then gold by name: the first body stays glass
     g = run(TWO_BODIES + 'wait:6;%s;wait:4;%s;wait:6' % (press(r['layer:2:material']), press(lr['lab/own:on'])), size=BIG, pairs=TWO_PAIRS)
@@ -1082,11 +1085,13 @@ def shadows_and_caustics_are_switched_for_all_and_for_each_body():
     assert base['settings']['cast'] == 0 and within(r['cast:off'], r['left']), 'the global control is not in the light group'
     assert not any(k.startswith('castShadow') for k in r), 'a body\'s switches show outside the lab'
     # by body: the selected body's switches are in the lab, and only there
-    d = run(clay + '%s;wait:8;lab:open;wait:4' % press(r['cast:body']), size=BIG, pairs=TWO_PAIRS)
+    # (the lab's layers folded, so that its casts are in view under its chooser)
+    lab_short = 'lab:open;fold:lab-made of;fold:lab-surface;fold:lab-on it;fold:lab-in it;fold:lab-special optics;wait:4'
+    d = run(clay + '%s;wait:8;%s' % (press(r['cast:body']), lab_short), size=BIG, pairs=TWO_PAIRS)
     assert d['settings']['cast'] == 1 and d['casting']['on'], 'pressing "by body" gave cast %s, casting %s' % (d['settings']['cast'], d['casting'])
     key = 'lab/castShadow2:no'
     assert key in d['rects'] and 'castShadow2:no' not in d['rects'], 'the second body\'s switches are not in the lab alone: %s' % [k for k in d['rects'] if 'cast' in k]
-    e = run(clay + '%s;wait:8;lab:open;wait:4;%s;wait:8' % (press(r['cast:body']), press(d['rects'][key])), size=BIG, pairs=TWO_PAIRS)
+    e = run(clay + '%s;wait:8;%s;%s;wait:8' % (press(r['cast:body']), lab_short, press(d['rects'][key])), size=BIG, pairs=TWO_PAIRS)
     assert e['settings']['castShadow2'] == 0 and e['casting']['casters'][1] == [False, False] and e['casting']['casters'][0][0], e['casting']
     # the lab has the same switches, and clay has no caustics to cast: that switch is greyed
     lab = run(clay + 'arg:cast=1;lab:open;wait:8', size=BIG, pairs=TWO_PAIRS)
@@ -1115,41 +1120,47 @@ def a_greyed_control_pressed_switches_on_what_it_needs():
 
 
 @check
-def the_denoiser_is_switched_beside_true_scattering():
-    plain = run('lab:open;wait:4', size=BIG)
-    assert not any(k.startswith('lab/denoise') for k in plain['rects']), 'the denoise switch shows with nothing drawn by chance'
-    walk = 'lab:open;arg:sss=1;arg:sssWalk=1;wait:6'
-    d = run(walk, size=BIG)
+def the_denoiser_is_in_quality():
+    q = 'fold:material;fold:picture;fold:quality;wait:4'
+    d = run(q, size=BIG)
     r = d['rects']
-    assert d['settings']['denoise'] == 1 and 'lab/denoise:off' in r and within(r['lab/denoise:off'], r['lab']), 'with true scattering on there is no denoise switch in view'
-    assert r['lab/wake:sssWalk' if 'lab/wake:sssWalk' in r else 'lab/sssWalk:on'][1] < r['lab/denoise:off'][1], 'the denoise switch is not under true scattering'
-    off = run(walk + ';%s;wait:4' % press(r['lab/denoise:off']), size=BIG)
-    assert off['settings']['denoise'] == 0 and off['error'] is None, off['settings']['denoise']
-    return 'hidden on plain glass; under true scattering, on by default; a press switches it off'
+    assert d['settings']['denoise'] == 1 and 'denoise' in r and within(r['denoise'], r['left']), 'the denoiser is not in quality'
+    assert not any(k.startswith('lab/denoise') for k in run('lab:open;arg:sss=1;arg:sssWalk=1;wait:6', size=BIG)['rects']), 'the lab still has a denoise switch'
+    opened = run(q + ';%s;wait:3' % press(r['denoise']), size=BIG)
+    items = opened['menu']
+    assert len(items) == 3, 'the denoise menu has %d entries' % len(items)
+    chosen = run(q + ';%s;wait:3;%s;wait:3' % (press(r['denoise']), press(items[2])), size=BIG)
+    assert chosen['settings']['denoise'] == 2, chosen['settings']['denoise']
+    return 'off / traced by chance (at first) / clear glass too, in the picture\'s quality; none in the lab'
 
 
 @check
 def the_camera_is_one_group_in_a_photographers_terms():
-    # (the material folded away, so that the camera's rows are in view)
-    base = run('fold:material;fold:camera;wait:4', size=BIG)
+    # the everyday part, in the picture section (the material folded away so that it is in view)
+    base = run('fold:material;fold:picture;wait:4', size=BIG)
     r, c = base['rects'], base['camera']
-    assert all(k in r for k in ('lens:0', 'slot:P.zoom', 'dof:on', 'slot:P.dist', 'slot:P.elev', 'slot:R.0', 'view:top', 'reset view', 'slot:P.ev', 'tone')), 'the camera group lacks a row'
+    assert all(k in r for k in ('group:camera', 'lens:0', 'slot:P.zoom', 'dof:on', 'slot:P.ev', 'camera button')), 'the picture section lacks the camera\'s everyday rows'
+    assert not any(k in r for k in ('slot:P.dist', 'slot:R.0', 'tone')), 'the whole camera is in the panel'
     assert c['fstop'] is None and 'everything sharp' in c['says'], c
-    # a named lens: 85 mm, the camera moved back so the subject keeps its size
-    lens = run('fold:material;fold:camera;wait:4;%s;wait:4' % press(r['lens:3']), size=BIG)
+    lens = run('fold:material;fold:picture;wait:4;%s;wait:4' % press(r['lens:3']), size=BIG)
     assert close(lens['camera']['focal'], 85, 0.01) and lens['settings']['dist'] > base['settings']['dist'], (lens['camera'], lens['settings']['dist'])
-    # the lens opened at f/4 the first time; a jewel's size; the f-stop slider moves by thirds of a stop
-    opened = run('fold:material;fold:camera;wait:4;%s;wait:4' % press(r['dof:on']), size=BIG)
-    assert opened['camera']['fstop'] and close(opened['camera']['fstop'], 4, 0.01), opened['camera']
-    o = opened['rects']
-    jewel = run('fold:material;fold:camera;wait:4;%s;wait:4;%s;wait:3;%s;wait:3' % (press(r['dof:on']), press(o['subject:1']), on(opened, 'P.av', 6)), size=BIG)
+    opened = run('fold:material;fold:picture;wait:4;%s;wait:4' % press(r['dof:on']), size=BIG)
+    assert opened['camera']['fstop'] and close(opened['camera']['fstop'], 4, 0.01) and 'slot:P.av' in opened['rects'], opened['camera']
+    # the whole of it in the camera window: from its button, and with K
+    win = run('fold:material;fold:picture;wait:4;%s;wait:4' % press(r['camera button']), size=BIG)
+    w = win['rects']
+    assert win['cameraWindow']['open'] and 'camera' in w and apart(w['camera'], w['left']) and apart(w['camera'], w['right']), 'the camera window did not open clear of the panels'
+    assert all(k in w for k in ('cam/lens:0', 'cam/slot:P.zoom', 'cam/dof:on', 'cam/slot:P.dist', 'cam/slot:P.elev', 'cam/slot:R.0', 'cam/view:top', 'cam/reset view', 'cam/slot:P.ev', 'cam/tone')), 'the camera window lacks a row'
+    assert run('key:k;wait:3')['cameraWindow']['open'] and not run('key:k;wait:3;key:k;wait:3')['cameraWindow']['open'], 'K did not open and shut the camera window'
+    o = run('camera:open;wait:4;%s;wait:4' % press(w['cam/dof:on']), size=BIG)
+    ow = o['rects']
+    jewel = run('camera:open;wait:4;%s;wait:4;%s;wait:3;%s;wait:3' % (press(w['cam/dof:on']), press(ow['cam/subject:1']), on(o, 'P.av', 6, 'cam/')), size=BIG)
     assert close(jewel['settings']['subject'], 30, 1e-6) and close(jewel['camera']['fstop'], 8, 0.05), (jewel['settings']['subject'], jewel['camera']['fstop'])
-    # the camera raised: elev
-    up = run('fold:material;fold:camera;wait:4;%s;wait:3' % on(base, 'P.elev', 20), size=BIG)
+    up = run('camera:open;wait:4;%s;wait:3' % on(win, 'P.elev', 20, 'cam/'), size=BIG)
     assert close(up['settings']['elev'], 20, 0.6), up['settings']['elev']
-    shut = run('fold:material;fold:camera;wait:4;%s;wait:4;%s;wait:4' % (press(r['dof:on']), press(o['dof:off'])), size=BIG)
+    shut = run('camera:open;wait:4;%s;wait:4;%s;wait:4' % (press(w['cam/dof:on']), press(ow['cam/dof:off'])), size=BIG)
     assert shut['camera']['fstop'] is None, shut['camera']
-    return 'lenses, focal length with its field, focus (all sharp, or open at f/4 with subject, f-stop, focus, sharp range), where it stands with its height, exposure and tone; 85 mm put the camera back from %.2f to %.2f; a jewel at f/8 reads "%s"' % (
+    return 'the picture section has the everyday camera (lenses, focal length, all sharp / lens open with its f-stop, exposure) and the way into the camera window, which has all of it (lens, focus, view with the scene\'s turn, exposure, grade, lens character) and opens with K; 85 mm put the camera back from %.2f to %.2f; a jewel at f/8 reads "%s"' % (
         base['settings']['dist'], lens['settings']['dist'], jewel['camera']['says'])
 
 
@@ -1206,10 +1217,10 @@ def a_video_is_written_and_plays():
     shut = run('wait:2')
     assert 'render' not in shut['rects'] and 'video' in shut['closed'], 'the video group is open before it is asked for'
     # (with the material group open the video group is reached by scrolling the panel: folded here, to press the button where it is)
-    opened = run('fold:material;fold:output;fold:video;wait:3', size=BIG)
+    opened = run('fold:material;fold:picture;fold:video;wait:3', size=BIG)
     button = opened['rects']['render']
     assert within(button, opened['rects']['left']), 'the render button is not in view: %s' % button
-    going = run('fold:material;fold:output;fold:video;vopt:size=320x180;vopt:samples=4;wait:3;%s;wait:40;note;cancel;wait:3' % press(button), size=BIG, pairs=('spin=0.3',))
+    going = run('fold:material;fold:picture;fold:video;vopt:size=320x180;vopt:samples=4;wait:3;%s;wait:40;note;cancel;wait:3' % press(button), size=BIG, pairs=('spin=0.3',))
     said = going['noted'][0]['perf']
     assert re.search(r'^320×180 · video frame \d+ of \d+ · ', said) and 'cancelled after' in going['says']['video'], 'pressed, the line says %r and the group %r' % (said, going['says']['video'])
     return '%s, %d bytes%s; a cancelled render leaves nothing; the folded group opens and its button renders ("%s")' % (os.path.basename(v['path']), v['bytes'], note, said)
@@ -1240,7 +1251,7 @@ def a_render_keeps_hands_off_and_no_ffmpeg_is_said_plainly():
 
 @check
 def the_panels_keep_what_is_done_on_them():
-    base = run('wait:2', size=BIG)
+    base = run('fold:animate-more;wait:2', size=BIG)
     left, right = base['rects']['left'], base['rects']['right']
     # a drag that begins on a panel's own ground, and the wheel over a panel
     for panel in (left, right):
@@ -1251,10 +1262,10 @@ def the_panels_keep_what_is_done_on_them():
     # typing a loop length: the keys go to the field and nowhere else
     field = base['rects']['loop']
     assert within(field, right), 'the loop field is not in view: %s' % field
-    d = run('wait:2;%s;type:12;key:2;key:space;wait:2' % press(field), size=BIG)
+    d = run('fold:animate-more;wait:2;%s;type:12;key:2;key:space;wait:2' % press(field), size=BIG)
     assert d['settings']['loop'] == 12 and d['says']['plan'].startswith('one loop: 12.00 s') and '720 frames' in d['says']['frames'], (d['says']['plan'], d['says']['frames'])
     assert d['family'] == 'attractors' and d['settings']['spin'] == 0, 'keys typed into the field also acted as shortcuts'
-    d = run('wait:2;%s;type:12;wait:2;pdown:%d,%d;pup;key:2;wait:2' % (press(field), BIG[0] // 2, BIG[1] // 2), size=BIG)
+    d = run('fold:animate-more;wait:2;%s;type:12;wait:2;pdown:%d,%d;pup;key:2;wait:2' % (press(field), BIG[0] // 2, BIG[1] // 2), size=BIG)
     assert d['family'] == 'knots', 'the shortcuts did not come back after leaving the field'
     return 'a drag and the wheel on either panel leave the picture alone; a loop length typed in is %s s and the keys stay in the field' % d['settings']['loop']
 
@@ -1269,9 +1280,9 @@ def choices_are_remembered_between_runs():
     # (the light room's longer sections folded, so that it can be dragged down without meeting the window's foot)
     opened = run('room:open;fold:room-surround;fold:room-floor;fold:room-lights;fold:room-cast;fold:room-turn;wait:4')
     bar = opened['rects']['room:bar']
-    first = run('fold:camera;fold:material;fold:animate;fold:room-surround;fold:room-floor;fold:room-lights;fold:room-cast;fold:room-turn;vopt:samples=64;vopt:shutter=0.5;vopt:codec=h265;vopt:size=2560x1440;vopt:fps=30;vopt:lens=8;vopt:quality=20;room:open;wait:10;%s;still16:%s;save-setup:%s;wait:40'
+    first = run('fold:picture;fold:material;fold:animate;fold:room-surround;fold:room-floor;fold:room-lights;fold:room-cast;fold:room-turn;vopt:samples=64;vopt:shutter=0.5;vopt:codec=h265;vopt:size=2560x1440;vopt:fps=30;vopt:lens=8;vopt:quality=20;room:open;wait:10;%s;still16:%s;save-setup:%s;wait:40'
                 % (pull(bar[0] + 50, bar[1] + 8, 222, 111), os.path.join(stills, 'a.png'), os.path.join(setups, 's.json')), flags=('--ui-store', store))
-    assert 'camera' not in first['closed'] and 'material' in first['closed'] and 'animate' in first['closed'] and 'quality' in first['closed'], first['closed']
+    assert 'picture' not in first['closed'] and 'material' in first['closed'] and 'animate' in first['closed'] and 'quality' in first['closed'], first['closed']
     assert os.path.isfile(store), 'nothing was written to %s' % store
     second = run('wait:3', flags=('--ui-store', store))
     assert second['closed'] == first['closed'], 'second run has %s folded, the first left %s' % (second['closed'], first['closed'])
@@ -1577,7 +1588,7 @@ def layers_are_added_selected_hidden_exchanged_and_removed():
     for part in ('layer:2', 'layer:2:eye', 'layer:2:x', 'group:joins', 'join:12', 'join:12:join', 'join:12:apart', 'slot:J12.radius'):
         assert within(r2[part], r2['right']), '%s is not in view' % part
     assert close(r2['layer:2'][1], r2['layer:1'][3], 0.01), 'two layers of one body do not touch: %s %s' % (r2['layer:1'], r2['layer:2'])
-    assert r2['layer:2'][3] < r2['group:joins'][1] < r2['join:12'][1] < min(v[1] for k, v in r2.items() if k.startswith('family:')), 'the joins are not between the layers and the families'
+    assert r2['layer:2'][3] < min(v[1] for k, v in r2.items() if k.startswith('family:')) and max(v[3] for k, v in r2.items() if k.startswith('family:')) < r2['group:joins'][1] < r2['join:12'][1] < r2['group:animate'][1], 'the joins are not after the shape and before the animation'
     # a press on a row selects its layer: the picker below then shows that layer's shape
     s = run('%s;%s;wait:4' % (add, press(r2['layer:1'])), size=BIG)
     assert s['layers']['selected'] == 1 and s['family'] == 'attractors' and s['preset'] == 'thomas' and 'layer:1:x' in s['rects'], 'pressing row 1 selected %s' % s['layers']['selected']
@@ -1607,9 +1618,9 @@ def layers_are_added_selected_hidden_exchanged_and_removed():
     ap = run('%s;%s;wait:5' % (add, press(r2['join:12:apart'])), size=BIG)
     assert ap['layers']['bodies'] == [[1], [2]] and ap['rects']['layer:2'][1] - ap['rects']['layer:1'][3] >= 4, 'apart: bodies %s, rows %s %s' % (ap['layers']['bodies'], ap['rects']['layer:1'], ap['rects']['layer:2'])
     # the detail buttons set every layer
-    det = run('%s;fold:output;fold:quality;wait:3' % add, size=BIG)
-    det2 = run('%s;fold:material;fold:output;fold:quality;wait:3;scroll:left=2000;wait:3' % add, size=BIG)
-    fine = run('%s;fold:material;fold:output;fold:quality;wait:3;scroll:left=2000;wait:3;%s;wait:5' % (add, press(det2['rects']['detail:384'])), size=BIG)
+    det = run('%s;fold:picture;fold:quality;wait:3' % add, size=BIG)
+    det2 = run('%s;fold:material;fold:picture;fold:quality;wait:3;scroll:left=2000;wait:3' % add, size=BIG)
+    fine = run('%s;fold:material;fold:picture;fold:quality;wait:3;scroll:left=2000;wait:3;%s;wait:5' % (add, press(det2['rects']['detail:384'])), size=BIG)
     assert [x['res'] for x in det['layers']['list']] == [768, 768] and [x['res'] for x in fine['layers']['list']] == [384, 384] and fine['layers']['joined'] == 384, 'the detail button gave %s' % [x['res'] for x in fine['layers']['list']]
     # a setup keeps the layers
     setup = os.path.join(OUT, 'layers_setup.json')
@@ -1660,7 +1671,8 @@ def every_join_has_its_own_options():
     assert t and t['on'] and wave['playing'] and wave['knobs']['J12.radius'] != 0.12 and min(t['from'], t['to']) <= wave['knobs']['J12.radius'] <= max(t['from'], t['to']), 'the seam radius did not travel: %s' % wave['knobs']['J12.radius']
     assert ('%s + %s: seam radius' % (names[0], names[1])) in wave['says']['moves'], 'what moves does not name the seam: %r' % wave['says']['moves']
     # three layers: three pairs, each with its own options, and one row for where the three meet
-    three = '%s;%s;wait:5' % (add, press(r['layer:add']))
+    # (the right panel scrolled to its foot: the joins come after the shape, above the animation)
+    three = '%s;%s;wait:5;scroll:right=3000;wait:4' % (add, press(r['layer:add']))
     t3 = run(three, size=BIG)
     r3 = t3['rects']
     assert [c['tag'] for c in t3['layers']['combos']] == ['12', '13', '23', '123'] and t3['layers']['open'] in ('13', '23'), t3['layers']['combos']
@@ -1738,7 +1750,7 @@ def families_and_the_animation_work_from_the_right_panel():
     d2 = run('wait:2;%s;wait:3;set:spin=0;%s;wait:3' % (press(r['family:knots']), press(d['rects']['shape:borromean'])), size=BIG)
     assert d2['family'] == 'knots' and d2['preset'] == 'borromean', 'pressing a shape gave %s / %s' % (d2['family'], d2['preset'])
     # the animation: its group is the foot of the right panel, open; the play button plays what the waves have lit
-    for name in ('group:animate', 'play', 'slot:time', 'slot:P.speed', 'slot:P.spin', 'loop'):
+    for name in ('group:animate', 'play', 'slot:time', 'slot:P.speed', 'slot:P.spin', 'group:animate-more'):
         assert within(r[name], right), '%s is not in the right panel: %s' % (name, r[name])
     assert r['group:animate'][1] > r['slot:attractors/thomas/b'][1] > r['shapes'][3], 'the right panel is out of order'
     p = run('wait:2;%s;wait:40' % press(r['play']), size=BIG)
@@ -1772,8 +1784,8 @@ def the_arrangement_is_as_designed():
         ys = [r['group:' + g][1] for g in LEFT_GROUPS]
         assert ys == sorted(ys) and all(within(r['group:' + g], left) for g in LEFT_GROUPS), 'the left panel\'s groups are out of order or out of view: %s' % ys
         assert close(r['group:material'][1], left[1] + 20, 1.0), 'the material is not at the head of the left panel'
-        for name in ('mat-group:glass', 'mat-name', 'materials', 'drawn:material', 'drawn:clay', 'slot:P.ior', 'slot:P.disp', 'slot:P.nb', 'slot:P.density', 'colour:tintR', 'slot:P.rough', 'slot:P.sss',
-                     'slot:P.coat', 'slot:P.film', 'lab button', 'room button', 'slot:P.lightGain', 'studio', 'cast:off', 'group:camera'):
+        for name in ('mat-name', 'recipe', 'drawn:material', 'drawn:clay', 'slot:P.ior', 'slot:P.disp', 'slot:P.nb', 'slot:P.density', 'colour:tintR', 'slot:P.rough', 'slot:P.sss',
+                     'slot:P.coat', 'slot:P.film', 'lab button', 'room button', 'slot:P.lightGain', 'studio', 'cast:off', 'group:picture'):
             assert within(r[name], left), '%s is not in view in the left panel' % name
         hidden = [k for k in ('slot:P.dist', 'slot:R.0', 'view:front', 'slot:P.ev', 'render', 'slot:P.av', 'slot:P.zoom', 'lens:0', 'detail:384') if k in r]
         assert not hidden, 'shown although their groups are folded (or do not apply): %s' % hidden
@@ -1787,19 +1799,19 @@ def the_arrangement_is_as_designed():
         notes.append('%d x %d points (left %d, right %d of %d)' % (w, h, p['left'], p['right'], p['room']))
     # every group opens and folds from its title, and opened they are all still reachable by scrolling
     d = run('wait:2', size=BIG)
-    opened = run('wait:2;' + ';'.join('%s;wait:2' % press(d['rects']['group:' + g]) for g in ('output', 'camera')) + ';wait:2', size=BIG)
-    assert 'camera' not in opened['closed'] and 'output' not in opened['closed'] and 'slot:P.dist' in opened['rects'] and 'slot:R.0' in opened['rects'], opened['closed']
+    opened = run('wait:2;%s;wait:2' % press(d['rects']['group:picture']), size=BIG)
+    assert 'picture' not in opened['closed'] and 'lens:0' in opened['rects'] and 'group:output' in opened['rects'], opened['closed']
     shut = run('wait:2;%s;wait:3' % press(d['rects']['group:material']), size=BIG)
     assert 'material' in shut['closed'] and 'slot:P.ior' not in shut['rects'], 'a press on the material title did not fold it'
-    everything = run(';'.join('fold:' + g for g in FOLDED) + ';set:aperture=0.05;wait:3', size=BIG)
+    everything = run(';'.join('fold:' + g for g in FOLDED) + ';camera:open;set:aperture=0.05;wait:3', size=BIG)
     for knob in ('P.dist', 'P.zoom', 'P.roll', 'P.elev', 'P.shiftX', 'R.0', 'R.1', 'R.2', 'P.ev', 'P.bloom', 'P.wbTemp', 'P.contrast', 'P.smooth', 'P.scale', 'P.ns', 'P.nw',
                  'P.av', 'P.focus', 'P.band', 'P.subjectLog', 'P.lensN', 'P.bokehRot', 'P.distort', 'P.tiltX', 'P.grain',
                  'P.ior', 'P.disp', 'P.nb', 'P.lightGain', 'P.speed', 'P.spin'):
-        assert 'slot:' + knob in everything['rects'], 'with every group open there is no slider for %s' % knob
+        assert 'slot:' + knob in everything['rects'] or 'cam/slot:' + knob in everything['rects'], 'with every group open there is no slider for %s' % knob
     assert everything['closed'] == [] and everything['panels']['left'] > everything['panels']['room'], 'with everything open the left panel should need to scroll'
     lights = run('room:open;wait:4', size=BIG)['rects']
     assert all('room/slot:P.' + k in lights for k in ('lyaw', 'lpitch', 'lroll', 'lspin')), 'the light room lacks the lights\' sliders'
-    return 'material (the named materials, the glass, the way into the lab) and light open on the left, the camera and the output (still, setup, quality, video) folded under them; the shape and animate on the right; nothing scrolls at %s; every group opens from its title and every slider there was is still there' % ', '.join(notes)
+    return 'material (the named materials, the glass, the way into the lab) and light open on the left, the picture (camera, output, quality, video) folded under them; the shape and animate on the right; nothing scrolls at %s; every group opens from its title and every slider there was is still there' % ', '.join(notes)
 
 
 @check

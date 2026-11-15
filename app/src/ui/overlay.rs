@@ -90,6 +90,7 @@ fn gestures(families: usize) -> [(&'static str, Vec<(String, &'static str)>); 3]
             (s("R"), "put the view back"),
             (s("L"), "the light room"),
             (s("M"), "the materials lab"),
+            (s("K"), "the camera"),
             (s("C"), "clay, or the material again"),
             (s("H"), "hide the panels, or show them"),
             (s("F"), "fullscreen (Esc leaves it)"),

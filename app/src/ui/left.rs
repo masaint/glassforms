@@ -1,6 +1,7 @@
-//! The left panel: how the shape looks. What it is made of first, then how it is lit (the one-press things:
-//! the rest is in the light room), then how it is photographed (lens, focus, the view, exposure); folded
-//! away at the foot, the output: stills, setups, quality and video.
+//! The left panel: how it looks, in three sections, each the everyday part of one scope whose whole is in a
+//! floating window: the material (what each body is made of; the materials lab), the light (the
+//! surroundings and the lights; the light room), the picture (the camera, the output, quality and video;
+//! the camera window).
 
 use eframe::egui::{self, Align2, Id, Ui};
 use gf_core::anim::js_round;
@@ -56,34 +57,44 @@ pub fn show(ui: &mut Ui, st: &mut State, px: &mut Panels) {
             studio::cast_row(ui, st, px);
         }
 
-        // the camera, and where it stands (the shape's turn is part of the view)
-        camera::group(ui, st, px);
     });
 
-    // output, at the foot: stills, setups, how finely things are drawn, and video. (Not greyed as a
-    // whole while a video renders: its cancel button is inside.)
-    let says = format!("{} · {} / s", size_name(&st.render.size), st.render.fps);
-    if px.group(ui, "output", "output", &says) {
+    // the picture: how the scene is photographed and delivered. Its everyday part here; the whole camera
+    // in the camera window. (The video's own sub-group is not greyed while a video renders: its cancel
+    // button is inside.)
+    let says = camera::brief(st, px.aspect);
+    if px.group(ui, "picture", "picture", &says) {
         ui.scope(|ui| {
             if locked { ui.disable(); }
+            px.heading(ui, "camera", "camera");
+            camera::everyday(ui, st, px);
+            px.heading(ui, "output", "output");
             file(ui, px);
-        });
-        camera::inset_part(ui, |ui| {
-            ui.scope(|ui| {
-                if locked { ui.disable(); }
-                // how finely the picture is drawn, and how finely the shape is built
-                if px.group(ui, "quality", "quality", "") {
-                    for name in ["smooth", "scale", "ns", "nw"] { knob::knob_row(ui, st, k(name), px); }
-                    gap(ui, 3.0);
-                    right::detail_rows(ui, st, px);
-                }
+            // how finely the picture is drawn and the shapes are built, and how its grain is cleaned
+            px.sub(ui, "quality", "quality", "", |ui, px| {
+                for name in ["smooth", "scale", "ns", "nw"] { knob::knob_row(ui, st, k(name), px); }
+                denoise(ui, st, px);
+                gap(ui, 3.0);
+                right::detail_rows(ui, st, px);
             });
-            if px.group(ui, "video", "video", "") {
-                video(ui, st, px);
-            }
         });
+        let video_says = format!("{} · {} / s", size_name(&st.render.size), st.render.fps);
+        px.sub(ui, "video", "video", &video_says, |ui, px| video(ui, st, px));
     }
     gap(ui, 2.0);
+}
+
+/// The denoiser, for the whole picture: off, what is traced by chance (true scattering, roughness by
+/// sampling), or clear glass too.
+fn denoise(ui: &mut Ui, st: &mut State, px: &mut Panels) {
+    let now = (js_round(st.p.get("denoise").unwrap_or(1.0)).max(0.0) as usize).min(2);
+    let names: Vec<String> = ["off", "traced by chance", "clear glass too"].iter().map(|n| n.to_string()).collect();
+    let at = ui.cursor().min;
+    if let Some(i) = pick(ui, Id::unique("denoise"), "denoise", &names, now) { st.p.set("denoise", i as f64); }
+    let r = egui::Rect::from_min_max(at, egui::pos2(at.x + ui.available_width(), ui.cursor().top()));
+    px.note("denoise", r);
+    let tip = "Cleans the grain of light followed by chance (true scattering, roughness by sampling) while the view moves and in the first frames of a still one, and switches itself off as the picture settles. \"Clear glass too\": also clear glass and gems in motion, which keeps their brightness.";
+    ui.interact(egui::Rect::from_min_size(r.min, egui::vec2(label_width(ui), r.height())), Id::unique("denoise name"), egui::Sense::hover()).on_hover_text(tip);
 }
 
 /// The head of the output group: the picture saved as a still, and the whole setup kept in a file and

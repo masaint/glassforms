@@ -139,7 +139,7 @@ fn preview(ui: &mut Ui, st: &mut State, px: &mut Panels) {
 fn lights(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     let (n, own, lit) = (st.rig().lights.len(), st.rig_is_default(), lights_lit(st));
     let says = format!("{n} · {}{}", if own { "the family's own" } else { "changed" }, if lit { "" } else { " · not lit" });
-    if !px.group_saying(ui, "room-lights", "lights", &says) { return; }
+    if !px.window_group(ui, "room-lights", "lights", &says) { return; }
     if st.hdri.is_some() {
         // with an environment picture the lights are an extra
         let run = named_run(ui, Id::unique("lights with picture"), "with picture", &[
@@ -243,7 +243,7 @@ fn lights(ui: &mut Ui, st: &mut State, px: &mut Panels) {
 fn turning(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     let turned = st.p.lyaw != 0.0 || st.p.lpitch != 0.0 || st.p.lroll != 0.0 || st.lphi != 0.0;
     let says = if st.p.lspin > 0.0 { "circling" } else if turned { "turned" } else { "as it started" };
-    if !px.group_saying(ui, "room-turn", "turn", says) { return; }
+    if !px.window_group(ui, "room-turn", "turn", says) { return; }
     let r = row(ui, gizmo::SIZE);
     let ball = Rect::from_min_size(r.min, egui::vec2(gizmo::SIZE, gizmo::SIZE));
     px.note("ball", ball);

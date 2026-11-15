@@ -57,7 +57,7 @@ pub fn casting(ui: &mut Ui, st: &mut State, px: &mut Panels) {
         (_, false, _) => "nothing casts".to_owned(),
         (m, true, f) => format!("{}{}", MODES[m].0, if f { " · caustics" } else { "" }),
     };
-    if !px.group_saying(ui, "room-cast", "shadows and caustics", &says) { return; }
+    if !px.window_group(ui, "room-cast", "shadows and caustics", &says) { return; }
     // (whether anything casts is switched in the light group, beside the lights' brightness)
     // (off, the title says where it is switched on; how strong and how fine they are is set here then)
     if mode(st) == 0 { return; }
@@ -235,7 +235,7 @@ pub fn surroundings(ui: &mut Ui, st: &mut State, px: &mut Panels) {
         Around::Studio => (0..STUDIOS.len()).find(|&i| studio_is(st, i)).map_or("studio backdrop".to_owned(), |i| STUDIOS[i].name.to_owned()),
         Around::Picture => px.lighting.picture.as_ref().map_or("picture".to_owned(), |p| p.0.clone()),
     };
-    if !px.group_saying(ui, "room-surround", "surroundings", &says) { return; }
+    if !px.window_group(ui, "room-surround", "surroundings", &says) { return; }
     let items = [
         Item::new("none", now == Around::Nothing).tip("black all round, as ever: only the lights light the shape"),
         Item::new("studio", now == Around::Studio).tip("a studio backdrop: a sweep of colour behind and round the shape, which also lights it"),
@@ -346,7 +346,7 @@ pub fn floor(ui: &mut Ui, st: &mut State, px: &mut Panels) {
         (true, Some(h)) => format!("at {h:+.2}"),
         (true, None) => "on".to_owned(),
     };
-    if !px.group_saying(ui, "room-floor", "floor", &says) { return; }
+    if !px.window_group(ui, "room-floor", "floor", &says) { return; }
     switch(ui, st, px, "floor", "floor", ["off", "on"], ["no floor, as ever", "a floor under the shape, level in the room: shadows and caustics fall on it"]);
     if !on { return; }
     let auto = st.p.get("floorAuto").unwrap_or(1.0) > 0.5;

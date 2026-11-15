@@ -43,7 +43,7 @@ pub mod widgets;
 
 use std::collections::BTreeMap;
 
-use eframe::egui::{Id, Rect, TextureId, Ui};
+use eframe::egui::{self, Id, Rect, TextureId, Ui};
 
 /// Something a panel asks the window to do (the panels themselves only change the state).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -212,6 +212,7 @@ impl Panels {
         match self.place {
             "room" => "room/",
             "lab" => "lab/",
+            "cam" => "cam/",
             _ => "",
         }
     }
@@ -232,6 +233,47 @@ impl Panels {
         !self.store.is_closed(id)
     }
 }
+
+/// The levels below a section (see docs/ui_layout.md, "The hierarchy"): a group in a panel has a heading
+/// and never folds; a group in a floating window folds; a sub-group folds and stands in from the edge
+/// with a bar down its left.
+impl Panels {
+    /// A group's heading in a panel. (Noted as `group:<id>` for tests, as the folding ones are.)
+    pub fn heading(&mut self, ui: &mut Ui, id: &str, title: &str) {
+        let at = widgets::group_heading(ui, title);
+        self.note(format!("group:{id}"), at);
+    }
+
+    /// A group in a floating window: its heading, which folds it; true if it is open. `says` shows beside
+    /// the title while it is folded.
+    pub fn window_group(&mut self, ui: &mut Ui, id: &str, title: &str, says: &str) -> bool {
+        let closed = self.store.is_closed(id);
+        let (clicked, at) = widgets::fold_heading(ui, Id::unique(("group", id)), title, closed, says);
+        self.note(format!("group:{id}"), at);
+        if clicked { self.store.fold(id); }
+        !self.store.is_closed(id)
+    }
+
+    /// A sub-group: its heading, and if it is open its rows, set in from the edge with a bar down their
+    /// left. `says` shows beside the title whether it is open or not.
+    pub fn sub(&mut self, ui: &mut Ui, id: &str, title: &str, says: &str, body: impl FnOnce(&mut Ui, &mut Panels)) {
+        if !self.window_group(ui, id, title, says) { return; }
+        let (top, left) = (ui.cursor().top(), ui.cursor().left());
+        let inner = Rect::from_min_max(egui::pos2(left + SUB_INSET, top), egui::pos2(ui.max_rect().right(), top + 8000.0));
+        let names = widgets::label_width(ui);
+        ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
+            ui.set_width(inner.width());
+            widgets::set_label_width(ui, names - SUB_INSET);
+            body(ui, self);
+        });
+        widgets::set_label_width(ui, names);
+        widgets::side_bar(ui, left + 3.0, top + 1.0, ui.cursor().top() - 2.0, 0.3);
+        widgets::gap(ui, 2.0);
+    }
+}
+
+/// How far a sub-group's rows stand in from its heading.
+pub const SUB_INSET: f32 = 10.0;
 
 /// Digits shown after the point for a slider with this step.
 pub fn digits_of(step: f64) -> usize {

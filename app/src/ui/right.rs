@@ -55,15 +55,15 @@ pub fn show(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     set_label_width(ui, COL_LABEL_WIDE);
     let top = ui.cursor().top();
 
-    // the layers, and how they are joined
+    // the layers (which is selected decides what everything below shows), then the selected layer's
+    // shape and where it is placed, then how the layers are joined
     layers::strip(ui, st, px);
-    layers::joins(ui, st, px);
-    // the selected layer's shape
     families(ui, st, px);
     let list = shapes(ui, st, px);
     maths(ui, st, px);
     sliders(ui, st, px);
     layers::placement(ui, st, px);
+    layers::joins(ui, st, px);
     // everything that moves
     animate::show(ui, st, px);
 
