@@ -1120,8 +1120,8 @@ fn grains(pos: vec3f, dir: vec3f, s: f32) -> Play {
     // (and little of the body shows between: most of the stone is colour, bright and less bright)
     // (but in broad patches, with the dark body between: a photographed stone is colour broken by dark, not
     // filled edge to edge)
-    let opPatch = smoothstep(0.32, 0.62, vnoise3(xw * 0.2 + 3.1, seed + 23u));
-    lit = mix(lit, (0.12 + 0.88 * opPatch) * (0.3 + 0.7 * lit), flow);
+    let opPatch = smoothstep(0.42, 0.72, vnoise3(xw * 0.2 + 3.1, seed + 23u));
+    lit = mix(lit, (0.06 + 0.94 * opPatch) * (0.3 + 0.7 * lit), flow);
     let rp = ten3(ihash(dm.h));
     let rq = ten3(ihash(dm.h + 7u));
     let o = toObj(pos + dir * t);
