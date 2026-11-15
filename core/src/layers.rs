@@ -45,6 +45,16 @@ pub const MAX_LAYERS: usize = 4;
 /// been moved is not touched by it.
 pub const STAGE_R: f64 = 1.44;
 pub const STAGE_SOFT: f64 = 0.03;
+/// How many times larger than ever the stage (the scene's volume and the ball it is cut to) may grow
+/// when the layers are placed far out, and the steps it grows in.
+pub const BOX_MAX: f64 = 4.0;
+pub const BOX_STEP: f64 = 0.25;
+/// The most voxels a side a grown stage's volume is made with: while still, and while things move. A stage
+/// twice as wide at the detail of 768 would need 1536 (seven gigabytes a volume): beyond these the detail
+/// is given up evenly instead.
+pub const BOX_RES_FULL: f64 = 1024.0;
+pub const BOX_RES_ANIM: f64 = 512.0;
+
 /// What an empty scene (no layer shows) reads everywhere.
 pub const EMPTY: f64 = 1.0;
 /// Stored distances are held within this range.
@@ -219,9 +229,9 @@ pub struct Slider {
 
 /// A placement's sliders, in order: position, turn, size.
 pub const PLACE: [Slider; 7] = [
-    Slider { id: "x", label: "move x", lo: -1.5, hi: 1.5, step: 0.005 },
-    Slider { id: "y", label: "move y", lo: -1.5, hi: 1.5, step: 0.005 },
-    Slider { id: "z", label: "move z", lo: -1.5, hi: 1.5, step: 0.005 },
+    Slider { id: "x", label: "move x", lo: -4.0, hi: 4.0, step: 0.005 },
+    Slider { id: "y", label: "move y", lo: -4.0, hi: 4.0, step: 0.005 },
+    Slider { id: "z", label: "move z", lo: -4.0, hi: 4.0, step: 0.005 },
     Slider { id: "rx", label: "turn x °", lo: -180.0, hi: 180.0, step: 0.5 },
     Slider { id: "ry", label: "turn y °", lo: -180.0, hi: 180.0, step: 0.5 },
     Slider { id: "rz", label: "turn z °", lo: -180.0, hi: 180.0, step: 0.5 },
@@ -330,6 +340,20 @@ impl Stack {
         Some(self.layers.len() - 1)
     }
     /// Every combination the present layers make: the pairs, then the triples, then the quad.
+    /// How many times larger than ever the stage has to be to hold every layer where it is placed (each
+    /// layer's shape fits in a ball of 1.4 times its size about its place): 1 while they all lie within
+    /// the stage as it always was, otherwise grown in steps, up to BOX_MAX.
+    pub fn box_k(&self) -> f64 {
+        let need = self
+            .layers
+            .iter()
+            .map(|l| {
+                let p = l.place.pos;
+                ((p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt() + 1.4 * l.place.size.abs()) / STAGE_R
+            })
+            .fold(1.0f64, f64::max);
+        if need <= 1.0 { 1.0 } else { ((need / BOX_STEP).ceil() * BOX_STEP).min(BOX_MAX) }
+    }
     pub fn combos(&self) -> Vec<u8> {
         let all = (1u8 << self.layers.len()) - 1;
         let mut v: Vec<u8> = (1..=all).filter(|m| m.count_ones() >= 2).collect();
@@ -496,7 +520,7 @@ impl Stack {
         let mut c = Combine {
             n, inv: [[0.0; 12]; 4], scale: [1.0; 4], show: [false; 4], morph: [[0.0; 4]; 4], term: [[0.0; 4]; 4], gap: [[0.0; 4]; 4],
             kc: [[0.0; 4]; 4], ku: [[0.0; 4]; 4], prof: [[3; 4]; 4], tfill: [0.0; 4], treach: [0.0; 4], qfill: 0.0, qreach: 0.0,
-            body: [0; 4], bodies: 1,
+            body: [0; 4], bodies: 1, box_k: self.box_k(),
         };
         let bodies = self.bodies();
         c.bodies = bodies.len().max(1);
@@ -656,6 +680,8 @@ pub struct Combine {
     /// which body each layer belongs to, and how many bodies there are
     pub body: [usize; 4],
     pub bodies: usize,
+    /// how many times larger than ever the stage is (`Stack::box_k`)
+    pub box_k: f64,
 }
 
 /// What a body that does not exist reads everywhere (the most a volume stores).
@@ -934,7 +960,7 @@ impl Combine {
         put(40, self.tfill);
         put(41, self.treach);
         put(42, [self.qfill, self.qreach, self.n as f64, res as f64]);
-        put(43, [STAGE_R, STAGE_SOFT, HB, self.bodies as f64]);
+        put(43, [STAGE_R * self.box_k, STAGE_SOFT, HB * self.box_k, self.bodies as f64]);
         for i in 0..4 {
             if let Some(w) = wide[i] { put(44 + i, [w.from, w.to, w.res as f64, 0.0]); }
         }
@@ -1452,7 +1478,20 @@ impl State {
     }
     /// Voxels per side of the combined volume: the finest of the layers'.
     pub fn scene_res(&self, mode: Detail) -> u32 {
-        (0..self.layer_count()).map(|i| self.layer_res(i, mode)).max().unwrap_or(crate::state::RES_FULL)
+        let res = (0..self.layer_count()).map(|i| self.layer_res(i, mode)).max().unwrap_or(crate::state::RES_FULL);
+        // a grown stage at the same detail, as far as memory allows
+        let k = self.box_k();
+        if k == 1.0 { return res; }
+        let cap = if matches!(mode, Detail::Full) { BOX_RES_FULL } else { BOX_RES_ANIM };
+        valid_res((res as f64 * k).min(cap.max(res as f64)))
+    }
+    /// How many times larger than ever the stage is: 1 unless layers are placed far out (`Stack::box_k`).
+    pub fn box_k(&self) -> f64 {
+        self.stack.box_k()
+    }
+    /// The scene's volume spans [-scene_hb, scene_hb] on each axis.
+    pub fn scene_hb(&self) -> f64 {
+        HB * self.box_k()
     }
     /// What the GPU has to build for one layer's shape (see `shape_job`).
     pub fn layer_job(&mut self, layer: usize, mode: Detail, res_override: Option<u32>) -> Result<Job, String> {

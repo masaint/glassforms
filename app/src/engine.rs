@@ -44,9 +44,10 @@ pub const MAX_ACCUM_CLAY: u32 = 96;
 /// great deal from one side to another (a gem's: close, small and bright) would come out white wherever
 /// the shape faces them, its facets lost; those are turned down until the brightest-facing surface is
 /// at CLAY_PEAK, keeping the differences between one facet and the next.
-fn clay_level(matte: &[[f32; 4]; 9]) -> f32 {
+/// The light a white matte surface gathers facing the brightest way (luminance), looked for over
+/// directions spread evenly round the sphere.
+fn matte_peak(matte: &[[f32; 4]; 9]) -> f64 {
     let lum = |c: [f64; 3]| 0.2126 * c[0].max(0.0) + 0.7152 * c[1].max(0.0) + 0.0722 * c[2].max(0.0);
-    // the brightest way to face, looked for over directions spread evenly round the sphere
     const N: usize = 600;
     let mut peak = 0.0f64;
     for i in 0..N {
@@ -55,8 +56,13 @@ fn clay_level(matte: &[[f32; 4]; 9]) -> f32 {
         let turn = i as f64 * 2.399963229728653;
         peak = peak.max(lum(env::sh_eval(matte, [r * turn.cos(), r * turn.sin(), z])));
     }
+    peak
+}
+
+fn clay_level(matte: &[[f32; 4]; 9]) -> f32 {
+    let peak = matte_peak(matte);
     // the shader draws clay * light * (light / average)^contrast
-    let clay = lum([CLAY[0] as f64, CLAY[1] as f64, CLAY[2] as f64]);
+    let clay = 0.2126 * CLAY[0] as f64 + 0.7152 * CLAY[1] as f64 + 0.0722 * CLAY[2] as f64;
     let drawn = clay * peak * (peak / CLAY_LIGHT).powf(CLAY_CONTRAST as f64);
     if drawn <= CLAY_PEAK { 1.0 } else { (CLAY_PEAK / drawn) as f32 }
 }
@@ -119,6 +125,8 @@ pub struct Engine {
     fit_now: f64,
     /// the softened copies of the lights' map are those of the map as it is now painted
     soft_ok: bool,
+    /// what the picture's exposure is multiplied by to expose for a milky body (`meter`; 1 otherwise)
+    meter: f32,
     /// make the bodies' volume even while no body has a material of its own (for checks that read it)
     pub bodies_always: bool,
     /// how thick each body is, measured from the bodies' volume (None: not measured since it was built)
@@ -203,7 +211,7 @@ impl Engine {
         let lights_tex = renderer.env_target(env::ENV_W as u32, env::ENV_H as u32);
         let lights_view = lights_tex.create_view(&wgpu::TextureViewDescriptor::default());
         let mut e = Self {
-            baker: Baker::new(&gpu), layers: LayerWork::new(&gpu), models: crate::mesh_bake::Models::new(auto), bubbler: Bubbler::new(&gpu), stage: crate::stage::StageWork::new(auto), bubbles_in: None, body_bubbles_in: None, scatter: Scatter::new(&gpu), glow: glow::Kept::default(), shape_no: 0, thickness: None, fit_now: 1.0, soft_ok: false, bodies_always: false, body_thick: None, gpu, state, renderer, cast, lights_tex, lights_view, painted: None, painted_px: Vec::new(), lights_lit: true, rig_sh: None, last_lamps: None,
+            baker: Baker::new(&gpu), layers: LayerWork::new(&gpu), models: crate::mesh_bake::Models::new(auto), bubbler: Bubbler::new(&gpu), stage: crate::stage::StageWork::new(auto), bubbles_in: None, body_bubbles_in: None, scatter: Scatter::new(&gpu), glow: glow::Kept::default(), shape_no: 0, thickness: None, fit_now: 1.0, soft_ok: false, meter: 1.0, bodies_always: false, body_thick: None, gpu, state, renderer, cast, lights_tex, lights_view, painted: None, painted_px: Vec::new(), lights_lit: true, rig_sh: None, last_lamps: None,
             maker: Arc::new(OnceLock::new()), picture: None, picture_no: 0, glass: None, glass_from: None, hdri_seen: None, loading: None, next: None, building: false, hdri_error: None, hdri_wait: auto,
             show_wanted: Cell::new(false), show: None, shown: None, lighting_no: 0, last_lu: None,
             dirty: true, cut: true, last_tu: None, last_look: None,
@@ -398,6 +406,8 @@ impl Engine {
             stage: crate::stage::Seen { cast: casting && self.cast.floor, ..crate::stage::StageWork::seen(&self.state) },
             denoise: crate::denoise::wanted(&mat, clay, p.denoise),
             near,
+            // (the box only grows for layers that are combined: one plain layer is where it is built)
+            box_q: if self.state.plain() { 0 } else { (self.state.box_k() * 4.0).round() as u8 },
         };
         // 3. is that tracer built? If not it is being built: carry on as things were
         // (and with the lens that is on: the plain one, or the first ray traced through the camera's own arithmetic)
@@ -465,6 +475,15 @@ impl Engine {
                 lu.nine[9..].copy_from_slice(&env::sh_terms(&sh, SHEEN));
             }
         }
+        // Exposed for a milky body: the lights as a white matte surface gathers them, facing the brightest
+        // way, brought to white (1 before the tone curve: about 230 of 255 after it). Only ever brighter
+        // than set, and at most four times: a rig made for glass is dim for a body that only gathers light.
+        self.meter = 1.0;
+        if v.mat.sss && !clay && self.state.p.meter > 0.5 {
+            let matte = env::sh_terms(&self.lighting_sh(), env::SH_MATTE);
+            let peak = matte_peak(&matte);
+            if peak > 1e-6 { self.meter = (1.0 / peak).clamp(1.0, 4.0) as f32; }
+        }
         if self.last_lu != Some(lu) {
             self.renderer.set_light(&lu);
             self.last_lu = Some(lu);
@@ -520,6 +539,8 @@ impl Engine {
                 for k in 0..material::MAX_BODIES {
                     let o = material::MB_HEAD + k * material::MU_FLOATS + material::MU_PIC;
                     numbers[o..o + 4].copy_from_slice(&[p.hdri_gain as f32, pic.texel as f32, hdri::blur_sigma(p.hdri_blur) as f32, (pic.levels - 1) as f32]);
+                    let sun = material::sun_numbers(&pic.glows, p.hdri_gain);
+                    for (i, at) in material::MU_SUN.iter().enumerate() { numbers[material::MB_HEAD + k * material::MU_FLOATS + at] = sun[i]; }
                 }
             }
             changed |= self.renderer.set_bodies_material(&numbers);
@@ -551,6 +572,8 @@ impl Engine {
             // is, how much it is softened for the glass anyway, and its softest level
             let p = &self.state.p;
             numbers[material::MU_PIC..material::MU_PIC + 4].copy_from_slice(&[p.hdri_gain as f32, pic.texel as f32, hdri::blur_sigma(p.hdri_blur) as f32, (pic.levels - 1) as f32]);
+            let sun = material::sun_numbers(&pic.glows, p.hdri_gain);
+            for (i, at) in material::MU_SUN.iter().enumerate() { numbers[*at] = sun[i]; }
         }
         // what lies inside the body: its numbers, with the width of a pixel at the shape (colour bands and
         // grains finer than a pixel are averaged) and the tint the tracer takes off already
@@ -830,6 +853,7 @@ impl Engine {
         Focus {
             aperture: p.aperture as f32, near: p.fnear.min(p.ffar) as f32, far: p.fnear.max(p.ffar) as f32,
             blades: p.blades as f32, rot: (p.bokeh_rot * DEG) as f32, backdrop: false, floor: self.floor_nearest() as f32,
+            bound: (1.47 * self.state.box_k()) as f32,
             squeeze: p.squeeze.max(1.0) as f32, edge: p.bokeh.clamp(-1.0, 1.0) as f32, eye: p.catseye.clamp(0.0, 1.0) as f32,
             lens: { let c = self.state.camera(); (!c.plain() || p.bokeh != 0.0 || p.catseye > 0.0 || crate::camera::always()).then_some(c) },
         }
@@ -884,7 +908,7 @@ impl Engine {
         let p = &self.state.p;
         Look {
             smooth: p.smooth as f32, spread: p.spread as f32, debug: p.debug as f32,
-            exposure: p.exposure as f32, bloom: p.bloom as f32, vignette: p.vignette as f32, grain: p.grain as f32, raw: p.raw as f32,
+            exposure: p.exposure as f32 * self.meter, bloom: p.bloom as f32, vignette: p.vignette as f32, grain: p.grain as f32, raw: p.raw as f32,
             planes: [p.fnear.min(p.ffar) as f32, p.fnear.max(p.ffar) as f32, if self.planes_shown { 1.0 } else { 0.0 }],
             still_grain: self.auto || self.state.rendering,
             focus: self.focus(),

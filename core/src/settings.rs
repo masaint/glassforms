@@ -222,6 +222,10 @@ settings! {
     /// how differently the colours scatter: 0 = all alike; towards 1 blue is scattered more often and red
     /// less (as in milk glass and wax: a bluish edge, a warm glow deeper in and in the shade)
     sss_spread, "sssSpread", 0.0;
+    /// 1 = with a milky body the picture is exposed for it, as a photographer exposes for the subject: a
+    /// white matte surface facing the brightest way comes to white (never darker than set; glass is not
+    /// affected, as it shows the lights themselves)
+    meter, "meter", 1.0;
     /// how fine the volume is in which the light inside a milky body is worked out: cells along a side
     sss_detail, "sssDetail", 160.0;
     /// bubbles inside the body: how many (0 = none), how large, how evenly (1) or unevenly (0) spread and

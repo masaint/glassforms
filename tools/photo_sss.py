@@ -15,10 +15,11 @@ out = sys.argv[2]
 extra = [a for a in sys.argv[3:] if not a.startswith('only=')]
 only = next((a[5:] for a in sys.argv[3:] if a.startswith('only=')), '')
 os.makedirs(out, exist_ok=True)
-SHAPES = {'thomas': 'scene=attractors preset=thomas dist=4.3', 'teapot': 'scene=models preset=teapot'}
+SHAPES = {'thomas': 'scene=attractors preset=thomas dist=4.3', 'teapot': 'scene=models preset=teapot', 'shell': 'scene=models preset=teapot p.mode=2 p.wall=0.04'}
 LIGHT = {
     'back': 'rig=0,15,14,14,6,6,6,0.6 ambient=0.01,0.01,0.012',
     'front': 'rig=140,35,16,16,3,3,3,0.6:-60,10,30,30,0.25,0.25,0.28,0.8 ambient=0.01,0.01,0.012',
+    'keyback': 'rig=130,30,14,14,2.2,2.2,2.2,0.6:-10,20,16,16,7,6.8,6.4,0.6:-80,5,40,30,0.15,0.15,0.17,0.8 ambient=0.02,0.02,0.024',
 }
 for m, fr in (('milk', 16), ('wax', 16), ('jade', 16), ('porcelain', 16), ('truemilk', 256), ('truejade', 256)):
     for s in SHAPES:

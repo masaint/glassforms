@@ -110,6 +110,9 @@ pub struct Variant {
     pub denoise: bool,
     /// lamps stand in the scene (lamps.rs): every lookup of the lights meets them
     pub near: bool,
+    /// how many quarters larger than ever the stage is (0 or 4: as it always was; layers placed far out
+    /// grow it: core/src/layers.rs `box_k`)
+    pub box_q: u8,
 }
 
 /// How a tracer marches (this differs by family).
@@ -166,6 +169,8 @@ fn tracer_from(template: &str, m: &March, v: Variant, profile: bool) -> String {
         .replace("{{BACKGROUND}}", crate::stage::background(v.stage, v.backdrop))
         .replace("{{SHADE}}", mat.shade)
         .replace("{{GRAZE}}", mat.graze);
+    // a grown stage: the volume spans a larger box, and the ball that holds the scene is larger
+    let src = if v.box_q > 4 { grown(&src, v.box_q as f64 / 4.0) } else { src };
     // the lamps, and then what the bodies cast, are put in last (never into the default tracer)
     let src = if v.near { crate::lamps::weave(&src) } else { src };
     let src = if v.cast { crate::cast::weave(&src).unwrap_or(src) } else { src };
@@ -175,6 +180,13 @@ fn tracer_from(template: &str, m: &March, v: Variant, profile: bool) -> String {
     // a tracer drawn by chance and denoised also writes, beside the picture, the light it found inside
     // the body, which is noisy (the picture then holds the rest: denoise.rs)
     if v.denoise && !profile { denoise::with_split(&src, v.mat.rough_ref) } else { src }
+}
+
+/// A tracer's text for a stage `k` times larger than ever: the volume's box and the ball the scene fits
+/// in, which the tracer holds as constants (so that the tracer of a stage as it always was is unchanged).
+pub fn grown(src: &str, k: f64) -> String {
+    src.replace("const BOUND: f32 = 1.47;", &format!("const BOUND: f32 = {:.6};", 1.47 * k))
+        .replace("const HB: f32 = 1.5;", &format!("const HB: f32 = {:.6};", 1.5 * k))
 }
 
 /// Is the stage for rough glass run after this tracer? Not when the tracer is denoised: then what is

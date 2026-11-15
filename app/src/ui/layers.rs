@@ -438,6 +438,16 @@ fn placement_rows(ui: &mut Ui, st: &mut State, px: &mut Panels, i: usize, as_bui
         if as_built { ui.disable(); }
         if button(ui, place, Id::unique("placement reset"), "reset", false, font.clone()).on_hover_text("this layer back where it is built: centred, unturned, full size").clicked() { st.reset_placement(i); }
     });
+    // down onto the floor, if there is one
+    if st.p.floor > 0.5 {
+        let fword = "to floor";
+        let fsize = button_size(ui, fword, &font, egui::vec2(8.0, 2.0));
+        let fplace = Rect::from_min_size(Pos2::new(r.left(), place.top()), fsize);
+        px.note("placement:floor", fplace);
+        if button(ui, fplace, Id::unique("placement floor"), fword, false, font.clone()).on_hover_text("move this layer straight down (or up) until it stands on the floor").clicked() {
+            px.requests.push(super::Request::ToFloor(i));
+        }
+    }
     // the handles over the picture, for moving, turning and sizing this layer by hand
     let on_layer = px.handles.on && px.handles.lamp.is_none();
     let word = if on_layer { "hide handles" } else { "handles" };

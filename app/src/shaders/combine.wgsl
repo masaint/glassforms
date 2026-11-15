@@ -26,7 +26,8 @@ struct C {
   tfill: vec4f,             // a triple's fill (a distance) and reach, kept under the layer it leaves out
   treach: vec4f,
   q: vec4f,                 // the quad's fill and reach; how many layers; voxels per side of the volume written
-  stage: vec4f,             // the stage's radius and the rounding of its edge; hb; how many bodies
+  stage: vec4f,             // the stage's radius and the rounding of its edge; hb (the scene's: larger than a
+                            // layer's when the layers are placed far out); how many bodies
   wide: array<vec4f, 4>,    // per layer with a wide volume: its own volume is read up to x, the wide one
                             // beyond y, a mix between; z = voxels per side of the wide volume (0 = it has none)
 }
@@ -45,6 +46,7 @@ struct C {
 @group(0) @binding(8) var wide2: texture_3d<f32>;
 @group(0) @binding(9) var wide3: texture_3d<f32>;
 
+const LAYER_HB: f32 = 1.5;          // a layer's own volume spans [-1.5, 1.5] of its own space
 const EMPTY: f32 = 1.0;             // what a body none of whose layers shows reads everywhere
 const ABSENT: f32 = 4.0;            // and a body that does not exist (the most a volume stores)
 const SHARE_WIDTH: f32 = 2.0;       // see layers.rs
@@ -189,7 +191,7 @@ fn layer(t: texture_3d<f32>, tw: texture_3d<f32>, i: u32, p: vec3f) -> f32 {
   let q = vec3f(dot(r0.xyz, p) + r0.w, dot(r1.xyz, p) + r1.w, dot(r2.xyz, p) + r2.w);
   let lim = c.info[i].y;
   let qc = clamp(q, vec3f(-lim), vec3f(lim));
-  let at = qc / (2.0 * c.stage.z) + 0.5;
+  let at = qc / (2.0 * LAYER_HB) + 0.5;
   var d = textureSampleLevel(t, smp, at, 0.0).r;
   let w = c.wide[i];
   if (w.z > 0.0 && d > w.x) {

@@ -140,7 +140,7 @@ pub fn optics_of(p: &Settings, scale: f64) -> Optics {
         return Optics { kind: Kind::Metal, ior: 1.0, disp: 0.0, absorb: [0.0; 3], tint: body, rough };
     }
     if v.sss {
-        let sc = material::scatter(body, p.sss_depth * scale, p.sss);
+        let sc = material::scatter(body, p.sss_depth * crate::material::sss_fit(scale), p.sss);
         return Optics { kind: Kind::Milky, ior: p.ior, disp: 0.0, absorb: sc.kappa, tint: body, rough };
     }
     if v.hollow {

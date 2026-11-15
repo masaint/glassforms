@@ -311,7 +311,7 @@ pub fn uniforms(p: &Settings, scale: f64, pixel: f64, tint: [f64; 3]) -> [f32; I
     put(r + 2, [opal_longest_nm(p.play_colour), soft, 0.0, 0.0]);
     // what the body takes from light on its way to a grain and back, per unit of length: the body's
     // scattering and absorption (as the milky body has them) and the tint, both ways
-    let sc = scatter([p.body_r, p.body_g, p.body_b], p.sss_depth * scale, p.sss);
+    let sc = scatter([p.body_r, p.body_g, p.body_b], p.sss_depth * crate::material::sss_fit(scale), p.sss);
     let lost = [0, 1, 2].map(|i| 2.0 * (if p.sss > 0.0 { sc.sigma_s + sc.sigma_a[i] } else { 0.0 } + tint[i]));
     put(r + 3, [lost[0], lost[1], lost[2], 0.0]);
     put(r + 4, [p.glint_r.clamp(0.0, 1.0), p.glint_g.clamp(0.0, 1.0), p.glint_b.clamp(0.0, 1.0), 0.32]);
@@ -347,7 +347,7 @@ pub fn uniforms(p: &Settings, scale: f64, pixel: f64, tint: [f64; 3]) -> [f32; I
     put(r + 12, [pat.flat, pat.together, pat.patch, GRAIN_R]);
     // (a milky body holds light going every way: about its whiteness times how milky it is, doubled for
     // light that has gone back and forth)
-    let held = if p.sss > 0.0 { 8.0 * p.sss.clamp(0.0, 1.0) * (p.body_r + p.body_g + p.body_b).clamp(0.0, 3.0) / 3.0 } else { 0.0 };
+    let held = if p.sss > 0.0 { 30.0 * p.sss.clamp(0.0, 1.0) * (p.body_r + p.body_g + p.body_b).clamp(0.0, 3.0) / 3.0 } else { 0.0 };
     put(r + 13, [pat.warp, pat.streak, held, 0.0]);
 
     // ---- volume fractures: a few great sheets, more smaller ones, and from 0.45 on a fan of five

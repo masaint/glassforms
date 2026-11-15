@@ -665,6 +665,7 @@ impl App {
                 }
                 Request::RenderVideo => {}
                 Request::CancelVideo => self.cancel_video(),
+                Request::ToFloor(i) => { self.engine.layer_to_floor(i); }
                 Request::Benchmark => {
                     self.px.bench = Bench::Asked;
                     self.bench_in = 2;

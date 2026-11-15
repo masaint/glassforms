@@ -96,6 +96,17 @@ fn seen(rd: vec3f, sig: f32) -> vec3f { return env(rd); }
 //#endif
 
 //#if PICTURE
+// The picture's sun as a mirror sees it along d (in the lights' frame), spread by w radians more: a small
+// bright disc holding all the light the picture's ceiling took off (material.rs: sun_numbers), as a bell
+// on the sphere. (Its numbers ride in the tables' unused fourth places.)
+fn sunGlint(d: vec3f, w: f32) -> vec3f {
+  let e = vec3f(mu.tab[3].w, mu.tab[4].w, mu.tab[5].w);
+  if (e.x + e.y + e.z <= 0.0) { return vec3f(0.0); }
+  let s2 = mu.tab[6].w * mu.tab[6].w + w * w;
+  let a2 = 2.0 * max(1.0 - dot(d, vec3f(mu.tab[0].w, mu.tab[1].w, mu.tab[2].w)), 0.0);
+  return e * (exp(-0.5 * a2 / s2) / (6.2831853 * s2));
+}
+
 // How soft a copy of the environment picture a mirror reads at p, where the surface faces n and the
 // ray met it at cosine c: the level whose softening is as wide as the patch of surroundings that one
 // pixel's worth of surface mirrors. A flat mirror shows the picture pixel for pixel; a curved one
@@ -130,7 +141,7 @@ fn mirrorLod(p: vec3f, n: vec3f, c: f32) -> f32 {
 // small and sharp, and the picture has it.)
 fn mirrorEnv(rd: vec3f, lod: f32) -> vec3f {
   let d = toEnv(rd);
-  var c = textureSampleLevel(pictureTex, pictureSmp, d, lod).rgb * mu.pic.x;
+  var c = textureSampleLevel(pictureTex, pictureSmp, d, lod).rgb * mu.pic.x + sunGlint(d, mu.pic.y * exp2(lod));
   if (mu.film5.y > 0.5) {
     let uv = vec2f(atan2(d.z, d.x) * 0.15915494 + 0.5, acos(clamp(d.y, -1.0, 1.0)) * 0.31830989);
     c += textureSampleLevel(envTex, envSmp, uv, 0.0).rgb;
@@ -249,7 +260,8 @@ fn wearRead(rd: vec3f, lod: f32, sig: f32) -> vec3f {
 //#if PICTURE
   if (mu.more.y > 0.5) {
     let d = toEnv(rd);
-    var c = textureSampleLevel(pictureTex, pictureSmp, d, max(lod, log2(max(sig, 1e-6) / mu.pic.y))).rgb * mu.pic.x;
+    let l = max(lod, log2(max(sig, 1e-6) / mu.pic.y));
+    var c = textureSampleLevel(pictureTex, pictureSmp, d, l).rgb * mu.pic.x + sunGlint(d, max(sig, mu.pic.y * exp2(lod)));
     if (mu.film5.y > 0.5) {
       let uv = vec2f(atan2(d.z, d.x) * 0.15915494 + 0.5, acos(clamp(d.y, -1.0, 1.0)) * 0.31830989);
       c += textureSampleLevel(softTex, softSmp, uv, clamp(select(log2(max(sig, 1e-6) / T0), sig / (2.0 * T0), sig < 2.0 * T0), 0.0, 7.0)).rgb;

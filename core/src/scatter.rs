@@ -45,7 +45,7 @@ impl Medium {
     /// The medium the settings ask for. `scale`: what the material's distances are multiplied by to fit
     /// the shape (`material::fit_scale`).
     pub fn of(p: &Settings, scale: f64) -> Self {
-        let sc = material::scatter([p.body_r, p.body_g, p.body_b], p.sss_depth * scale, p.sss);
+        let sc = material::scatter([p.body_r, p.body_g, p.body_b], p.sss_depth * crate::material::sss_fit(scale), p.sss);
         // (under a full clear coat the body meets the coat, and the coat meets the air: for diffuse light
         // the two together hold in what a bare surface of the body's index would)
         let ior = p.ior.max(1.0);
@@ -54,7 +54,7 @@ impl Medium {
         // directions that can leave is that much narrower); so the two shares are tied together, and a
         // body that absorbs nothing gives back exactly what arrives.
         let back = 1.0 - enters / (ior * ior);
-        let (sig_s, sig_a) = material::scatter_rgb([p.body_r, p.body_g, p.body_b], p.sss_depth * scale, p.sss, p.sss_spread);
+        let (sig_s, sig_a) = material::scatter_rgb([p.body_r, p.body_g, p.body_b], p.sss_depth * crate::material::sss_fit(scale), p.sss, p.sss_spread);
         let _ = sc;
         Self { sig_s, sig_a, hold: (1.0 + back) / (1.0 - back), enters, ior, mottle: p.mottle.clamp(0.0, 1.0) }
     }

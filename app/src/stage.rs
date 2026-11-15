@@ -207,8 +207,8 @@ impl Lowest {
 
     /// How far the shape in `vol` reaches along `d` (a unit vector in the shape's own frame), from the
     /// middle of the volume. None if the volume holds no shape. Waits for the GPU.
-    pub fn reach(&self, vol: &Volume, d: [f64; 3]) -> Option<f64> {
-        let asked = self.ask(vol, d, false);
+    pub fn reach(&self, vol: &Volume, d: [f64; 3], hb: f64) -> Option<f64> {
+        let asked = self.ask(vol, d, false, hb);
         self.gpu.wait();
         asked.answer(&self.gpu).flatten()
     }
@@ -216,10 +216,11 @@ impl Lowest {
     /// The same, asked for now and answered later (see `Asked::answer`): the GPU is handed the work and
     /// nothing waits for it. `quick`: on a grid half as fine (an eighth of the work), for a shape that
     /// is tipping and will be measured again in a moment.
-    pub fn ask(&self, vol: &Volume, d: [f64; 3], quick: bool) -> Asked {
+    /// `hb`: the volume spans [-hb, hb] (larger than ever when the layers are placed far out).
+    pub fn ask(&self, vol: &Volume, d: [f64; 3], quick: bool, hb: f64) -> Asked {
         let gpu = &self.gpu;
         let n = vol.res.min(if quick { LOW_N_MOVING } else { LOW_N });
-        let width = 2.0 * gf_core::HB;
+        let width = 2.0 * hb;
         let spacing = width / n as f64;
         // samples up to one and a half spacings outside the surface and two inside: there is always one
         // of them beside any point of the surface, and that near the surface every volume's distances
@@ -448,13 +449,14 @@ impl Engine {
                     // (a frame of a video is waited for, like a still; and so is the first measurement of
                     // all, when there is nothing to go on meanwhile)
                     let wait = self.stage.wait || self.state.rendering || self.stage.measured.is_none();
+                    let hb = self.state.scene_hb();
                     match (self.scene_volume(), &self.stage.lowest) {
                         (Some(vol), Some(low)) if wait => {
-                            self.stage.measured = Some((key.0, key.1, low.reach(vol, down)));
+                            self.stage.measured = Some((key.0, key.1, low.reach(vol, down, hb)));
                             self.stage.rough = false;
                         }
                         // (no more than a few on their way at once: a shape that tips every frame asks every frame)
-                        (Some(vol), Some(low)) => if self.stage.asked.len() < 4 { self.stage.asked.push((key, tipping, low.ask(vol, down, tipping))); },
+                        (Some(vol), Some(low)) => if self.stage.asked.len() < 4 { self.stage.asked.push((key, tipping, low.ask(vol, down, tipping, hb))); },
                         _ => self.stage.measured = Some((key.0, key.1, None)),
                     }
                     self.stage.measures += 1;
@@ -493,6 +495,35 @@ impl Engine {
             if t > 0.0 && t.is_finite() { best = best.min(t); }
         }
         if best == f64::MAX { 0.0 } else { best }
+    }
+
+    /// Move layer i straight up or down in the room until its lowest point touches the floor (measured
+    /// from the layer's own volume, as the floor is from the scene's). False if there is no floor, or
+    /// nothing to measure.
+    pub fn layer_to_floor(&mut self, i: usize) -> bool {
+        let Some(h) = self.stage.height() else { return false };
+        if i >= self.state.layer_count() { return false; }
+        if self.stage.lowest.is_none() { self.stage.lowest = Some(Lowest::new(&self.gpu)); }
+        let pl = self.state.stack.layers[i].place;
+        let size = if pl.size != 0.0 { pl.size } else { 1.0 };
+        let r = self.state.r;
+        let rt = gf_core::math::transpose(&r);
+        let turn = gf_core::math::euler(pl.rot[0], pl.rot[1], pl.rot[2]);
+        // the room's down, in the layer's own frame
+        let down = gf_core::math::apply(&gf_core::math::transpose(&turn), gf_core::math::apply(&rt, [0.0, -1.0, 0.0]));
+        let (Some(vol), Some(low)) = (self.baker.layer_volume(i), self.stage.lowest.as_ref()) else { return false };
+        let Some(reach) = low.reach(vol, down, gf_core::HB) else { return false };
+        // its lowest point's height in the room now, and the move up the room's vertical that sets it on the floor
+        let centre = gf_core::math::apply(&r, pl.pos)[1];
+        let dy = h - (centre - reach * size);
+        if std::env::var("GLASSFORMS_FLOOR_DEBUG").is_ok() { eprintln!("to floor: layer {i} reach {reach} size {size} centre {centre} floor {h} move {dy} down {down:?}"); }
+        let up = gf_core::math::apply(&rt, [0.0, 1.0, 0.0]);
+        let pos = [pl.pos[0] + up[0] * dy, pl.pos[1] + up[1] * dy, pl.pos[2] + up[2] * dy];
+        for (c, k) in self.state.place_knobs(i).into_iter().enumerate().take(3) {
+            let v = pos[c].clamp(k.lo, k.hi);
+            self.state.user_set(&k, v, false);
+        }
+        true
     }
 
     /// Where the floor stands in the room (its height above the middle of the shape, so below it is

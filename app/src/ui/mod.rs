@@ -64,6 +64,8 @@ pub enum Request {
     LoadPicture,
     /// choose a model's file in a dialog
     LoadModel,
+    /// set the layer at this place in the list down on the floor
+    ToFloor(usize),
 }
 
 /// What the window knows of the lighting that the state does not say: the engine's doing.

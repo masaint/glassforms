@@ -9,7 +9,6 @@
 use bytemuck::{Pod, Zeroable};
 
 use gf_core::cast::{self as core, Caster, Kind, MAX_BODIES};
-use gf_core::HB;
 
 use crate::gpu::*;
 
@@ -20,7 +19,18 @@ const RESOLVE_WGSL: &str = include_str!("shaders/cast_resolve.wgsl");
 /// The shader that turns landed light into arriving light. `storage16`: a compute shader can write a
 /// volume of 16-bit floats on this device (else the areas are kept in 32-bit ones).
 pub fn resolve_source(storage16: bool) -> String {
-    RESOLVE_WGSL.replace("{{AREA}}", if storage16 { "r16float" } else { "r32float" })
+    // (the box the volumes span is told, not fixed: it grows when the layers are placed far out)
+    RESOLVE_WGSL.replace("{{AREA}}", if storage16 { "r16float" } else { "r32float" }).replace("const HB: f32 = 1.5;", "").replace("HB", "ru.k.z")
+}
+
+/// The shader that follows the lights' rays and lands their light, with the box the volumes span told
+/// rather than fixed (lu.body[0].tint.w: it grows when the layers are placed far out).
+pub fn light_source() -> String {
+    LIGHT_WGSL
+        .replace("const HB: f32 = 1.5;", "")
+        .replace("const BOUND: f32 = 1.47;", "")
+        .replace("BOUND", "(lu.body[0].tint.w * 0.98)")
+        .replace("HB", "lu.body[0].tint.w")
 }
 
 /// Rays a side of the grid sent from one light at most: when the picture is at rest, and while things move.
@@ -126,6 +136,8 @@ pub struct Scene<'a> {
     pub coarse: &'a wgpu::TextureView,
     pub coarse_res: u32,
     pub floor: Option<FloorIn>,
+    /// the volumes span [-hb, hb] (larger than ever when the layers are placed far out)
+    pub hb: f64,
 }
 
 /// What was last made, and from what.
@@ -235,7 +247,7 @@ impl Caustics {
         let l_area = gpu.bind_layout("cast: area", &[out(0, area_format, d3)]);
         let l_resolve = gpu.bind_layout("cast: resolve", &[storage_ro(1), tex(2, d3), tex(3, d3), out(4, rgba, d3)]);
         let l_floor = gpu.bind_layout("cast: floor", &[storage_ro(1), tex(5, d2), out(6, rgba, d2)]);
-        let light = gpu.shader("cast: light", LIGHT_WGSL, false);
+        let light = gpu.shader("cast: light", &light_source(), false);
         let resolve = gpu.shader("cast: resolve", &resolve_source(gpu.storage16), false);
         let pipe = |label, module: &wgpu::ShaderModule, entry, layouts: &[Option<&wgpu::BindGroupLayout>]| {
             let layout = gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some(label), bind_group_layouts: layouts, immediate_size: 0 });
@@ -383,7 +395,7 @@ impl Caustics {
     pub fn run(&mut self, scene: &Scene, lights: &[OneU], weights: &[f64], rest: bool, timed: bool) -> (bool, bool) {
         let fresh = self.size_to(scene.res, scene.floor.map_or(0, |f| f.res));
         let res = scene.res;
-        let h0 = 2.0 * HB / res as f64;
+        let h0 = 2.0 * scene.hb / res as f64;
         let n_levels = self.levels.len() as u32;
 
         // the bodies, as light meets them
@@ -426,6 +438,8 @@ impl Caustics {
         // landed light is counted in whole numbers against the brightest light
         let brightest = lights.iter().map(|l| l.rgb[0].max(l.rgb[1]).max(l.rgb[2])).fold(0.0f32, f32::max).max(1e-20);
         u.soft = [LONE_LEVEL, 1.0 / brightest, scene.coarse_res as f32, 0.0];
+        // (the box the volumes span, where nothing else is kept: it grows when the layers are placed far out)
+        u.body[0].tint[3] = scene.hb as f32;
         // where each band's light lands between the ends of the spectrum: by its bending, which goes with
         // one over the wavelength squared
         let bend = |lam: f64| 1.0 / (lam * lam);
@@ -437,7 +451,7 @@ impl Caustics {
             let lam = 400.0 + 300.0 * (i as f64 + 0.5) / 16.0;
             u.bands[i] = [b[0] as f32, b[1] as f32, b[2] as f32, ((bend(lam) - bend(400.0)) / (bend(700.0) - bend(400.0))) as f32];
         }
-        ru.k = [(OFF_SURFACE * h0) as f32, brightest, 0.0, 0.0];
+        ru.k = [(OFF_SURFACE * h0) as f32, brightest, scene.hb as f32, 0.0];
 
         // made already from exactly this? (the number of rays apart)
         let lights = &lights[..lights.len().min(core::MAX_CAUSTIC_LIGHTS)];

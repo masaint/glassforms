@@ -49,6 +49,8 @@ pub struct Focus {
     /// a floor lies under the shape: the nearest it comes to the lens within the picture, measured along
     /// the line of sight (0 = there is no floor)
     pub floor: f32,
+    /// the radius of the ball the scene fits in (larger when layers are placed far out)
+    pub bound: f32,
     /// an anamorphic lens: blurred points are this many times taller than wide (1 = an ordinary lens)
     pub squeeze: f32,
     /// blurred points with a bright rim (towards 1) or a bright core (towards -1); 0 = evenly lit
@@ -62,7 +64,7 @@ pub struct Focus {
 }
 
 impl Focus {
-    pub const OFF: Focus = Focus { aperture: 0.0, near: 0.0, far: 0.0, blades: 0.0, rot: 0.0, backdrop: false, floor: 0.0, squeeze: 1.0, edge: 0.0, eye: 0.0, lens: None };
+    pub const OFF: Focus = Focus { aperture: 0.0, near: 0.0, far: 0.0, blades: 0.0, rot: 0.0, backdrop: false, floor: 0.0, bound: BOUND, squeeze: 1.0, edge: 0.0, eye: 0.0, lens: None };
     pub fn on(&self) -> bool {
         self.aperture > 0.0
     }
@@ -500,7 +502,7 @@ impl Dof {
         let zn = (dist + f.near.min(f.far)).max(0.02);
         let zf = (dist + f.near.max(f.far)).max(zn);
         // the most blur there can be: at the two ends of the sphere the object fits in
-        let (mut z0, mut z1) = ((dist - BOUND).max(0.02), dist + BOUND);
+        let (mut z0, mut z1) = ((dist - f.bound).max(0.02), dist + f.bound);
         // (a floor comes nearer than the shape, as near as the picture's lower edge shows it, and runs
         // on to the horizon)
         if f.floor > 0.0 { (z0, z1) = (z0.min(f.floor.max(0.02)), f32::INFINITY); }

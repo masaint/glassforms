@@ -508,7 +508,8 @@ impl Engine {
         // the object sees it
         let cam_to_obj = transpose(&self.state.view_r());
         let to_obj = mul(&cam_to_obj, &self.state.light_m());
-        let h = 2.0 * HB / BODIES_RES as f64;
+        let hb = self.state.scene_hb();
+        let h = 2.0 * hb / BODIES_RES as f64;
         // Caustics: only while a body focuses light and something can show it. The volumes of arriving
         // light are for the bodies that gather light; with only a floor to show it they are kept tiny.
         let receives = |c: &Caster| matches!(c.optics.kind, Kind::Matte | Kind::Milky);
@@ -521,7 +522,7 @@ impl Engine {
         let all: f64 = lit.lights.iter().map(|l| l.weight()).sum();
         let n = lit.lights.iter().take(MAX_LIGHTS).take_while(|l| l.weight() > 0.01 * all).count();
         u.k = [n as f32, p.cast_caustics as f32, (0.75 * h) as f32, (0.6 * h) as f32];
-        u.k2 = [if focusing && bodies_gather { light_res as f32 } else { 0.0 }, (crate::cast_light::OFF_SURFACE * 2.0 * HB / light_res as f64) as f32, 0.0, 0.0];
+        u.k2 = [if focusing && bodies_gather { light_res as f32 } else { 0.0 }, (crate::cast_light::OFF_SURFACE * 2.0 * hb / light_res as f64) as f32, 0.0, 0.0];
         for k in 0..9 {
             u.total[k] = [lit.total[k][0] as f32, lit.total[k][1] as f32, lit.total[k][2] as f32, 0.0];
         }
@@ -608,7 +609,7 @@ impl Engine {
                 ones.push(OneU {
                     dir: [d[0] as f32, d[1] as f32, d[2] as f32, core::taken_angle(l, p.cast_soft).tan() as f32],
                     // the grid of rays covers the whole scene (nothing lies further out than 1.47)
-                    u: [uo[0] as f32, uo[1] as f32, uo[2] as f32, 1.47],
+                    u: [uo[0] as f32, uo[1] as f32, uo[2] as f32, (1.47 * hb / HB) as f32],
                     v: [vo[0] as f32, vo[1] as f32, vo[2] as f32, 0.0],
                     rgb: [(l.rgb[0] * b) as f32, (l.rgb[1] * b) as f32, (l.rgb[2] * b) as f32, 0.0],
                 });
@@ -616,7 +617,7 @@ impl Engine {
             }
             let m = self.state.march();
             let Some((_, coarse)) = self.cast.bodies.as_ref() else { return false };
-            let scene = Scene { fine: &fine, fine_res, count, built, casters, march: (m.0, m.1, m.2), res: light_res, coarse, coarse_res: BODIES_RES, floor: floor_in };
+            let scene = Scene { fine: &fine, fine_res, count, built, casters, march: (m.0, m.1, m.2), res: light_res, coarse, coarse_res: BODIES_RES, floor: floor_in, hb };
             // (a video's frames, and frames averaged for a still, are each made in full)
             let rest = self.state.rendering || self.averaging;
             let (made, fresh) = self.cast.caustics.run(&scene, &ones, &weights, rest, timed());

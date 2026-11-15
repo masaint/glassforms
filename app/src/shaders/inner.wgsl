@@ -212,6 +212,10 @@ struct Crack {
 // part (it turns at a mirror, and passes through a face that mostly transmits) and the smaller part is
 // read at once from the lights in the direction it would have gone. Light is neither made nor lost.
 fn cracks(pos: vec3f, dir: vec3f, s: f32, n: f32) -> Crack {
+//#if CRACK_DEPTH
+  // cracks kept near the surface are a net running in from it
+  if (iu.crackB.z < 1e8) { return crackleNet(pos, dir, s, n); }
+//#endif
   var out: Crack;
   out.t = -1.0;
   out.dir = dir;
@@ -429,6 +433,128 @@ fn cracks(pos: vec3f, dir: vec3f, s: f32, n: f32) -> Crack {
   return out;
 }
 
+// ---- crackle: a network of cracks running in from the surface ----
+// Glass plunged hot into water (ice glass, crackle) breaks into a net of small polygons all over its
+// surface: each crack a short wall standing upright in the glass, meeting its neighbours, reaching only a
+// little way in. Here the surface is divided into cells, each place belonging to the nearest of scattered
+// centres measured along the surface only (the distance across the wall is left out), so the walls
+// between cells stand upright to it and join into a net. A ray near the surface is looked at in a row of
+// places; where the nearest centre changes it has crossed a wall, met exactly (the plane halfway between
+// the two centres). Most walls hold a crack, some do not, and each is held open in patches.
+struct NetCell {
+  h: u32,
+  p: vec3f,
+}
+fn netNearest(x: vec3f, nrm: vec3f, seed: u32) -> NetCell {
+  let b = vec3i(floor(x - 0.5));
+  var best = 1e9;
+  var r: NetCell;
+  r.h = 0u;
+  r.p = x;
+  for (var i = 0; i < 8; i++) {
+    let cc = b + vec3i(i & 1, (i >> 1) & 1, (i >> 2) & 1);
+    let hh = cellHash(cc, seed);
+    let sp = vec3f(cc) + 0.5 + (ten3(hh) - 0.5) * 0.8;
+    var dd = x - sp;
+    dd -= nrm * dot(dd, nrm);
+    let d2 = dot(dd, dd);
+    if (d2 < best) {
+      best = d2;
+      r.h = hh;
+      r.p = sp;
+    }
+  }
+  return r;
+}
+
+// the surface's outward direction about o (the shape's own frame), from four reads of the distance
+fn netNormal(o: vec3f) -> vec3f {
+  let hs = 0.01;
+  let k = vec2f(1.0, -1.0);
+//#if BODIES
+  let g = k.xyy * mapOB(o + k.xyy * hs) + k.yyx * mapOB(o + k.yyx * hs) + k.yxy * mapOB(o + k.yxy * hs) + k.xxx * mapOB(o + k.xxx * hs);
+//#else
+  let g = k.xyy * map(o + k.xyy * hs) + k.yyx * map(o + k.yyx * hs) + k.yxy * map(o + k.yxy * hs) + k.xxx * map(o + k.xxx * hs);
+//#endif
+  return g / max(length(g), 1e-9);
+}
+fn netDepth(o: vec3f) -> f32 {
+//#if BODIES
+  return -mapOB(o);
+//#else
+  return -map(o);
+//#endif
+}
+
+const NET_N: i32 = 12;
+fn crackleNet(pos: vec3f, dir: vec3f, s: f32, n: f32) -> Crack {
+  var out: Crack;
+  out.t = -1.0;
+  out.dir = dir;
+  out.keep = vec3f(1.0);
+  out.light = vec3f(0.0);
+  let cells = iu.crackA.x;
+  let o = toObj(pos);
+  let d = toObj(dir);
+  let depth = iu.crackB.z;
+  let seed = u32(iu.crackB.w) * 2654435761u + 4321u;
+  let off = iu.crackB.w * vec3f(17.13, 7.77, 3.31);
+  let pxs = iu.crackC.z / cells;
+  // the two ends of the stretch lie at the surface: near each the net is looked for
+  for (var end = 0; end < 2; end++) {
+    let at = select(0.0, s, end == 1);
+    let nrm = netNormal(o + d * at);
+    let cd = max(abs(dot(d, nrm)), 0.15);
+    let reach = min(depth * 1.3 / cd, s * 0.5);
+    let t0 = select(0.0, s - reach, end == 1);
+    let step = reach / f32(NET_N);
+    let nl = toLat(nrm);
+    var prev = netNearest(toLat(o + d * t0) * cells + off, nl, seed);
+    for (var k = 1; k <= NET_N; k++) {
+      let tk = t0 + step * f32(k);
+      let cur = netNearest(toLat(o + d * tk) * cells + off, nl, seed);
+      if (cur.h == prev.h) { continue; }
+      let a = prev;
+      prev = cur;
+      // most walls hold a crack
+      let ph = ihash(min(a.h, cur.h) ^ ihash(max(a.h, cur.h)));
+      if (unit1(ph) >= iu.crackA.y) { continue; }
+      // the wall: halfway between the two centres, upright to the surface
+      var m = cur.p - a.p;
+      m -= nl * dot(m, nl);
+      m = normalize(m);
+      let mid = 0.5 * (a.p + cur.p);
+      let x0 = toLat(o) * cells + off;
+      let xd = toLat(d) * cells;
+      let den = dot(xd, m);
+      if (abs(den) < 1e-6) { continue; }
+      let th = dot(mid - x0, m) / den;
+      if (th <= tk - step - 1e-5 || th > tk + 1e-5 || th <= 2e-3 / cells) { continue; }
+      // how deep it reaches: the crack fades out at its depth, ragged
+      let hp = o + d * th;
+      let dep = netDepth(hp);
+      let lp = toLat(hp) * cells + off;
+      let ragged = depth * (0.55 + 0.45 * vnoise2(vec2f(dot(lp, cross(m, nl)), dot(lp, nl)) * 2.0, ph));
+      let edge = 1.0 - dep / max(ragged, 1e-6);
+      if (edge <= 0.0) { continue; }
+      // the gap: widest at the surface, held open in patches along the wall
+      let along = vec2f(dot(lp, cross(m, nl)), dot(lp, nl));
+      let mot = smoothstep(0.25, 0.6, vnoise2(along * 1.7, ph + 1u));
+      let prof = sqrt(min(edge * 2.0, 1.0));
+      let wide = iu.crackB.x * (0.5 + unit1(ihash(ph + 2u)));
+      let gap = wide * prof * mot;
+      let mw = fromLat(m);
+      let ci = abs(dot(d, mw));
+      let dgap = wide * pxs * 4.0 / max(ci, 0.3);
+      let R = crackR(ci, gap, n, dgap);
+      let back = fromObj(reflect(d, mw));
+      let ext = exp(-u.absorb.xyz * th);
+      if (faceCross(&out, th, R, vec3f(0.0), crackSeen(back), vec3f(0.0), crackSeen(dir), back, ext)) { return out; }
+    }
+  }
+  return out;
+}
+
 // ---- what a crossing of a crack's face does to the path ----
 // R: what the face mirrors; V: what its veil sends back as light from all round; back: the mirrored
 // direction; ext: what the tint has taken on the way there. The path goes with the larger part (it
@@ -449,10 +575,10 @@ fn faceCross(out: ptr<function, Crack>, tt: f32, R: vec3f, V: vec3f, mirror: vec
   return false;
 }
 
-// the lights as a fracture's face mirrors them: a little softened, so a flash is not a single point
-fn fracSeen(d: vec3f) -> vec3f {
+// the lights as a fracture's face mirrors them: a little softened (soft, radians), so a flash is not a single point
+fn fracSeen(d: vec3f, soft: f32) -> vec3f {
 //#if ENVL
-  return envL(d, max(iu.crackC.x, 0.04));
+  return envL(d, max(iu.crackC.x, soft));
 //#else
   return env(d);
 //#endif
@@ -516,6 +642,9 @@ fn sheetOf(i: i32) -> Sheet {
   let rr = select(0.85, 0.6, big) * pow(r1.z, 0.6) * rs;
   sh.c = sphereDir(r2.xy) * rr;
   sh.a = sphereDir(r1.xy);
+  // in ice (rough faces) the sheets stand upright, across the frozen surface, as lake ice cracks
+  let upr = smoothstep(0.3, 0.6, iu.crackC.y);
+  if (upr > 0.0) { sh.a = normalize(sh.a - vec3f(0.0, sh.a.y * 0.92 * upr, 0.0)); }
   sh.e1 = across1(sh.a);
   sh.e2 = across2(sh.a);
   sh.r = rs * select(0.16 + 0.32 * r2.z, 0.55 + 0.55 * r2.z, big);
@@ -526,6 +655,8 @@ fn sheetOf(i: i32) -> Sheet {
   // the kind: in glass (curve high) no cleavage
   let kk = unit1(ihash(h + 5u));
   sh.kind = select(select(2, 1, kk < 0.72), 0, kk < 0.36);
+  // (a crystal's great sheets split along its planes as often as not)
+  if (big && unit1(ihash(h + 6u)) < 0.5) { sh.kind = 2; }
   if (sh.kind == 2 && curve > 0.5) { sh.kind = 0; }
   if (sh.kind == 2) {
     sh.k1 *= 0.15;
@@ -644,9 +775,9 @@ fn fractures(pos: vec3f, dir: vec3f, s: f32, n: f32) -> Crack {
     var wide = gapw * (0.35 + 1.15 * rq.x);
     if (sh.kind == 2) {
       open = clamp(0.55 + 1.3 * (sw - 0.5), 0.0, 1.0);
-      wide = min(wide, 900.0) * 0.6;
+      wide = min(wide, 1500.0);
     } else {
-      open = smoothstep(0.3, 0.62, sw);
+      open = mix(smoothstep(0.3, 0.62, sw), clamp(0.5 + 1.4 * (sw - 0.5), 0.0, 1.0), 1.0 - smoothstep(1200.0, 3000.0, wide));
       if (sh.kind == 1) { open *= 0.35 * smoothstep(0.55, 0.75, fbm2(xf * 3.1, sd + 13u)); }
     }
     // feathers at the rim: the sheet frays into streaks running out from its middle
@@ -669,13 +800,28 @@ fn fractures(pos: vec3f, dir: vec3f, s: f32, n: f32) -> Crack {
     let dopen = length(vec2f(sx - sw, sy - sw)) / hs * select(2.5, 1.3, sh.kind == 2) * g;
     let dgap = wide * ((1.0 - ee) / max(prof, 0.03) * 3.0 * open + prof * dopen) * px;
     var R = crackR(ci, gap, n, dgap);
+    // A gap thinner than a micron or so shows its colours in every light of a bright room: the faces
+    // are never quite flat, so they gather light from a spread of directions, and next to the plain
+    // glass around them the colours read strongly. The softened lights stand for the first, and the
+    // colour is drawn out and brightened for the second (looks first: a dark studio has too little
+    // light round about for the exact figure to show the bands a photograph does).
+    // (not past the critical angle: there the faces mirror nearly everything, whatever the gap)
+    let crit = sqrt(max(1.0 - 1.0 / (n * n), 0.0));
+    let thin = (1.0 - smoothstep(1200.0, 3000.0, wide)) * open * smoothstep(crit, crit + 0.06, ci);
+    if (thin > 0.0) {
+      let lum = dot(R, vec3f(0.2126, 0.7152, 0.0722));
+      let vivid = max(vec3f(lum) + (R - vec3f(lum)) * 4.0, vec3f(0.0)) * 3.5;
+      R = clamp(mix(R, vivid, thin), vec3f(0.0), vec3f(0.95));
+    }
     // the veil: fluid inclusions in fingerprint lines (healed sheets, and the rough faces of open
     // ones); fine dots that a pixel cannot tell apart are taken at their average
     var V = vec3f(0.0);
     // a rough face: a white veil in soft streaks and feathers, as in ice
     if (iu.crackC.y > 0.0) {
       let streaky = smoothstep(0.3, 0.7, fbm2(vec2f(xf.x * 1.2, xf.y * 5.0) + 1.5 * jag, sd + 29u));
-      V = vec3f(iu.crackC.y * 0.6 * prof * (0.35 + 0.65 * streaky));
+      // (a thin layer of scatterers: faint seen face on, dense seen edge on)
+      let k = iu.crackC.y * prof * (0.1 + 0.9 * streaky * streaky);
+      V = vec3f(0.85 * (1.0 - exp(-0.35 * k / max(ci, 0.04))));
     }
     if (sh.kind == 1) {
       let xs = xf * (sh.r / (0.1 * rs));
@@ -691,7 +837,7 @@ fn fractures(pos: vec3f, dir: vec3f, s: f32, n: f32) -> Crack {
     R *= 1.0 - V;
     let back = fromObj(reflect(d, nl));
     let ext = exp(-u.absorb.xyz * tt);
-    if (faceCross(&out, tt, R, V, fracSeen(back), crackAll(back), crackSeen(dir), back, ext)) { break; }
+    if (faceCross(&out, tt, R, V, fracSeen(back, 0.04 + 0.1 * thin), crackAll(back), crackSeen(dir), back, ext)) { break; }
   }
   return out;
 }
@@ -850,7 +996,7 @@ fn grains(pos: vec3f, dir: vec3f, s: f32) -> Play {
     // the spacing of the domain's spheres: one domain runs to reds, its neighbour only to greens and
     // blues (lit places of one domain share a hue, since for a given light and eye every lit place
     // meets them at the same angle)
-    let spacing = 0.74 + 0.3 * rq.x;
+    let spacing = 0.76 + 0.38 * rq.x;
     // the layers bending slowly through the domain
     let ph = 6.2831853 * rq;
     let bend = vec2f(sin(0.45 * xw.x + 0.3 * xw.z + ph.x) + 0.5 * sin(0.8 * xw.y + ph.y), sin(0.4 * xw.z - 0.35 * xw.y + ph.z) + 0.5 * sin(0.7 * xw.x + ph.x));
@@ -895,8 +1041,7 @@ fn grains(pos: vec3f, dir: vec3f, s: f32) -> Play {
       if (lam < 425.0 || lam > 715.0) { continue; }
       let rho = clamp(specW(lam) * iu.white.rgb * (iu.white.w * iu.playB.w), vec3f(0.0), vec3f(1.0)) * share;
       let got = rho * envL(reflect(dir, gw), iu.playC.y);
-      // (the first set stands first: a place lit by nothing but the light inside the body shows its colour)
-      let y = dot(got, vec3f(0.2126, 0.7152, 0.0722)) + select(0.0, 1e-4, j == 0);
+      let y = dot(got, vec3f(0.2126, 0.7152, 0.0722));
       if (y > bestY) {
         bestY = y;
         best = got;
@@ -904,9 +1049,18 @@ fn grains(pos: vec3f, dir: vec3f, s: f32) -> Play {
       }
     }
     // A milky body is full of light going every way, scattered within it; the stacking sends back its
-    // band of that too, so in white opal the colour shows even where no light outside is mirrored.
-    out.light += out.keep * (best + bestRho * iu.playF.z * inside) * vis;
-    out.keep *= 1.0 - bestRho * vis;
+    // band of that too, so in white opal the colour shows even where no light outside is mirrored. That
+    // light meets the layers at every angle; what a flake shows of it is taken at an angle of its
+    // domain's own (so whole domains glow orange, green or blue, not all the longest colour, red).
+    var rhoIn = vec3f(0.0);
+    if (iu.playF.z > 0.0) {
+      let lamIn = iu.playC.x * spacing * (0.62 + 0.3 * rp.x + 0.06 * gh.z);
+      if (lamIn >= 425.0 && lamIn <= 715.0) {
+        rhoIn = clamp(specW(lamIn) * iu.white.rgb * (iu.white.w * iu.playB.w), vec3f(0.0), vec3f(1.0)) * share;
+      }
+    }
+    out.light += out.keep * (best + rhoIn * iu.playF.z * inside) * vis;
+    out.keep *= 1.0 - max(bestRho, rhoIn) * vis;
   }
   return out;
 }
