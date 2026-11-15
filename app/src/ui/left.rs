@@ -1,7 +1,7 @@
-//! The left panel: how it looks, in three sections, each the everyday part of one scope whose whole is in a
-//! floating window: the material (what each body is made of; the materials lab), the light (the
-//! surroundings and the lights; the light room), the picture (the camera, the output, quality and video;
-//! the camera window).
+//! The left panel: how it looks, a section for each thing, each wholly in one place: the material (what the
+//! selected body is made of), the light (all of it in the light room, which it opens), the camera
+//! (everything a photographer calls the camera's), the renderer's quality, and the output (the files
+//! written: stills, setups, video).
 
 use eframe::egui::{self, Align2, Id, Ui};
 use gf_core::anim::js_round;
@@ -41,47 +41,52 @@ pub fn show(ui: &mut Ui, st: &mut State, px: &mut Panels) {
 
         material::group(ui, st, px, &knobs);
 
-        // the light: everything about it is in the light room; here only the one-press things
-        if px.group(ui, "light", "light", "") {
-            let (resp, at) = wide_button(ui, Id::unique("light room"), "light room…", px.store.room_open);
-            px.note("room button", at);
-            if resp.on_hover_text("the studio, every light, the light from everywhere, an environment picture, shadows, how the whole set is turned · key L").clicked() {
-                px.store.room_open = !px.store.room_open;
-            }
-            // a studio in one press: its lights, backdrop, floor and tone
-            studio::studio_menu(ui, st, px);
-            // how bright whatever lights the shape is: the environment picture, the lights, or both
-            if st.hdri.is_some() { knob::knob_row(ui, st, k("hdriGain"), px); }
-            if room::lights_lit(st) { knob::knob_row(ui, st, k("lightGain"), px); }
-            // shadows and caustics: off, as each body says, or all (how strong and how fine: the light room)
-            studio::cast_row(ui, st, px);
-        }
+        // the light: all of it is in the light room (it needs the room its picture of the lighting takes);
+        // here only its name, what it is set to, and the way in
+        light(ui, st, px);
 
+        // the camera: all of it, as a photographer would group it
+        camera::section(ui, st, px);
+
+        // how finely the renderer draws and builds (the renderer's, not the camera's)
+        let says = format!("{} · {}³", ["no denoise", "denoised", "denoised · glass"][(js_round(st.p.get("denoise").unwrap_or(1.0)).max(0.0) as usize).min(2)], st.shape().res);
+        if px.group(ui, "quality", "quality", &says) {
+            for name in ["smooth", "scale", "ns", "nw", "nb"] { knob::knob_row(ui, st, k(name), px); }
+            denoise(ui, st, px);
+            let samples: Vec<(u32, String)> = vec![(8, "8 (draft)".into()), (16, "16".into()), (32, "32".into()), (64, "64".into()), (128, "128 (slow)".into())];
+            if let Some(v) = pick_value(ui, "video samples", "video samples", &samples, &st.render.samples) { st.render.samples = v; }
+            gap(ui, 3.0);
+            right::detail_rows(ui, st, px);
+        }
     });
 
-    // the picture: how the scene is photographed and delivered. Its everyday part here; the whole camera
-    // in the camera window. (The video's own sub-group is not greyed while a video renders: its cancel
-    // button is inside.)
-    let says = camera::brief(st, px.aspect);
-    if px.group(ui, "picture", "picture", &says) {
+    // the files written: stills, setups and, folded, video. (Not greyed as a whole while a video renders:
+    // its cancel button is inside.)
+    let says = format!("{} · {} / s", size_name(&st.render.size), st.render.fps);
+    if px.group(ui, "output", "output", &says) {
         ui.scope(|ui| {
             if locked { ui.disable(); }
-            px.heading(ui, "camera", "camera");
-            camera::everyday(ui, st, px);
-            px.heading(ui, "output", "output");
             file(ui, px);
-            // how finely the picture is drawn and the shapes are built, and how its grain is cleaned
-            px.sub(ui, "quality", "quality", "", |ui, px| {
-                for name in ["smooth", "scale", "ns", "nw"] { knob::knob_row(ui, st, k(name), px); }
-                denoise(ui, st, px);
-                gap(ui, 3.0);
-                right::detail_rows(ui, st, px);
-            });
         });
-        let video_says = format!("{} · {} / s", size_name(&st.render.size), st.render.fps);
+        let video_says = format!("{} · {}", st.render.codec, size_name(&st.render.size));
         px.sub(ui, "video", "video", &video_says, |ui, px| video(ui, st, px));
     }
     gap(ui, 2.0);
+}
+
+/// The light section: all of the light is in the light room, so here is only the section's line, saying
+/// what lights the shape and whether anything casts, and the button that opens the room.
+fn light(ui: &mut Ui, st: &mut State, px: &mut Panels) {
+    let around = if st.hdri.is_some() { "picture".to_owned() } else { studio::studio_name(st).unwrap_or_else(|| if st.p.get("backdrop") == Some(1.0) { "backdrop".into() } else { "lights".into() }) };
+    let lights = if room::lights_lit(st) { format!(" · {} lights", st.rig().lights.len()) } else { String::new() };
+    let cast = ["", " · shadows", " · all cast"][(js_round(st.p.cast).max(0.0) as usize).min(2)];
+    let at = section(ui, "light", &format!("{around}{lights}{cast}"));
+    px.note("group:light", at);
+    let (resp, at) = wide_button(ui, Id::unique("light room"), "light room…", px.store.room_open);
+    px.note("room button", at);
+    if resp.on_hover_text("all of the light: the studio and what is round the shape, the floor, every light, an environment picture, shadows and caustics, how the lighting is turned · key L").clicked() {
+        px.store.room_open = !px.store.room_open;
+    }
 }
 
 /// The denoiser, for the whole picture: off, what is traced by chance (true scattering, roughness by
@@ -143,20 +148,7 @@ fn video(ui: &mut Ui, st: &mut State, px: &mut Panels) {
         if let Some(v) = pick_value(ui, "video size", "size", &sizes, &st.render.size) { st.render.size = v; }
         let rates: Vec<(u32, String)> = [24, 30, 60].iter().map(|&v| (v, v.to_string())).collect();
         if let Some(v) = pick_value(ui, "video fps", "frames / s", &rates, &st.render.fps) { st.render.fps = v; }
-        let samples: Vec<(u32, String)> = vec![(8, "8 (draft)".into()), (16, "16".into()), (32, "32".into()), (64, "64".into()), (128, "128 (slow)".into())];
-        if let Some(v) = pick_value(ui, "video samples", "samples", &samples, &st.render.samples) { st.render.samples = v; }
-        let lens: Vec<(u32, String)> = vec![(0, "as live".into()), (2, "2".into()), (4, "4".into()), (8, "8".into())];
-        let at = ui.cursor().min;
-        ui.scope(|ui| {
-            // they count only when rays are traced through a lens: not with everything sharp, nor with the blur made afterwards
-            if st.p.aperture <= 0.0 || st.p.dof > 0.5 { ui.disable(); }
-            if let Some(v) = pick_value(ui, "video lens", "lens rays", &lens, &st.render.lens) { st.render.lens = v; }
-        });
-        px.note("video lens", egui::Rect::from_min_max(at, egui::pos2(at.x + ui.available_width(), ui.cursor().top())));
-        // motion blur: the share of each frame's time the shutter stays open (0 = none, 0.5 = a film camera's usual)
-        if let Some(v) = knob::plain_row(ui, Id::unique("video blur"), "motion blur", st.render.shutter, 0.0, 1.0, 0.05).value {
-            st.render.shutter = v;
-        }
+        // (its samples a frame are the renderer's quality, its lens rays and shutter the camera's)
 
         // how the file is written, and where
         let codec = Codec::from_id(&st.render.codec).unwrap_or(Codec::H264);

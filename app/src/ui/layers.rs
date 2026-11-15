@@ -113,7 +113,7 @@ pub fn strip(ui: &mut Ui, st: &mut State, px: &mut Panels) {
             if made.hovered() { ui.ctx().set_cursor_icon(CursorIcon::PointingHand); }
             dot(ui, spot.center(), material::body_colour(st, i), false);
             let of = if i == 0 || st.body_own(i) { material::body_material(st, i) } else { "the first body's material" };
-            if made.on_hover_text(format!("made of {of} · press for the materials lab")).clicked() { lab = Some(i); }
+            if made.on_hover_text(format!("made of {of} · press to show its material")).clicked() { lab = Some(i); }
         }
 
         // the eye: show the layer, or keep it only as something that cuts and masks the others
@@ -162,10 +162,10 @@ pub fn strip(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     }
 
     if let Some(i) = select { st.select_layer(i); }
-    // (the materials lab shows the material of the selected layer's body)
+    // (the material section shows the material of the selected layer's body: it is opened to it)
     if let Some(i) = lab {
         st.select_layer(i);
-        px.store.lab_open = true;
+        if px.store.is_closed("material") { px.store.fold("material"); }
     }
     if let Some(i) = toggle { st.set_layer_show(i, !st.stack.layers[i].show); }
     if let Some((a, b)) = exchange {

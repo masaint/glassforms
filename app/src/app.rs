@@ -773,8 +773,9 @@ impl App {
                     (self.px.hide_left, self.px.hide_right) = (hide, hide);
                 }
                 L => self.px.store.room_open = !self.px.store.room_open,
-                M => self.px.store.lab_open = !self.px.store.lab_open,
-                K => self.px.store.camera_open = !self.px.store.camera_open,
+                // the material and the camera: their sections opened or folded
+                M => self.px.store.fold("material"),
+                K => self.px.store.fold("camera"),
                 C => st.p.clay = if st.p.clay > 0.5 { 0.0 } else { 1.0 },
                 F1 => self.px.help_open = !self.px.help_open,
                 R => st.reset_view(),
@@ -881,8 +882,6 @@ impl App {
         // the windows that float over both: hidden with the panels, but not closed
         if !(px.hide_left && px.hide_right) {
             room::show(ctx, st, px, self.full);
-            material::lab(ctx, st, px, self.full);
-            crate::ui::camera::window(ctx, st, px, self.full);
             overlay::help(ctx, px, st.families.len(), self.full);
         }
         // something went wrong building the shape: say so over the picture (the shape before stays up).
@@ -1208,8 +1207,17 @@ impl App {
                 if let Some(t) = &mut self.test { t.noted.push(note); }
             }
             Act::Room(open) => self.px.store.room_open = open,
-            Act::Lab(open) => self.px.store.lab_open = open,
-            Act::Camera(open) => self.px.store.camera_open = open,
+            // (the material and the camera are sections of the left panel now: these open or fold them)
+            Act::Lab(open) => {
+                if open == self.px.store.is_closed("material") { self.px.store.fold("material"); }
+                // (open, as the lab was: every part of the material in view, its sub-groups open too)
+                if open {
+                    for g in ["lab-in it", "lab-special optics", "lab-casts"] {
+                        if self.px.store.is_closed(g) { self.px.store.fold(g); }
+                    }
+                }
+            }
+            Act::Camera(open) => { if open == self.px.store.is_closed("camera") { self.px.store.fold("camera"); } }
             Act::Light(n) => {
                 if n > st.rig().lights.len() { return Err(format!("light: there are only {} lights", st.rig().lights.len())); }
                 self.px.light = n - 1;
@@ -1509,8 +1517,8 @@ impl App {
         let camera = json!({ "focal": r.focal, "fstop": r.fstop, "field": [r.field_v, r.field_h], "focusMm": r.focus_mm, "distanceMm": r.distance_mm, "proj": st.camera().proj.id(),
                              "says": crate::ui::camera::summary(st, self.px.aspect) });
         let more = json!({
-            "lab": { "open": self.px.store.lab_open, "at": self.px.store.lab_at },
-            "cameraWindow": { "open": self.px.store.camera_open, "at": self.px.store.camera_at },
+            "lab": { "open": !self.px.store.is_closed("material") },
+            "cameraWindow": { "open": !self.px.store.is_closed("camera") },
             "model": { "is": st.is_model(), "needsFile": st.needs_file(st.stack.sel), "path": st.model_file(st.stack.sel), "known": self.px.model.known, "file": self.px.model.file,
                        "line": self.px.model.line, "tip": self.px.model.tip, "shell": self.px.model.shell, "foundShell": self.px.model.found_shell, "ownSmooth": self.px.model.own_smooth,
                        "reading": self.px.model.reading, "error": self.px.model.error, "said": self.px.model.said,

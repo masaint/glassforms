@@ -1,5 +1,5 @@
-//! The camera, in a photographer's terms, as one thing: its everyday part in the picture section of the
-//! left panel, and the whole of it in the camera window (key K). The window, from the top:
+//! The camera, in a photographer's terms, as one thing: a section of the left panel holding all of it
+//! (everything a photographer would call the camera's, whatever part of the program reads it). From the top:
 //! the lens (named lenses, the focal length with the field it takes in, the kind of lens, the sensor);
 //! the focus (everything sharp, or the lens opened: the subject's real size, the f-stop, where it is
 //! focused, how deep a range is held sharp, what that comes to, how the blur is made); where the camera
@@ -73,78 +73,28 @@ fn worded(ui: &mut Ui, st: &mut State, px: &mut Panels, name: &str, shown: &str,
     knob::knob_row_with(ui, st, &engine(name), px, knob::Extra { shown, tip, ..Default::default() });
 }
 
-/// The camera's everyday part, in the picture section of the left panel: a named lens, the focal length,
-/// all sharp or the lens open (with its f-stop), and the exposure; and the way into the camera window,
-/// which has the whole of it.
-pub fn everyday(ui: &mut Ui, st: &mut State, px: &mut Panels) {
-    let c = st.camera();
-    let r = c.readout(px.aspect);
-    let words: Vec<String> = LENSES.iter().map(lens_word).collect();
-    let items: Vec<Item> = LENSES
-        .iter()
-        .zip(&words)
-        .map(|(l, w)| Item::new(w, (r.focal - l.focal).abs() < 0.5 && c.proj == l.proj).tip(format!("{}: the camera moves so that the subject keeps its size", l.name)))
-        .collect();
-    let run = filled_run(ui, Id::unique(("lenses", px.place)), &items, egui::vec2(5.0, 2.0), &mono(SIZE));
-    for (i, place) in run.places.iter().enumerate() { px.note(format!("{}lens:{i}", px.whose()), *place); }
-    if let Some(i) = run.clicked { st.lens_preset(i); }
-    gap(ui, 3.0);
-    let r = st.camera().readout(px.aspect);
-    ui.scope(|ui| {
-        if st.camera().proj == Projection::Panorama { ui.disable(); }
-        worded(ui, st, px, "zoom", &focal_text(r.focal), "the lens's focal length: shift-wheel on the picture changes it and keeps the subject's size");
-    });
-    dof_switch(ui, st, px);
-    if let Some(n) = st.camera().readout(px.aspect).fstop {
-        worded(ui, st, px, "av", &format!("f/{}", stop_text(n)), "the f-stop: smaller numbers open the lens wider and blur more; a slider step is a third of a stop. Click the glass to focus there");
-    }
-    let ev = gf_core::camera::get(&st.p, "ev").unwrap_or(0.0);
-    let k = Knob { label: "exposure".into(), ..engine("ev") };
-    knob::knob_row_with(ui, st, &k, px, knob::Extra { shown: &format!("{ev:+.2} EV"), tip: "brighter or darker, in stops", ..Default::default() });
-    let (resp, at) = wide_button(ui, Id::unique("camera window"), "camera…", px.store.camera_open);
-    px.note("camera button", at);
-    if resp.on_hover_text("the whole camera: lens, focus, the view, exposure, tone, grade, the lens's character · key K").clicked() {
-        px.store.camera_open = !px.store.camera_open;
-    }
-}
-
-/// Where the camera window first appears: beside the left panel, set down and across from any other
-/// window already open there, so that every title shows.
-fn first_place(px: &Panels) -> Pos2 {
-    let others = usize::from(px.store.room_open) + usize::from(px.store.lab_open);
-    Pos2::new(EDGE + LEFT_W + 36.0 + 30.0 * others as f32, EDGE + 34.0 * others as f32)
-}
-
-/// The camera window, if it is open: the whole camera, a group for each task (lens, focus, view,
-/// exposure, each of which folds) and the grade and the lens's character folded under them. `full`: the
-/// inside of the program's window.
-pub fn window(ctx: &egui::Context, st: &mut State, px: &mut Panels, full: Rect) {
-    if !px.store.camera_open { return; }
-    let first = px.store.camera_at.map_or_else(|| first_place(px), |p| Pos2::new(p[0], p[1]));
-    let max_h = (full.height() - 2.0 * EDGE - 44.0).max(80.0);
-    let out = floating(ctx, "camera", "camera", FLOAT_W, first, max_h, |ui| {
-        if px.rendering { ui.disable(); }
-        set_label_width(ui, COL_LABEL_WIDE);
-        px.place = "cam";
-        let r = st.camera().readout(px.aspect);
-        let lens_says = format!("{} · {}", focal_text(r.focal), st.camera().proj.name());
-        if px.window_group(ui, "cam-lens", "lens", &lens_says) { lens(ui, st, px); }
-        let focus_says = match r.fstop {
-            Some(n) => format!("f/{} · at {}", stop_text(n), length_text(r.focus_mm)),
-            None => "all sharp".to_owned(),
-        };
-        if px.window_group(ui, "cam-focus", "focus", &focus_says) { focus(ui, st, px); }
-        if px.window_group(ui, "cam-view", "view", &length_text(r.distance_mm)) { framing(ui, st, px); }
-        let ev = gf_core::camera::get(&st.p, "ev").unwrap_or(0.0);
-        if px.window_group(ui, "cam-exposure", "exposure", &format!("{ev:+.2} EV")) { exposure(ui, st, px); }
-        character(ui, st, px);
-        gap(ui, 2.0);
-    });
-    if out.closed { px.store.camera_open = false; }
-    px.store.camera_at = Some([out.rect.min.x.round(), out.rect.min.y.round()]);
-    px.note("camera", out.rect);
-    px.note("camera:bar", out.bar);
-    px.note("camera:close", out.cross);
+/// The camera section, wholly in the left panel: everything a photographer would call the camera's. Groups
+/// for the lens, the focus (and how the lens is sampled), the view (where the camera stands and how the
+/// scene is turned in front of it) and the exposure (with the shutter, which blurs motion, the glare and the
+/// tone); folded under them, the grade and the lens's character.
+pub fn section(ui: &mut Ui, st: &mut State, px: &mut Panels) {
+    let says = brief(st, px.aspect);
+    let top = ui.cursor().top();
+    if !px.group(ui, "camera", "camera", &says) { return; }
+    let names = label_width(ui);
+    set_label_width(ui, COL_LABEL_WIDE);
+    px.heading(ui, "cam-lens", "lens");
+    lens(ui, st, px);
+    px.heading(ui, "cam-focus", "focus");
+    focus(ui, st, px);
+    px.heading(ui, "cam-view", "view");
+    framing(ui, st, px);
+    px.heading(ui, "cam-exposure", "exposure");
+    exposure(ui, st, px);
+    character(ui, st, px);
+    set_label_width(ui, names);
+    // (where the whole camera is, for tests)
+    px.note("camera", Rect::from_min_max(Pos2::new(ui.cursor().left(), top), Pos2::new(ui.cursor().left() + ui.available_width(), ui.cursor().top())));
 }
 
 /// All sharp, or the lens open (at the f-stop it was last open at, f/4 the first time).
@@ -153,8 +103,8 @@ fn dof_switch(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     if let Some(n) = r.fstop { px.last_fstop = n; }
     let open = r.fstop.is_some();
     let run = named_run(ui, Id::unique(("depth of field", px.place)), "focus", &[
-        Item::new("all sharp", !open).tip("no depth of field: everything is sharp"),
-        Item::new("lens open", open).tip(format!("depth of field: the lens opened at an f-stop (f/{} to begin with)", stop_text(px.last_fstop))),
+        Item::new("sharp", !open).tip("no depth of field: everything is sharp"),
+        Item::new("open", open).tip(format!("depth of field: the lens opened at an f-stop (f/{} to begin with)", stop_text(px.last_fstop))),
     ]);
     for (place, name) in run.places.iter().zip(["dof:off", "dof:on"]) { px.note(format!("{}{name}", px.whose()), *place); }
     match run.clicked {
@@ -267,9 +217,13 @@ fn focus(ui: &mut Ui, st: &mut State, px: &mut Panels) {
         "Clean at once. What shows through the glass blurs with the glass in front of it."
     });
     ui.scope(|ui| {
-        // rays through the lens are only counted when rays go through the lens
+        // rays through the lens are only counted when rays go through the lens: live, and in a video
         if !exact { ui.disable(); }
         knob::knob_row(ui, st, &engine("lensN"), px);
+        let lens: Vec<(u32, String)> = vec![(0, "as live".into()), (2, "2".into()), (4, "4".into()), (8, "8".into())];
+        let at = ui.cursor().min;
+        if let Some(v) = pick_value(ui, "video lens", "video rays", &lens, &st.render.lens) { st.render.lens = v; }
+        px.note("video lens", Rect::from_min_max(at, Pos2::new(at.x + ui.available_width(), ui.cursor().top())));
     });
     if let Some(i) = choice(ui, Id::unique(("planes", px.place)), "planes", &["hide", "show"], js_round(st.p.planes) as usize) {
         st.p.planes = i as f64;
@@ -316,7 +270,20 @@ fn exposure(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     let ev = gf_core::camera::get(&st.p, "ev").unwrap_or(0.0);
     let k = Knob { label: "exposure".into(), ..engine("ev") };
     knob::knob_row_with(ui, st, &k, px, knob::Extra { shown: &format!("{ev:+.2} EV"), tip: "brighter or darker, in stops", ..Default::default() });
-    knob::knob_row(ui, st, &engine("bloom"), px);
+    // the shutter: how long it stays open each frame, as a film camera's angle (0: off). Only a video
+    // moves while it is open, so only a video shows it
+    let angle = gf_core::camera::shutter_angle(st.render.shutter);
+    let speed = gf_core::camera::shutter_speed(st.render.shutter, st.render.fps as f64);
+    let r = row(ui, ROW_H);
+    let label_r = Rect::from_min_size(r.min, egui::vec2(label_width(ui), r.height()));
+    knob::name(ui, label_r, Id::unique(("shutter name", px.place)), "shutter °", SIZE, "how long the shutter stays open each frame, as a film camera's angle: the motion blur of a video (360: the whole frame; 180: a film camera's usual)");
+    let slot = Rect::from_min_max(Pos2::new(label_r.right() + COL_GAP, r.center().y - 6.0), Pos2::new(r.right() - COL_WAVE - 2.0 * COL_GAP - 76.0, r.center().y + 6.0));
+    px.note(format!("{}slot:shutter", px.whose()), slot);
+    let moved = slider(ui, slot, Id::unique(("shutter", px.place)), angle, 0.0, 360.0, 5.0, ACCENT);
+    if let Some(v) = moved.value { st.render.shutter = gf_core::camera::shutter_of_angle(v); }
+    let words = if angle <= 0.0 { "off".to_owned() } else { format!("{angle:.0}° · 1/{speed:.0} s") };
+    text_in(ui, Rect::from_min_max(Pos2::new(slot.right() + COL_GAP, r.top()), Pos2::new(r.right() - COL_WAVE - COL_GAP, r.bottom())), Align2::RIGHT_CENTER, &words, mono(SIZE), BRIGHT);
+    knob::knob_row_with(ui, st, &called("bloom", "glare"), px, knob::Extra { tip: "bloom: a soft glow round what is bright, as a lens and the air in front of it give", ..Default::default() });
     let tone = (js_round(st.p.get("tone").unwrap_or(0.0)).max(0.0) as usize).min(TONES.len() - 1);
     // the tone curve, from a menu (each says what it is for when hovered in the light of its name)
     let names: Vec<String> = TONES.iter().map(|t| t.0.to_owned()).collect();
@@ -329,7 +296,7 @@ fn exposure(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     let says = if graded(st) { "changed" } else { "as shot" };
     px.sub(ui, "camera-grade", "grade", says, |ui, px| {
         {
-            for name in ["wbTemp", "wbTint", "contrast", "saturation"] { knob::knob_row(ui, st, &engine(name), px); }
+            for name in ["wbTemp", "wbTint", "contrast", "saturation", "grain"] { knob::knob_row(ui, st, &engine(name), px); }
             let font = mono(SIZE);
             let size = button_size(ui, "reset", &font, egui::vec2(8.0, 2.0));
             let r = row(ui, size.y + 2.0);
@@ -395,7 +362,6 @@ fn character(ui: &mut Ui, st: &mut State, px: &mut Panels) {
             knob::knob_row_with(ui, st, &called("tiltX", "tilt °"), px, knob::Extra { tip: "the plane of focus leant back, about the picture's horizontal", ..Default::default() });
             knob::knob_row_with(ui, st, &called("tiltY", "swing °"), px, knob::Extra { tip: "the plane of focus swung, about the picture's vertical", ..Default::default() });
         });
-        knob::knob_row(ui, st, &engine("grain"), px);
     });
 }
 

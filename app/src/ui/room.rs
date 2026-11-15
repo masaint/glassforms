@@ -243,7 +243,7 @@ fn lights(ui: &mut Ui, st: &mut State, px: &mut Panels) {
 fn turning(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     let turned = st.p.lyaw != 0.0 || st.p.lpitch != 0.0 || st.p.lroll != 0.0 || st.lphi != 0.0;
     let says = if st.p.lspin > 0.0 { "circling" } else if turned { "turned" } else { "as it started" };
-    if !px.window_group(ui, "room-turn", "turn", says) { return; }
+    if !px.window_group(ui, "room-turn", "turn the lighting", says) { return; }
     let r = row(ui, gizmo::SIZE);
     let ball = Rect::from_min_size(r.min, egui::vec2(gizmo::SIZE, gizmo::SIZE));
     px.note("ball", ball);

@@ -1,11 +1,11 @@
 //! The studio and what the lights cast, in the light room; and each body's own switches for casting.
 //!
-//!   studio     a studio in one press (a menu in the light group); in the light room, what is round the
+//!   studio     in the light room: what is round the
 //!              shape (nothing, a studio backdrop, an environment picture, with one "behind the shape"
 //!              switch) and the floor the shape stands on
 //!   casting    whether bodies cast shadows and caustics (off / as each body says / all), how large the
 //!              lights are taken to be, how strong shadows and caustics are, how fine the caustics are
-//!              (the three-way choice itself is in the light group of the left panel only)
+//!              (all of it here, in the light room)
 //!   switches   a body's own two switches, shadow and caustics: by its material, no, yes (in the
 //!              materials lab, beside the body's material)
 
@@ -52,18 +52,17 @@ pub fn cast_row(ui: &mut Ui, st: &mut State, px: &mut Panels) {
 pub fn casting(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     let now = mode(st);
     let says = match (now, px.casting.on, px.casting.focusing) {
-        (0, ..) => "off · switched in the light group".to_owned(),
+        (0, ..) => "off".to_owned(),
         (_, false, _) if !px.casting.receivers => "nothing to fall on".to_owned(),
         (_, false, _) => "nothing casts".to_owned(),
         (m, true, f) => format!("{}{}", MODES[m].0, if f { " · caustics" } else { "" }),
     };
     if !px.window_group(ui, "room-cast", "shadows and caustics", &says) { return; }
     // (whether anything casts is switched in the light group, beside the lights' brightness)
-    // (off, the title says where it is switched on; how strong and how fine they are is set here then)
+    // whether anything casts, then how strongly and how finely
+    cast_row(ui, st, px);
+    // (nothing casts: the rest would do nothing, so it waits until something does)
     if mode(st) == 0 { return; }
-    if mode(st) > 0 && !px.casting.receivers {
-        note(ui, "Nothing in the picture gathers light diffusely (clay, a milky body, a floor): there is nothing for a shadow to fall on.");
-    }
     ui.scope(|ui| {
         let tip = "how large the lights are taken to be for what is cast: 1 as they are, towards 0 points. A family's lights are large and stand all round: for a shadow or a caustic that reads, make one light small and bright";
         knob::knob_row_with(ui, st, &State::engine_knob("castSoft"), px, knob::Extra { tip, ..Default::default() });
@@ -149,6 +148,7 @@ fn studio_is(st: &State, i: usize) -> bool {
 }
 
 /// Is there no studio at all: the family's own lights, no backdrop, no floor?
+#[cfg(test)]
 fn no_studio(st: &State) -> bool {
     st.rig_is_default() && st.p.get("backdrop") == Some(0.0) && st.p.get("floor") == Some(0.0)
 }
@@ -188,29 +188,8 @@ fn colour(ui: &mut Ui, st: &mut State, px: &mut Panels, label: &str, names: [&st
     gap(ui, 3.0);
 }
 
-/// The studio as the light group's menu says it: a place in `STUDIOS`, `STUDIOS.len()` for none, or
-/// one past that for something set up by hand.
-fn studio_now(st: &State) -> usize {
-    (0..STUDIOS.len()).find(|&i| studio_is(st, i)).unwrap_or(if no_studio(st) { STUDIOS.len() } else { STUDIOS.len() + 1 })
-}
-
-/// The light group's studio menu: a studio in one press (its lights, backdrop, floor and tone), or none.
-pub fn studio_menu(ui: &mut Ui, st: &mut State, px: &mut Panels) {
-    let now = studio_now(st);
-    let mut names: Vec<String> = STUDIOS.iter().map(|s| s.name.to_owned()).collect();
-    names.push("none".to_owned());
-    if now > STUDIOS.len() { names.push("as set by hand".to_owned()); }
-    let at = ui.cursor().min;
-    if let Some(i) = pick(ui, Id::unique("studio menu"), "studio", &names, now) {
-        if i < STUDIOS.len() {
-            st.apply_studio(i);
-            px.light = 0;
-        } else if i == STUDIOS.len() {
-            st.clear_studio();
-            px.light = 0;
-        }
-    }
-    px.note("studio", Rect::from_min_max(at, Pos2::new(at.x + ui.available_width(), ui.cursor().top())));
+pub fn studio_name(st: &State) -> Option<String> {
+    (0..STUDIOS.len()).find(|&i| studio_is(st, i)).map(|i| STUDIOS[i].name.to_owned())
 }
 
 /// What is all round the shape, lighting it and perhaps seen behind it: nothing (black), a studio

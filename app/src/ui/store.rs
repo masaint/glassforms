@@ -13,21 +13,23 @@ pub const FILE_NAME: &str = "glassforms-ui.json";
 /// Which arrangement of the panels this program has. A file written for an earlier arrangement keeps
 /// everything it says except which groups are folded: its groups were other groups, in other places,
 /// and folding them the old way would hide what this arrangement means a newcomer to see.
-pub const ARRANGEMENT: u32 = 5;
+pub const ARRANGEMENT: u32 = 6;
 
 /// Every group that folds: those of the left panel from the top, those of the right, those of the light room.
 /// (The chooser of named materials and the layers of the materials lab fold too. They are not listed
 /// here: the material's own code names them, see `material::folds`.)
-pub const GROUPS: [&str; 21] = [
-    "material", "light", "picture", "quality", "video", "placement", "joins", "animate", "animate-more", "room-surround", "room-floor", "room-lights", "room-cast",
-    "room-turn", "lab-casts", "cam-lens", "cam-focus", "cam-view", "cam-exposure", "camera-grade", "camera-character",
+pub const GROUPS: [&str; 16] = [
+    "material", "camera", "camera-grade", "camera-character", "quality", "output", "video", "placement", "joins", "animate", "animate-more", "room-surround",
+    "room-floor", "room-lights", "room-cast", "room-turn",
 ];
 
 /// What starts folded away: the picture section (it says its lens and size when folded) and the
 /// sub-groups (detail: quality, video, placement, easing and loop, the chooser of named materials, the
 /// camera's grade and lens character). Material and light on the left and the animation on the right
 /// start open.
-pub const FOLDED_AT_FIRST: [&str; 8] = ["picture", "quality", "video", "placement", "animate-more", "material-chooser", "camera-grade", "camera-character"];
+pub const FOLDED_AT_FIRST: [&str; 12] = [
+    "camera", "quality", "output", "video", "placement", "animate-more", "material-chooser", "lab-in it", "lab-special optics", "lab-casts", "camera-grade", "camera-character",
+];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -150,15 +152,15 @@ mod tests {
     fn groups_fold_and_unfold() {
         let mut s = Store::default();
         assert!(!s.is_closed("material") && !s.is_closed("light") && !s.is_closed("animate"), "{:?}", s.closed);
-        assert!(s.is_closed("video") && s.is_closed("picture") && s.is_closed("material-chooser"));
-        s.fold("picture");
+        assert!(s.is_closed("video") && s.is_closed("camera") && s.is_closed("material-chooser"));
+        s.fold("camera");
         s.fold("material");
-        assert!(!s.is_closed("picture") && s.is_closed("material"));
+        assert!(!s.is_closed("camera") && s.is_closed("material"));
     }
 
     #[test]
     fn a_file_with_parts_missing_is_still_read() {
-        let s = Store::read(r#"{ "arrangement": 5, "closed": ["animate"], "video": { "fps": 24 } }"#);
+        let s = Store::read(r#"{ "arrangement": 6, "closed": ["animate"], "video": { "fps": 24 } }"#);
         assert_eq!(s.closed, vec!["animate".to_string()]);
         assert_eq!((s.video.fps, s.video.samples, s.window, s.room_open, s.room_at), (24, RenderOpts::default().samples, None, false, None));
         assert_eq!((s.lab_open, s.lab_at), (false, None));

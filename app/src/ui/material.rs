@@ -167,7 +167,7 @@ const STACK: [Layer; 5] = [
         title: "made of",
         bare: "",
         rows: &[
-            ("metal", ""), ("hollow", ""), ("ior", ""), ("disp", ""), ("nb", ""), ("density", ""), ("tintR", ""), ("spectrum", ""), ("grad", ""), ("gradMode", "grad"),
+            ("metal", ""), ("hollow", ""), ("ior", ""), ("disp", ""), ("tintR", ""), ("density", ""), ("spectrum", ""), ("grad", ""), ("gradMode", "grad"),
             ("gradR", "grad"), ("gradAz", "grad"), ("gradEl", "grad"), ("gradOffset", "grad"), ("gradSoft", "grad"), ("gradBands", "grad"), ("gradWave", "grad"), ("fit", ""),
             ("sss", ""), ("sssDepth", "sss"), ("sssDetail", "sss"), ("bodyR", ""),
         ],
@@ -195,8 +195,9 @@ const STACK: [Layer; 5] = [
     Layer { title: "special optics", bare: "none", rows: &[("biref", ""), ("birefAz", "biref"), ("birefEl", "biref"), ("grin", ""), ("grinDepth", "grin"), ("sssWalk", "")] },
 ];
 
-/// The sliders of the glass itself, which the table of controls leaves to the engine's own list.
-const GLASS: [&str; 3] = ["ior", "disp", "nb"];
+/// The sliders of the glass itself, which the table of controls leaves to the engine's own list. (How many
+/// bounces are followed inside the glass is the renderer's quality, not the material's.)
+const GLASS: [&str; 2] = ["ior", "disp"];
 
 /// Which layer a control that the stack does not list belongs in: told by the group the table gives it.
 fn layer_by_group(c: &Control) -> usize {
@@ -234,7 +235,7 @@ pub const CHOOSER: &str = "material-chooser";
 
 /// Everything of the material's that folds, by what it is remembered as.
 pub fn folds() -> Vec<String> {
-    std::iter::once(CHOOSER.to_owned()).chain(STACK.iter().map(|l| lab_fold(l.title))).collect()
+    std::iter::once(CHOOSER.to_owned()).chain(STACK.iter().skip(3).map(|l| lab_fold(l.title))).chain(std::iter::once("lab-casts".to_owned())).collect()
 }
 
 // ---- the recipe -------------------------------------------------------------------------------------
@@ -434,21 +435,6 @@ fn about(ui: &Ui, name: &str, note: &str, p: &Settings, how: How, live: bool, h:
 /// A body by its layers' names: "Thomas + Gyroid".
 fn body_name(st: &State, layers: &[usize]) -> String {
     layers.iter().map(|l| st.layer_title(*l)).collect::<Vec<_>>().join(" + ")
-}
-
-/// Whose material the lab shows, when the scene has more than one body: "body 2 · Icosahedron", with the
-/// dot of its material. Which body it is is chosen in the layers list (a press on a row, or on a body's dot).
-fn body_line(ui: &mut Ui, st: &State, px: &mut Panels) {
-    let bodies = st.bodies();
-    if bodies.len() < 2 { return; }
-    let k = st.body_of(st.stack.sel);
-    let r = row(ui, 17.0);
-    px.note(format!("{}body", px.whose()), r);
-    dot(ui, Pos2::new(r.left() + 5.5, r.center().y), body_colour(st, bodies[k][0]), false);
-    let text = format!("body {} · {}", k + 1, body_name(st, &bodies[k]));
-    text_in(ui, Rect::from_min_max(Pos2::new(r.left() + 16.0, r.top()), r.max), Align2::LEFT_CENTER, &text, mono(SIZE), BRIGHT);
-    ui.interact(r, Id::unique("lab body"), Sense::hover()).on_hover_text("the body of the layer selected in the layers list: choose another there");
-    gap(ui, 4.0);
 }
 
 /// A body other than the first is made of the first body's material until it is given one of its own:
@@ -784,10 +770,12 @@ fn control(ui: &mut Ui, st: &mut State, px: &mut Panels, at: usize, knobs: &[Kno
 
 // ---- the group on the left ----------------------------------------------------------------------------
 
-/// The `material` group at the head of the left panel: which material, whether it is drawn as itself or
-/// as clay, the sliders of the glass, the controls the table puts here, and the way into the lab.
-/// `knobs`: the engine's sliders, which the panel has already listed.
-pub fn group(ui: &mut Ui, st: &mut State, px: &mut Panels, knobs: &[Knob]) {
+/// The material section, wholly in the left panel: whose material it is (the body of the layer selected
+/// in the layers list), which named material (the chooser folds under its name), whether it is its own,
+/// the recipe, whether it is drawn as itself or as clay, then the material layer by layer from the body
+/// outwards: what it is made of, its surface and what lies on it as groups; what is in it, special optics
+/// and what it casts as sub-groups (detail, folded at first).
+pub fn group(ui: &mut Ui, st: &mut State, px: &mut Panels, _knobs: &[Knob]) {
     let clay = how(st).clay;
     let name = NAMED[chosen(st)].name;
     // with several bodies the title says whose material this is, and beside it the body's layers by name;
@@ -803,20 +791,25 @@ pub fn group(ui: &mut Ui, st: &mut State, px: &mut Panels, knobs: &[Knob]) {
     } else {
         String::new()
     };
+    let top = ui.cursor().top();
     if !px.group_saying(ui, "material", &title, &says) { return; }
-    // (a body with a material of its own has that material's sliders in place of the scene's)
-    let own_knobs;
-    let knobs = if body(st) > 0 {
-        own_knobs = sliders(st);
-        &own_knobs[..]
-    } else {
-        knobs
-    };
+    let names = label_width(ui);
+    set_label_width(ui, COL_LABEL_WIDE);
 
-    // which material it is; under that line the chooser of named materials, which a press on the line
-    // folds away or brings back; then the recipe: what is on at present
+    // which material it is, with the way back to it as named; under that line the chooser of named
+    // materials, which a press on the line folds away or brings back
+    // (the button that puts it back as named is there only while it has been changed)
     let open = !px.store.is_closed(CHOOSER);
-    if name_line(ui, st, px, 18.0, Some(open)).1 { px.store.fold(CHOOSER); }
+    let is_changed = changed(st) && own(st);
+    let (r, pressed) = name_line(ui, st, px, if is_changed { 80.0 } else { 18.0 }, Some(open));
+    if pressed { px.store.fold(CHOOSER); }
+    if is_changed {
+        let reset_at = Rect::from_min_size(Pos2::new(r.right() - 74.0, r.center().y - 9.5), egui::vec2(54.0, 19.0));
+        px.note("mat-reset", reset_at);
+        let now = chosen(st);
+        let tip = format!("every setting of the material back to what {} sets", NAMED[now].name);
+        if button(ui, reset_at, Id::unique("material as named"), "reset", false, mono(SIZE)).on_hover_text(tip).clicked() { choose(st, now); }
+    }
     if !px.store.is_closed(CHOOSER) {
         gap(ui, 3.0);
         named(ui, st, px);
@@ -839,39 +832,39 @@ pub fn group(ui: &mut Ui, st: &mut State, px: &mut Panels, knobs: &[Knob]) {
     for (place, name) in run.places.iter().zip(["drawn:material", "drawn:clay"]) { px.note(name, *place); }
     if let Some(i) = run.clicked { st.p.clay = i as f64; }
 
-    ui.scope(|ui| {
-        if !mine { ui.disable(); }
-        // the glass itself: its index, how far it splits the colours, how many bounces are followed inside it
-        for name in GLASS {
-            if let Some(k) = knobs.iter().find(|k| k.id == name) { slider(ui, st, px, k); }
+    // the stack: groups for what it is made of, its surface and what lies on it; sub-groups (folded) for
+    // what is in it and the special optics, each title saying what is on in it
+    let knobs = sliders(st);
+    for (layer, l) in STACK.iter().enumerate() {
+        let says = layer_says(layer, &recipe(settings(st)));
+        if layer < 3 {
+            px.heading(ui, &lab_fold(l.title), l.title);
+            ui.scope(|ui| {
+                if !mine { ui.disable(); }
+                stack_rows(ui, st, px, &layer_rows(layer), &knobs);
+            });
+        } else {
+            px.sub(ui, &lab_fold(l.title), l.title, &says, |ui, px| {
+                if !mine { ui.disable(); }
+                stack_rows(ui, st, px, &layer_rows(layer), &knobs);
+            });
         }
-        for at in 0..CONTROLS.len() {
-            if CONTROLS[at].place == Place::Main && !part_of_colour(at) { control(ui, st, px, at, knobs); }
-        }
+    }
+    // what the body casts on the others: its own two switches
+    let (s, c) = gf_core::cast::switches(&st.p, body(st));
+    let word = |x: gf_core::cast::Switch| match x { gf_core::cast::Switch::Auto => "material", gf_core::cast::Switch::On => "yes", gf_core::cast::Switch::Off => "no" };
+    let says = if s == c { format!("{} for both", word(s)) } else { format!("shadow {} · caustics {}", word(s), word(c)) };
+    px.sub(ui, "lab-casts", "casts", &says, |ui, px| {
+        let layer = body(st);
+        studio::switches(ui, st, px, layer);
     });
-
-    let (resp, at) = wide_button(ui, Id::unique("materials lab"), "materials lab…", px.store.lab_open);
-    px.note("lab button", at);
-    if resp.on_hover_text("everything a material is made of, layer by layer: its body, its surface, what lies on it, what is in it · key M").clicked() {
-        px.store.lab_open = !px.store.lab_open;
+    if CONTROLS.iter().any(|c| c.costly) {
+        gap(ui, 6.0);
+        legend(ui);
     }
-}
-
-// ---- the lab ----------------------------------------------------------------------------------------
-
-/// Where the lab first appears: beside the left panel. If the light room is open there, beside the light
-/// room when the picture between the panels is wide enough for both, otherwise a little down and across
-/// from it, so that neither window's title is hidden.
-fn first_place(px: &Panels, full: Rect) -> Pos2 {
-    let beside = Pos2::new(EDGE + LEFT_W + 36.0, EDGE);
-    let room = px.store.room_open.then(|| px.store.room_at.map_or(beside, |p| Pos2::new(p[0], p[1])));
-    match room {
-        Some(room) if (room - beside).length() < 60.0 => {
-            let next = Pos2::new(room.x + FLOAT_W + 24.0 + 16.0, room.y);
-            if next.x + LAB_W + 24.0 <= full.right() - EDGE - RIGHT_W - 36.0 { next } else { room + egui::vec2(30.0, 34.0) }
-        }
-        _ => beside,
-    }
+    set_label_width(ui, names);
+    // (where the whole material is, for tests)
+    px.note("lab", Rect::from_min_max(Pos2::new(ui.cursor().left(), top), Pos2::new(ui.cursor().left() + ui.available_width(), ui.cursor().top())));
 }
 
 /// How far the controls of a part stand in from its switch.
@@ -906,70 +899,6 @@ fn stack_rows(ui: &mut Ui, st: &mut State, px: &mut Panels, rows: &[Row], knobs:
     }
     if let Some(top) = run { side_bar(ui, left + 2.0, top, ui.cursor().top() - 1.0, 0.3); }
     set_label_width(ui, names);
-}
-
-/// The head of the lab: which material this is, and the way back to it as named.
-fn head(ui: &mut Ui, st: &mut State, px: &mut Panels) {
-    let r = name_line(ui, st, px, 62.0, None).0;
-    let at = Rect::from_min_size(Pos2::new(r.right() - 54.0, r.center().y - 9.5), egui::vec2(54.0, 19.0));
-    px.note("lab/reset", at);
-    let now = chosen(st);
-    let is_changed = changed(st) && own(st);
-    ui.scope(|ui| {
-        if !is_changed { ui.disable(); }
-        let tip = format!("every setting of the material back to what {} sets", NAMED[now].name);
-        if button(ui, at, Id::unique("material as named"), "reset", false, mono(SIZE)).on_hover_text(tip).clicked() { choose(st, now); }
-    });
-}
-
-/// Show the materials lab if it is open. `full`: the inside of the program's window.
-pub fn lab(ctx: &egui::Context, st: &mut State, px: &mut Panels, full: Rect) {
-    if !px.store.lab_open { return; }
-    let first = px.store.lab_at.map_or_else(|| first_place(px, full), |p| Pos2::new(p[0], p[1]));
-    let max_h = (full.height() - 2.0 * EDGE - 44.0).max(80.0);
-    let out = floating(ctx, "materials lab", "materials lab", LAB_W, first, max_h, |ui| {
-        if px.rendering { ui.disable(); }
-        set_label_width(ui, LAB_LABEL);
-        px.place = "lab";
-        // whose material: the body the selected layer belongs to (chosen in the layers list), named
-        gap(ui, 3.0);
-        body_line(ui, st, px);
-        head(ui, st, px);
-        // the named materials, open here (folded in the panel)
-        gap(ui, 3.0);
-        named(ui, st, px);
-        own_row(ui, st, px);
-        let mine = own(st);
-        ui.scope(|ui| {
-            // (a body made of the first body's material shows that material, out of reach until it has its own)
-            if !mine { ui.disable(); }
-            gap(ui, 5.0);
-            recipe_line(ui, st, px);
-            // the stack: the material layer by layer from its body outwards, each title saying what is on in it
-            let knobs = sliders(st);
-            for (layer, l) in STACK.iter().enumerate() {
-                let says = layer_says(layer, &recipe(settings(st)));
-                if px.window_group(ui, &lab_fold(l.title), l.title, &says) {
-                    stack_rows(ui, st, px, &layer_rows(layer), &knobs);
-                }
-            }
-        });
-        // what the body casts on the others: its own two switches
-        if px.window_group(ui, "lab-casts", "casts", "") {
-            let layer = body(st);
-            studio::switches(ui, st, px, layer);
-        }
-        if CONTROLS.iter().any(|c| c.costly) {
-            gap(ui, 8.0);
-            legend(ui);
-        }
-        gap(ui, 2.0);
-    });
-    if out.closed { px.store.lab_open = false; }
-    px.store.lab_at = Some([out.rect.min.x.round(), out.rect.min.y.round()]);
-    px.note("lab", out.rect);
-    px.note("lab:bar", out.bar);
-    px.note("lab:close", out.cross);
 }
 
 /// How the material stands, for tests: which named material, whether it has been changed, which group of
@@ -1071,7 +1000,7 @@ mod tests {
                 assert!(under.is_empty() || rows[..at].iter().any(|r| r.0 == *under), "{name} stands under {under}, which is not above it in {}", STACK[l].title);
             }
         }
-        assert_eq!(folds().len(), STACK.len() + 1);
+        assert_eq!(folds().len(), STACK.len() - 1);
         // the named materials: ids are unique, and each group's materials come in one run
         for (i, n) in NAMED.iter().enumerate() {
             assert_eq!(NAMED.iter().position(|m| m.id == n.id), Some(i), "two materials are called {}", n.id);
