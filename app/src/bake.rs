@@ -175,6 +175,11 @@ pub struct Baker {
 }
 
 impl Baker {
+    /// What is kept between builds, counted (for the window's diagnostic log).
+    pub fn kept(&self) -> String {
+        format!("coarse={} sheets={} fields={} vols={}", self.coarse.len(), self.sheets.len(), self.field_pipes.len(), self.kept.iter().chain(&self.wide).map(|k| k.vols.len()).sum::<usize>())
+    }
+
     pub fn new(gpu: &Gpu) -> Self {
         let vf = wgpu::ShaderStages::VERTEX_FRAGMENT;
         let all = vf | wgpu::ShaderStages::COMPUTE;

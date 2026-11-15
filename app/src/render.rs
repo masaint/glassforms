@@ -392,6 +392,8 @@ pub struct Renderer {
     pub accum_n: u32,
     pub frame_no: u32,
     jitter_n: u32,
+    /// the last frame was folded in by the antialiasing that follows motion
+    was_taa: bool,
     prev: Option<PrevView>,
     last_final: Option<FinalU>,
     /// build the tracer so that it counts its lookups instead of making a picture
@@ -578,7 +580,7 @@ impl Renderer {
             building: None, scene: None, march: None, variant: Variant::default(),
             u_accum: gpu.uniform_buffer("accumulate", std::mem::size_of::<AccumU>() as u64),
             u_final: gpu.uniform_buffer("final", std::mem::size_of::<FinalU>() as u64),
-            g_trace: None, t: None, acc_idx: 0, accum_n: 0, frame_no: 0, jitter_n: 0, prev: None, last_final: None, profile: false,
+            g_trace: None, t: None, acc_idx: 0, accum_n: 0, frame_no: 0, jitter_n: 0, was_taa: false, prev: None, last_final: None, profile: false,
             dof: Dof::new(gpu), focused: false, cam: Default::default(),
             frost: Frost::new(gpu),
             dn: Denoise::new(gpu), shown: 0,
@@ -756,6 +758,11 @@ impl Renderer {
     fn tracer_text(&self, m: &March, v: Variant) -> String {
         if self.cam.wanted { tracer_source_lens(m, v, self.profile) } else { tracer_source(m, v, self.profile) }
     }
+    /// Tracers kept, and frames in the running average (for the window's diagnostic log).
+    pub fn kept(&self) -> String {
+        format!("pipes={} accum={}", self.trace_pipes.len(), self.accum_n)
+    }
+
     pub fn variant(&self) -> Variant {
         self.variant
     }
@@ -1022,8 +1029,19 @@ impl Renderer {
             weight = 1.0 - look.smooth as f64;
             self.accum_n = ((1.0 / weight + 0.5).floor() as u32).saturating_sub(1);      // then carry on averaging from here
         } else {
+            // The first still frame after motion. The picture so far was kept by the antialiasing that
+            // follows motion: it lags what moved, is darkened where its neighbourhood limit cut bright
+            // samples, and (when the shape was rebuilt at its still detail just now) shows the coarser
+            // shape it had while moving. Counted as the frames it stands for (ten at the usual smoothing), that error would fade
+            // only as ten over the number of frames since; counted as one frame, it is gone four times
+            // sooner, and one frame of new light weighs as much as it straight away. What is denoised
+            // keeps a running mean of its own (denoise.rs): that is started afresh instead.
+            if self.was_taa {
+                self.accum_n = if self.variant.denoise { 0 } else { self.accum_n.min(1) };
+            }
             weight = 1.0 / (self.accum_n as f64 + 1.0);
         }
+        self.was_taa = taa;
         self.jitter_n = (self.jitter_n % 4096) + 1;
         // always jitter unless antialiasing is off and the view is moving
         let jit = weight < 1.0 || look.smooth > 0.0;

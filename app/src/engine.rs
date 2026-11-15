@@ -1099,6 +1099,11 @@ impl Engine {
         Ok((vol.res, out))
     }
 
+    /// What is kept between frames, counted (for the window's diagnostic log).
+    pub fn kept(&self) -> String {
+        format!("{} {} tracks={} layers={} fam={} preset={}", self.renderer.kept(), self.baker.kept(), self.state.tracks.len(), self.state.layer_count(), self.state.family().id, self.state.preset().id)
+    }
+
     /// What is on screen as RGBA bytes, top row first.
     pub fn screenshot(&self) -> R<(u32, u32, Vec<u8>)> {
         self.renderer.read_screen()

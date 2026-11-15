@@ -171,6 +171,38 @@ pub fn run(pairs: Vec<(String, String)>, flags: Vec<(String, Option<String>)>) -
 /// window is as real there as anywhere (it is drawn, and a picture can be taken of it); it is only not
 /// in front of whoever is using the machine. In points, which are never smaller than pixels, so that the
 /// place is past the edge whatever the scaling.
+/// With GF_PERFLOG=<file> in the environment, a line a second is appended to that file: seconds since the
+/// window opened, frames drawn in that second, the mean and longest time between drawn frames, the mean
+/// and longest time the engine's own call took, and what the engine keeps (see `Engine::kept`).
+fn perf_log(engine: &Engine, drew: bool, call_ms: f64) {
+    struct Log { file: std::fs::File, t0: Instant, at: Instant, last: Option<Instant>, n: u32, gap: (f64, f64), call: (f64, f64) }
+    static LOG: Mutex<Option<Option<Log>>> = Mutex::new(None);
+    let mut guard = LOG.lock().unwrap_or_else(|e| e.into_inner());
+    let log = guard.get_or_insert_with(|| {
+        let path = std::env::var("GF_PERFLOG").ok()?;
+        let file = std::fs::OpenOptions::new().create(true).append(true).open(path).ok()?;
+        let now = Instant::now();
+        Some(Log { file, t0: now, at: now, last: None, n: 0, gap: (0.0, 0.0), call: (0.0, 0.0) })
+    });
+    let Some(l) = log.as_mut() else { return };
+    let now = Instant::now();
+    if drew {
+        if let Some(t) = l.last {
+            let g = (now - t).as_secs_f64() * 1e3;
+            l.gap = (l.gap.0 + g, l.gap.1.max(g));
+        }
+        l.last = Some(now);
+        l.n += 1;
+        l.call = (l.call.0 + call_ms, l.call.1.max(call_ms));
+    }
+    if (now - l.at).as_secs_f64() >= 1.0 {
+        use std::io::Write as _;
+        let n = l.n.max(1) as f64;
+        let _ = writeln!(l.file, "{:.1} {} {:.2} {:.1} {:.2} {:.1} {}", (now - l.t0).as_secs_f64(), l.n, l.gap.0 / n, l.gap.1, l.call.0 / n, l.call.1, engine.kept());
+        (l.at, l.n, l.gap, l.call) = (now, 0, (0.0, 0.0), (0.0, 0.0));
+    }
+}
+
 fn out_of_sight() -> [f32; 2] {
     #[cfg(windows)]
     {
@@ -1694,7 +1726,9 @@ impl eframe::App for App {
             // after a rest the clock starts afresh: nothing was moving, so no time has to be made up
             if self.rested { dt = dt.min(1.0 / 60.0); }
             self.last = Some(now);
+            let t_frame = Instant::now();
             let did = self.engine.frame(self.canvas.0, self.canvas.1, dt);
+            perf_log(&self.engine, did.drew, t_frame.elapsed().as_secs_f64() * 1e3);
             // frames a second: those drawn over the last fifth of a second or more, counted
             if did.drew { self.drawn.0 += 1; }
             let span = (now - self.drawn.1).as_secs_f64();

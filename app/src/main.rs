@@ -527,6 +527,69 @@ fn run() -> Result<(), String> {
         println!("{{\"scene\":\"{}\",\"preset\":\"{}\",\"traceAndFoldMs\":{trace:.3},\"bloomAndScreenMs\":{post:.3}}}", e.state.family().id, e.state.preset().id);
         return Ok(());
     }
+    if let Some(Some(dir)) = args.flag("motion-seq") {
+        // The live view through a change of motion, frame by frame, with a settled picture of each frame
+        // to measure its grain against. The picture first settles; then `move=play` starts the animation
+        // (`move=turn` starts the view spinning instead, `move=both` does both), `play=` frames are drawn as the window draws them
+        // (a 60th of a second apart), the motion stops and `after=` more are drawn. Every frame is written
+        // as <dir>/live_NNN.png; frames listed in `refs=` (a,b,c; numbered on from the first moving frame)
+        // also get <dir>/ref_NNN.png: the same moment settled over `refFrames=` frames. A line of JSON a
+        // frame goes to <dir>/frames.jsonl.
+        let mut e = headless(&args)?;
+        e.auto = false;
+        let ((w, h), _) = e.renderer.size();
+        let (play, after) = (args.num("play").unwrap_or(90.0) as usize, args.num("after").unwrap_or(90.0) as usize);
+        // (move=both: spinning and playing at once, as the window does by default when play is pressed)
+        let turn = matches!(args.text("move"), Some("turn" | "both"));
+        let anim = !matches!(args.text("move"), Some("turn"));
+        let spin = args.num("spin").unwrap_or(0.25);
+        std::fs::create_dir_all(dir).map_err(|err| format!("{dir}: {err}"))?;
+        let save = |e: &Engine, name: &str| -> Result<(), String> {
+            let (w, h, rgba) = e.screenshot()?;
+            write_png(&format!("{dir}/{name}.png"), w, h, &rgba)
+        };
+        e.render(args.num("frames").unwrap_or(64.0) as u32);
+        save(&e, "settled")?;
+        let mut log = String::new();
+        // (clock, angle, the detail it was built at) for every frame
+        let mut when: Vec<(f64, f64, Detail)> = Vec::new();
+        let mut detail = Detail::Full;
+        if turn { e.state.p.spin = spin; }
+        if anim { e.state.set_playing(true); }
+        for i in 0..play + after {
+            if i == play {
+                e.state.p.spin = 0.0;
+                e.state.set_playing(false);
+            }
+            e.state.tick(1.0 / 60.0);
+            if let Some(d) = e.state.want { detail = d; }
+            let t0 = Instant::now();
+            e.frame(w, h, 0.0);
+            e.gpu.wait();
+            let ms = t0.elapsed().as_secs_f64() * 1e3;
+            when.push((e.state.clock, e.state.theta, detail));
+            log += &format!("{{\"i\":{i},\"moving\":{},\"accum\":{},\"detail\":\"{detail:?}\",\"ms\":{ms:.2}}}
+", i < play, e.renderer.accum_n);
+            save(&e, &format!("live_{i:03}"))?;
+        }
+        std::fs::write(format!("{dir}/frames.jsonl"), log).map_err(|err| format!("{dir}: {err}"))?;
+        let refs: Vec<usize> = args.text("refs").unwrap_or("0,1,2,4,8,16,32,64,89,90,91,92,94,98,106,122,150,179").split(',').filter_map(|x| x.trim().parse().ok()).filter(|i| *i < when.len()).collect();
+        let n_ref = args.num("refFrames").unwrap_or(256.0) as u32;
+        e.state.set_playing(false);
+        e.state.p.spin = 0.0;
+        for i in refs {
+            let (clock, theta, d) = when[i];
+            e.state.clock = clock;
+            e.state.theta = theta;
+            e.state.update_r();
+            e.state.apply_time();
+            e.state.want = None;
+            e.bake(d)?;
+            e.render(n_ref);
+            save(&e, &format!("ref_{i:03}"))?;
+        }
+        return Ok(());
+    }
     if let Some(n) = args.flag("bench-anim") {
         let n = n.as_ref().and_then(|v| v.parse().ok()).unwrap_or(60u32);
         let mut e = headless(&args)?;

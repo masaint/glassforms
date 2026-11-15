@@ -144,7 +144,9 @@ def checks():
 guarded('checks', checks)
 
 # ---------------------------------------------------------------- the checks that later parts bring with them
-for script, name in (('gens_check.py', 'the newer generators'), ('light_check.py', 'lights, environment pictures and clay'), ('dof_check.py', 'depth of field'), ('material_check.py', 'materials'), ('layers_check.py', 'layers and smooth booleans')):
+for script, name in (('gens_check.py', 'the newer generators'), ('light_check.py', 'lights, environment pictures and clay'), ('dof_check.py', 'depth of field'), ('material_check.py', 'materials'), ('layers_check.py', 'layers and smooth booleans'),
+                     ('models_check.py', 'polygon models'), ('cast_check.py', 'shadows and caustics'), ('camera_check.py', 'the camera'),
+                     ('film_check.py', 'thin film'), ('stage_check.py', 'backdrop, floor and tone'), ('smoke.py', 'every feature runs')):
     path = os.path.join(HERE, script)
     if os.path.exists(path):
         r = run([sys.executable, path])
