@@ -134,6 +134,14 @@ pub fn weave(src: &str) -> String {
 fn mirrorEnv0(rd: vec3f, lod: f32) -> vec3f {
   let d = toEnv(rd);",
     );
+    // (and without a picture, the mirror's own reading of the softened lights' copies)
+    s = s.replace(
+        "fn mirrorEnv(rd: vec3f, lod: f32) -> vec3f {
+  let e = toEnv(rd);",
+        "fn mirrorEnv(rd: vec3f, lod: f32) -> vec3f { return lampsEnv(mirrorEnv0(rd, lod), rd); }
+fn mirrorEnv0(rd: vec3f, lod: f32) -> vec3f {
+  let e = toEnv(rd);",
+    );
     s = s.replace(
         "sig / (2.0 * T0), sig < 2.0 * T0), 0.0, 7.0)).rgb;
     }

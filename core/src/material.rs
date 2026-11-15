@@ -625,7 +625,7 @@ pub fn uniforms(p: &Settings, scale: f64) -> [f32; MU_FLOATS] {
     put(4, [sc.sigma_s, sc.reach, WALK_EVENTS, p.ior]);
     // the scattering and absorption of each colour (they differ when the colours scatter differently)
     let (ss3, sa3) = scatter_rgb([p.body_r, p.body_g, p.body_b], p.sss_depth * crate::material::sss_fit(scale), p.sss, p.sss_spread);
-    put(5, [sa3[0], sa3[1], sa3[2], 0.0]);
+    put(5, [sa3[0], sa3[1], sa3[2], p.sss_hue.clamp(0.0, 1.0)]);
     put(6, [ss3[0], ss3[1], ss3[2], 0.0]);
     // (the last: how uneven the colour is, read with the surface's wear)
     put(7, [p.body_r.clamp(0.0, 1.0), p.body_g.clamp(0.0, 1.0), p.body_b.clamp(0.0, 1.0), p.mottle.clamp(0.0, 1.0)]);
@@ -799,7 +799,7 @@ pub const RESET: &[(&str, f64)] = &[
     ("density", 1.0), ("fit", 0.0), ("spectrum", 0.0), ("rough", 0.0), ("roughRef", 0.0),
     ("film", 0.0), ("filmIor", 1.33), ("filmVar", 0.0), ("filmScale", 1.0), ("filmFlow", 0.0), ("filmDrain", 0.0), ("filmSky", 0.5),
     ("coat", 0.0), ("coatIor", 1.5), ("metal", 0.0), ("hollow", 0.0), ("bodyR", 1.0), ("bodyG", 1.0), ("bodyB", 1.0),
-    ("sss", 0.0), ("sssDepth", 0.2), ("sssWalk", 0.0), ("sssSpread", 0.0), ("sharp", 1.0), ("age", 1.0), ("edgeWear", 0.0), ("cavity", 0.0), ("cavityR", 0.35), ("cavityG", 0.27), ("cavityB", 0.2), ("scratches", 0.0), ("swirls", 0.0), ("peel", 0.0), ("smudges", 0.0), ("dust", 0.0), ("brush", 0.0), ("mottle", 0.0),
+    ("sss", 0.0), ("sssDepth", 0.2), ("sssWalk", 0.0), ("sssSpread", 0.0), ("sssHue", 0.0), ("sharp", 1.0), ("age", 1.0), ("edgeWear", 0.0), ("cavity", 0.0), ("cavityR", 0.35), ("cavityG", 0.27), ("cavityB", 0.2), ("scratches", 0.0), ("swirls", 0.0), ("peel", 0.0), ("smudges", 0.0), ("dust", 0.0), ("brush", 0.0), ("mottle", 0.0),
     ("bubbles", 0.0), ("bubbleSize", 0.03), ("bubbleEven", 0.5), ("bubbleShape", 0.0), ("bubbleSeed", 1.0),
     ("glow", 0.0), ("glowR", 1.0), ("glowG", 0.32), ("glowB", 0.08), ("glowCore", 0.5),
     ("grin", 0.0), ("grinDepth", 0.02), ("biref", 0.0), ("birefAz", 0.0), ("birefEl", 90.0),
@@ -904,7 +904,7 @@ pub static NAMED: &[Named] = &[
     named!("milk", "milk glass", "translucent", "White opal glass: light goes in and wanders out again; thin edges let some through.", [("sss", 1.0), ("sssDepth", 0.12), ("bodyR", 0.995), ("bodyG", 0.995), ("bodyB", 0.99), ("disp", 0.0), ("sssSpread", 0.6), ("peel", 0.2), ("smudges", 0.2), ("dust", 0.12)], absorb CLEAR),
     named!("opal", "opalescent glass", "translucent", "Half clear, half milky, bluish where light scatters.", [("sss", 0.3), ("sssDepth", 0.5), ("bodyR", 0.78), ("bodyG", 0.88), ("bodyB", 1.0)], absorb [0.02, 0.06, 0.16]),
     named!("jade", "jade", "translucent", "Polished green jade: bright and pale where it is thin, deep green in the bulk, glowing when lit from behind.", [("ior", 1.61), ("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.055), ("bodyR", 0.33), ("bodyG", 0.53), ("bodyB", 0.28), ("rough", 0.0), ("mottle", 0.6), ("sssSpread", 0.35), ("edgeWear", 0.3), ("cavity", 0.3), ("cavityR", 0.45), ("cavityG", 0.45), ("cavityB", 0.4), ("dust", 0.1)], absorb CLEAR),
-    named!("wax", "wax", "translucent", "Candle wax: soft, warm, glowing where it is thin.", [("ior", 1.44), ("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.15), ("bodyR", 0.97), ("bodyG", 0.82), ("bodyB", 0.5), ("rough", 0.35), ("mottle", 0.25), ("sssSpread", 0.3), ("smudges", 0.5)], absorb CLEAR),
+    named!("wax", "wax", "translucent", "Candle wax: soft, warm, glowing where it is thin.", [("ior", 1.44), ("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.15), ("bodyR", 0.95), ("bodyG", 0.64), ("bodyB", 0.4), ("rough", 0.35), ("mottle", 0.25), ("sssSpread", 0.3), ("smudges", 0.5), ("sssHue", 0.9)], absorb CLEAR),
     named!("alabaster", "alabaster", "translucent", "Pale stone with a soft sheen.", [("ior", 1.52), ("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.05), ("bodyR", 0.94), ("bodyG", 0.90), ("bodyB", 0.84), ("rough", 0.22), ("mottle", 0.5), ("sssSpread", 0.4)], absorb CLEAR),
     named!("rosequartz", "rose quartz", "translucent", "Cloudy pink quartz.", [("ior", 1.546), ("disp", 0.0171), ("sss", 0.5), ("sssDepth", 0.35), ("bodyR", 0.98), ("bodyG", 0.74), ("bodyB", 0.78)], absorb [0.02, 0.10, 0.07]),
     named!("honey", "honey", "translucent", "Thick, golden and slightly cloudy.", [("ior", 1.49), ("disp", 0.01), ("sss", 0.2), ("sssDepth", 0.6), ("bodyR", 0.98), ("bodyG", 0.72), ("bodyB", 0.22)], absorb [0.10, 0.75, 3.2]),
@@ -1062,6 +1062,7 @@ pub static CONTROLS: &[Control] = &[
     ctl("sssDepth", "light travels", Slider, 0.01, 2.0, 0.005, true, Lab("inside"), "How far light gets inside a milky body between scatterings: small = dense and chalky, large = soft and deep."),
     costly(ctl("sssWalk", "true scattering", Switch, 0.0, 1.0, 1.0, false, Lab("inside"), "Follow the light as it wanders inside the body instead of estimating it. Grainy until the picture settles: for still views and video.")),
     ctl("sssSpread", "colours travel apart", Slider, 0.0, 1.0, 0.01, true, Lab("inside"), "0: every colour travels as far inside the body. Towards 1 blue is scattered sooner and red goes deeper, as in milk glass and wax: a bluish edge, a warm glow in the shade and where light comes through."),
+    ctl("sssHue", "colour under the skin", Slider, 0.0, 1.0, 0.01, true, Lab("inside"), "How far the light scattered inside takes on the body's colour at every depth, not only deep in it: towards 1 a dyed body glows its colour just under the surface and through thin parts, as wax does."),
     ctl("meter", "expose for the body", Switch, 0.0, 1.0, 1.0, false, Lab("inside"), "Expose the picture for a milky body, as a photographer exposes for the subject: a white surface facing the brightest light comes out white. The lights glass is lit by are made to be seen in it, and a body that only gathers them would look grey."),
     ctl("sssDetail", "light detail", Slider, 96.0, 256.0, 32.0, false, Lab("inside"), "How fine the volume is in which a milky body's light is worked out (cells along a side). Finer follows thin pieces better; it is worked out again whenever the lights or the shape move, and costs more the finer it is."),
     ctl("sharp", "sharp reflections", Switch, 0.0, 1.0, 1.0, false, Lab("surface"), "A metal, a milky body or a glaze mirrors an environment picture as sharp as it is, as a photograph shows it; off, it mirrors the picture softened as the glass sees it."),
@@ -1153,7 +1154,7 @@ pub fn applies(name: &str, p: &Settings) -> bool {
         "spectrum" | "sss" => !metal && !v.hollow,
         "bodyR" | "bodyG" | "bodyB" => metal || v.sss,
         "sssDepth" | "sssWalk" => v.sss,
-        "sssSpread" => v.sss && !v.walk,
+        "sssSpread" | "sssHue" => v.sss && !v.walk,
         "meter" => v.sss,
         "sssDetail" => v.sss && !v.walk,
         "filmIor" | "filmVar" | "filmScale" => v.film,

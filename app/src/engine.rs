@@ -130,6 +130,8 @@ pub struct Engine {
     soft_ok: bool,
     /// what the picture's exposure is multiplied by to expose for a milky body (`meter`; 1 otherwise)
     meter: f32,
+    /// the fine lights' map was last painted with crisp edges (for a metal or a coat)
+    fine_crisp: bool,
     /// make the bodies' volume even while no body has a material of its own (for checks that read it)
     pub bodies_always: bool,
     /// how thick each body is, measured from the bodies' volume (None: not measured since it was built)
@@ -214,7 +216,7 @@ impl Engine {
         let lights_tex = renderer.env_target(env::ENV_W as u32, env::ENV_H as u32);
         let lights_view = lights_tex.create_view(&wgpu::TextureViewDescriptor::default());
         let mut e = Self {
-            baker: Baker::new(&gpu), layers: LayerWork::new(&gpu), models: crate::mesh_bake::Models::new(auto), bubbler: Bubbler::new(&gpu), stage: crate::stage::StageWork::new(auto), bubbles_in: None, body_bubbles_in: None, scatter: Scatter::new(&gpu), glow: glow::Kept::default(), shape_no: 0, thickness: None, fit_now: 1.0, soft_ok: false, meter: 1.0, bodies_always: false, body_thick: None, gpu, state, renderer, cast, lights_tex, lights_view, painted: None, painted_px: Vec::new(), lights_lit: true, rig_sh: None, last_lamps: None,
+            baker: Baker::new(&gpu), layers: LayerWork::new(&gpu), models: crate::mesh_bake::Models::new(auto), bubbler: Bubbler::new(&gpu), stage: crate::stage::StageWork::new(auto), bubbles_in: None, body_bubbles_in: None, scatter: Scatter::new(&gpu), glow: glow::Kept::default(), shape_no: 0, thickness: None, fit_now: 1.0, soft_ok: false, meter: 1.0, fine_crisp: false, bodies_always: false, body_thick: None, gpu, state, renderer, cast, lights_tex, lights_view, painted: None, painted_px: Vec::new(), lights_lit: true, rig_sh: None, last_lamps: None,
             maker: Arc::new(OnceLock::new()), picture: None, picture_no: 0, glass: None, glass_from: None, hdri_seen: None, loading: None, next: None, building: false, hdri_error: None, hdri_wait: auto,
             show_wanted: Cell::new(false), show: None, shown: None, lighting_no: 0, last_lu: None,
             dirty: true, cut: true, last_tu: None, last_look: None,
@@ -248,12 +250,20 @@ impl Engine {
     /// The lights' map painted again FINE times as finely each way, as `paint_lights` paints it, for the
     /// softened copies (whose first level a mirror reads: the glass's own map is too coarse for a mirror
     /// to show a studio's soft box and horizon sharp).
-    fn paint_fine(&mut self) -> Vec<f32> {
+    ///
+    /// `crisp`: a metal or a coat will mirror it. The rigs' lights fade out over most of their half-size,
+    /// which suits glass (which sees them through itself, bent and spread); a mirror shows them as they
+    /// are, and a real soft box has a crisp edge. So for a mirror their fading edge is made a quarter as
+    /// wide. Glass reads its own map, painted as ever.
+    fn paint_fine(&mut self, crisp: bool) -> Vec<f32> {
+        self.fine_crisp = crisp;
         let p = &self.state.p;
         let rig = self.picture.is_none() || p.hdri_lights > 0.5;
         let (w, h) = (FINE * env::ENV_W, FINE * env::ENV_H);
         let r = self.state.rig();
-        let mut px = if rig { env::paint_gain(&r.lights, r.ambient, p.light_gain, w, h) } else { env::paint(&[], [0.0; 3], w, h) };
+        let mut lights = r.lights.clone();
+        if crisp { for l in lights.iter_mut() { l.soft *= 0.25; } }
+        let mut px = if rig { env::paint_gain(&lights, r.ambient, p.light_gain, w, h) } else { env::paint(&[], [0.0; 3], w, h) };
         if let Some(pic) = &self.picture {
             env::add_glows(&mut px, &pic.glows, p.hdri_gain, hdri::blur_sigma(p.hdri_blur), w, h);
         }
@@ -498,7 +508,7 @@ impl Engine {
             }
         }
         // Exposed for a milky body: the lights as a white matte surface gathers them, facing the brightest
-        // way, brought to 0.85 before the tone curve (about 225 of 255 after it). Only ever brighter
+        // way, brought to 0.7 before the tone curve (about 215 of 255 after it: whiter still and the tone curve bleaches its colour). Only ever brighter
         // than set, and at most three times: a rig made for glass is dim for a body that only gathers light.
         self.meter = 1.0;
         // (not where a backdrop or the picture is seen behind the shape: the picture is then exposed for
@@ -515,7 +525,7 @@ impl Engine {
             // (the nine terms give the light arriving on the surface; a white matte surface sends back that
             // over pi towards each way it is seen: measured, a white milky body's brightest point under a
             // single light comes to peak / pi as a matte one would)
-            if peak > 1e-6 { self.meter = (0.85 * std::f64::consts::PI / peak).clamp(1.0, 3.0) as f32; }
+            if peak > 1e-6 { self.meter = (0.7 * std::f64::consts::PI / peak).clamp(1.0, 3.0) as f32; }
         }
         if self.last_lu != Some(lu) {
             self.renderer.set_light(&lu);
@@ -556,8 +566,9 @@ impl Engine {
             self.state.want = Some(Detail::Full);
         }
         if v.bodies > 0 {
+            if self.soft_ok && self.fine_crisp != (v.metal || v.coat) { self.soft_ok = false; }
             if (v.rough || v.sss || v.wear || v.metal || v.coat || v.inner.soft_lights()) && !self.soft_ok && !self.painted_px.is_empty() {
-                let fine = self.paint_fine();
+                let fine = self.paint_fine(v.metal || v.coat);
                 self.renderer.soften_lights(&fine, (FINE * env::ENV_W) as u32, (FINE * env::ENV_H) as u32);
                 self.soft_ok = true;
                 changed = true;
@@ -593,8 +604,9 @@ impl Engine {
         if v.plain() { return changed; }
         // rough and milky materials read softened copies of the lights' map: made when first wanted, and
         // again when the map is painted anew
+        if self.soft_ok && self.fine_crisp != (v.metal || v.coat) { self.soft_ok = false; }
         if (v.rough || v.sss || v.wear || v.metal || v.coat || v.inner.soft_lights()) && !self.soft_ok && !self.painted_px.is_empty() {
-            let fine = self.paint_fine();
+            let fine = self.paint_fine(v.metal || v.coat);
                 self.renderer.soften_lights(&fine, (FINE * env::ENV_W) as u32, (FINE * env::ENV_H) as u32);
             self.soft_ok = true;
             changed = true;

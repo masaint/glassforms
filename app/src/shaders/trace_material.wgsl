@@ -21,7 +21,8 @@ struct MU {
   body: vec4f,        // rgb: the body's colour (a metal's tint)   w: 1 = a metal from the table, 0 = a perfect mirror
   sss: vec4f,         // x: scatterings per unit length   y: reach of diffuse light beyond the surface   z: events followed at most
                       // w: the index of a thin wall's own glass
-  sssA: vec4f,        // rgb: absorption of the milky body per unit length
+  sssA: vec4f,        // rgb: absorption of the milky body per unit length   w: how far the scattered light takes on
+                      // the body's colour at every depth (sssHue)
   sssK: vec4f,        // rgb: scatterings per unit length of each colour (sss.x is green's: they differ when the
                       // colours scatter differently)
   sssC: vec4f,        // rgb: the colour of a thick piece
@@ -674,7 +675,11 @@ fn glowAlong(pos: vec3f, dir: vec3f, s_in: f32) -> vec3f {
     let x = toObj(pos + dir * t) / (2.0 * HB) + 0.5;
     sum += glowAt(x) * exp(-(st - k) * t);
   }
-  return sum * mu.sssK.rgb * (all / (f32(GLOW_N) * k) * 0.0795775 / (u.ior * u.ior));
+  // (a dyed body: the light scattered towards the eye takes on the body's colour already just under the
+  // surface, kept as bright as it was; looks first, see docs/materials.md section 14)
+  let body = mu.sssC.rgb / max(max(mu.sssC.r, mu.sssC.g), max(mu.sssC.b, 1e-3));
+  let dye = mix(vec3f(1.0), body / max(dot(body, vec3f(0.2126, 0.7152, 0.0722)), 1e-3), mu.sssA.w);
+  return sum * dye * mu.sssK.rgb * (all / (f32(GLOW_N) * k) * 0.0795775 / (u.ior * u.ior));
 }
 //#endif
 //#endif
