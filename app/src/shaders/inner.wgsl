@@ -23,6 +23,7 @@ struct IU {
   playB: vec4f,       // x: the step between the places looked at along a ray   y: how strongly   z: how far
                       // neighbouring grains share a direction   w: how much more than its share of white a grain sends back
   playC: vec4f,       // x: the longest wavelength the grains send back, nm   y: how softened the lights they send back are, radians
+                      // z: how far the colour runs on from domain to domain in streaks (0: each domain its own)
   playD: vec4f,       // rgb: what the body takes from light on its way to a grain and back, per unit of length
   glint: vec4f,       // rgb: the platelets' colour   w: a platelet's radius, in cells
   white: vec4f,       // rgb: one over white light added up a nanometre at a time   w: the width of a grain's band, nm
@@ -1029,6 +1030,22 @@ fn opalLit(c: vec3f) -> vec3f {
 //#endif
 }
 
+// The colour of a field where the colour runs on, for a place 0 to 1 along the run of colours a black
+// opal's fields grade through: blue into green, green into yellow, yellow into orange and red, then back
+// to blue. The warm colours take as much of the run as the cool ones, as they do in the stones (evenly
+// in wavelength, yellow and orange would be thin lines between green and red).
+fn opalRun(h: f32) -> f32 {
+  var at = array<f32, 8>(0.0, 0.1, 0.24, 0.4, 0.55, 0.7, 0.88, 1.0);
+  var nm = array<f32, 8>(478.0, 502.0, 530.0, 556.0, 574.0, 590.0, 615.0, 478.0);
+  for (var i = 1; i < 8; i++) {
+    if (h <= at[i]) {
+      let f = (h - at[i - 1]) / (at[i] - at[i - 1]);
+      return mix(nm[i - 1], nm[i], select(f, step(0.5, f), i == 7));
+    }
+  }
+  return 465.0;
+}
+
 fn grains(pos: vec3f, dir: vec3f, s: f32) -> Play {
   var out: Play;
   out.light = vec3f(0.0);
@@ -1062,6 +1079,13 @@ fn grains(pos: vec3f, dir: vec3f, s: f32) -> Play {
             + dot(envL(vec3f(0.0, 0.0, 1.0), 1.6), wl) + dot(envL(vec3f(0.0, 0.0, -1.0), 1.6), wl)) / 6.0;
   }
 //#endif
+  // Where the colour runs on from domain to domain (flame, broad flash: the Lightning Ridge black opals),
+  // the stone is laid down in sheets that all streak one way: a direction across the up axis, fixed in the
+  // shape, along which the colour drifts slowly and across which it changes faster.
+  let flow = iu.playC.z;
+  let fa = 6.2831853 * unit1(ihash(seed + 101u));
+  let sAlong = vec3f(cos(fa), 0.0, sin(fa));
+  let sAcross = vec3f(-sin(fa), 0.0, cos(fa));
   for (var k = 0; k < PLAY_N; k++) {
     let t = (f32(k) + 0.5) * iu.playB.x;
     if (t > s) { break; }
@@ -1087,10 +1111,14 @@ fn grains(pos: vec3f, dir: vec3f, s: f32) -> Play {
     if (unit1(dm.h) >= iu.playA.y) { continue; }
     // where two domains meet the colour thins out over most of a grain into the dark body between, rather
     // than stopping at a line
-    let seam = 0.1 + 0.9 * smoothstep(0.05, 0.7, (sqrt(dm.d2) - sqrt(dm.d1)) * cw);
+    var seam = 0.1 + 0.9 * smoothstep(0.05, 0.7, (sqrt(dm.d2) - sqrt(dm.d1)) * cw);
+    // (where the colour runs on, neighbouring domains meet without a dark seam between)
+    seam = mix(seam, 0.75 + 0.25 * seam, flow);
     // and within a domain the colour is not even: bright cores, places nearly dark, so the body shows
     // through between and across patches
-    let lit = 0.1 + 0.9 * smoothstep(0.15, 0.6, vnoise3(xw * 0.55 + 7.0 * ten3(ihash(dm.h + 3u)), seed + 9u));
+    var lit = 0.1 + 0.9 * smoothstep(0.15, 0.6, vnoise3(xw * 0.55 + 7.0 * ten3(ihash(dm.h + 3u)), seed + 9u));
+    // (and little of the body shows between: most of the stone is colour, bright and less bright)
+    lit = mix(lit, 0.25 + 0.75 * lit, flow);
     let rp = ten3(ihash(dm.h));
     let rq = ten3(ihash(dm.h + 7u));
     let o = toObj(pos + dir * t);
@@ -1106,14 +1134,18 @@ fn grains(pos: vec3f, dir: vec3f, s: f32) -> Play {
     let ph = 6.2831853 * rq;
     let bend = vec2f(sin(0.45 * xw.x + 0.3 * xw.z + ph.x) + 0.5 * sin(0.8 * xw.y + ph.y), sin(0.4 * xw.z - 0.35 * xw.y + ph.z) + 0.5 * sin(0.7 * xw.x + ph.x));
     // the streaks run one way in the layers (the domain's own)
-    let sa = cos(ph.z) * e1 + sin(ph.z) * e2;
+    var sa = cos(ph.z) * e1 + sin(ph.z) * e2;
+    // (where the colour runs on, every domain streaks the stone's own way, as near as its layers allow)
+    let sg = sAlong - dot(sAlong, pd) * pd;
+    if (flow > 0.0 && dot(sg, sg) > 1e-4) { sa = normalize(mix(sa * sign(dot(sa, sg) + 1e-6), normalize(sg), flow)); }
     let sb = cross(pd, sa);
     let sn = vnoise3(vec3f(dot(xw, sa) * 0.35, dot(xw, sb) * 4.5, xw.y * 1.5), seed + 3u);
     let fl = vnoise3(vec3f(dot(xw, sa) * 1.3, dot(xw, sb) * 9.0, xw.y * 3.0), seed + 4u);
     // flakes: small pieces drawn out along the streaks, of a size that differs from domain to domain,
     // with ragged edges, each tilted its own way within the domain's spread, so that a domain glitters
     // piece by piece; a faint seam of body between them
-    let fz = mix(0.6, 1.6, rq.y);
+    // (where the colour runs on, finer: a field is made of many small flecks, not a few broad strokes)
+    let fz = mix(0.6, 1.6, rq.y) * (1.0 + 0.7 * flow);
     let fq = vec3f(dot(xw, sa) * 1.3, dot(xw, sb) * 3.8, xw.y * 3.2) * fz + 0.9 * vec3f(sn - 0.5, fl - 0.5, sn - fl);
     let gr = nearest(fq, seed);
     let gh = ten3(ihash(gr.h));
@@ -1122,7 +1154,9 @@ fn grains(pos: vec3f, dir: vec3f, s: f32) -> Play {
     let fine = vnoise3(fq * 2.7, seed + 5u);
     let gt = (gh.xy - 0.5) * 2.0 * spread + 0.3 * (fine - 0.5);
     let flake = select(0.45, 1.0, gh.z < 0.82) * (0.55 + 0.45 * smoothstep(0.0, 0.06, sqrt(gr.d2) - sqrt(gr.d1))) * (0.5 + 0.5 * fine);
-    let streak = mix(1.0, smoothstep(0.4, 0.6, sn) * (0.55 + 0.45 * smoothstep(0.3, 0.7, fl)), iu.playF.y) * flake;
+    // (where the colour runs on, the streaks shade it rather than cut it into lines)
+    let cut = smoothstep(0.4, 0.6, sn) * (0.55 + 0.45 * smoothstep(0.3, 0.7, fl));
+    let streak = mix(1.0, mix(cut, 0.35 + 0.65 * cut, flow), iu.playF.y) * flake;
     let tilt = 0.2 * bend + gt + iu.playF.y * 0.3 * vec2f(sn - 0.5, fl - 0.5);
     let gd = normalize(pd + tilt.x * e1 + tilt.y * e2);
     let vis = exp(-iu.playD.rgb * t);
@@ -1160,15 +1194,25 @@ fn grains(pos: vec3f, dir: vec3f, s: f32) -> Play {
     // body, the light inside it), over its own window of angles: as the stone turns its hue runs a
     // little within the window and goes out abruptly beyond it, and another domain comes on.
     let cd = abs(dot(od, pd));
-    let lo = 0.02 + 0.45 * rq.y;
-    let hi = lo + 0.6 + 0.3 * rp.y;
+    // (where the colour runs on, the windows are wider: at any turn most of the stone shows colour, and only
+    // a few domains are out)
+    let lo = mix(0.02 + 0.45 * rq.y, 0.01 + 0.12 * rq.y, flow);
+    let hi = lo + mix(0.6 + 0.3 * rp.y, 0.85 + 0.3 * rp.y, flow);
     let gate = smoothstep(lo, lo + 0.025, cd) * (1.0 - smoothstep(hi, hi + 0.025, cd));
     var glow = vec3f(0.0);
     var rhoD = vec3f(0.0);
     if (gate > 0.0 && iu.playF.w > 0.0) {
       // the domain's own colour, all hues alike likely, running a little across its window
-      let lamD = 430.0 + 270.0 * fract(rp.x + 0.37 * rq.z) + 45.0 * ((cd - lo) / (hi - lo) - 0.5) + 12.0 * (gh.z - 0.5)
-        + 70.0 * (vnoise3(xw * 0.4, seed + 10u) - 0.5);
+      // Where the colour runs on, the hue is not the domain's own but the stone's, laid out in long fields
+      // along its streaks that grade from one into the next (red into orange and yellow, green into blue),
+      // so that neighbouring domains share it and a field flows on across their outlines; each domain
+      // moves it a little, and its flakes a little more.
+      let q = vec3f(dot(xw, sAlong) * 0.07, xw.y * 0.3, dot(xw, sAcross) * 0.22);
+      let hf = vnoise3(q, seed + 21u) + 0.45 * vnoise3(q * 2.3 + 5.1, seed + 22u);
+      let hueRun = opalRun(fract(1.1 * hf + 0.1 * (rp.x - 0.5) + 0.31 * f32(seed & 7u)));
+      let lamOwn = 430.0 + 270.0 * fract(rp.x + 0.37 * rq.z);
+      let lamD = mix(lamOwn, hueRun, flow) + mix(45.0, 25.0, flow) * ((cd - lo) / (hi - lo) - 0.5) + mix(12.0, 8.0, flow) * (gh.z - 0.5)
+        + mix(70.0, 15.0, flow) * (vnoise3(xw * 0.4, seed + 10u) - 0.5);
       rhoD = clamp(specW(lamD) * iu.white.rgb * (iu.white.w * iu.playB.w), vec3f(0.0), vec3f(1.0)) * share * gate;
       // flake by flake it glows more or less
       // (a few flakes much brighter than the rest: the patch glitters rather than glowing as one fill)
@@ -1176,7 +1220,9 @@ fn grains(pos: vec3f, dir: vec3f, s: f32) -> Play {
       // (lit by how bright the light round about is, not by its colour: a green garden does not leave only
       // the green domains alight)
       let wl = vec3f(0.2126, 0.7152, 0.0722);
-      glow = rhoD * each * (iu.playF.w * max(dot(envL(reflect(dir, fromObj(pd)), 0.8), wl), around) * picBoost + iu.playF.z * dot(inside, wl));
+      // (where the colour runs on, the fields are as bright as the flashes of the stones photographed:
+      // broad, and lit from much of the room at once)
+      glow = (1.0 + 0.8 * flow) * rhoD * each * (iu.playF.w * max(dot(envL(reflect(dir, fromObj(pd)), 0.8), wl), around) * picBoost + iu.playF.z * dot(inside, wl));
     }
     out.light += out.keep * (best + glow) * vis;
     out.keep *= 1.0 - max(bestRho, rhoD) * vis;

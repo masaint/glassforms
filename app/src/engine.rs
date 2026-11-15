@@ -970,8 +970,10 @@ impl Engine {
             ns: (p.ns + 0.5).floor() as i32,
             nb: (p.nb + 0.5).floor() as i32,
             lens_n: (p.lens_n + 0.5).floor() as i32,
-            // (the box the scene's volume spans, read by a tracer built for a larger stage than ever)
-            pad: [0, 0, (self.state.scene_hb() as f32).to_bits() as i32],
+            // (what the surface's own reflection is multiplied by, so that the exposure set for a milky
+            // body's light (`meter`) leaves the mirror on its surface as bright as the exposure set; and the
+            // box the scene's volume spans, read by a tracer built for a larger stage than ever)
+            pad: [(1.0 / self.meter.max(1e-3)).to_bits() as i32, 0, (self.state.scene_hb() as f32).to_bits() as i32],
             cam: crate::camera::tracer_cam(p, !self.focus_after()),
         };
         if p.hollow > 0.5 && p.metal < 0.5 {

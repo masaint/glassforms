@@ -239,6 +239,9 @@ pub struct Pattern {
     pub warp: f64,
     /// how strongly stacking faults streak the colour
     pub streak: f64,
+    /// how far the colour runs on from domain to domain in long streaky fields that grade into each other
+    /// (0: each domain its own colour)
+    pub flow: f64,
 }
 
 /// What a grain of each pattern is: blocks side by side (harlequin), small scattered points (pinfire),
@@ -250,7 +253,10 @@ pub fn pattern(p: &Settings) -> Pattern {
         3 => (0.6, 0.3, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0),
         _ => (1.0, 0.9, 0.0, 0.6, 0.7, 3.5, 0.12, 0.6),
     };
-    Pattern { size, cover, roll, flat, together, patch, warp, streak }
+    // (broad flash: the colour lies in broad fields that run into each other along the streaks, covering
+    // most of the stone, as on the Lightning Ridge black opals)
+    let flow = if p.play_pattern.round() as i64 == 2 { 1.0 } else { 0.0 };
+    Pattern { size, cover, roll, flat, together, patch, warp, streak, flow }
 }
 
 /// How brightly an opal's domains show the broad light round about (looks first: in photographs the play
@@ -312,7 +318,7 @@ pub fn uniforms(p: &Settings, scale: f64, pixel: f64, tint: [f64; 3]) -> [f32; I
     let roll = roll0 + (1.0 - roll0) * p.play_roll.clamp(0.0, 1.0);
     put(r + 1, [0.5 * grain, strength * seen, roll, OPAL_GAIN]);
     let soft = if glitter { 0.02 + 0.3 * p.play_soft.clamp(0.0, 1.0) } else { 0.05 + 0.6 * p.play_soft.clamp(0.0, 1.0) };
-    put(r + 2, [opal_longest_nm(p.play_colour), soft, 0.0, 0.0]);
+    put(r + 2, [opal_longest_nm(p.play_colour), soft, pat.flow, 0.0]);
     // what the body takes from light on its way to a grain and back, per unit of length: the body's
     // scattering and absorption (as the milky body has them) and the tint, both ways
     let sc = scatter([p.body_r, p.body_g, p.body_b], p.sss_depth * crate::material::sss_fit(scale), p.sss);

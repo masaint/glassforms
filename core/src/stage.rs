@@ -668,7 +668,7 @@ pub const STUDIOS_MORE: &[Studio] = &[
         name: "Translucent: key and back light",
         about: "for milky bodies: a key light from the front left, a strong soft light from behind, on dark, so that thin parts and edges glow",
         lights: &[
-            [130.0, 30.0, 14.0, 14.0, 2.2, 2.2, 2.2, 0.6],
+            [130.0, 30.0, 16.0, 16.0, 5.0, 5.0, 5.0, 0.6],
             [-10.0, 20.0, 16.0, 16.0, 7.0, 6.8, 6.4, 0.6],
             [-80.0, 5.0, 40.0, 30.0, 0.15, 0.15, 0.17, 0.8],
         ],

@@ -1368,6 +1368,13 @@ fn beyondM(ro_in: vec3f, rd_in: vec3f, ior: f32, sig_in: f32) -> vec3f {
 }
 
 // What shade() does, for every material with a clear or milky body.
+// What the surface's own reflection is multiplied by: the inverse of the exposure the picture was raised
+// by for a milky body (1 otherwise).
+fn surfaceK() -> f32 {
+  let k = bitcast<f32>(u.pad0);
+  return select(1.0, k, k > 0.0 && k <= 1.0);
+}
+
 fn shadeM(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
   let p = ro + rd * t;
   let n = nrm(p);
@@ -1475,6 +1482,9 @@ fn shadeM(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
 //#endif
   }
   acc *= f32(MODES);
+  // (an exposure raised for a milky body's own light is not to brighten the mirror on its surface: a
+  // polished stone reflects its surroundings faintly, as its index has it)
+  acc *= surfaceK();
 
 //#if MONO
   // No dispersion: every wavelength bends alike, so one path is followed and stands for them all.
@@ -1836,9 +1846,9 @@ fn shadeM(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
 
 fn grazeM(p: vec3f, rd: vec3f) -> vec3f {
 //#if COAT
-  return env(reflect(rd, nrm(p)));
+  return env(reflect(rd, nrm(p))) * surfaceK();
 //#else
-  return seen(reflect(rd, nrm(p)), spreadR());
+  return seen(reflect(rd, nrm(p)), spreadR()) * surfaceK();
 //#endif
 }
 //#endif
