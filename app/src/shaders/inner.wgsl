@@ -1067,11 +1067,30 @@ fn grains(pos: vec3f, dir: vec3f, s: f32) -> Play {
     if (t > s) { break; }
     let x = x0 + dl * t;
     // ragged outlines: the place pushed about before the centres are looked for (little for harlequin)
+    // (and, at every pattern, wandering a little more about a grain's width, so that no outline is a
+    // straight cut: in photographs patches run into each other in ragged fringes)
+    let rag = vec3f(vnoise3(x * 0.8, seed + 11u), vnoise3(x * 0.8 + 17.3, seed + 12u), vnoise3(x * 0.8 + 31.7, seed + 13u)) - 0.5;
     let xw = x + warp * (sin(0.53 * x.yzx + 1.7 * sin(0.41 * x.zxy)) + 0.4 * sin(1.9 * x.zxy + 1.3 * x.yzx));
-    let dm = nearest(xw / span, seed ^ 0x51ed27u);
+    let xd = xw + 0.8 * rag;
+    // patches of every size: many of the large domains are broken into smaller ones, some smaller still
+    var cw = span;
+    var dm = nearest(xd / cw, seed ^ 0x51ed27u);
+    let split = unit1(ihash(dm.h + 31u));
+    if (split < 0.5) {
+      cw = span * 0.5;
+      dm = nearest(xd / cw, seed ^ 0x2c1b3c6du);
+      if (split < 0.15) {
+        cw = span * 0.3;
+        dm = nearest(xd / cw, seed ^ 0x6a09e667u);
+      }
+    }
     if (unit1(dm.h) >= iu.playA.y) { continue; }
-    // the seam where two domains meet
-    let seam = 0.4 + 0.6 * smoothstep(0.015, 0.06, sqrt(dm.d2) - sqrt(dm.d1));
+    // where two domains meet the colour thins out over most of a grain into the dark body between, rather
+    // than stopping at a line
+    let seam = 0.1 + 0.9 * smoothstep(0.05, 0.7, (sqrt(dm.d2) - sqrt(dm.d1)) * cw);
+    // and within a domain the colour is not even: bright cores, places nearly dark, so the body shows
+    // through between and across patches
+    let lit = 0.1 + 0.9 * smoothstep(0.15, 0.6, vnoise3(xw * 0.55 + 7.0 * ten3(ihash(dm.h + 3u)), seed + 9u));
     let rp = ten3(ihash(dm.h));
     let rq = ten3(ihash(dm.h + 7u));
     let o = toObj(pos + dir * t);
@@ -1108,7 +1127,7 @@ fn grains(pos: vec3f, dir: vec3f, s: f32) -> Play {
     let gd = normalize(pd + tilt.x * e1 + tilt.y * e2);
     let vis = exp(-iu.playD.rgb * t);
     // (each place stands for a layer of the stone half a grain thick)
-    let share = rho0 * streak * seam;
+    let share = rho0 * streak * seam * lit;
     // the four sets of a close packing's layers: across gd, and three leaning 70.5 degrees from it.
     // At one place the set that sends back the most wins (the sets lie in different parts of a flake,
     // finer than a pixel is not: one colour shows at a point, not a blend of four)
@@ -1148,10 +1167,12 @@ fn grains(pos: vec3f, dir: vec3f, s: f32) -> Play {
     var rhoD = vec3f(0.0);
     if (gate > 0.0 && iu.playF.w > 0.0) {
       // the domain's own colour, all hues alike likely, running a little across its window
-      let lamD = 430.0 + 270.0 * fract(rp.x + 0.37 * rq.z) + 45.0 * ((cd - lo) / (hi - lo) - 0.5) + 12.0 * (gh.z - 0.5);
+      let lamD = 430.0 + 270.0 * fract(rp.x + 0.37 * rq.z) + 45.0 * ((cd - lo) / (hi - lo) - 0.5) + 12.0 * (gh.z - 0.5)
+        + 70.0 * (vnoise3(xw * 0.4, seed + 10u) - 0.5);
       rhoD = clamp(specW(lamD) * iu.white.rgb * (iu.white.w * iu.playB.w), vec3f(0.0), vec3f(1.0)) * share * gate;
       // flake by flake it glows more or less
-      let each = (0.3 + 0.7 * gh.y) * (0.45 + 0.55 * fine);
+      // (a few flakes much brighter than the rest: the patch glitters rather than glowing as one fill)
+      let each = (0.3 + 1.0 * gh.y * gh.y) * (0.45 + 0.55 * fine);
       // (lit by how bright the light round about is, not by its colour: a green garden does not leave only
       // the green domains alight)
       let wl = vec3f(0.2126, 0.7152, 0.0722);
