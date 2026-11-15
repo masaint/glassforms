@@ -23,6 +23,8 @@ pub struct Medium {
     pub enters: f64,
     /// the body's index of refraction
     pub ior: f64,
+    /// how uneven its colour is: clouds and veins through the body (0 = even)
+    pub mottle: f64,
 }
 
 /// The share of light arriving evenly from every direction on one side of a surface that the surface
@@ -52,7 +54,7 @@ impl Medium {
         // directions that can leave is that much narrower); so the two shares are tied together, and a
         // body that absorbs nothing gives back exactly what arrives.
         let back = 1.0 - enters / (ior * ior);
-        Self { sig_s: [sc.sigma_s; 3], sig_a: sc.sigma_a, hold: (1.0 + back) / (1.0 - back), enters, ior }
+        Self { sig_s: [sc.sigma_s; 3], sig_a: sc.sigma_a, hold: (1.0 + back) / (1.0 - back), enters, ior, mottle: p.mottle.clamp(0.0, 1.0) }
     }
 
     /// What a ray loses per unit length, by colour.

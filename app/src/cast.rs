@@ -105,6 +105,8 @@ pub struct CastU {
     pub floor_total: [f32; 4],
     pub floor_share: [[f32; 4]; MAX_LIGHTS],
     pub lights: [LightU; MAX_LIGHTS],
+    /// for each body: how much of the light from all round it hides from a floor beneath it
+    pub veil: [f32; 4],
 }
 
 #[repr(C)]
@@ -529,6 +531,7 @@ impl Engine {
             u.casts[k] = if c.shadow { 1.0 } else { 0.0 };
             u.solid[k] = if c.shadow && lets == 0.0 { 1.0 } else { 0.0 };
             u.far[k] = if c.shadow { 0.0 } else { 10.0 };
+            u.veil[k] = c.veil() as f32;
         }
         let strength = p.cast_shadows.clamp(0.0, 1.0);
         for (i, l) in lit.lights.iter().take(n).enumerate() {

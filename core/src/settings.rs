@@ -182,6 +182,16 @@ settings! {
     rough, "rough", 0.0;
     /// 1 = roughness by sampling alone, nothing softened beforehand (slow to settle; for checking the quick way)
     rough_ref, "roughRef", 0.0;
+    /// 1 = a surface that is not glass (a metal, a milky body, a glaze) mirrors an environment picture as
+    /// sharp as it is, softened only by its own roughness; 0 = softened as the glass sees it (`hdriBlur`)
+    sharp, "sharp", 1.0;
+    /// the surface as a real one is: 0 = perfect; up to 1, its polish undulates, it has duller patches
+    /// (smudges) and a fine uneven haze, all fixed to the object
+    wear, "wear", 0.0;
+    /// fine parallel polishing lines round the shape's vertical (brushed metal): 0 = none
+    brush, "brush", 0.0;
+    /// uneven colour: clouds and veins in a milky body, a faint unevenness of a metal's colour (0 = even)
+    mottle, "mottle", 0.0;
     /// a thin film on the surface: thickness in nanometres (0 = none), its index, how much the thickness
     /// varies across the surface, how large that pattern is, where the pattern is in its flow (one turn =
     /// 1), and how much thinner the film is towards the top
@@ -289,6 +299,9 @@ settings! {
     // ---- the studio (see stage.rs) ----------------------------------------------------------------------
     /// the camera raised on an arc above the floor and looking down at the shape, degrees (0 = level)
     elev, "elev", 0.0;
+    /// the camera carried round the room's vertical on that arc, degrees (0 = where it has always stood):
+    /// the room, its floor, its backdrop and the lights fixed to it turn in the picture together with the shape
+    azim, "azim", 0.0;
     /// a studio backdrop: 0 = none (black), 1 = a sweep of three colours, with a glow if one is set
     backdrop, "backdrop", 0.0;
     /// 1 = the backdrop is seen behind the shape; 0 = it only lights the shape

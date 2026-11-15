@@ -818,16 +818,21 @@ impl State {
         self.r = orthonormalise(rn);
         self.r0 = mul(&transpose(&self.spin_m(self.theta)), &self.r);
     }
+    /// The camera stands off the level or has been carried round the room: the room is seen turned (with
+    /// neither, the old arithmetic is taken, to the letter).
+    pub fn raised(&self) -> bool {
+        self.p.elev != 0.0 || self.p.azim != 0.0
+    }
     /// The camera can roll about its line of sight. The roll is applied to the scene instead: the shape,
     /// and the room's lights with it, are turned the other way about that axis.
     pub fn view_r(&self) -> Mat3 {
         // (a camera raised above the floor sees the whole room tilted towards it, the shape with it)
-        if self.p.elev != 0.0 { return mul(&self.room_m(), &self.r); }
+        if self.raised() { return mul(&self.room_m(), &self.r); }
         if self.p.roll != 0.0 { mul(&axis_angle(0.0, 0.0, 1.0, -self.p.roll * DEG), &self.r) } else { self.r }
     }
     /// Apply a rotation given about the screen's axes to the shape as it appears through the rolled camera.
     pub fn turn(&mut self, s: &Mat3) {
-        if self.p.elev != 0.0 {
+        if self.raised() {
             // the turn is about the screen's axes: taken into the room, applied, and brought back
             let m = self.room_m();
             let rn = mul(&transpose(&m), &mul(s, &mul(&m, &self.r)));
@@ -863,6 +868,7 @@ impl State {
         self.p.dist = num("dist", base.dist);
         crate::camera::set(&mut self.p, "fov", num("fov", base.fov));
         self.p.shift = [0.0, 0.0];
+        self.p.azim = 0.0;
         self.p.roll = num("roll", 0.0);
         self.reset_orientation();
     }
@@ -876,7 +882,7 @@ impl State {
     // ---- lights --------------------------------------------------------------------------------
     // A light whose direction in the lights' own frame is a appears to the camera in direction  base . turned . a
     pub fn light_base(&self) -> Mat3 {
-        if self.p.lights > 0.5 { self.view_r() } else if self.p.elev != 0.0 { self.room_m() } else { axis_angle(0.0, 0.0, 1.0, -self.p.roll * DEG) }
+        if self.p.lights > 0.5 { self.view_r() } else if self.raised() { self.room_m() } else { axis_angle(0.0, 0.0, 1.0, -self.p.roll * DEG) }
     }
     pub fn light_turn(&self) -> Mat3 {
         yxz(self.p.lyaw * DEG + self.lphi, self.p.lpitch * DEG, self.p.lroll * DEG)
@@ -1011,7 +1017,20 @@ impl State {
     // ---- camera gestures -----------------------------------------------------------------------
     /// Dragging on the picture, by (dx, dy) screen points.
     pub fn drag_turn(&mut self, dx: f64, dy: f64) {
+        // Over a floor the camera goes round the shape instead, as round a table: across, round the room's
+        // vertical; up and down, higher or lower on its arc. The shape stays where it stands on the floor,
+        // and floor, backdrop and lights turn with it in the picture.
+        if self.p.floor > 0.5 {
+            self.drag_orbit(dx, dy);
+            return;
+        }
         self.turn(&mul(&axis_angle(0.0, 1.0, 0.0, dx * 0.006), &axis_angle(1.0, 0.0, 0.0, dy * 0.006)));
+    }
+    /// Carry the camera round the room by a drag of (dx, dy) points (at the rate a drag turns the shape).
+    pub fn drag_orbit(&mut self, dx: f64, dy: f64) {
+        let k = 0.006 / DEG;
+        self.p.azim = ((self.p.azim + dx * k + 540.0) % 360.0) - 180.0;
+        self.p.elev = (self.p.elev + dy * k).clamp(0.0, 89.5);
     }
     /// `height`: the picture's height in the same units as dx, dy.
     pub fn drag_pan(&mut self, dx: f64, dy: f64, height: f64) {

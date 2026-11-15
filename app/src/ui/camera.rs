@@ -241,6 +241,8 @@ fn framing(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     worded(ui, st, px, "dist", &length_text(r.distance_mm), "from the lens to the middle of the shape");
     let elev = Knob { label: "height °".into(), ..engine("elev") };
     knob::knob_row_with(ui, st, &elev, px, knob::Extra { tip: "the camera's height: raised on an arc and looking down at the shape, the room, its lights and the shape tilting together", ..Default::default() });
+    let azim = Knob { label: "round °".into(), ..engine("azim") };
+    knob::knob_row_with(ui, st, &azim, px, knob::Extra { tip: "the camera carried round the room, as round a table: the floor, the backdrop and the lights fixed to the room turn in the picture with the shape (over a floor, dragging the picture does this and the height)", ..Default::default() });
     let tip = "the picture slid across the lens's image, in half-heights of the picture: with a long lens this is how a close-up is framed";
     for name in ["shiftX", "shiftY"] { knob::knob_row_with(ui, st, &engine(name), px, knob::Extra { tip, ..Default::default() }); }
     knob::knob_row(ui, st, &engine("roll"), px);
@@ -387,7 +389,7 @@ mod tests {
 
     #[test]
     fn every_name_the_group_uses_is_a_knob() {
-        for name in ["zoom", "subjectLog", "av", "focus", "band", "lensN", "dist", "elev", "shiftX", "shiftY", "roll", "ev", "bloom", "wbTemp", "wbTint", "contrast", "saturation",
+        for name in ["zoom", "subjectLog", "av", "focus", "band", "lensN", "dist", "elev", "azim", "shiftX", "shiftY", "roll", "ev", "bloom", "wbTemp", "wbTint", "contrast", "saturation",
                      "distort", "fringe", "falloff", "vignette", "bokehRot", "bokeh", "catseye", "squeeze", "tiltX", "tiltY", "grain"] {
             assert!(State::engine_knobs().iter().any(|k| k.id == name), "{name} is not a knob");
         }

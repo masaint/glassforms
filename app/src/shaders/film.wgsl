@@ -144,52 +144,7 @@ fn skyDim(d: vec3f) -> vec3f { return vec3f(mu.more.x * filmGlow(dot(d, vec3f(u.
 fn skyFar(d: vec3f) -> vec3f { return vec3f(mu.exo.w * filmGlow(dot(d, vec3f(u.env0.y, u.env1.y, u.env2.y)))); }
 //#endif
 
-//#if PICTURE
-// How soft a copy of the environment picture a mirror reads at p, where the surface faces n and the
-// ray met it at cosine c: the level whose softening is as wide as the patch of surroundings that one
-// pixel's worth of surface mirrors. A flat mirror shows the picture pixel for pixel; a curved one
-// squeezes it, by twice the surface's curvature times the distance (and more the more glancing the
-// ray), and read at full sharpness the squeezed picture would sparkle from frame to frame.
-// The curvature is measured from the distance field: three lookups a few voxels out across the
-// surface, a third of a turn apart, give its greatest bend whichever way that lies.
-fn filmLod(p: vec3f, n: vec3f, c: f32) -> f32 {
-  let h = 3.0 * (2.0 * HB / u.vres);
-  // any two directions across n (Duff et al. 2017)
-  let sg = select(-1.0, 1.0, n.z >= 0.0);
-  let k = -1.0 / (sg + n.z);
-  let m = n.x * n.y * k;
-  let t1 = vec3f(1.0 + sg * n.x * n.x * k, sg * m, -sg * n.x);
-  let t2 = vec3f(m, sg + n.y * n.y * k, -n.y);
-  let d0 = mapW(p);
-  let k1 = mapW(p + h * t1) - d0;
-  let k2 = mapW(p + h * (-0.5 * t1 + 0.8660254 * t2)) - d0;
-  let k3 = mapW(p + h * (-0.5 * t1 - 0.8660254 * t2)) - d0;
-  // (each is half the bend that way times h squared; their mean is the mean bend, their scatter the rest)
-  let mean = (k1 + k2 + k3) / 3.0;
-  let dev = sqrt(0.6666667 * ((k1 - mean) * (k1 - mean) + (k2 - mean) * (k2 - mean) + (k3 - mean) * (k3 - mean)));
-  let bend = min((abs(mean) + dev) * 2.0 / (h * h), 1.0 / h);
-  let far = length(p - vec3f(0.0, 0.0, u.dist));
-  let pixel = 2.0 * u.tan_fov / u.res.y;
-  let wide = pixel * (1.0 + 2.0 * bend * far / max(c, 0.25));
-  return clamp(log2(0.4 * wide / mu.pic.y), 0.0, mu.pic.w);
-}
-// The surroundings as a mirror-like film shows them along rd: the picture itself at that level; and,
-// when the family's lights are kept lit beside the picture, the lights' map. (Otherwise that map holds
-// only the soft glow that stands in for the picture's sun in the glass. A mirror wants the sun itself,
-// small and sharp, and the picture has it.)
-fn filmEnv(rd: vec3f, lod: f32) -> vec3f {
-  let d = toEnv(rd);
-  var c = textureSampleLevel(pictureTex, pictureSmp, d, lod).rgb * mu.pic.x;
-  if (mu.film5.y > 0.5) {
-    let uv = vec2f(atan2(d.z, d.x) * 0.15915494 + 0.5, acos(clamp(d.y, -1.0, 1.0)) * 0.31830989);
-    c += textureSampleLevel(envTex, envSmp, uv, 0.0).rgb;
-  }
-  return c;
-}
-//#else
-fn filmLod(p: vec3f, n: vec3f, c: f32) -> f32 { return 0.0; }
-fn filmEnv(rd: vec3f, lod: f32) -> vec3f { return env(rd); }
-//#endif
+// (how sharp a mirror reads the surroundings, and what it reads: mirrorLod and mirrorEnv in trace_material.wgsl)
 
 //#if BUBBLE
 // ---- a film around air: a soap bubble --------------------------------------------------------------
@@ -253,7 +208,7 @@ fn beyondB(ro_in: vec3f, rd: vec3f, lod: f32, xi: f32) -> vec3f {
 //#if ROUGH
     col += thr * F * (seen(mir, spreadR()) + skyOf(mir));
 //#else
-    col += thr * F * (filmEnv(mir, filmLod(p, n, ci)) + skyOf(mir));
+    col += thr * F * (mirrorEnv(mir, mirrorLod(p, n, ci)) + skyOf(mir));
 //#endif
     // across the air inside, and out by the wall beyond
     let q0 = p - n * 0.004;
@@ -272,7 +227,7 @@ fn beyondB(ro_in: vec3f, rd: vec3f, lod: f32, xi: f32) -> vec3f {
 //#if ROUGH
   return col + thr * (seen(rd, spreadR()) + skyOf(rd));
 //#else
-  return col + thr * (filmEnv(rd, lod) + skyOf(rd));
+  return col + thr * (mirrorEnv(rd, lod) + skyOf(rd));
 //#endif
 }
 
@@ -286,7 +241,7 @@ fn shadeM(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
 //#if ROUGH
   var acc = F * (seen(mir, spreadR()) + skyOf(mir));
 //#else
-  var acc = F * (filmEnv(mir, filmLod(p, n, cosi)) + skyOf(mir));
+  var acc = F * (mirrorEnv(mir, mirrorLod(p, n, cosi)) + skyOf(mir));
 //#endif
   var thr = (1.0 - F) * mu.axis.xyz;
   var pos = p - n * 0.004;
@@ -306,7 +261,7 @@ fn shadeM(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
     // What leaves through this wall. The first time, that is light that has come straight through the
     // bubble; after that it has been mirrored by a wall on the way, and it sees the surroundings.
     var lod = -1.0;
-    if (b > 0) { lod = filmLod(q, m, c); }
+    if (b > 0) { lod = mirrorLod(q, m, c); }
     acc += thr * (1.0 - F) * mu.axis.xyz * beyondB(q + m * 0.006, dir, lod, xi);
     // and what the wall sends back across the bubble
     thr *= F;
@@ -323,7 +278,7 @@ fn grazeM(p: vec3f, rd: vec3f) -> vec3f {
 //#if ROUGH
   return seen(mir, spreadR()) + skyOf(mir);
 //#else
-  return filmEnv(mir, filmLod(p, n, 0.0)) + skyOf(mir);
+  return mirrorEnv(mir, mirrorLod(p, n, 0.0)) + skyOf(mir);
 //#endif
 }
 //#endif

@@ -94,6 +94,185 @@ fn seen(rd: vec3f, sig: f32) -> vec3f { return envL(rd, sig); }
 fn seen(rd: vec3f, sig: f32) -> vec3f { return env(rd); }
 //#endif
 
+//#if PICTURE
+// How soft a copy of the environment picture a mirror reads at p, where the surface faces n and the
+// ray met it at cosine c: the level whose softening is as wide as the patch of surroundings that one
+// pixel's worth of surface mirrors. A flat mirror shows the picture pixel for pixel; a curved one
+// squeezes it, by twice the surface's curvature times the distance (and more the more glancing the
+// ray), and read at full sharpness the squeezed picture would sparkle from frame to frame.
+// The curvature is measured from the distance field: three lookups a few voxels out across the
+// surface, a third of a turn apart, give its greatest bend whichever way that lies.
+fn mirrorLod(p: vec3f, n: vec3f, c: f32) -> f32 {
+  let h = 3.0 * (2.0 * HB / u.vres);
+  // any two directions across n (Duff et al. 2017)
+  let sg = select(-1.0, 1.0, n.z >= 0.0);
+  let k = -1.0 / (sg + n.z);
+  let m = n.x * n.y * k;
+  let t1 = vec3f(1.0 + sg * n.x * n.x * k, sg * m, -sg * n.x);
+  let t2 = vec3f(m, sg + n.y * n.y * k, -n.y);
+  let d0 = mapW(p);
+  let k1 = mapW(p + h * t1) - d0;
+  let k2 = mapW(p + h * (-0.5 * t1 + 0.8660254 * t2)) - d0;
+  let k3 = mapW(p + h * (-0.5 * t1 - 0.8660254 * t2)) - d0;
+  // (each is half the bend that way times h squared; their mean is the mean bend, their scatter the rest)
+  let mean = (k1 + k2 + k3) / 3.0;
+  let dev = sqrt(0.6666667 * ((k1 - mean) * (k1 - mean) + (k2 - mean) * (k2 - mean) + (k3 - mean) * (k3 - mean)));
+  let bend = min((abs(mean) + dev) * 2.0 / (h * h), 1.0 / h);
+  let far = length(p - vec3f(0.0, 0.0, u.dist));
+  let pixel = 2.0 * u.tan_fov / u.res.y;
+  let wide = pixel * (1.0 + 2.0 * bend * far / max(c, 0.25));
+  return clamp(log2(0.4 * wide / mu.pic.y), 0.0, mu.pic.w);
+}
+// The surroundings as a mirror (a metal, a film, a glaze) shows them along rd: the picture itself at that level; and,
+// when the family's lights are kept lit beside the picture, the lights' map. (Otherwise that map holds
+// only the soft glow that stands in for the picture's sun in the glass. A mirror wants the sun itself,
+// small and sharp, and the picture has it.)
+fn mirrorEnv(rd: vec3f, lod: f32) -> vec3f {
+  let d = toEnv(rd);
+  var c = textureSampleLevel(pictureTex, pictureSmp, d, lod).rgb * mu.pic.x;
+  if (mu.film5.y > 0.5) {
+    let uv = vec2f(atan2(d.z, d.x) * 0.15915494 + 0.5, acos(clamp(d.y, -1.0, 1.0)) * 0.31830989);
+    c += textureSampleLevel(envTex, envSmp, uv, 0.0).rgb;
+  }
+  return c;
+}
+//#else
+fn mirrorLod(p: vec3f, n: vec3f, c: f32) -> f32 { return 0.0; }
+fn mirrorEnv(rd: vec3f, lod: f32) -> vec3f { return env(rd); }
+//#endif
+
+// What a polished surface that is not glass mirrors along rd at p (facing n, met at cosine c): with an
+// environment picture, the picture as sharp as one pixel's worth of the surface can show it (mirrorLod),
+// not softened as the glass reads it; glass hides that softening behind what it bends, a mirror shows it
+// at once. `sharp` off (mu.more.y): the glass's softened surroundings, as before.
+fn sharpEnv(rd: vec3f, p: vec3f, n: vec3f, c: f32) -> vec3f {
+//#if PICTURE
+  if (mu.more.y > 0.5) { return mirrorEnv(rd, mirrorLod(p, n, c)); }
+//#endif
+  return env(rd);
+}
+
+//#if WEAR
+// ---- a real surface: wear, smudges, polishing lines, uneven colour --------------------------------------
+// No made surface is perfect, and a photograph shows it at once: a mirror's reflections waver a little
+// where the polish undulates, a handled object has duller patches, brushed metal has fine parallel lines
+// that stretch highlights across them, and a metal's or a stone's colour is not quite even. All of it is
+// fixed to the object (worked out from where the point lies in the shape's own frame), nothing in it is
+// random from frame to frame, and detail finer than a pixel is not drawn but averaged into a wider
+// spread, so a single frame is clean and nothing swims as the view moves.
+//   mu.more.z   wear: how uneven the polish is and how many smudges there are (0 = a perfect surface)
+//   mu.more.w   brush: how strong the polishing lines are (they run round the shape's vertical)
+//   mu.sssC.w   mottle: how uneven the colour is
+fn wHash(i: vec3i) -> f32 {
+  var h = (u32(i.x) * 73856093u) ^ (u32(i.y) * 19349663u) ^ (u32(i.z) * 83492791u);
+  h = (h ^ (h >> 16u)) * 0x45d9f3bu;
+  h = (h ^ (h >> 16u)) * 0x45d9f3bu;
+  h = h ^ (h >> 16u);
+  return f32(h & 0xffffffu) * (2.0 / 16777215.0) - 1.0;
+}
+// smooth noise, -1 to 1, one bump about every unit of x
+fn wNoise(x: vec3f) -> f32 {
+  let i = vec3i(floor(x));
+  let f = fract(x);
+  let s = f * f * (3.0 - 2.0 * f);
+  let a = mix(mix(wHash(i), wHash(i + vec3i(1, 0, 0)), s.x), mix(wHash(i + vec3i(0, 1, 0)), wHash(i + vec3i(1, 1, 0)), s.x), s.y);
+  let b = mix(mix(wHash(i + vec3i(0, 0, 1)), wHash(i + vec3i(1, 0, 1)), s.x), mix(wHash(i + vec3i(0, 1, 1)), wHash(i + vec3i(1, 1, 1)), s.x), s.y);
+  return mix(a, b, s.z);
+}
+// the shape's own frame -> the world (toObj turned back)
+fn fromObj(v: vec3f) -> vec3f { return vec3f(dot(v, vec3f(u.obj0.x, u.obj1.x, u.obj2.x)), dot(v, vec3f(u.obj0.y, u.obj1.y, u.obj2.y)), dot(v, vec3f(u.obj0.z, u.obj1.z, u.obj2.z))); }
+
+struct Wear {
+  n: vec3f,       // the surface's facing, with the polish's undulation and the line under the point
+  sig: f32,       // how much more the reflection is spread here (radians)
+  keep: f32,      // the share of the reflection kept (a smudge takes a little)
+  b: vec3f,       // across the polishing lines (in the surface)
+  aniso: f32,     // how far the lines tilt the surface across themselves, all the lines in a pixel together (radians)
+  tint: vec3f,    // the colour's unevenness, as a factor
+}
+fn wearAt(p: vec3f, n: vec3f) -> Wear {
+  var w: Wear;
+  w.n = n;
+  w.sig = 0.0;
+  w.keep = 1.0;
+  w.b = vec3f(0.0);
+  w.aniso = 0.0;
+  w.tint = vec3f(1.0);
+  let q = toObj(p);
+  let nq = toObj(n);
+  // the width of a pixel at p (as mirrorLod reckons it)
+  let px = length(p - vec3f(0.0, 0.0, u.dist)) * 2.0 * u.tan_fov / u.res.y;
+  let a = mu.more.z;
+  if (a > 0.0) {
+    // the polish undulates gently, at two sizes
+    let k1 = q * 3.1;
+    let k2 = q * 11.0;
+    var t = vec3f(wNoise(k1), wNoise(k1 + vec3f(17.1, 3.3, 9.7)), wNoise(k1 + vec3f(5.9, 23.1, 1.3)))
+          + 0.5 * vec3f(wNoise(k2 + vec3f(2.2, 8.1, 4.4)), wNoise(k2 + vec3f(13.5, 1.7, 6.2)), wNoise(k2 + vec3f(7.3, 11.9, 3.1)));
+    t -= nq * dot(t, nq);
+    w.n = normalize(n + fromObj(t) * (0.012 * a));
+    // smudges: soft patches, larger and smaller, where the surface is duller
+    let sm = max(smoothstep(0.1, 0.6, wNoise(q * 1.7 + vec3f(31.0, 7.0, 13.0))) * (0.65 + 0.35 * wNoise(q * 8.0 + vec3f(4.0, 9.0, 2.0))), 0.0);
+    // and a fine haze everywhere, a little uneven
+    let haze = 0.5 + 0.5 * wNoise(q * 23.0 + vec3f(1.0, 5.0, 3.0));
+    w.sig = a * (0.004 + 0.004 * haze + 0.06 * sm);
+    w.keep = 1.0 - 0.07 * a * sm;
+  }
+  let br = mu.more.w;
+  if (br > 0.0) {
+    // The lines run round the shape's vertical, as on a turned and brushed piece; across them is up
+    // along the surface (on a face that looks straight up or down, along the shape's x instead).
+    var bq = vec3f(0.0, 1.0, 0.0) - nq * nq.y;
+    let lb = length(bq);
+    bq = mix(vec3f(1.0, 0.0, 0.0) - nq * nq.x, bq, smoothstep(0.1, 0.3, lb));
+    w.b = fromObj(normalize(bq + vec3f(1e-6)));
+    // Each line tilts the surface its own way across itself; lines are short and long, never quite level.
+    // Lines narrower than a pixel are not drawn: their tilts, taken together, spread the reflection.
+    let y = q.y + 0.004 * wNoise(q * 3.0);
+    let r = vec3f(q.x * 9.0, q.z * 9.0, 0.0);
+    let fine = 1.0 - smoothstep(0.3, 1.0, px * 380.0);
+    let coarse = 1.0 - smoothstep(0.3, 1.0, px * 110.0);
+    let line = wNoise(vec3f(r.x, y * 380.0, r.y)) * fine + 0.6 * wNoise(vec3f(r.x * 0.4 + 7.0, y * 110.0, r.y * 0.4 + 3.0)) * coarse;
+    w.n = normalize(w.n + w.b * (0.05 * br * line));
+    w.aniso = br * (0.03 + 0.05 * (1.0 - 0.5 * (fine + coarse)));
+  }
+  let mo = mu.sssC.w;
+  if (mo > 0.0) {
+    w.tint = vec3f(1.0) + mo * 0.06 * vec3f(wNoise(q * 2.3 + vec3f(5.0, 1.0, 8.0)), wNoise(q * 2.3 + vec3f(11.0, 3.0, 2.0)), wNoise(q * 2.3 + vec3f(2.0, 13.0, 6.0)));
+  }
+  return w;
+}
+// The surroundings a worn surface mirrors along rd: as sharpEnv does, spread a further sig (radians);
+// and across the polishing lines (b, aniso), drawn out: four looks along the line across them.
+fn wearRead(rd: vec3f, lod: f32, sig: f32) -> vec3f {
+//#if PICTURE
+  if (mu.more.y > 0.5) {
+    let d = toEnv(rd);
+    var c = textureSampleLevel(pictureTex, pictureSmp, d, max(lod, log2(max(sig, 1e-6) / mu.pic.y))).rgb * mu.pic.x;
+    if (mu.film5.y > 0.5) {
+      let uv = vec2f(atan2(d.z, d.x) * 0.15915494 + 0.5, acos(clamp(d.y, -1.0, 1.0)) * 0.31830989);
+      c += textureSampleLevel(softTex, softSmp, uv, clamp(select(log2(max(sig, 1e-6) / T0), sig / (2.0 * T0), sig < 2.0 * T0), 0.0, 7.0)).rgb;
+    }
+    return c;
+  }
+//#endif
+  return envL(rd, sig);
+}
+fn wearSee(rd_in: vec3f, w: Wear, p: vec3f, c: f32) -> vec3f {
+  let lod = mirrorLod(p, w.n, c);
+  let mir = reflect(rd_in, w.n);
+  if (w.aniso <= 0.0) { return wearRead(mir, lod, w.sig); }
+  // (a tilt of the surface by e turns the reflection by 2e; each look stands for a quarter of the spread)
+  let s = sqrt(w.sig * w.sig + w.aniso * w.aniso);
+  var c4 = vec3f(0.0);
+  for (var k = 0; k < 4; k++) {
+    let e = (f32(k) - 1.5) * 0.75 * w.aniso;
+    c4 += wearRead(reflect(rd_in, normalize(w.n + w.b * e)), lod, s);
+  }
+  return 0.25 * c4;
+}
+//#endif
+
 //#if RANDOM
 fn pcg(v: u32) -> u32 {
   let x = v * 747796405u + 2891336453u;
@@ -366,6 +545,9 @@ fn shadeM(ro: vec3f, rd_in: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f 
 //#endif
     let cosi = clamp(-dot(rd, n), 0.0, 1.0);
     let mir = reflect(rd, n);
+//#if WEAR
+    let wr = wearAt(p, n);
+//#endif
 //#if GLOW
     col += thr * mu.glow.rgb * 0.25;        // a glowing metal simply shines of itself
 //#endif
@@ -385,7 +567,7 @@ fn shadeM(ro: vec3f, rd_in: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f 
     let Fc = vec3f(fresnel(cosi, 1.0, nx));
     let R = metalRGB(cc, nx, fd);
 //#endif
-    col += thr * Fc * env(mir);
+    col += thr * Fc * sharpEnv(mir, p, n, cosi);
     thr *= 1.0 - Fc;
 //#else
     let R = metalRGB(cosi, 1.0, fd);
@@ -398,15 +580,31 @@ fn shadeM(ro: vec3f, rd_in: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f 
     // and by the bend of the patch the cone landed on. Its middle is followed to the next surface while
     // it is narrow (share fo); the rest of it sees the lights, less what the shape itself hides of them.
     fv = frMetalV(fv, frBend(p, n, fp, rd));
-    let fo = frFollow(fv);
+//#if WEAR
+    // (the wear spreads the lobe further; the polishing lines draw it out across themselves: four looks)
+    fv = frCap(fv + wr.sig * wr.sig);
+    var lit0 = vec3f(0.0);
+    if (wr.aniso > 0.0) {
+      for (var k = 0; k < 4; k++) { lit0 += 0.25 * frMetalLit(dir, frMid(rd, normalize(wr.n + wr.b * ((f32(k) - 1.5) * 0.75 * wr.aniso))), fv, b); }
+    } else {
+      lit0 = frMetalLit(dir, frMid(rd, wr.n), fv, b);
+    }
+    lit0 *= wr.keep * wr.tint;
+//#else
     let lit0 = frMetalLit(dir, frMid(rd, n), fv, b);
+//#endif
+    let fo = frFollow(fv);
     let hid = frMetalHid(p, n, frMid(rd, n), fv, lit0, R);
     let lit = mix(hid, lit0, fo);
 //#else
 //#if FILM
     let lit = filmEnv(mir, filmLod(p, n, cosi));
 //#else
-    let lit = env(mir);
+//#if WEAR
+    let lit = wearSee(rd, wr, p, cosi) * (wr.keep * wr.tint);
+//#else
+    let lit = sharpEnv(mir, p, n, cosi);
+//#endif
 //#endif
 //#endif
     var t2 = 0.0;
@@ -960,12 +1158,27 @@ fn shadeM(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
 //#if ROUGH
   let envB = frTop(rd, n, xi, cosi);        // the body's own reflection, spread by its roughness
 //#else
+//#if WEAR
+  let wr = wearAt(p, n);
+  let envB = wearSee(rd, wr, p, cosi) * (wr.keep * wr.tint);
+//#else
+//#if SSS
+  let envB = sharpEnv(reflect(rd, n), p, n, cosi);
+//#else
   let envB = env(reflect(rd, n));
+//#endif
+//#endif
   let ne = n;
 //#endif
 //#if COAT
 //#if ROUGH
-  let envT = env(reflect(rd, n));           // the coat's reflection is sharp whatever lies under it
+  // (the coat's reflection is sharp whatever lies under it)
+//#if WEAR
+  let wr = wearAt(p, n);
+  let envT = wearSee(rd, wr, p, cosi) * (wr.keep * wr.tint);
+//#else
+  let envT = sharpEnv(reflect(rd, n), p, n, cosi);
+//#endif
 //#else
   let envT = envB;
 //#endif

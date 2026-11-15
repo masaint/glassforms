@@ -38,6 +38,7 @@ struct SU {
   zb: vec4f,              // rgb: cell over the distance beyond the surface at which diffuse light would reach nothing
                           // w: the share of light from all round that gets into the body
   ab: vec4f,              // rgb: absorption times cell squared over the diffusion constant
+                          // w: what a cell of the furnace's volume should hold (0: no calibration here)
   even: vec4f,            // light that is in no beam: its brightness averaged over all directions, by colour
                           // w: 1 = the body lights itself where one part of it faces another
   leanX: vec4f,           // and how much brighter it is towards x, y and z (brightness around d = even + lean . d)
@@ -58,6 +59,7 @@ struct SU {
   cbody: array<vec4f, 4>, // each body: rgb = what a unit length of it takes from light passing through, w = what its surfaces let through
   caus: vec4f,            // x: how strong shadows are   y: how strong caustics are   z: cells a side of the volume of
                           // light arriving by way of the bodies (0: none)   w: how far off the surface that light was landed
+  mottle: vec4f,          // x: how uneven the body's colour is (0 = even)
 }
 
 @group(0) @binding(0) var<uniform> su: SU;
@@ -77,6 +79,7 @@ struct SU {
 @group(0) @binding(13) var belowTex: texture_3d<f32>;       // the light volume of the size below (nothing in it for the smallest)
 @group(0) @binding(14) var castTex: texture_3d<f32>;        // the distance to each body, one a channel, at modest detail
 @group(0) @binding(15) var castLight: texture_3d<f32>;      // light arriving at the surfaces by way of the bodies (caustics)
+@group(0) @binding(16) var calibTex: texture_3d<f32>;       // the same body in a furnace (scatter.rs: Scatter::solve)
 
 fn sdf(p: vec3f) -> f32 { return dot(textureSampleLevel(volTex, lin, p / (2.0 * su.hb) + 0.5, 0.0), su.pick); }
 fn castAt(p: vec3f) -> vec4f { return textureSampleLevel(castTex, lin, p / (2.0 * su.hb) + 0.5, 0.0); }
@@ -277,6 +280,12 @@ fn cs_inject(@builtin(global_invocation_id) id: vec3u) {
     let e = vec2f(1.0, -1.0) * (0.5 * h);
     let away = normalize(e.xyy * sdf(p + e.xyy) + e.yyx * sdf(p + e.yyx) + e.yxy * sdf(p + e.yxy) + e.xxx * sdf(p + e.xxx) + vec3f(1e-12));
     let above = p + away * (0.75 * h - d);
+    // (and a point inside the body, for the march across it to its other face: the cell's middle, or
+    // for a cell whose middle lies just outside, a little way below the surface)
+    let inside = p - away * max(d + 0.25 * h, 0.0);
+    // How far the far face of the piece lies, straight through it: light coming in through that face
+    // from direction w has come (as through a slab) this far over the cosine of its slant.
+    let farFace = across(inside, -away, h, least);
     // (of a body that is several bodies of one material, which of them the cell is in: the highest-numbered
     // it is inside, or the nearest; it darkens its own beams whatever it casts)
     var keep = su.casts;
@@ -294,9 +303,14 @@ fn cs_inject(@builtin(global_invocation_id) id: vec3u) {
       // A wide beam arrives at many angles at once: the wider it is, the more it is given what light
       // from all round gets in on average, in place of what gets in at its middle's angle.
       let wide = clamp(1.6 * tanA, 0.0, 1.0);
+      // (the march back from the cell, when it is made, also says how much body lies beyond this piece)
+      var back: Way;
+      var backed = false;
       if (dense < 1.0) {
         // ---- followed back from the cell
         let m = way(p, w, tanA, 0.5 * h, false, h, least, keep);
+        back = m;
+        backed = true;
         // Inside the cell: its stretch of the beam in four pieces. Each of the beam's parts crosses so
         // much more body there; what a part loses between coming to the cell and leaving it is light
         // that the cell holds. (A part of the beam is inside the body or it is not: a beam passing the
@@ -320,6 +334,26 @@ fn cs_inject(@builtin(global_invocation_id) id: vec3u) {
         light += su.beams[b].rgb.rgb * got * (1.0 - dense) * castThrough(p, w, tanA);
       }
       let c = dot(away, w);
+      if (dense > 0.0 && c < -0.03) {
+        // ---- put in at the far side: the beam comes into this piece of the body through its other face
+        // (in a thin piece the cell lies within reach of both; through a thick one nothing gets across)
+        let fc = -c;
+        let s = farFace / fc;
+        let ci = sqrt(1.0 - (1.0 - fc * fc) / (su.k.w * su.k.w));
+        let half = 0.5 * h / ci;
+        if (least * (s - half) < 10.0) {
+          let start = inside + w * (s + 0.75 * h);
+          var reaches = vec3f(0.0);
+          if (backed) {
+            let o = max(s - 0.5 * h, 0.0);
+            reaches = (exp(-st * max(back.a.x - o, 0.0)) + exp(-st * max(back.a.y - o, 0.0)) + exp(-st * max(back.a.z - o, 0.0)) + exp(-st * max(back.b.x - o, 0.0)) + exp(-st * max(back.b.y - o, 0.0)) + exp(-st * max(back.b.z - o, 0.0))) / 6.0;
+          } else {
+            let m = way(start, w, tanA, 0.0, true, h, least, keep);
+            reaches = (exp(-st * m.a.x) + exp(-st * m.a.y) + exp(-st * m.a.z) + exp(-st * m.b.x) + exp(-st * m.b.y) + exp(-st * m.b.z)) / 6.0;
+          }
+          light += su.beams[b].rgb.rgb * reaches * (dense * fc * mix(enters(fc), su.zb.w, wide)) * (exp(-st * max(s - half, 0.0)) - exp(-st * (s + half))) * castThrough(start, w, tanA);
+        }
+      }
       if (dense > 0.0 && shell && c > 0.03) {
         // ---- put in at the surface
         let m = way(above, w, tanA, 0.0, true, h, least, keep);
@@ -347,11 +381,28 @@ fn cs_inject(@builtin(global_invocation_id) id: vec3u) {
       for (var b = 0; b < 12; b++) {
         let w = ROUND[b];
         let c = dot(w, away);
-        if (c < 0.03) { continue; }
+        // Light from this direction comes in through the face near the cell (it faces that way) or,
+        // in a piece thin enough for it to get across, through the face on the other side.
+        var fc = c;
+        var start = above;
+        var sTop = top / max(c, 0.03);
+        var sBottom = bottom / max(c, 0.03);
+        if (c < 0.03) {
+          if (c > -2.0) { continue; }
+          fc = -c;
+          let s = farFace / fc;
+          if (least * (s - 0.5 * h / fc) > 10.0) { continue; }
+          start = inside + w * (s + 0.75 * h);
+          sTop = max(s - 0.5 * h / fc, 0.0);
+          sBottom = s + 0.5 * h / fc;
+        }
         var t = 0.0;
         var met = false;
-        for (var i = 0; i < 28; i++) {
-          let q = above + w * t;
+        // (whether the look out meets the body again is asked only on the near side: light that has
+        // crossed the whole piece is faint, and is taken to come from the surroundings)
+        let ask = c >= 0.03;
+        for (var i = 0; i < select(0, 28, ask); i++) {
+          let q = start + w * t;
           if (dot(q, q) > su.st.w) { break; }
           let dq = sdf(q);
           if (dq < 0.0) {
@@ -364,9 +415,9 @@ fn cs_inject(@builtin(global_invocation_id) id: vec3u) {
         if (met) {
           // what a point of the body gives off: of the light it holds, the share that is scattered, evenly
           // into all directions, thinned by the square of the index on leaving
-          comes = textureSampleLevel(belowTex, lin, (above + w * (t + h)) / (2.0 * su.hb) + 0.5, 0.0).rgb * (su.ss.rgb / st) * (0.0795775 / (su.k.w * su.k.w));
+          comes = textureSampleLevel(belowTex, lin, (start + w * (t + h)) / (2.0 * su.hb) + 0.5, 0.0).rgb * (su.ss.rgb / st) * (0.0795775 / (su.k.w * su.k.w));
         }
-        light += comes * (3.14159265 * c / squarely * su.zb.w) * (exp(-st * (top / c)) - exp(-st * (bottom / c)));
+        light += comes * (3.14159265 * fc / squarely * su.zb.w) * (exp(-st * sTop) - exp(-st * sBottom));
       }
       // Light that a clear body has bent and focused on to the surface here (caustics: cast_light.wgsl
       // lands it on the surfaces that gather light, a little way off them). It is counted as the light from
@@ -382,6 +433,51 @@ fn cs_inject(@builtin(global_invocation_id) id: vec3u) {
     light /= st * h;
   }
   textureStore(srcOut, id, vec4f(light, d));
+}
+
+// How far the body reaches from p (inside it) along w: where a ray from p that way would leave it.
+// (Not far is all that matters: past ten distances between scatterings nothing gets across anyway.)
+fn across(p: vec3f, w: vec3f, h: f32, least: f32) -> f32 {
+  var t = 0.0;
+  for (var i = 0; i < 10; i++) {
+    let d = sdf(p + w * t);
+    if (d > 0.0) { return t; }
+    t += max(-d, 0.5 * h);
+    if (least * t > 10.0) { break; }
+  }
+  return t;
+}
+
+// ---- uneven colour ------------------------------------------------------------------------------------
+// No stone or wax is the same colour all through: jade has paler cloudy patches and fine pale veins,
+// alabaster and wax are a little blotchy. The light the body holds is made uneven in the same way, fixed
+// to the shape (the light volume lies in the shape's own frame), as paler and deeper clouds at two sizes
+// and thin veins that wander through them. (The surface's own wear is the tracer's: trace_material.wgsl.)
+fn mHash(i: vec3i) -> f32 {
+  var h = (u32(i.x) * 73856093u) ^ (u32(i.y) * 19349663u) ^ (u32(i.z) * 83492791u);
+  h = (h ^ (h >> 16u)) * 0x45d9f3bu;
+  h = (h ^ (h >> 16u)) * 0x45d9f3bu;
+  h = h ^ (h >> 16u);
+  return f32(h & 0xffffffu) * (2.0 / 16777215.0) - 1.0;
+}
+fn mNoise(x: vec3f) -> f32 {
+  let i = vec3i(floor(x));
+  let f = fract(x);
+  let s = f * f * (3.0 - 2.0 * f);
+  let a = mix(mix(mHash(i), mHash(i + vec3i(1, 0, 0)), s.x), mix(mHash(i + vec3i(0, 1, 0)), mHash(i + vec3i(1, 1, 0)), s.x), s.y);
+  let b = mix(mix(mHash(i + vec3i(0, 0, 1)), mHash(i + vec3i(1, 0, 1)), s.x), mix(mHash(i + vec3i(0, 1, 1)), mHash(i + vec3i(1, 1, 1)), s.x), s.y);
+  return mix(a, b, s.z);
+}
+fn mottled(v: vec3f, q: vec3f, amount: f32) -> vec3f {
+  let cloud = 0.65 * mNoise(q * 2.2 + vec3f(3.1, 7.7, 1.9)) + 0.35 * mNoise(q * 5.3 + vec3f(9.2, 2.6, 5.5));
+  let warp = vec3f(mNoise(q * 1.3 + vec3f(1.0, 2.0, 3.0)), mNoise(q * 1.3 + vec3f(4.0, 5.0, 6.0)), mNoise(q * 1.3 + vec3f(7.0, 8.0, 9.0)));
+  let vein = smoothstep(0.86, 0.97, 1.0 - abs(mNoise(q * 3.4 + 0.8 * warp)));
+  let grey = vec3f(dot(v, vec3f(0.2126, 0.7152, 0.0722)));
+  // paler, greyer where the clouds are light and along the veins; deeper and richer where they are dark
+  let pale = clamp(amount * (0.45 * max(cloud, 0.0) + 0.5 * vein), 0.0, 1.0);
+  var o = mix(v, grey * 1.15, pale);
+  o *= 1.0 + amount * (0.3 * cloud + 0.25 * vein);
+  return max(o, vec3f(0.0));
 }
 
 // Twelve directions spread evenly (the corners of an icosahedron): the ways a cell looks for other parts
@@ -554,5 +650,13 @@ fn cs_finish(@builtin(global_invocation_id) id: vec3u) {
     // (from a cell and a half below the surface to two and a half, the one way gives over to the other)
     v = mix(near, v, clamp(-1.5 - d, 0.0, 1.0));
   }
+  // The calibration: each cell as a share of what it held in the furnace against what it should have
+  // held there. (Kept within bounds: where the furnace's cell holds next to nothing, outside the body,
+  // its share says nothing.)
+  if (su.ab.w > 1e9) {
+    let f = textureLoad(calibTex, me, 0).g;
+    v *= clamp(su.ab.w / max(f, 1e-6), 0.5, 3.0);
+  }
+  if (su.mottle.x > 0.0) { v = mottled(v, ((vec3f(id) + 0.5) / su.res - 0.5) * (2.0 * su.hb), su.mottle.x); }
   textureStore(outTex, id, vec4f(max(v, vec3f(0.0)), mine.a));
 }

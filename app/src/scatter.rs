@@ -58,6 +58,8 @@ struct ScatterU {
     pick: [f32; 4],
     pick_src: [f32; 4],
     shading: Shading,
+    /// x: how uneven the body's colour is (0 = even)
+    mottle: [f32; 4],
 }
 
 /// What the bodies cast on the body whose light is worked out (scatter.wgsl: castThrough, sdfKeep): the
@@ -105,6 +107,9 @@ struct Level {
     phi: [wgpu::TextureView; 2],
     /// what the tracer reads
     out: wgpu::TextureView,
+    /// the same body's light volume under even white light from everywhere, with nothing absorbed (see
+    /// `Scatter::solve`): what this way of working the light out gives where the true answer is known
+    calib: wgpu::TextureView,
     /// the scene's volume, the light volume of the size below, and what the bodies cast (their distances,
     /// the light arriving by way of them) that this level's first step was last bound to
     g_inject: Option<([wgpu::TextureView; 4], wgpu::BindGroup)>,
@@ -157,6 +162,37 @@ pub struct Scatter {
     pub steps_after: u32,
     /// stands in for the light volume until there is one
     blank: wgpu::TextureView,
+    /// what the calibration in the finest volume was worked out for (see `solve`)
+    calibrated: Option<Calibrated>,
+    /// false: the light volume is used as it is worked out, without the calibration (for comparing)
+    pub calibrate: bool,
+}
+
+/// What a calibration depends on: the shape (its volume, its changes, the channel), the cells a side, and
+/// the body as a medium apart from what it absorbs.
+#[derive(Clone, PartialEq)]
+struct Calibrated {
+    view: wgpu::TextureView,
+    shape_no: u64,
+    chan: usize,
+    res: u32,
+    medium: [u64; 4],
+}
+
+/// The lighting of a furnace: white light of brightness 1 from every direction, as the light volume
+/// takes lighting (beams and the rest), made once.
+fn furnace() -> &'static Lighting {
+    static L: std::sync::OnceLock<Lighting> = std::sync::OnceLock::new();
+    L.get_or_init(|| {
+        let (w, h) = (gf_core::env::ENV_W, gf_core::env::ENV_H);
+        gf_core::scatter::beams(&vec![1.0f32; w * h * 4], w, h, None)
+    })
+}
+/// What the light volume holds, in a body that absorbs nothing, under the furnace's light: the light
+/// inside is the same everywhere, the light outside times the square of the index, from all 4 pi of
+/// directions (the tracer turns it back into what is seen by the reverse of both).
+fn furnace_level(ior: f64) -> f64 {
+    4.0 * std::f64::consts::PI * ior * ior
 }
 
 /// The sizes a fresh start climbs through, smallest first, ending at `res`.
@@ -180,7 +216,7 @@ impl Scatter {
         let l_inject = gpu.bind_layout("scatter: beams", &[uniform_entry(0, c, false), tex(1), smp(2), out(3, OUT_FORMAT), tex(13), tex(14), tex(15)]);
         let l_step = gpu.bind_layout("scatter: relax", &[uniform_entry(0, c, false), tex(4), tex(5), out(6, WORK_FORMAT)]);
         let l_refine = gpu.bind_layout("scatter: refine", &[uniform_entry(0, c, false), smp(2), tex(4), tex(5), out(6, WORK_FORMAT)]);
-        let l_finish = gpu.bind_layout("scatter: finish", &[uniform_entry(0, c, false), tex(4), tex(5), out(7, OUT_FORMAT)]);
+        let l_finish = gpu.bind_layout("scatter: finish", &[uniform_entry(0, c, false), tex(4), tex(5), out(7, OUT_FORMAT), tex(16)]);
         let l_sum = gpu.bind_layout("scatter: sum", &[uniform_entry(0, c, false), tex(4), tex(5), out(10, WORK_FORMAT), out(11, WORK_FORMAT)]);
         let l_fold = gpu.bind_layout("scatter: fold", &[tex(8), tex(9), out(10, WORK_FORMAT), out(11, WORK_FORMAT)]);
         let l_level = gpu.bind_layout("scatter: level", &[tex(5), out(6, WORK_FORMAT), tex(8), tex(9)]);
@@ -209,7 +245,7 @@ impl Scatter {
             p_level: pipe("scatter: level", &l_level, "cs_level"),
             l_inject, l_refine, l_step, l_finish, l_sum, l_fold, l_level,
             levels: Vec::new(), res: 0, steps: [8, 12, 24, 24, 24], steps_after: 4,
-            blank: blank(gpu),
+            blank: blank(gpu), calibrated: None, calibrate: true,
         }
     }
 
@@ -241,6 +277,16 @@ impl Scatter {
         let src = make("scatter: beams' light", OUT_FORMAT, res);
         let phi = [make("scatter: scattered light a", WORK_FORMAT, res), make("scatter: scattered light b", WORK_FORMAT, res)];
         let out = make("light volume", OUT_FORMAT, res);
+        let calib = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("light volume: calibration"),
+            size: wgpu::Extent3d { width: res, height: res, depth_or_array_layers: res },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: OUT_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        }).create_view(&wgpu::TextureViewDescriptor::default());
         // sums over blocks of 4 cells a side, then of 8 of those, then of 8 of those (one block in all up
         // to 256 cells a side)
         let sums = [res.div_ceil(4), res.div_ceil(32), res.div_ceil(256)];
@@ -249,17 +295,17 @@ impl Scatter {
         let group = |layout: &wgpu::BindGroupLayout, entries: &[wgpu::BindGroupEntry]| gpu.device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout, entries });
         let uniform = || wgpu::BindGroupEntry { binding: 0, resource: u.as_entire_binding() };
         let g_diffuse = [0, 1].map(|i| group(&self.l_step, &[uniform(), entry(4, &src), entry(5, &phi[i]), entry(6, &phi[1 - i])]));
-        let g_finish = [0, 1].map(|i| group(&self.l_finish, &[uniform(), entry(4, &src), entry(5, &phi[i]), entry(7, &out)]));
+        let g_finish = [0, 1].map(|i| group(&self.l_finish, &[uniform(), entry(4, &src), entry(5, &phi[i]), entry(7, &out), entry(16, &calib)]));
         // (beginning writes phi[0]; it reads phi[1] only because the layout says so)
         let g_begin = group(&self.l_step, &[uniform(), entry(4, &src), entry(5, &phi[1]), entry(6, &phi[0])]);
         let g_sum = [0, 1].map(|i| group(&self.l_sum, &[uniform(), entry(4, &src), entry(5, &phi[i]), entry(10, &sum[0][0]), entry(11, &sum[0][1])]));
         let g_fold = [0, 1].map(|i| group(&self.l_fold, &[entry(8, &sum[i][0]), entry(9, &sum[i][1]), entry(10, &sum[i + 1][0]), entry(11, &sum[i + 1][1])]));
         let g_level = [0, 1].map(|i| group(&self.l_level, &[entry(5, &phi[i]), entry(6, &phi[1 - i]), entry(8, &sum[2][0]), entry(9, &sum[2][1])]));
-        self.levels.push(Level { res, u, src, phi, out, g_inject: None, g_begin, g_diffuse, g_finish, g_sum, g_fold, g_level, sums, cur: 0 });
+        self.levels.push(Level { res, u, src, phi, out, calib, g_inject: None, g_begin, g_diffuse, g_finish, g_sum, g_fold, g_level, sums, cur: 0 });
         self.levels.len() - 1
     }
 
-    fn numbers(res: u32, light: &Lighting, m: &Medium, to_shape: &[f64; 9], pick: [[f32; 4]; 2], shading: Shading) -> ScatterU {
+    fn numbers(res: u32, light: &Lighting, m: &Medium, to_shape: &[f64; 9], pick: [[f32; 4]; 2], shading: Shading, correct: bool) -> ScatterU {
         let beams = &light.beams;
         let h = 2.0 * HB / res as f64;
         let (st, d, zb) = (m.sig_t(), m.diffusion(), m.beyond());
@@ -270,7 +316,8 @@ impl Scatter {
             ss: f(m.sig_s, over(res)),
             k: f([0, 1, 2].map(|i| h * h / d[i]), m.ior),
             zb: f([0, 1, 2].map(|i| h / zb[i]), m.enters),
-            ab: f([0, 1, 2].map(|i| m.sig_a[i] * h * h / d[i]), 0.0),
+            // (the last: what the calibration should read, or 0 where it is not applied)
+            ab: f([0, 1, 2].map(|i| m.sig_a[i] * h * h / d[i]), if correct { furnace_level(m.ior) } else { 0.0 }),
             // (the last: the body lights itself where one part of it faces another)
             even: [0.0, 0.0, 0.0, 1.0],
             lean: [[0.0; 4]; 3],
@@ -278,6 +325,7 @@ impl Scatter {
             pick: pick[0],
             pick_src: pick[1],
             shading,
+            mottle: [m.mottle as f32, 0.0, 0.0, 0.0],
         };
         // The rest of the lighting: its brightness around direction d is  even + lean . d  (the lean is
         // turned from the lights' frame into the shape's, like the beams).
@@ -302,11 +350,38 @@ impl Scatter {
     /// `to_shape`: that frame's directions in the shape's (a rotation, by rows). `res`: cells a side.
     /// `shape_no`: a number that changes whenever the volume holds another shape. `cast`: what the bodies
     /// cast on this one, if anything casts.
+    ///
+    /// The volume is calibrated. However it is worked out, a grid of cells a little finer than the pieces
+    /// of the body, and light that spreads as heat does, are approximations, and they lose light where a
+    /// piece is thin (a tube of Thomas held 0.67 of the light it should). Where the answer is known their
+    /// error can be measured: in a furnace (white light from everywhere on a body that absorbs nothing)
+    /// the light inside is the same everywhere. So the same body is worked out once in a furnace, with
+    /// nothing absorbed, and every cell of the finest volume is divided by what that cell held there, as
+    /// a share of what it should have held. The furnace does not depend on where the lights are or how
+    /// the shape is turned: it is worked out again only when the shape, its detail or the body's
+    /// scattering changes.
     #[allow(clippy::too_many_arguments)]
     pub fn solve(&mut self, vol: &Volume, shape_no: u64, light: &Lighting, m: &Medium, to_shape: &[f64; 9], res: u32, chan: usize, cast: Option<&Casting>) {
+        let key = Calibrated { view: vol.view.clone(), shape_no, chan, res, medium: [m.sig_s[0].to_bits(), m.hold.to_bits(), m.enters.to_bits(), m.ior.to_bits()] };
+        if self.calibrate && self.calibrated.as_ref() != Some(&key) {
+            let clear = Medium { sig_a: [0.0; 3], mottle: 0.0, ..*m };
+            self.run(vol, shape_no, furnace(), &clear, to_shape, res, chan, None, false);
+            let l = self.levels.iter().find(|l| l.res == res).expect("just worked out");
+            let mut enc = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("scatter: calibration") });
+            enc.copy_texture_to_texture(l.out.texture().as_image_copy(), l.calib.texture().as_image_copy(), wgpu::Extent3d { width: res, height: res, depth_or_array_layers: res });
+            self.gpu.queue.submit([enc.finish()]);
+            self.calibrated = Some(key);
+        }
+        let correct = self.calibrate && self.calibrated.is_some();
+        self.run(vol, shape_no, light, m, to_shape, res, chan, cast, correct);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run(&mut self, vol: &Volume, shape_no: u64, light: &Lighting, m: &Medium, to_shape: &[f64; 9], res: u32, chan: usize, cast: Option<&Casting>, correct: bool) {
         let sizes: Vec<u32> = sizes(res);
         // (volumes of sizes no longer wanted are let go: the largest hold a few hundred megabytes)
         self.levels.retain(|l| sizes.contains(&l.res));
+        if !self.levels.iter().any(|l| l.res == res) { self.calibrated = None; }
         let ids: Vec<usize> = sizes.iter().map(|&r| self.level(r)).collect();
         let gpu = self.gpu.clone();
         let mut enc = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("scatter") });
@@ -335,7 +410,9 @@ impl Scatter {
         let pick = [if self.copy.is_some() { one_hot(0) } else { one_hot(chan) }, one_hot(chan)];
         let shading = cast.map_or(Shading::default(), |c| c.numbers);
         for (n, &i) in ids.iter().enumerate() {
-            gpu.queue.write_buffer(&self.levels[i].u, 0, bytemuck::bytes_of(&Self::numbers(sizes[n], light, m, to_shape, pick, shading)));
+            // (only the finest volume is calibrated: the smaller ones serve as its start, and as the body's
+            // own light, in the furnace as in the light worked out)
+            gpu.queue.write_buffer(&self.levels[i].u, 0, bytemuck::bytes_of(&Self::numbers(sizes[n], light, m, to_shape, pick, shading, correct && n + 1 == sizes.len())));
         }
         let cast_views = [cast.map_or(&self.blank, |c| &c.bodies).clone(), cast.and_then(|c| c.light.as_ref()).unwrap_or(&self.blank).clone()];
         if let Some((pipe, g, n)) = &fresh_copy {

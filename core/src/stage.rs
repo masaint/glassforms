@@ -42,6 +42,12 @@ const LUM: [f64; 3] = [0.2126, 0.7152, 0.0722];
 pub fn room_m(roll: f64, elev: f64) -> Mat3 {
     mul(&axis_angle(0.0, 0.0, 1.0, -roll * DEG), &axis_angle(1.0, 0.0, 0.0, elev * DEG))
 }
+/// The same with the camera also carried round the room's vertical by `azim` degrees (as round a table):
+/// the room is turned the other way about its own vertical before it is tilted.
+pub fn room_orbit(roll: f64, elev: f64, azim: f64) -> Mat3 {
+    if azim == 0.0 { return room_m(roll, elev); }
+    mul(&room_m(roll, elev), &axis_angle(0.0, 1.0, 0.0, azim * DEG))
+}
 
 fn sstep(x: f64) -> f64 {
     let x = x.clamp(0.0, 1.0);
@@ -457,6 +463,7 @@ impl Grade {
 /// choice `tone` are not sliders.)
 pub const KNOBS: &[(&str, &str, f64, f64, f64, bool)] = &[
     ("elev", "camera height °", -30.0, 90.0, 0.5, true),
+    ("azim", "camera round °", -180.0, 180.0, 0.5, true),
     ("backGain", "backdrop ×", 0.0, 4.0, 0.01, true),
     ("backSpread", "backdrop blend °", 1.0, 90.0, 0.5, true),
     ("backWrap", "backdrop reach °", 0.0, 180.0, 1.0, true),
@@ -496,7 +503,7 @@ pub const NAMES: &[&str] = &[
     "backdrop", "backShow", "backGain", "backSpread", "backWrap", "backHigh", "backTopR", "backTopG", "backTopB", "backMidR", "backMidG", "backMidB",
     "backLowR", "backLowG", "backLowB", "backGlow", "backGlowR", "backGlowG", "backGlowB", "backGlowAz", "backGlowEl", "backGlowSize",
     "floor", "floorAuto", "floorY", "floorR", "floorG", "floorB", "floorGain", "floorMatch", "floorFade", "floorGloss", "floorMirror",
-    "elev", "tone", "wbTemp", "wbTint", "contrast", "saturation",
+    "elev", "azim", "tone", "wbTemp", "wbTint", "contrast", "saturation",
 ];
 
 // ---- studios: lighting presets for a bright background -------------------------------------------------
@@ -524,7 +531,7 @@ impl Studio {
         let fresh = Settings::default();
         for n in NAMES {
             // (where the camera stands is the picture's framing, not the studio's: it stays)
-            if *n == "elev" { continue; }
+            if *n == "elev" || *n == "azim" { continue; }
             if let Some(v) = fresh.get(n) { p.set(n, v); }
         }
         for (n, v) in self.settings { p.set(n, *v); }
@@ -625,7 +632,7 @@ pub fn studio_index(id: &str) -> Option<usize> {
 impl crate::state::State {
     /// How the camera sees the room (see `room_m`).
     pub fn room_m(&self) -> Mat3 {
-        room_m(self.p.roll, self.p.elev)
+        room_orbit(self.p.roll, self.p.elev, self.p.azim)
     }
     /// The lights' own frame -> the room: how the lights have been turned in it.
     pub fn lights_to_room(&self) -> Mat3 {

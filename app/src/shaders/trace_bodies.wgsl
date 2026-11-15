@@ -585,7 +585,15 @@ fn shadeB(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
   if (alpha > 0.0) { envR = frTop(rd, n, xi, cosi); }
 //#endif
 //#if FILM
-  if (mb.b[k].film.x > 0.0 && alpha <= 0.0) { envR = filmEnv(mir, filmLod(p, n, cosi)); }
+  if (mb.b[k].film.x > 0.0 && alpha <= 0.0) { envR = mirrorEnv(mir, mirrorLod(p, n, cosi)); }
+//#endif
+  // a polished milky body mirrors the picture sharp, and a worn one as its wear has it (trace_material.wgsl)
+  if (alpha <= 0.0 && mb.kind[k] > 1.5 && mb.kind[k] < 2.5 && mb.b[k].film.x <= 0.0) { envR = sharpEnv(mir, p, n, cosi); }
+//#if WEAR
+  if (alpha <= 0.0 && mb.kind[k] > 1.5 && mb.kind[k] < 2.5 && mb.b[k].film.x <= 0.0 && mb.b[k].more.z + mb.b[k].more.w + mb.b[k].sssC.w > 0.0) {
+    let wr = wearAt(p, n);
+    envR = wearSee(rd, wr, p, cosi) * (wr.keep * wr.tint);
+  }
 //#endif
   envR += skyB(k, mir);
   if (opaqueB(k)) {

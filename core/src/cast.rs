@@ -204,6 +204,24 @@ impl Caster {
     ///   - clear without caustics: the light goes straight on, tinted by the body and less what its
     ///     surfaces reflect (a pale coloured shadow)
     ///   - milky: a coloured shadow that deepens with thickness
+    /// How much of the light from all round (the backdrop, the light from everywhere) the body hides from
+    /// a floor beneath it. Light from all round is not followed through a clear body as a caustic: it
+    /// goes through, less what the two surfaces reflect (and a tint), so clear glass leaves only a faint
+    /// pool of shade under it, as it does in life; a body that lets nothing through hides it all; a milky
+    /// one most of it.
+    pub fn veil(&self) -> f64 {
+        if !self.shadow { return 0.0; }
+        match self.optics.kind {
+            Kind::Matte | Kind::Metal => 1.0,
+            Kind::Clear => {
+                let r = ((self.optics.ior - 1.0) / (self.optics.ior + 1.0)).powi(2);
+                // (what is reflected away, twice over, and what a moderate thickness of tint takes)
+                let tint = (self.optics.absorb[0] + self.optics.absorb[1] + self.optics.absorb[2]) / 3.0;
+                (1.0 - (1.0 - r) * (1.0 - r) * (-0.5 * tint).exp()).clamp(0.0, 1.0)
+            }
+            Kind::Milky => 0.7,
+        }
+    }
     pub fn shadow_terms(&self) -> ([f64; 3], f64) {
         const SOLID: f64 = 1.0e4;
         if !self.shadow { return ([0.0; 3], 1.0); }

@@ -490,7 +490,7 @@ impl Engine {
             // (a material fitted to the shape is fitted to its own body)
             if self.body_thick.is_none() && mats.iter().any(|m| m.fit > 0.5) { self.body_thick = self.measure_bodies(); }
             let thick = self.body_thick.clone().unwrap_or_default();
-            if (v.rough || v.sss || v.inner.soft_lights()) && !self.soft_ok && !self.painted_px.is_empty() {
+            if (v.rough || v.sss || v.wear || v.inner.soft_lights()) && !self.soft_ok && !self.painted_px.is_empty() {
                 self.renderer.soften_lights(&self.painted_px, env::ENV_W as u32, env::ENV_H as u32);
                 self.soft_ok = true;
                 changed = true;
@@ -520,7 +520,7 @@ impl Engine {
         if v.plain() { return changed; }
         // rough and milky materials read softened copies of the lights' map: made when first wanted, and
         // again when the map is painted anew
-        if (v.rough || v.sss || v.inner.soft_lights()) && !self.soft_ok && !self.painted_px.is_empty() {
+        if (v.rough || v.sss || v.wear || v.inner.soft_lights()) && !self.soft_ok && !self.painted_px.is_empty() {
             self.renderer.soften_lights(&self.painted_px, env::ENV_W as u32, env::ENV_H as u32);
             self.soft_ok = true;
             changed = true;

@@ -146,7 +146,7 @@ pub fn choices(name: &str) -> Vec<&'static str> {
 /// Bands the visible spectrum is divided into when a crack's colours are worked out.
 pub const BANDS: usize = 8;
 /// Rows of four numbers in the block the tracer reads (`IU` in inner.wgsl).
-pub const IU_ROWS: usize = 3 + BANDS + 12;
+pub const IU_ROWS: usize = 3 + BANDS + 13;
 pub const IU_FLOATS: usize = IU_ROWS * 4;
 
 /// `crackDepth` at or above this means cracks everywhere in the body (the depth is then not read at all).
@@ -217,16 +217,36 @@ pub fn opal_longest_nm(colour: f64) -> f64 {
     470.0 + 290.0 * colour.clamp(0.0, 1.0)
 }
 
-/// What a grain of each pattern is: its size as a multiple of `playSize`, the share of grains that send
-/// back light, and the least `playRoll` (how far neighbouring grains share a direction).
-pub fn pattern(p: &Settings) -> (f64, f64, f64) {
-    match p.play_pattern.round() as i64 {
-        1 => (0.35, 0.45, 0.0),
-        2 => (2.6, 1.0, 0.55),
-        3 => (0.6, 0.3, 0.0),
-        _ => (1.0, 0.92, 0.0),
-    }
+/// What the grains of each pattern are like.
+pub struct Pattern {
+    /// a grain's width, as a multiple of `playSize`
+    pub size: f64,
+    /// the share of patches that send back light (the rest are plain body); for platelets, of cells
+    pub cover: f64,
+    /// the least `playRoll` (how far patches lean with a smooth field across the stone)
+    pub roll: f64,
+    /// a grain's thickness across the layers opal is laid down in, as a share of its width
+    pub flat: f64,
+    /// how closely the grains of one patch share a direction (1: they flash as one block)
+    pub together: f64,
+    /// a patch's width, in grains
+    pub patch: f64,
 }
+
+/// What a grain of each pattern is: blocks side by side (harlequin), small scattered points (pinfire),
+/// great patches that flash together (broad flash), or platelets.
+pub fn pattern(p: &Settings) -> Pattern {
+    let (size, cover, roll, flat, together, patch) = match p.play_pattern.round() as i64 {
+        1 => (0.45, 0.6, 0.0, 0.7, 0.35, 2.2),
+        2 => (1.5, 1.0, 0.55, 0.5, 0.95, 3.5),
+        3 => (0.6, 0.3, 0.0, 1.0, 0.0, 1.0),
+        _ => (1.0, 0.7, 0.0, 0.55, 0.85, 3.5),
+    };
+    Pattern { size, cover, roll, flat, together, patch }
+}
+
+/// How much of its band a grain of opal sends back at the middle of the band.
+pub const GRAIN_R: f64 = 0.9;
 
 /// The colour that is the second tint, said as absorption per unit length (as `absorb` is the first).
 pub fn grad_absorb(p: &Settings) -> [f64; 3] {
@@ -252,12 +272,13 @@ pub fn uniforms(p: &Settings, scale: f64, pixel: f64, tint: [f64; 3]) -> [f32; I
     // rough faces: how far what they send back is spread (radians), how much of a white veil they are
     // instead of a mirror; then the pixel's width in cells; then the turns allowed
     let rough = p.crack_rough.clamp(0.0, 1.0);
-    put(2, [0.15 + 0.85 * rough, rough, pixel * cells, TURNS]);
+    put(2, [0.03 + rough * rough, rough, pixel * cells, TURNS]);
     for (j, b) in band_weights().iter().enumerate() { put(3 + j, *b); }
     let r = 3 + BANDS;
 
     // ---- play of colour, or platelets
-    let (size, cover, roll0) = pattern(p);
+    let pat = pattern(p);
+    let (size, cover, roll0) = (pat.size, pat.cover, pat.roll);
     let grain = p.play_size.clamp(0.005, 3.0) * unit * size;
     let glitter = p.play_pattern.round() as i64 == GLITTER;
     put(r, [1.0 / grain, cover, p.play_seed.round().rem_euclid(4096.0), if glitter { 1.0 } else { 0.0 }]);
@@ -302,6 +323,8 @@ pub fn uniforms(p: &Settings, scale: f64, pixel: f64, tint: [f64; 3]) -> [f32; I
     let g = p.piezo.max(0.0);
     let body = g * PIEZO_BODY / unit;
     put(r + 11, [col[0] * body, col[1] * body, col[2] * body, g * PIEZO_RIM]);
+    // ---- opal's grains: how flat, how they gather into patches, how much of their band they send back
+    put(r + 12, [pat.flat, pat.together, pat.patch, GRAIN_R]);
     u
 }
 

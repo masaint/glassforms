@@ -35,6 +35,7 @@ struct CastU {
                               // w: the share of it that comes from all round (not from the lights), times the strength of shadows
   floorShare: array<vec4f, 12>,      // rgb: of that, each light's own share (times the strength of shadows)
   lights: array<CastLightU, 12>,
+  veil: vec4f,                // for each body: how much of the light from all round it hides from a floor beneath it
 }
 @group(1) @binding(0) var<uniform> cu: CastU;
 @group(1) @binding(1) var castBodies: texture_3d<f32>;      // the distance to each body, one a channel, at modest detail
@@ -149,7 +150,7 @@ fn castAt(p: vec3f, n: vec3f) -> vec3f {
 }
 
 // How much of the sky above a floor point ro (in the object's frame; up: the floor's up there) the bodies
-// that cast hide, 0 to 1: the distance to them asked at a few heights straight up, against each height
+// that cast hide, 0 to 1, each by its veil (cu.veil): the distance to them asked at a few heights straight up, against each height
 // (as a matte surface's own folds are judged). Under a body it is most, falling off softly around it.
 fn castUnder(ro: vec3f, up: vec3f) -> f32 {
   var shut = 0.0;
@@ -158,8 +159,9 @@ fn castUnder(ro: vec3f, up: vec3f) -> f32 {
   for (var i = 0; i < 5; i++) {
     let h = 0.08 + 0.25 * f32(i * i) * 0.25 + 0.1 * f32(i);
     let d = textureSampleLevel(castBodies, castSmp, (ro + up * h) / (2.0 * HB) + 0.5, 0.0) + cu.far;
-    let dm = min(min(d.x, d.y), min(d.z, d.w));
-    shut += w * clamp((h - dm) / h, 0.0, 1.0);
+    // each body hides what it hides of that light (clear glass little, a solid body all of it)
+    let c = clamp((vec4f(h) - d) / h, vec4f(0.0), vec4f(1.0)) * cu.veil;
+    shut += w * max(max(c.x, c.y), max(c.z, c.w));
     ws += w;
     w *= 0.8;
   }
