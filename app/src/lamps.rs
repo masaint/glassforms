@@ -36,15 +36,68 @@ pub struct LampsU {
 /// towards a light, from the surface to the lamp and no further, with the lamp taken as large as
 /// `castSoft` says (lamps.wgsl: `lamps.n.z`).
 const SHADOW_STUB: &str = "fn lampShadow(p: vec3f, n: vec3f, at: vec3f, r: f32) -> vec3f { return vec3f(1.0); }";
-const SHADOW: &str = "fn lampShadow(p: vec3f, n: vec3f, at: vec3f, r: f32) -> vec3f {
+///
+/// A lamp is near and its shadow's penumbra is narrow, about the size of the cells of the bodies' distance
+/// map. One fixed march (castShadow) reads that map at the same stops every frame: its stops and the map's
+/// cells beat against each other as fine ripples and rings across the penumbra, and a ray that steps over
+/// a thin part of a body leaves a bright streak inside the shadow. So the march towards a lamp starts a
+/// random part of a stride along and strides by lengths that vary (lampMarch), with more strides; frames
+/// add up to the smooth shadow (one frame shows only a faint grain). The random number comes from the
+/// pixel (a hash of it, `lampFc`, set where the tracer starts a pixel) moved by the golden ratio each
+/// frame, so any run of frames covers the stops evenly. (Aiming each look at a random point of the lamp
+/// as well was tried: it made one frame far grainier and the sum no better.)
+const SHADOW: &str = "var<private> lampFc: vec2f;
+var<private> lampSeq: u32;
+const LAMP_STEPS: i32 = 72;
+fn lampHash(v: u32) -> u32 {
+  let x = v * 747796405u + 2891336453u;
+  let w = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u;
+  return (w >> 22u) ^ w;
+}
+fn lampShadow(p: vec3f, n: vec3f, at: vec3f, r: f32) -> vec3f {
+  lampSeq += 1u;
+  let h = lampHash(u32(lampFc.x) + lampHash(u32(lampFc.y) + lampHash(lampSeq)));
+  let j = fract(f32(h >> 8u) / 16777216.0 + f32(u.frame % 4096) * 0.61803399);
   let d = at - p;
   let dist = length(d);
   let ro = toObj(p) + toObj(n) * cu.k.z;
   castMax = dist;
-  let s = castShadow(ro, toObj(d / max(dist, 1e-6)), max(r / max(dist, 1e-3) * lamps.n.z, 0.002));
+  let s = lampMarch(ro, toObj(d / max(dist, 1e-6)), max(r / max(dist, 1e-3) * lamps.n.z, 0.002), j);
   castMax = 1e9;
   return s;
+}
+// castShadow (cast.wgsl) with its stops moved by j (0 to 1) and its strides varied, and more of them.
+fn lampMarch(ro: vec3f, rd: vec3f, w: f32, j: f32) -> vec3f {
+  let b = dot(ro, rd);
+  let h = b * b - (dot(ro, ro) - BOUND * BOUND);
+  if (h <= 0.0) { return vec3f(1.0); }
+  let tFar = min(-b + sqrt(h), castMax);
+  if (tFar <= 0.0) { return vec3f(1.0); }
+  var t = max(cu.k.z / max(w, 0.2), -b - sqrt(h)) + j * cu.k.w;
+  var r = vec4f(1.0);
+  var s = vec4f(0.0);
+  var q = j;
+  for (var i = 0; i < LAMP_STEPS; i++) {
+    if (t > tFar) { break; }
+    let d = textureSampleLevel(castBodies, castSmp, (ro + rd * t) / (2.0 * HB) + 0.5, 0.0);
+    r = min(r, d / (w * t));
+    if (any(r * cu.solid <= vec4f(-1.0))) { break; }
+    let a = abs(d) + cu.far;
+    q = fract(q + 0.61803399);
+    let dt = clamp(min(min(a.x, a.y), min(a.z, a.w)), cu.k.w, CAST_STRIDE) * (0.6 + 0.8 * q);
+    s += min(dt, tFar - t) * step(d, vec4f(0.0));
+    t += dt;
+  }
+  let x = clamp(0.5 - 0.5 * r, vec4f(0.0), vec4f(1.0));
+  let cover = x * x * (3.0 - 2.0 * x) * cu.casts;
+  var v = mix(vec3f(1.0), exp(-cu.body[0].rgb * s.x) * cu.body[0].w, cover.x);
+  v *= mix(vec3f(1.0), exp(-cu.body[1].rgb * s.y) * cu.body[1].w, cover.y);
+  v *= mix(vec3f(1.0), exp(-cu.body[2].rgb * s.z) * cu.body[2].w, cover.z);
+  v *= mix(vec3f(1.0), exp(-cu.body[3].rgb * s.w) * cu.body[3].w, cover.w);
+  return v;
 }";
+/// Where the tracer starts a pixel: the lamps' shadows take their random numbers from it.
+const PIXEL_AT: &str = "  let fc = vec2f(pos.x, u.res.y - pos.y);\n";
 
 /// The lamps as light that casts caustics (cast_light.wgsl: `One` with `at`), each with how much light
 /// it sends (to choose among lights when there are many). `to_obj`: the lights' frame -> the object's.
@@ -81,7 +134,7 @@ pub fn caustic_lights(st: &State, to_obj: &gf_core::math::Mat3, hb: f64) -> Vec<
 
 /// The lamps' shadows put into a tracer with lamps and casting both woven in.
 pub fn weave_shadows(src: &str) -> String {
-    src.replace(SHADOW_STUB, SHADOW)
+    src.replace(SHADOW_STUB, SHADOW).replacen(PIXEL_AT, &format!("{PIXEL_AT}  lampFc = fc;\n"), 1)
 }
 
 /// What the tracer is told of the lamps as the state has them now (in the camera's frame).
