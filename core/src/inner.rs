@@ -248,7 +248,7 @@ pub fn pattern(p: &Settings) -> Pattern {
         1 => (0.4, 0.65, 0.0, 0.7, 0.3, 2.5, 0.35, 0.5),
         2 => (1.4, 1.0, 0.55, 0.5, 0.9, 4.0, 0.45, 0.8),
         3 => (0.6, 0.3, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0),
-        _ => (1.0, 0.8, 0.0, 0.6, 0.8, 2.2, 0.12, 0.65),
+        _ => (1.0, 0.8, 0.0, 0.6, 0.7, 3.5, 0.12, 0.6),
     };
     Pattern { size, cover, roll, flat, together, patch, warp, streak }
 }
@@ -345,7 +345,10 @@ pub fn uniforms(p: &Settings, scale: f64, pixel: f64, tint: [f64; 3]) -> [f32; I
     put(r + 11, [col[0] * body, col[1] * body, col[2] * body, g * PIEZO_RIM]);
     // ---- opal's grains: how flat, how they gather into patches, how much of their band they send back
     put(r + 12, [pat.flat, pat.together, pat.patch, GRAIN_R]);
-    put(r + 13, [pat.warp, pat.streak, 0.0, 0.0]);
+    // (a milky body holds light going every way: about its whiteness times how milky it is, doubled for
+    // light that has gone back and forth)
+    let held = if p.sss > 0.0 { 8.0 * p.sss.clamp(0.0, 1.0) * (p.body_r + p.body_g + p.body_b).clamp(0.0, 3.0) / 3.0 } else { 0.0 };
+    put(r + 13, [pat.warp, pat.streak, held, 0.0]);
 
     // ---- volume fractures: a few great sheets, more smaller ones, and from 0.45 on a fan of five
     let (nfan, nbig, nmed) = fracture_counts(p.fractures);

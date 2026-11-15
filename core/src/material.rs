@@ -515,6 +515,22 @@ pub fn scatter(colour: [f64; 3], depth: f64, amount: f64) -> Scatter {
     }
     Scatter { sigma_s, sigma_a, kappa, reach: SCATTER_REACH / sigma_s.max(1e-6) }
 }
+/// The scattering of each colour (red, green, blue: per unit length) and the absorption that, with it,
+/// gives a thick piece the body's colour, when the colours scatter differently (`sssSpread`): colour c
+/// travels (its wavelength / 550 nm)^(4 x spread) times as far between scatterings as green does, as
+/// light scattered by particles small against the wavelength does at spread 1.
+pub fn scatter_rgb(colour: [f64; 3], depth: f64, amount: f64, spread: f64) -> ([f64; 3], [f64; 3]) {
+    let spread = spread.clamp(0.0, 1.0);
+    let mut s = [0.0; 3];
+    let mut a = [0.0; 3];
+    for (c, nm) in [610.0f64, 550.0, 465.0].into_iter().enumerate() {
+        let sc = scatter(colour, depth * (nm / 550.0).powf(4.0 * spread), amount);
+        s[c] = sc.sigma_s;
+        a[c] = sc.sigma_a[c];
+    }
+    (s, a)
+}
+
 /// See `Scatter::reach`: in units of the distance between scatterings (set by comparing the estimate
 /// with light followed as it wanders).
 pub const SCATTER_REACH: f64 = 2.0;
@@ -583,8 +599,10 @@ pub fn uniforms(p: &Settings, scale: f64) -> [f32; MU_FLOATS] {
     let sc = scatter([p.body_r, p.body_g, p.body_b], p.sss_depth * scale, p.sss);
     // (the last: the index of a thin wall's own glass)
     put(4, [sc.sigma_s, sc.reach, WALK_EVENTS, p.ior]);
-    put(5, [sc.sigma_a[0], sc.sigma_a[1], sc.sigma_a[2], 0.0]);
-    put(6, [sc.kappa[0], sc.kappa[1], sc.kappa[2], 0.0]);
+    // the scattering and absorption of each colour (they differ when the colours scatter differently)
+    let (ss3, sa3) = scatter_rgb([p.body_r, p.body_g, p.body_b], p.sss_depth * scale, p.sss, p.sss_spread);
+    put(5, [sa3[0], sa3[1], sa3[2], 0.0]);
+    put(6, [ss3[0], ss3[1], ss3[2], 0.0]);
     // (the last: how uneven the colour is, read with the surface's wear)
     put(7, [p.body_r.clamp(0.0, 1.0), p.body_g.clamp(0.0, 1.0), p.body_b.clamp(0.0, 1.0), p.mottle.clamp(0.0, 1.0)]);
     let g = p.glow.max(0.0) / scale;
@@ -742,7 +760,7 @@ pub const RESET: &[(&str, f64)] = &[
     ("density", 1.0), ("fit", 0.0), ("spectrum", 0.0), ("rough", 0.0), ("roughRef", 0.0),
     ("film", 0.0), ("filmIor", 1.33), ("filmVar", 0.0), ("filmScale", 1.0), ("filmFlow", 0.0), ("filmDrain", 0.0), ("filmSky", 0.5),
     ("coat", 0.0), ("coatIor", 1.5), ("metal", 0.0), ("hollow", 0.0), ("bodyR", 1.0), ("bodyG", 1.0), ("bodyB", 1.0),
-    ("sss", 0.0), ("sssDepth", 0.2), ("sssWalk", 0.0), ("sharp", 1.0), ("wear", 0.0), ("brush", 0.0), ("mottle", 0.0),
+    ("sss", 0.0), ("sssDepth", 0.2), ("sssWalk", 0.0), ("sssSpread", 0.0), ("sharp", 1.0), ("wear", 0.0), ("brush", 0.0), ("mottle", 0.0),
     ("bubbles", 0.0), ("bubbleSize", 0.03), ("bubbleEven", 0.5), ("bubbleShape", 0.0), ("bubbleSeed", 1.0),
     ("glow", 0.0), ("glowR", 1.0), ("glowG", 0.32), ("glowB", 0.08), ("glowCore", 0.5),
     ("grin", 0.0), ("grinDepth", 0.02), ("biref", 0.0), ("birefAz", 0.0), ("birefEl", 90.0),
@@ -844,15 +862,15 @@ pub static NAMED: &[Named] = &[
     named!("beetle", "beetle shell", "surface", "A dark body under a film of high index: green that turns to blue and violet towards the outline. (One film stands in for the many thin layers of a real beetle's shell.)", [("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.02), ("bodyR", 0.02), ("bodyG", 0.03), ("bodyB", 0.02), ("film", 330.0), ("filmIor", 2.0), ("filmVar", 0.05), ("filmScale", 0.6), ("filmSky", 0.9), ("coat", 0.0)], absorb CLEAR),
     named!("carnival", "carnival glass", "surface", "Iridescent sprayed glass: a varying film over amber.", [("film", 520.0), ("filmIor", 2.0), ("filmVar", 0.35), ("filmScale", 2.4), ("spectrum", sp(12)), ("density", 0.6)]),
     // ---- translucent
-    named!("milk", "milk glass", "translucent", "White opal glass: light goes in and wanders out again; thin edges let some through.", [("sss", 1.0), ("sssDepth", 0.025), ("bodyR", 0.97), ("bodyG", 0.97), ("bodyB", 0.955), ("disp", 0.0), ("wear", 0.2)], absorb CLEAR),
+    named!("milk", "milk glass", "translucent", "White opal glass: light goes in and wanders out again; thin edges let some through.", [("sss", 1.0), ("sssDepth", 0.05), ("bodyR", 0.97), ("bodyG", 0.97), ("bodyB", 0.955), ("disp", 0.0), ("wear", 0.2), ("sssSpread", 0.6)], absorb CLEAR),
     named!("opal", "opalescent glass", "translucent", "Half clear, half milky, bluish where light scatters.", [("sss", 0.3), ("sssDepth", 0.5), ("bodyR", 0.78), ("bodyG", 0.88), ("bodyB", 1.0)], absorb [0.02, 0.06, 0.16]),
-    named!("jade", "jade", "translucent", "Polished green jade: bright and pale where it is thin, deep green in the bulk, glowing when lit from behind.", [("ior", 1.61), ("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.055), ("bodyR", 0.33), ("bodyG", 0.53), ("bodyB", 0.28), ("rough", 0.08), ("wear", 0.25), ("mottle", 0.6)], absorb CLEAR),
-    named!("wax", "wax", "translucent", "Candle wax: soft, warm, glowing where it is thin.", [("ior", 1.44), ("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.05), ("bodyR", 0.96), ("bodyG", 0.90), ("bodyB", 0.74), ("rough", 0.35), ("wear", 0.3), ("mottle", 0.25)], absorb CLEAR),
-    named!("alabaster", "alabaster", "translucent", "Pale stone with a soft sheen.", [("ior", 1.52), ("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.05), ("bodyR", 0.94), ("bodyG", 0.90), ("bodyB", 0.84), ("rough", 0.22), ("wear", 0.2), ("mottle", 0.5)], absorb CLEAR),
+    named!("jade", "jade", "translucent", "Polished green jade: bright and pale where it is thin, deep green in the bulk, glowing when lit from behind.", [("ior", 1.61), ("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.055), ("bodyR", 0.33), ("bodyG", 0.53), ("bodyB", 0.28), ("rough", 0.08), ("wear", 0.25), ("mottle", 0.6), ("sssSpread", 0.35)], absorb CLEAR),
+    named!("wax", "wax", "translucent", "Candle wax: soft, warm, glowing where it is thin.", [("ior", 1.44), ("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.12), ("bodyR", 0.96), ("bodyG", 0.90), ("bodyB", 0.74), ("rough", 0.35), ("wear", 0.3), ("mottle", 0.25), ("sssSpread", 0.2)], absorb CLEAR),
+    named!("alabaster", "alabaster", "translucent", "Pale stone with a soft sheen.", [("ior", 1.52), ("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.05), ("bodyR", 0.94), ("bodyG", 0.90), ("bodyB", 0.84), ("rough", 0.22), ("wear", 0.2), ("mottle", 0.5), ("sssSpread", 0.4)], absorb CLEAR),
     named!("rosequartz", "rose quartz", "translucent", "Cloudy pink quartz.", [("ior", 1.546), ("disp", 0.0171), ("sss", 0.5), ("sssDepth", 0.35), ("bodyR", 0.98), ("bodyG", 0.74), ("bodyB", 0.78)], absorb [0.02, 0.10, 0.07]),
     named!("honey", "honey", "translucent", "Thick, golden and slightly cloudy.", [("ior", 1.49), ("disp", 0.01), ("sss", 0.2), ("sssDepth", 0.6), ("bodyR", 0.98), ("bodyG", 0.72), ("bodyB", 0.22)], absorb [0.10, 0.75, 3.2]),
     // ---- ceramic
-    named!("porcelain", "glazed porcelain", "ceramic", "A dense white body under a clear glaze.", [("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.03), ("bodyR", 0.95), ("bodyG", 0.95), ("bodyB", 0.93), ("rough", 0.5), ("coat", 1.0), ("coatIor", 1.5), ("wear", 0.2)], absorb CLEAR),
+    named!("porcelain", "glazed porcelain", "ceramic", "A dense white body under a clear glaze.", [("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.03), ("bodyR", 0.95), ("bodyG", 0.95), ("bodyB", 0.93), ("rough", 0.5), ("coat", 1.0), ("coatIor", 1.5), ("wear", 0.2), ("sssSpread", 0.15)], absorb CLEAR),
     named!("celadon", "celadon", "ceramic", "Grey-green glazed stoneware.", [("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.05), ("bodyR", 0.60), ("bodyG", 0.77), ("bodyB", 0.66), ("rough", 0.5), ("coat", 1.0), ("coatIor", 1.5), ("wear", 0.2), ("mottle", 0.2)], absorb CLEAR),
     named!("pearl", "pearl", "ceramic", "A milky body under a clear coat that shimmers with thin-film colour.", [("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.05), ("bodyR", 0.96), ("bodyG", 0.93), ("bodyB", 0.89), ("rough", 0.3), ("coat", 1.0), ("coatIor", 1.53), ("film", 440.0), ("filmIor", 1.68), ("filmVar", 0.22), ("filmScale", 2.5)], absorb CLEAR),
     named!("lacquer", "black lacquer", "ceramic", "A black body under a deep clear coat.", [("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.02), ("bodyR", 0.012), ("bodyG", 0.012), ("bodyB", 0.014), ("rough", 0.6), ("coat", 1.0), ("coatIor", 1.55)], absorb CLEAR),
@@ -893,11 +911,11 @@ pub static NAMED: &[Named] = &[
     named!("flakequartz", "flaked quartz", "fractures", "Rock crystal full of small flat flakes: each a mirror at its own angle.", [("ior", 1.5460), ("disp", 0.0171), ("cracks", 0.8), ("crackSize", 0.4), ("crackOpen", 0.9), ("crackCurve", 0.15), ("crackRough", 0.15), ("crackSeed", 3.0)], absorb CLEAR),
     named!("irisquartz", "iris quartz", "fractures", "Rock crystal whose fractures stand open by less than a thousandth of a millimetre: rainbow bands that follow each crack's edge.", [("ior", 1.5460), ("disp", 0.0171), ("fractures", 0.5), ("crackOpen", 0.45), ("crackCurve", 0.1), ("crackSeed", 5.0)], absorb CLEAR),
     named!("crackle", "crackle glass", "fractures", "Glass shocked by heat: full of small cracks, every face a mirror at its own angle.", [("disp", 0.0), ("cracks", 1.0), ("crackSize", 0.1), ("crackDepth", 0.3), ("crackOpen", 0.9), ("crackCurve", 0.7), ("crackSeed", 1.0)], absorb CLEAR),
-    named!("crackedice", "cracked ice", "fractures", "Clear ice with white fracture sheets through it.", [("ior", 1.3110), ("disp", 0.0125), ("fractures", 0.7), ("crackOpen", 0.95), ("crackCurve", 0.35), ("crackRough", 0.5), ("crackSeed", 2.0)], absorb [0.05, 0.012, 0.004]),
-    named!("whiteopal", "white opal", "opal", "Precious opal on a milky white body: patches of pure colour that change as the stone turns.", [("ior", 1.45), ("disp", 0.0), ("sss", 0.35), ("sssDepth", 0.15), ("bodyR", 0.72), ("bodyG", 0.75), ("bodyB", 0.8), ("play", 1.0), ("playSize", 0.15), ("playColour", 0.85), ("playSoft", 0.25)], absorb CLEAR),
-    named!("blackopal", "black opal", "opal", "Precious opal on a dark body: the colours glow out of black.", [("ior", 1.45), ("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.08), ("bodyR", 0.04), ("bodyG", 0.045), ("bodyB", 0.06), ("play", 1.0), ("playSize", 0.16), ("playColour", 1.0), ("playSoft", 0.22)], absorb [4.0, 4.0, 3.5]),
-    named!("crystalopal", "crystal opal", "opal", "Precious opal that is nearly clear: the colours float inside the stone.", [("ior", 1.45), ("disp", 0.005), ("sss", 0.04), ("sssDepth", 1.0), ("bodyR", 0.95), ("bodyG", 0.96), ("bodyB", 1.0), ("play", 1.0), ("playSize", 0.14), ("playColour", 0.8), ("playSoft", 0.25)], absorb [0.01, 0.012, 0.02]),
-    named!("fireopal", "fire opal", "opal", "Orange, nearly clear opal with a few points of colour.", [("ior", 1.44), ("disp", 0.004), ("sss", 0.06), ("sssDepth", 0.5), ("bodyR", 1.0), ("bodyG", 0.6), ("bodyB", 0.3), ("play", 0.4), ("playSize", 0.25), ("playColour", 0.8), ("playSoft", 0.12)], absorb [0.15, 2.6, 8.0]),
+    named!("crackedice", "cracked ice", "fractures", "Clear ice with white fracture sheets through it.", [("ior", 1.3110), ("disp", 0.0125), ("fractures", 0.85), ("crackOpen", 0.95), ("crackCurve", 0.35), ("crackRough", 0.75), ("crackSeed", 2.0)], absorb [0.05, 0.012, 0.004]),
+    named!("whiteopal", "white opal", "opal", "Precious opal on a milky white body: patches of pure colour that change as the stone turns.", [("ior", 1.45), ("disp", 0.0), ("sss", 0.3), ("sssDepth", 0.2), ("bodyR", 0.42), ("bodyG", 0.47), ("bodyB", 0.55), ("play", 1.0), ("playSize", 0.15), ("playColour", 0.9), ("playSoft", 0.1)], absorb CLEAR),
+    named!("blackopal", "black opal", "opal", "Precious opal on a dark body: the colours glow out of black.", [("ior", 1.45), ("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.08), ("bodyR", 0.04), ("bodyG", 0.045), ("bodyB", 0.06), ("play", 1.0), ("playSize", 0.16), ("playColour", 1.0), ("playSoft", 0.1)], absorb [4.0, 4.0, 3.5]),
+    named!("crystalopal", "crystal opal", "opal", "Precious opal that is nearly clear: the colours float inside the stone.", [("ior", 1.45), ("disp", 0.005), ("sss", 0.04), ("sssDepth", 1.0), ("bodyR", 0.95), ("bodyG", 0.96), ("bodyB", 1.0), ("play", 1.0), ("playSize", 0.14), ("playColour", 0.85), ("playSoft", 0.1)], absorb [0.01, 0.012, 0.02]),
+    named!("fireopal", "fire opal", "opal", "Orange, nearly clear opal with a few points of colour.", [("ior", 1.44), ("disp", 0.004), ("sss", 0.06), ("sssDepth", 0.5), ("bodyR", 1.0), ("bodyG", 0.6), ("bodyB", 0.3), ("play", 0.4), ("playSize", 0.25), ("playColour", 0.8), ("playSoft", 0.1)], absorb [0.15, 2.6, 8.0]),
     named!("biquartz", "rock crystal, doubly refracting", "quartz", "Clear quartz with its weak double refraction (every ray is traced twice) and a few fractures.", [("ior", 1.5442), ("disp", 0.0171), ("biref", 0.0091), ("birefEl", 90.0), ("cracks", 0.15), ("crackSize", 0.6), ("crackOpen", 0.85), ("crackSeed", 7.0)], absorb CLEAR, costly),
     named!("chalcedony", "chalcedony", "quartz", "Quartz in crystals too small to see: a waxy, cloudy blue-grey body with faint bands.", [("ior", 1.535), ("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.12), ("bodyR", 0.82), ("bodyG", 0.86), ("bodyB", 0.92), ("rough", 0.15), ("grad", 0.6), ("gradMode", 2.0), ("gradBands", 9.0), ("gradR", 0.75), ("gradG", 0.82), ("gradB", 0.95), ("gradSoft", 0.4), ("gradWave", 0.4)], absorb CLEAR),
     named!("agate", "banded agate", "quartz", "Chalcedony laid down in bands: cloudy white and red-brown rings that follow the stone.", [("ior", 1.54), ("disp", 0.0), ("sss", 0.7), ("sssDepth", 0.15), ("bodyR", 0.92), ("bodyG", 0.88), ("bodyB", 0.82), ("rough", 0.1), ("grad", 1.0), ("gradMode", 2.0), ("gradBands", 7.0), ("gradR", 0.55), ("gradG", 0.25), ("gradB", 0.1), ("gradSoft", 0.08), ("gradWave", 0.5)], absorb [0.02, 0.03, 0.05]),
@@ -1004,6 +1022,7 @@ pub static CONTROLS: &[Control] = &[
     ctl("bodyB", "body blue", Slider, 0.0, 1.0, 0.005, true, Lab("body"), ""),
     ctl("sssDepth", "light travels", Slider, 0.01, 2.0, 0.005, true, Lab("inside"), "How far light gets inside a milky body between scatterings: small = dense and chalky, large = soft and deep."),
     costly(ctl("sssWalk", "true scattering", Switch, 0.0, 1.0, 1.0, false, Lab("inside"), "Follow the light as it wanders inside the body instead of estimating it. Grainy until the picture settles: for still views and video.")),
+    ctl("sssSpread", "colours travel apart", Slider, 0.0, 1.0, 0.01, true, Lab("inside"), "0: every colour travels as far inside the body. Towards 1 blue is scattered sooner and red goes deeper, as in milk glass and wax: a bluish edge, a warm glow in the shade and where light comes through."),
     ctl("sssDetail", "light detail", Slider, 96.0, 256.0, 32.0, false, Lab("inside"), "How fine the volume is in which a milky body's light is worked out (cells along a side). Finer follows thin pieces better; it is worked out again whenever the lights or the shape move, and costs more the finer it is."),
     ctl("sharp", "sharp reflections", Switch, 0.0, 1.0, 1.0, false, Lab("surface"), "A metal, a milky body or a glaze mirrors an environment picture as sharp as it is, as a photograph shows it; off, it mirrors the picture softened as the glass sees it."),
     ctl("wear", "wear", Slider, 0.0, 1.0, 0.01, true, Lab("surface"), "The surface as a real one is: its polish undulates a little, it has duller patches where it was handled, and a faint uneven haze. 0 = a perfect surface. Fixed to the object."),
@@ -1084,6 +1103,7 @@ pub fn applies(name: &str, p: &Settings) -> bool {
         "spectrum" | "sss" => !metal && !v.hollow,
         "bodyR" | "bodyG" | "bodyB" => metal || v.sss,
         "sssDepth" | "sssWalk" => v.sss,
+        "sssSpread" => v.sss && !v.walk,
         "sssDetail" => v.sss && !v.walk,
         "filmIor" | "filmVar" | "filmScale" => v.film,
         "filmFlow" => v.film && p.film_var > 0.0,

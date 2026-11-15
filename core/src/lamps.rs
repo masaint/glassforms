@@ -136,6 +136,13 @@ impl Lamp {
             LampKind::Panel => (self.size[0] * self.size[1] / std::f64::consts::PI).sqrt() * 2.0,
         }
     }
+    /// The turn (rx, ry, 0) that makes a panel at `pos` face the middle of the scene: its own z, turned
+    /// about x and then about y, points from `pos` to the middle.
+    pub fn facing_middle(pos: [f64; 3]) -> [f64; 3] {
+        let l = (pos[0] * pos[0] + pos[1] * pos[1] + pos[2] * pos[2]).sqrt().max(1e-9);
+        let d = pos.map(|c| -c / l);
+        [(-d[1]).clamp(-1.0, 1.0).asin().to_degrees(), d[0].atan2(d[2]).to_degrees(), 0.0]
+    }
     /// As text: `kind,x,y,z,a,b,r,g,b,power`.
     pub fn text(&self) -> String {
         format!("{},{},{},{},{},{},{},{},{},{}", self.kind.id(), self.pos[0], self.pos[1], self.pos[2], self.size[0], self.size[1], self.rgb[0], self.rgb[1], self.rgb[2], self.power)
@@ -156,6 +163,8 @@ impl Lamp {
                 _ => return None,
             }
         }
+        // (a panel faces the middle of the scene from where it stands; its turn sliders turn it from there)
+        if kind == LampKind::Panel { l.rot = Lamp::facing_middle(l.pos); }
         Some(l)
     }
 }
@@ -206,10 +215,7 @@ impl State {
             LampKind::Panel => {
                 l.size = [0.6, 0.4];
                 l.power = 4.0;
-                let p = l.pos;
-                let yaw = p[0].atan2(p[2]).to_degrees();
-                let pitch = -(p[1].atan2((p[0] * p[0] + p[2] * p[2]).sqrt())).to_degrees();
-                l.rot = [pitch, yaw, 0.0];
+                l.rot = Lamp::facing_middle(l.pos);
             }
         }
         self.lamps.push(l);

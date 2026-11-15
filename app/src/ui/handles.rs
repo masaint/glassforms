@@ -56,13 +56,20 @@ pub enum Part {
     Scale,
 }
 
+/// What the handles act on: a layer (the selected one) or a lamp.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Target {
+    Layer(usize),
+    Lamp(usize),
+}
+
 /// A drag in progress.
 #[derive(Clone, Debug)]
 pub struct Grab {
     pub part: Part,
-    layer: usize,
-    /// the placement when the drag began: x, y, z, three turns, size
-    start: [f64; 7],
+    target: Target,
+    /// the numbers when the drag began: x, y, z, three turns, size (and a lamp's second size)
+    start: [f64; 8],
     /// where the pointer was pressed
     at0: Pos2,
     /// the point of the constraint the pointer's ray met at the press (camera frame), or the length
@@ -82,6 +89,9 @@ pub struct Handles {
     pub mode: Mode,
     pub grab: Option<Grab>,
     pub hover: Option<Part>,
+    /// they act on this lamp (chosen in the light room, or picked on the picture), otherwise on the
+    /// selected layer
+    pub lamp: Option<usize>,
 }
 
 const AXIS_INK: [Color32; 3] = [Color32::from_rgb(235, 90, 85), Color32::from_rgb(110, 205, 95), Color32::from_rgb(95, 145, 240)];
@@ -111,10 +121,13 @@ fn dot(a: [f64; 3], b: [f64; 3]) -> f64 { a[0] * b[0] + a[1] * b[1] + a[2] * b[2
 fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] { [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]] }
 
 impl View {
-    fn of(st: &State, rect: Rect, layer: usize) -> Option<View> {
+    fn of(st: &State, rect: Rect, target: Target) -> Option<View> {
         let cam = st.camera();
-        let m = st.view_r();
-        let pos = st.stack.layers.get(layer)?.place.pos;
+        // a layer stands in the object's frame, a lamp in the lights' frame
+        let (m, pos) = match target {
+            Target::Layer(i) => (st.view_r(), st.stack.layers.get(i)?.place.pos),
+            Target::Lamp(i) => (st.light_m(), st.lamps.get(i)?.pos),
+        };
         let c = apply(&m, pos);
         let axes = [apply(&m, [1.0, 0.0, 0.0]), apply(&m, [0.0, 1.0, 0.0]), apply(&m, [0.0, 0.0, 1.0])];
         let mut v = View { cam, m, c, axes, len: 0.4, rect };
@@ -229,15 +242,32 @@ fn along_line(o: [f64; 3], d: [f64; 3], c: [f64; 3], a: [f64; 3]) -> Option<f64>
     Some((ad * dot(w, d) - dd * dot(w, a)) / den)
 }
 
-fn placement(st: &State, layer: usize) -> [f64; 7] {
-    let p = st.stack.layers[layer].place;
-    [p.pos[0], p.pos[1], p.pos[2], p.rot[0], p.rot[1], p.rot[2], p.size]
+fn values(st: &State, t: Target) -> [f64; 8] {
+    match t {
+        Target::Layer(i) => {
+            let p = st.stack.layers[i].place;
+            [p.pos[0], p.pos[1], p.pos[2], p.rot[0], p.rot[1], p.rot[2], p.size, 0.0]
+        }
+        Target::Lamp(i) => {
+            let l = st.lamps[i];
+            [l.pos[0], l.pos[1], l.pos[2], l.rot[0], l.rot[1], l.rot[2], l.size[0], l.size[1]]
+        }
+    }
+}
+
+fn exists(st: &State, t: Target) -> bool {
+    match t {
+        Target::Layer(i) => i < st.layer_count(),
+        Target::Lamp(i) => i < st.lamps.len(),
+    }
 }
 
 impl Handles {
-    /// The layer the handles act on, if they show.
-    fn target(&self, st: &State) -> Option<usize> {
-        (self.on && st.stack.sel < st.layer_count()).then_some(st.stack.sel)
+    /// What the handles act on, if they show.
+    pub fn target(&self, st: &State) -> Option<Target> {
+        if !self.on { return None; }
+        if let Some(i) = self.lamp.filter(|i| *i < st.lamps.len()) { return Some(Target::Lamp(i)); }
+        (st.stack.sel < st.layer_count()).then_some(Target::Layer(st.stack.sel))
     }
 
     /// Show or hide them (G).
@@ -248,8 +278,8 @@ impl Handles {
 
     /// The part of the handles under the pointer, if any.
     pub fn hit(&self, st: &State, rect: Rect, at: Pos2) -> Option<Part> {
-        let layer = self.target(st)?;
-        let v = View::of(st, rect, layer)?;
+        let target = self.target(st)?;
+        let v = View::of(st, rect, target)?;
         let c = v.screen(v.c)?;
         let mut best: Option<(f32, Part)> = None;
         let mut take = |d: f32, part: Part| {
@@ -276,9 +306,9 @@ impl Handles {
 
     /// Take hold of a part at the pointer.
     pub fn begin(&mut self, st: &State, rect: Rect, at: Pos2, part: Part) {
-        let Some(layer) = self.target(st) else { return };
-        let Some(v) = View::of(st, rect, layer) else { return };
-        let mut g = Grab { part, layer, start: placement(st, layer), at0: at, hit0: v.c, s0: 0.0, tan: Vec2::X, rad: 40.0 };
+        let Some(target) = self.target(st) else { return };
+        let Some(v) = View::of(st, rect, target) else { return };
+        let mut g = Grab { part, target, start: values(st, target), at0: at, hit0: v.c, s0: 0.0, tan: Vec2::X, rad: 40.0 };
         if let Part::Ring(k) = part {
             // the point of the ring nearest the pointer, and the way it runs there on the screen
             let (a, b) = v.across(k);
@@ -314,9 +344,9 @@ impl Handles {
     /// tenth as far.
     pub fn drag(&mut self, st: &mut State, rect: Rect, at: Pos2, snap: bool, fine: bool) {
         let Some(g) = self.grab.clone() else { return };
-        if g.layer >= st.layer_count() { self.grab = None; return; }
-        // the frame as it was at the press: the layer's own middle moves under the drag, the constraint does not
-        let Some(mut v) = View::of(st, rect, g.layer) else { return };
+        if !exists(st, g.target) { self.grab = None; return; }
+        // the frame as it was at the press: the middle moves under the drag, the constraint does not
+        let Some(mut v) = View::of(st, rect, g.target) else { return };
         v.c = apply(&v.m, [g.start[0], g.start[1], g.start[2]]);
         let Some((o, d)) = v.ray(at) else { return };
         let k_fine = if fine { 0.1 } else { 1.0 };
@@ -354,22 +384,24 @@ impl Handles {
             Part::Scale => {
                 let Some(c) = v.screen(v.c) else { return };
                 let (r0, r1) = ((g.at0 - c).length().max(4.0) as f64, (at - c).length() as f64);
-                out[6] = g.start[6] * (1.0 + (r1 / r0 - 1.0) * k_fine);
+                let f = 1.0 + (r1 / r0 - 1.0) * k_fine;
+                out[6] = g.start[6] * f;
+                out[7] = g.start[7] * f;
                 if snap { out[6] = (out[6] / 0.05).round() * 0.05; }
             }
         }
         if snap && matches!(g.part, Part::Axis(_) | Part::Plane(_) | Part::Centre) {
             for x in out.iter_mut().take(3) { *x = (*x / 0.05).round() * 0.05; }
         }
-        self.write(st, g.layer, &out, true);
+        self.write(st, g.target, &out, true);
     }
 
     /// Let go: the placement is built at full detail.
     pub fn end(&mut self, st: &mut State) {
         if let Some(g) = self.grab.take() {
-            if g.layer < st.layer_count() {
-                let now = placement(st, g.layer);
-                self.write(st, g.layer, &now, false);
+            if exists(st, g.target) {
+                let now = values(st, g.target);
+                self.write(st, g.target, &now, false);
             }
         }
     }
@@ -377,13 +409,18 @@ impl Handles {
     /// Esc during a drag: the layer goes back to where the drag began. True if there was a drag.
     pub fn cancel(&mut self, st: &mut State) -> bool {
         let Some(g) = self.grab.take() else { return false };
-        if g.layer < st.layer_count() { self.write(st, g.layer, &g.start, false); }
+        if exists(st, g.target) { self.write(st, g.target, &g.start, false); }
         true
     }
 
-    /// Write a placement through its sliders (so that it is what the sliders say, within their range).
-    fn write(&self, st: &mut State, layer: usize, v: &[f64; 7], quick: bool) {
-        for (c, k) in st.place_knobs(layer).into_iter().enumerate() {
+    /// Write the numbers through their sliders (so that they are what the sliders say, within their range).
+    fn write(&self, st: &mut State, t: Target, v: &[f64; 8], quick: bool) {
+        // (a layer's sliders: x, y, z, three turns, size; a lamp's begin the same, then its second size)
+        let knobs = match t {
+            Target::Layer(i) => st.place_knobs(i),
+            Target::Lamp(i) => st.lamp_knobs_of(i).into_iter().take(8).collect(),
+        };
+        for (c, k) in knobs.into_iter().enumerate() {
             // a number that is being animated is the animation's: the handle leaves it alone
             if st.tracks.contains_key(&k.key) { continue; }
             let x = if c >= 3 && c <= 5 { ((v[c] + 540.0) % 360.0) - 180.0 } else { v[c] };
@@ -394,8 +431,8 @@ impl Handles {
 
     /// Paint the handles over the picture.
     pub fn paint(&mut self, p: &Painter, st: &State, rect: Rect, pointer: Option<Pos2>) {
-        let Some(layer) = self.target(st) else { return };
-        let Some(v) = View::of(st, rect, layer) else { return };
+        let Some(target) = self.target(st) else { return };
+        let Some(v) = View::of(st, rect, target) else { return };
         let Some(c) = v.screen(v.c) else { return };
         let lit = self.grab.as_ref().map(|g| g.part).or_else(|| pointer.and_then(|at| self.hit(st, rect, at)));
         self.hover = lit;
@@ -459,6 +496,25 @@ impl Handles {
         let font = eframe::egui::FontId::monospace(10.0);
         p.text(c + eframe::egui::vec2(0.0, 14.0), eframe::egui::Align2::CENTER_TOP, format!("{} · T", self.mode.word()), font, Color32::from_white_alpha(170));
     }
+}
+
+/// The lamp under a point of the screen, if any (the nearest of those whose outline the pointer's ray
+/// passes within): lamps are known exactly, so this is worked out here, not read from the picture.
+pub fn pick_lamp(st: &State, rect: Rect, at: Pos2) -> Option<usize> {
+    let cam = st.camera();
+    let h = rect.height() as f64 / 2.0;
+    let (o, d) = cam.ray([(at.x - rect.center().x) as f64 / h, -(at.y - rect.center().y) as f64 / h])?;
+    let mut best: Option<(f64, usize)> = None;
+    for i in 0..st.lamps.len() {
+        let (c, _) = st.lamp_in_view(i)?;
+        let l = &st.lamps[i];
+        let r = match l.kind { gf_core::lamps::LampKind::Ball => l.size[0], _ => l.size[0].max(l.size[1]) } + 0.03;
+        let oc = sub(c, o);
+        let t = dot(oc, d);
+        if t <= 0.0 { continue; }
+        if dot(oc, oc) - t * t < r * r && best.is_none_or(|(b, _)| t < b) { best = Some((t, i)); }
+    }
+    best.map(|(_, i)| i)
 }
 
 /// The layer whose shape is under a point of the picture (fx, fy: fractions of its width and height

@@ -37,6 +37,7 @@ pub fn show(ctx: &egui::Context, st: &mut State, px: &mut Panels, full: Rect) {
         studio::surroundings(ui, st, px);
         studio::floor(ui, st, px);
         lights(ui, st, px);
+        super::lamps::lamps(ui, st, px);
         studio::casting(ui, st, px);
         turning(ui, st, px);
         gap(ui, 2.0);

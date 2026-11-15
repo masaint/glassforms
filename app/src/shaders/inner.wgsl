@@ -36,6 +36,7 @@ struct IU {
   playE: vec4f,       // x: how thick a grain is across the layers, as a share of its width   y: how closely the grains of
                       // one domain share a direction   z: a domain's width, in grains   w: the stacking's reflectance in its band
   playF: vec4f,       // x: how ragged the domains' outlines are   y: how strongly stacking faults streak the colour
+                      // z: how much light a milky body holds inside, as a share of the light from all round
   fracA: vec4f,       // x: a volume fracture's widest gap, nm   y: the shape's radius   z: which arrangement   w: how many sheets
   fracB: vec4f,       // x: how many of them make a fan   y: how many are great ones
 }
@@ -679,12 +680,13 @@ fn fractures(pos: vec3f, dir: vec3f, s: f32, n: f32) -> Crack {
     if (sh.kind == 1) {
       let xs = xf * (sh.r / (0.1 * rs));
       let org = vec2f(cos(6.2831853 * rq.y), sin(6.2831853 * rq.y)) * 1.5;
-      let ridge = 0.5 + 0.5 * sin(6.2831853 * (3.0 * length(xs - org * (sh.r / (0.1 * rs))) * 0.35 + 4.0 * fbm2(xs * 0.3, sd + 23u)));
+      let ridge = 0.5 + 0.5 * sin(6.2831853 * (10.0 * length(xs - org * (sh.r / (0.1 * rs))) * 0.35 + 4.0 * fbm2(xs * 0.3, sd + 23u)));
       let pu = pxs / (0.1 * rs * max(ci, 0.3));
-      let lines = mix(smoothstep(0.6, 0.9, ridge), 0.3, clamp(pu * 3.0 - 0.5, 0.0, 1.0));
+      let lines = mix(smoothstep(0.5, 0.9, ridge), 0.35, clamp(pu * 10.0 - 0.5, 0.0, 1.0));
       let dots = mix(smoothstep(0.45, 0.75, vnoise2(xs * 40.0, sd + 25u)), 0.35, clamp(pu * 40.0 - 0.5, 0.0, 1.0));
       let patchy = smoothstep(0.25, 0.55, fbm2(xf * 1.3 + 7.1, sd + 27u));
-      V = max(V, vec3f(0.5 * prof * patchy * (0.12 + 0.88 * lines * dots)));
+      let broken = smoothstep(0.35, 0.65, vnoise2(xs * 1.7, sd + 31u));
+      V = max(V, vec3f(0.5 * prof * patchy * (0.2 + 0.8 * mix(0.35, lines, 0.5 * broken) * dots)));
     }
     R *= 1.0 - V;
     let back = fromObj(reflect(d, nl));
@@ -825,6 +827,9 @@ fn grains(pos: vec3f, dir: vec3f, s: f32) -> Play {
   let span = iu.playE.z;
   let warp = iu.playF.x;
   let rho0 = iu.playE.w * iu.playB.y;
+  // the light inside the body: what it gathers from all round
+  var inside = vec3f(0.0);
+  if (iu.playF.z > 0.0) { inside = envL(-dir, 1.6); }
   for (var k = 0; k < PLAY_N; k++) {
     let t = (f32(k) + 0.5) * iu.playB.x;
     if (t > s) { break; }
@@ -842,25 +847,42 @@ fn grains(pos: vec3f, dir: vec3f, s: f32) -> Play {
     let pd = normalize(mix(sphereDir(rp.xy), field, iu.playB.z));
     let e1 = across1(pd);
     let e2 = across2(pd);
+    // the spacing of the domain's spheres: one domain runs to reds, its neighbour only to greens and
+    // blues (lit places of one domain share a hue, since for a given light and eye every lit place
+    // meets them at the same angle)
+    let spacing = 0.74 + 0.3 * rq.x;
     // the layers bending slowly through the domain
     let ph = 6.2831853 * rq;
     let bend = vec2f(sin(0.45 * xw.x + 0.3 * xw.z + ph.x) + 0.5 * sin(0.8 * xw.y + ph.y), sin(0.4 * xw.z - 0.35 * xw.y + ph.z) + 0.5 * sin(0.7 * xw.x + ph.x));
-    // its grains, each tilted a little
-    let gr = nearest(xw * 1.0, seed);
-    let gt = (ten3(ihash(gr.h)).xy - 0.5) * (0.3 + 0.7 * (1.0 - iu.playE.y));
-    // the streaks: fine across one direction in the layers (the domain's own), long along it
+    // the streaks run one way in the layers (the domain's own)
     let sa = cos(ph.z) * e1 + sin(ph.z) * e2;
     let sb = cross(pd, sa);
     let sn = vnoise3(vec3f(dot(xw, sa) * 0.35, dot(xw, sb) * 4.5, xw.y * 1.5), seed + 3u);
     let fl = vnoise3(vec3f(dot(xw, sa) * 1.3, dot(xw, sb) * 9.0, xw.y * 3.0), seed + 4u);
-    let streak = mix(1.0, smoothstep(0.4, 0.6, sn) * (0.55 + 0.45 * smoothstep(0.3, 0.7, fl)), iu.playF.y);
-    let tilt = 0.3 * bend + 0.9 * gt + iu.playF.y * 0.5 * vec2f(sn - 0.5, fl - 0.5);
+    // flakes: small pieces drawn out along the streaks, of a size that differs from domain to domain,
+    // with ragged edges, each tilted its own way within the domain's spread, so that a domain glitters
+    // piece by piece; a faint seam of body between them
+    let fz = mix(0.6, 1.6, rq.y);
+    let fq = vec3f(dot(xw, sa) * 1.3, dot(xw, sb) * 3.8, xw.y * 3.2) * fz + 0.9 * vec3f(sn - 0.5, fl - 0.5, sn - fl);
+    let gr = nearest(fq, seed);
+    let gh = ten3(ihash(gr.h));
+    let spread = 0.22 + 0.7 * (1.0 - iu.playE.y);
+    // (and inside each flake the layers waver, so it lights in part, unevenly)
+    let fine = vnoise3(fq * 2.7, seed + 5u);
+    let gt = (gh.xy - 0.5) * 2.0 * spread + 0.3 * (fine - 0.5);
+    let flake = select(0.2, 1.0, gh.z < 0.82) * (0.55 + 0.45 * smoothstep(0.0, 0.06, sqrt(gr.d2) - sqrt(gr.d1))) * (0.5 + 0.5 * fine);
+    let streak = mix(1.0, smoothstep(0.4, 0.6, sn) * (0.55 + 0.45 * smoothstep(0.3, 0.7, fl)), iu.playF.y) * flake;
+    let tilt = 0.2 * bend + gt + iu.playF.y * 0.3 * vec2f(sn - 0.5, fl - 0.5);
     let gd = normalize(pd + tilt.x * e1 + tilt.y * e2);
     let vis = exp(-iu.playD.rgb * t);
     // (each place stands for a layer of the stone half a grain thick)
-    let share = rho0 * streak * seam * 0.65;
-    var took = vec3f(0.0);
-    // the four sets of a close packing's layers: across gd, and three leaning 70.5 degrees from it
+    let share = rho0 * streak * seam;
+    // the four sets of a close packing's layers: across gd, and three leaning 70.5 degrees from it.
+    // At one place the set that sends back the most wins (the sets lie in different parts of a flake,
+    // finer than a pixel is not: one colour shows at a point, not a blend of four)
+    var best = vec3f(0.0);
+    var bestRho = vec3f(0.0);
+    var bestY = -1.0;
     for (var j = 0; j < 4; j++) {
       var pn = gd;
       if (j > 0) {
@@ -869,13 +891,22 @@ fn grains(pos: vec3f, dir: vec3f, s: f32) -> Play {
       }
       if (dot(pn, od) > 0.0) { pn = -pn; }
       let gw = fromObj(pn);
-      let lam = iu.playC.x * abs(dot(dir, gw)) * (0.95 + 0.05 * rq.x);
+      let lam = iu.playC.x * abs(dot(dir, gw)) * spacing;
       if (lam < 425.0 || lam > 715.0) { continue; }
       let rho = clamp(specW(lam) * iu.white.rgb * (iu.white.w * iu.playB.w), vec3f(0.0), vec3f(1.0)) * share;
-      out.light += out.keep * rho * envL(reflect(dir, gw), iu.playC.y) * vis;
-      took += rho;
+      let got = rho * envL(reflect(dir, gw), iu.playC.y);
+      // (the first set stands first: a place lit by nothing but the light inside the body shows its colour)
+      let y = dot(got, vec3f(0.2126, 0.7152, 0.0722)) + select(0.0, 1e-4, j == 0);
+      if (y > bestY) {
+        bestY = y;
+        best = got;
+        bestRho = rho;
+      }
     }
-    out.keep *= 1.0 - min(took, vec3f(1.0)) * vis;
+    // A milky body is full of light going every way, scattered within it; the stacking sends back its
+    // band of that too, so in white opal the colour shows even where no light outside is mirrored.
+    out.light += out.keep * (best + bestRho * iu.playF.z * inside) * vis;
+    out.keep *= 1.0 - bestRho * vis;
   }
   return out;
 }

@@ -31,6 +31,7 @@ pub mod camera;
 pub mod gizmo;
 pub mod handles;
 pub mod knob;
+pub mod lamps;
 pub mod layers;
 pub mod left;
 pub mod material;
@@ -143,6 +144,8 @@ pub struct Panels {
     pub light: usize,
     /// the handles over the picture (shown with G)
     pub handles: handles::Handles,
+    /// which lamp the light room is showing the sliders of
+    pub lamp: usize,
     /// which group of the named materials the list is showing (none: the group of the one chosen), and
     /// the material the list last showed lit (when another is chosen from elsewhere, the list goes to it)
     pub mat_group: Option<&'static str>,
@@ -199,7 +202,7 @@ pub struct Panels {
 impl Panels {
     pub fn new(store: store::Store) -> Self {
         Self {
-            store, hide_left: false, hide_right: false, help_open: false, bright: false, light: 0, handles: handles::Handles::default(), mat_group: None, lit_mat: None, combo_open: None, meets_open: [false; 2], joined: None, lighting: Lighting::default(), model: Model::default(), casting: Casting::default(), aspect: 16.0 / 9.0, last_fstop: 4.0, perf: String::new(), bench: Bench::Idle, rendering: false, ffmpeg: false,
+            store, hide_left: false, hide_right: false, help_open: false, bright: false, light: 0, handles: handles::Handles::default(), lamp: 0, mat_group: None, lit_mat: None, combo_open: None, meets_open: [false; 2], joined: None, lighting: Lighting::default(), model: Model::default(), casting: Casting::default(), aspect: 16.0 / 9.0, last_fstop: 4.0, perf: String::new(), bench: Bench::Idle, rendering: false, ffmpeg: false,
             video_text: String::new(), file_text: String::new(), loop_text: String::new(), requests: Vec::new(), place: "", record: false, rects: BTreeMap::new(),
             left_at: None, right_at: None, lit_shape: None, scroll_to: [None, None], room_h: 600.0, needs: [0.0; 2], right_rest: 0.0,
         }

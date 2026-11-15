@@ -22,7 +22,8 @@ struct MU {
   sss: vec4f,         // x: scatterings per unit length   y: reach of diffuse light beyond the surface   z: events followed at most
                       // w: the index of a thin wall's own glass
   sssA: vec4f,        // rgb: absorption of the milky body per unit length
-  sssK: vec4f,        // rgb: how fast diffuse light dies away with depth
+  sssK: vec4f,        // rgb: scatterings per unit length of each colour (sss.x is green's: they differ when the
+                      // colours scatter differently)
   sssC: vec4f,        // rgb: the colour of a thick piece
   glow: vec4f,        // rgb: light given off per unit length   w: how tightly it keeps to the core
   exo: vec4f,         // x: graded index, the change   y: 1 / its depth   z: double refraction (second index minus first)
@@ -454,15 +455,16 @@ const GLOW_N: i32 = 6;
 // inside into the whole half-space outside, which thins it by the square of the index.
 fn glowAlong(pos: vec3f, dir: vec3f, s_in: f32) -> vec3f {
   let s = max(s_in, 0.0);                   // (settling onto the surface can leave a length a hair below nothing)
-  let k = mu.sss.x + min(mu.sssA.r, min(mu.sssA.g, mu.sssA.b));
+  let st = mu.sssK.rgb + mu.sssA.rgb;
+  let k = min(st.r, min(st.g, st.b));
   let all = 1.0 - exp(-k * s);
   var sum = vec3f(0.0);
   for (var j = 0; j < GLOW_N; j++) {
     let t = -log(1.0 - (f32(j) + 0.5) / f32(GLOW_N) * all) / k;
     let x = toObj(pos + dir * t) / (2.0 * HB) + 0.5;
-    sum += glowAt(x) * exp(-(mu.sssA.rgb + mu.sss.x - k) * t);
+    sum += glowAt(x) * exp(-(st - k) * t);
   }
-  return sum * (all / (f32(GLOW_N) * k) * mu.sss.x * 0.0795775 / (u.ior * u.ior));
+  return sum * mu.sssK.rgb * (all / (f32(GLOW_N) * k) * 0.0795775 / (u.ior * u.ior));
 }
 //#endif
 //#endif
@@ -1061,7 +1063,7 @@ fn beyondM(ro_in: vec3f, rd_in: vec3f, ior: f32, sig_in: f32) -> vec3f {
     {
       // the milky body: part of the light is scattered on the way through, and that part is replaced by
       // the diffuse light inside (taken as the lights gathered by the face it came in by)
-      let ext = exp(-(mu.sss.x + mu.sssA.rgb) * max(s, 0.0));
+      let ext = exp(-(mu.sssK.rgb + mu.sssA.rgb) * max(s, 0.0));
 //#if WALK
       {
         // the part of the ray scattered on this stretch: one point of the stretch stands for it, drawn
@@ -1359,7 +1361,7 @@ fn shadeM(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
       {
         // part of the ray is scattered away on this stretch; in its place comes the light the body
         // holds along it, scattered towards the eye
-        let ext = exp(-(mu.sss.x + mu.sssA.rgb) * max(s, 0.0));
+        let ext = exp(-(mu.sssK.rgb + mu.sssA.rgb) * max(s, 0.0));
         acc += {{WEIGHT}} * att * glowAlong(q - dir * s, dir, s);
         att *= ext;
         haze += HAZE * mu.sss.x * s;

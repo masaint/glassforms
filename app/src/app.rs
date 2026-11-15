@@ -766,7 +766,12 @@ impl App {
                 if d.kind == Gesture::Handle {
                     self.px.handles.end(st);
                 } else if d.kind == Gesture::Turn && d.moved < 4.0 && self.px.handles.on && !mods.alt {
-                    if let Some(i) = crate::ui::handles::pick_layer(&self.engine, fx, fy) {
+                    // a lamp under the pointer first (it is known exactly), then a layer's shape
+                    if let Some(i) = crate::ui::handles::pick_lamp(&self.engine.state, self.full, d.at) {
+                        self.px.handles.lamp = Some(i);
+                        self.px.lamp = i;
+                    } else if let Some(i) = crate::ui::handles::pick_layer(&self.engine, fx, fy) {
+                        self.px.handles.lamp = None;
                         if i != self.engine.state.stack.sel { self.engine.state.select_layer(i); }
                     }
                 } else if d.kind == Gesture::Turn && d.moved < 4.0 && st.p.aperture > 0.0 {
@@ -1556,6 +1561,8 @@ impl App {
                 "seconds": v.seconds, "bytes": v.bytes, "lens": v.lens,
             })),
             "stillBits": if self.px.store.still_16 { 16 } else { 8 },
+            "lamps": st.lamps.iter().map(|l| json!({ "kind": l.kind.id(), "pos": l.pos, "rot": l.rot, "size": l.size, "rgb": l.rgb, "power": l.power, "seen": l.seen })).collect::<Vec<_>>(),
+            "handles": { "on": self.px.handles.on, "mode": self.px.handles.mode.word(), "lamp": self.px.handles.lamp },
             "folders": { "videos": folder.display().to_string(), "setups": self.px.store.setups_folder().display().to_string(), "stills": self.px.store.stills_folder().display().to_string() },
             "rendering": self.video.is_some(),
             "ffmpeg": self.px.ffmpeg,

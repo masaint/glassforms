@@ -439,9 +439,15 @@ fn placement_rows(ui: &mut Ui, st: &mut State, px: &mut Panels, i: usize, as_bui
         if button(ui, place, Id::unique("placement reset"), "reset", false, font.clone()).on_hover_text("this layer back where it is built: centred, unturned, full size").clicked() { st.reset_placement(i); }
     });
     // the handles over the picture, for moving, turning and sizing this layer by hand
-    let word = if px.handles.on { "hide handles" } else { "handles" };
+    let on_layer = px.handles.on && px.handles.lamp.is_none();
+    let word = if on_layer { "hide handles" } else { "handles" };
     let hsize = button_size(ui, word, &font, egui::vec2(8.0, 2.0));
     let hplace = Rect::from_min_size(Pos2::new(place.left() - 8.0 - hsize.x, place.top()), hsize);
     px.note("placement:handles", hplace);
-    if button(ui, hplace, Id::unique("placement handles"), word, px.handles.on, font).on_hover_text("arrows, squares and rings over the picture to drag this layer about (G). T: move, turn or size; Ctrl: in steps; Shift: finely; Esc: put them away. While they show, a click on a shape selects its layer").clicked() { px.handles.toggle(); }
+    if button(ui, hplace, Id::unique("placement handles"), word, on_layer, font).on_hover_text("arrows, squares and rings over the picture to drag this layer about (G). T: move, turn or size; Ctrl: in steps; Shift: finely; Esc: put them away. While they show, a click on a shape selects its layer").clicked() {
+        if on_layer { px.handles.toggle(); } else {
+            px.handles.lamp = None;
+            if !px.handles.on { px.handles.toggle(); }
+        }
+    }
 }
