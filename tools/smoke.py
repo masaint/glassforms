@@ -59,6 +59,7 @@ CASES = [
     ('denoise-fisheye-turning', ['material=truemilk', 'proj=fisheye', 'turn=12']),
     ('denoise-focus', ['material=truemilk', 'focal=85', 'fstop=2']),
     ('denoise-picture', ['material=truejade', 'hdri=hdri/suburban_garden_4k.exr', 'hdriShow=1']),
+    ('denoise-gem-turning', ['scene=gems', 'preset=brilliant', 'denoise=2', 'turn=12']),
 ]
 bad = 0
 # (names given on the command line: only those cases)

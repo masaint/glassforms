@@ -59,12 +59,15 @@ pub fn casting(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     };
     if !px.group_saying(ui, "room-cast", "shadows and caustics", &says) { return; }
     // (whether anything casts is switched in the light group, beside the lights' brightness)
-    if mode(st) == 0 { note(ui, "Switched on in the light group of the left panel (shadows: by body, or all)."); }
+    if mode(st) == 0 {
+        note(ui, "Off. Switched on in the light group of the left panel (shadows: by body, or all); how strong and how fine they are is set here then.");
+        gap(ui, 2.0);
+        return;
+    }
     if mode(st) > 0 && !px.casting.receivers {
         note(ui, "Nothing in the picture gathers light diffusely (clay, a milky body, a floor): there is nothing for a shadow to fall on.");
     }
     ui.scope(|ui| {
-        if mode(st) == 0 { ui.disable(); }
         let tip = "how large the lights are taken to be for what is cast: 1 as they are, towards 0 points. A family's lights are large and stand all round: for a shadow or a caustic that reads, make one light small and bright";
         knob::knob_row_with(ui, st, &State::engine_knob("castSoft"), px, knob::Extra { tip, ..Default::default() });
         knob::knob_row_with(ui, st, &State::engine_knob("castShadows"), px, knob::Extra { tip: "how much of the light a body hides is taken away", ..Default::default() });

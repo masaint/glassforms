@@ -46,9 +46,9 @@ BIG = (1600, 900)
 runs = 0
 
 # the groups that fold, from the top of each panel, and the ones folded when nothing is remembered
-LEFT_GROUPS = ['material', 'light', 'camera', 'object', 'quality', 'video', 'file']
-RIGHT_GROUPS = ['joins', 'placement', 'detail', 'animate']
-FOLDED = ['camera', 'camera-character', 'camera-grade', 'detail', 'file', 'object', 'placement', 'quality', 'video']
+LEFT_GROUPS = ['material', 'light', 'camera', 'output']
+RIGHT_GROUPS = ['joins', 'placement', 'animate']
+FOLDED = ['camera', 'camera-character', 'camera-grade', 'output', 'placement', 'quality', 'video']
 
 
 def command(script='', pairs=(), frames=5, shot=None, flags=(), size=(W, H), scale=1, dump=None):
@@ -432,9 +432,9 @@ def the_light_room_opens_moves_and_closes():
     room = d['rects'].get('room')
     assert d['room']['open'] and room, 'pressing "light room" did not open it'
     assert apart(room, d['rects']['left']) and apart(room, d['rects']['right']) and within(room, [0, 0, w, h]), 'it first appears at %s, over a panel' % room
-    for part in ('room/preview', 'room/light:1', 'room/add', 'room/reset', 'room/load', 'ball', 'room/slot:P.lspin'):
+    for part in ('room/preview', 'room/around:picture', 'room/floor:on', 'room/light:1', 'room/add', 'room/reset', 'ball', 'room/slot:P.lspin'):
         assert within(d['rects'][part], room), '%s is not in view in the light room: %s' % (part, d['rects'][part])
-    order = [d['rects'][k][1] for k in ('room/preview', 'group:room-lights', 'group:room-picture', 'group:room-turn')]
+    order = [d['rects'][k][1] for k in ('room/preview', 'group:room-surround', 'group:room-floor', 'group:room-lights', 'group:room-cast', 'group:room-turn')]
     assert order == sorted(order), 'the light room is out of order: %s' % order
     # the ball, dragged with the pointer, turns the lights; they go back when told to
     b = run('room:open;wait:4;ball:20,10', size=BIG)
@@ -596,7 +596,7 @@ def an_environment_picture_lights_the_shape():
     missing = run('room:open;hdri:%s;wait:8' % os.path.join(OUT, 'no such picture.hdr'), size=BIG)['hdri']
     assert missing['error'] and missing['name'] is None, missing
     # the dialog's button does nothing in a run that cannot answer a dialog
-    quiet = run('%s;%s;wait:3' % (opened, press(before[0]['rects']['room/load'])), size=BIG)
+    quiet = run('%s;%s;wait:3' % (opened, press(before[0]['rects']['room/around:picture'])), size=BIG)
     assert quiet['hdri']['path'] is None and quiet['room']['open']
     # a setup keeps the picture and the lights
     setup = os.path.join(OUT, 'lit_setup.json')
@@ -1020,7 +1020,7 @@ def focus_is_blurred_afterwards_or_traced_through_the_lens():
     # in the camera group and in the video group
     rays = r['slot:P.lensN']
     assert e['slot:P.lensN'] == rays, 'the rows moved between the two modes'
-    video = 'set:aperture=0.15;fold:material;fold:video;wait:4'
+    video = 'set:aperture=0.15;fold:material;fold:output;fold:video;wait:4'
     v_clean, v_exact = look(video, 'focus_video_clean', pairs=filling), look(video + ';p:dof=0;wait:3', 'focus_video_exact', pairs=filling)
     greyed = (dim(clean, rays) / dim(exact, rays), dim(v_clean, v_clean[0]['rects']['video lens']) / dim(v_exact, v_exact[0]['rects']['video lens']))
     assert max(greyed) < 0.8, 'the lens rays are not greyed when the blur is made afterwards: %.2f and %.2f of their brightness' % greyed
@@ -1086,24 +1086,24 @@ def shadows_and_caustics_are_switched_for_all_and_for_each_body():
     base = run(clay, size=BIG, pairs=TWO_PAIRS)
     r = base['rects']
     assert base['settings']['cast'] == 0 and within(r['cast:off'], r['left']), 'the global control is not in the light group'
-    assert not any(k.startswith('castShadow') for k in r), 'a body\'s switches show while nothing casts per body'
-    # by body: the selected body's switches appear beside its material, and in the lab
-    d = run(clay + '%s;wait:8' % press(r['cast:body']), size=BIG, pairs=TWO_PAIRS)
+    assert not any(k.startswith('castShadow') for k in r), 'a body\'s switches show outside the lab'
+    # by body: the selected body's switches are in the lab, and only there
+    d = run(clay + '%s;wait:8;lab:open;wait:4' % press(r['cast:body']), size=BIG, pairs=TWO_PAIRS)
     assert d['settings']['cast'] == 1 and d['casting']['on'], 'pressing "by body" gave cast %s, casting %s' % (d['settings']['cast'], d['casting'])
-    key = 'castShadow2:no'
-    assert key in d['rects'], 'the second body\'s switches are not beside its material: %s' % [k for k in d['rects'] if k.startswith('cast')]
-    e = run(clay + '%s;wait:8;%s;wait:8' % (press(r['cast:body']), press(d['rects'][key])), size=BIG, pairs=TWO_PAIRS)
+    key = 'lab/castShadow2:no'
+    assert key in d['rects'] and 'castShadow2:no' not in d['rects'], 'the second body\'s switches are not in the lab alone: %s' % [k for k in d['rects'] if 'cast' in k]
+    e = run(clay + '%s;wait:8;lab:open;wait:4;%s;wait:8' % (press(r['cast:body']), press(d['rects'][key])), size=BIG, pairs=TWO_PAIRS)
     assert e['settings']['castShadow2'] == 0 and e['casting']['casters'][1] == [False, False] and e['casting']['casters'][0][0], e['casting']
     # the lab has the same switches, and clay has no caustics to cast: that switch is greyed
     lab = run(clay + 'arg:cast=1;lab:open;wait:8', size=BIG, pairs=TWO_PAIRS)
     assert 'lab/castShadow2:yes' in lab['rects'] and 'lab/castCaustic2:yes' in lab['rects'], 'the lab lacks the body\'s switches'
-    # the light room: the same three-way control, the sliders and the detail
-    room = run(clay + 'arg:cast=2;room:open;wait:8', size=BIG, pairs=TWO_PAIRS)
+    # the light room: the sliders and the detail (the three-way switch is in the light group only)
+    room = run(clay + 'arg:cast=2;room:open;fold:room-surround;fold:room-floor;fold:room-lights;wait:8', size=BIG, pairs=TWO_PAIRS)
     rr = room['rects']
-    assert all(k in rr for k in ('room/cast:all', 'room/slot:P.castSoft', 'room/slot:P.castShadows', 'room/slot:P.castCaustics', 'room/castDetail:fine')), 'the light room lacks what is cast'
-    soft = run(clay + 'arg:cast=2;room:open;wait:8;%s;wait:3' % on(room, 'P.castSoft', 0.8, 'room/'), size=BIG, pairs=TWO_PAIRS)
+    assert all(k in rr for k in ('room/slot:P.castSoft', 'room/slot:P.castShadows', 'room/slot:P.castCaustics', 'room/castDetail:fine')) and 'room/cast:all' not in rr, 'the light room lacks what is cast, or has the switch too'
+    soft = run(clay + 'arg:cast=2;room:open;fold:room-surround;fold:room-floor;fold:room-lights;wait:8;%s;wait:3' % on(room, 'P.castSoft', 0.8, 'room/'), size=BIG, pairs=TWO_PAIRS)
     assert close(soft['settings']['castSoft'], 0.8, 0.011), soft['settings']['castSoft']
-    return 'off, by body and all from the light group (by body: body 2 told to cast no shadow casts %s); the lab and the light room have the switches, the sliders and the detail' % e['casting']['casters'][1]
+    return 'off, by body and all from the light group (by body: body 2 told to cast no shadow casts %s); the body\'s switches are in the lab alone, the sliders and the detail in the light room' % e['casting']['casters'][1]
 
 
 @check
@@ -1139,7 +1139,7 @@ def the_camera_is_one_group_in_a_photographers_terms():
     # (the material folded away, so that the camera's rows are in view)
     base = run('fold:material;fold:camera;wait:4', size=BIG)
     r, c = base['rects'], base['camera']
-    assert all(k in r for k in ('lens:0', 'slot:P.zoom', 'dof:on', 'slot:P.dist', 'slot:P.elev', 'slot:P.ev', 'tone')), 'the camera group lacks a row'
+    assert all(k in r for k in ('lens:0', 'slot:P.zoom', 'dof:on', 'slot:P.dist', 'slot:P.elev', 'slot:R.0', 'view:top', 'reset view', 'slot:P.ev', 'tone')), 'the camera group lacks a row'
     assert c['fstop'] is None and 'everything sharp' in c['says'], c
     # a named lens: 85 mm, the camera moved back so the subject keeps its size
     lens = run('fold:material;fold:camera;wait:4;%s;wait:4' % press(r['lens:3']), size=BIG)
@@ -1163,21 +1163,26 @@ def the_camera_is_one_group_in_a_photographers_terms():
 def the_studio_is_set_up_in_the_light_room():
     base = run('room:open;wait:4', size=BIG)
     r = base['rects']
-    assert all(k in r for k in ('room/studio:lavender', 'room/studio:none', 'room/backdrop:on', 'room/floor:on')), 'the light room has no studio'
-    assert r['room/studio:lavender'][1] < r['room/light:1'][1], 'the studio is not above the lights'
-    assert base['settings']['backdrop'] == 0 and base['settings']['floor'] == 0, 'a studio is up before one was asked for'
-    lav = run('room:open;wait:4;%s;wait:8' % press(r['room/studio:lavender']), size=BIG)
-    s = lav['settings']
+    assert all(k in r for k in ('room/around:none', 'room/around:studio', 'room/around:picture', 'room/floor:on', 'studio')), 'the light room has no surroundings and floor, or the light group no studio menu'
+    assert r['group:room-surround'][1] < r['group:room-floor'][1] < r['room/light:1'][1], 'surroundings and floor are not above the lights'
+    assert within(r['studio'], r['left']) and base['settings']['backdrop'] == 0 and base['settings']['floor'] == 0, 'a studio is up before one was asked for'
+    # a studio backdrop alone, then a studio in full from among them
+    back = run('room:open;wait:4;%s;wait:6' % press(r['room/around:studio']), size=BIG)
+    assert back['settings']['backdrop'] == 1 and back['settings']['floor'] == 0 and 'room/studio:lavender' in back['rects'], 'the backdrop alone did not switch on'
+    br = back['rects']
+    lav = run('room:open;wait:4;%s;wait:6;%s;wait:8' % (press(r['room/around:studio']), press(br['room/studio:lavender'])), size=BIG)
+    s, lr = lav['settings'], lav['rects']
     assert s['backdrop'] == 1 and s['floor'] == 1 and not lav['rig']['own'] and lav['casting']['floor'] is not None, 'the lavender studio did not set up a backdrop and a floor'
-    lr = lav['rects']
-    assert all(k in lr for k in ('room/colour:backTopR', 'room/slot:P.backGain', 'room/slot:P.floorY', 'room/floorAuto:hand')), 'the backdrop and floor rows did not appear'
-    hand = run('room:open;wait:4;%s;wait:8;%s;wait:4' % (press(r['room/studio:lavender']), press(lr['room/floorAuto:hand'])), size=BIG)
+    assert all(k in lr for k in ('room/colour:backTopR', 'room/slot:P.backGain', 'room/slot:P.floorY', 'room/floorAuto:hand', 'room/show:on')), 'the backdrop and floor rows did not appear'
+    hand = run('room:open;wait:4;%s;wait:6;%s;wait:8;%s;wait:4' % (press(r['room/around:studio']), press(br['room/studio:lavender']), press(lr['room/floorAuto:hand'])), size=BIG)
     assert hand['settings']['floorAuto'] == 0, hand['settings']['floorAuto']
-    none = run('room:open;wait:4;%s;wait:8;%s;wait:6' % (press(r['room/studio:lavender']), press(lr['room/studio:none'])), size=BIG)
-    assert none['settings']['backdrop'] == 0 and none['settings']['floor'] == 0 and none['rig']['own'], 'none did not take the studio away'
-    alone = run('room:open;wait:4;%s;wait:6' % press(r['room/backdrop:on']), size=BIG)
-    assert alone['settings']['backdrop'] == 1 and alone['settings']['floor'] == 0, 'the backdrop alone did not switch on'
-    return 'studios above the lights; lavender sets a backdrop and a floor (standing at %.3f), the floor goes to "by hand", none takes it all away; a backdrop switches on alone' % lav['casting']['floor']
+    # one "behind the shape" switch: hidden, the backdrop still lights but is not seen
+    hid = run('room:open;wait:4;%s;wait:6;%s;wait:4' % (press(r['room/around:studio']), press(br['room/show:off'])), size=BIG)
+    assert hid['settings']['backShow'] == 0 and hid['settings']['hdriShow'] == 0, (hid['settings']['backShow'], hid['settings']['hdriShow'])
+    # none: black all round again (the floor is its own)
+    none = run('room:open;wait:4;%s;wait:6;%s;wait:6' % (press(r['room/around:studio']), press(br['room/around:none'])), size=BIG)
+    assert none['settings']['backdrop'] == 0, 'none did not take the backdrop away'
+    return 'surroundings (none / studio / picture) and floor above the lights; a backdrop alone, then lavender (floor at %.3f), the floor by hand, one behind-the-shape switch, none; a studio menu in the light group' % lav['casting']['floor']
 
 
 @check
@@ -1207,10 +1212,10 @@ def a_video_is_written_and_plays():
     shut = run('wait:2')
     assert 'render' not in shut['rects'] and 'video' in shut['closed'], 'the video group is open before it is asked for'
     # (with the material group open the video group is reached by scrolling the panel: folded here, to press the button where it is)
-    opened = run('fold:material;fold:video;wait:3', size=BIG)
+    opened = run('fold:material;fold:output;fold:video;wait:3', size=BIG)
     button = opened['rects']['render']
     assert within(button, opened['rects']['left']), 'the render button is not in view: %s' % button
-    going = run('fold:material;fold:video;vopt:size=320x180;vopt:samples=4;wait:3;%s;wait:40;note;cancel;wait:3' % press(button), size=BIG, pairs=('spin=0.3',))
+    going = run('fold:material;fold:output;fold:video;vopt:size=320x180;vopt:samples=4;wait:3;%s;wait:40;note;cancel;wait:3' % press(button), size=BIG, pairs=('spin=0.3',))
     said = going['noted'][0]['perf']
     assert re.search(r'^320×180 · video frame \d+ of \d+ · ', said) and 'cancelled after' in going['says']['video'], 'pressed, the line says %r and the group %r' % (said, going['says']['video'])
     return '%s, %d bytes%s; a cancelled render leaves nothing; the folded group opens and its button renders ("%s")' % (os.path.basename(v['path']), v['bytes'], note, said)
@@ -1268,9 +1273,9 @@ def choices_are_remembered_between_runs():
     with open(store, 'w', encoding='utf-8') as f:
         json.dump({'arrangement': 3, 'folder': videos}, f)
     # (the light room's longer sections folded, so that it can be dragged down without meeting the window's foot)
-    opened = run('room:open;fold:room-studio;fold:room-lights;fold:room-cast;fold:room-turn;wait:4')
+    opened = run('room:open;fold:room-surround;fold:room-floor;fold:room-lights;fold:room-cast;fold:room-turn;wait:4')
     bar = opened['rects']['room:bar']
-    first = run('fold:camera;fold:material;fold:animate;fold:room-studio;fold:room-lights;fold:room-cast;fold:room-turn;vopt:samples=64;vopt:shutter=0.5;vopt:codec=h265;vopt:size=2560x1440;vopt:fps=30;vopt:lens=8;vopt:quality=20;room:open;wait:10;%s;still16:%s;save-setup:%s;wait:40'
+    first = run('fold:camera;fold:material;fold:animate;fold:room-surround;fold:room-floor;fold:room-lights;fold:room-cast;fold:room-turn;vopt:samples=64;vopt:shutter=0.5;vopt:codec=h265;vopt:size=2560x1440;vopt:fps=30;vopt:lens=8;vopt:quality=20;room:open;wait:10;%s;still16:%s;save-setup:%s;wait:40'
                 % (pull(bar[0] + 50, bar[1] + 8, 222, 111), os.path.join(stills, 'a.png'), os.path.join(setups, 's.json')), flags=('--ui-store', store))
     assert 'camera' not in first['closed'] and 'material' in first['closed'] and 'animate' in first['closed'] and 'quality' in first['closed'], first['closed']
     assert os.path.isfile(store), 'nothing was written to %s' % store
@@ -1608,9 +1613,9 @@ def layers_are_added_selected_hidden_exchanged_and_removed():
     ap = run('%s;%s;wait:5' % (add, press(r2['join:12:apart'])), size=BIG)
     assert ap['layers']['bodies'] == [[1], [2]] and ap['rects']['layer:2'][1] - ap['rects']['layer:1'][3] >= 4, 'apart: bodies %s, rows %s %s' % (ap['layers']['bodies'], ap['rects']['layer:1'], ap['rects']['layer:2'])
     # the detail buttons set every layer
-    det = run('%s;fold:detail;wait:3' % add, size=BIG)
-    det2 = run('%s;fold:detail;wait:3;scroll:right=2000;wait:3' % add, size=BIG)
-    fine = run('%s;fold:detail;wait:3;scroll:right=2000;wait:3;%s;wait:5' % (add, press(det2['rects']['detail:384'])), size=BIG)
+    det = run('%s;fold:output;fold:quality;wait:3' % add, size=BIG)
+    det2 = run('%s;fold:material;fold:output;fold:quality;wait:3;scroll:left=2000;wait:3' % add, size=BIG)
+    fine = run('%s;fold:material;fold:output;fold:quality;wait:3;scroll:left=2000;wait:3;%s;wait:5' % (add, press(det2['rects']['detail:384'])), size=BIG)
     assert [x['res'] for x in det['layers']['list']] == [768, 768] and [x['res'] for x in fine['layers']['list']] == [384, 384] and fine['layers']['joined'] == 384, 'the detail button gave %s' % [x['res'] for x in fine['layers']['list']]
     # a setup keeps the layers
     setup = os.path.join(OUT, 'layers_setup.json')
@@ -1741,7 +1746,7 @@ def families_and_the_animation_work_from_the_right_panel():
     # the animation: its group is the foot of the right panel, open; the play button plays what the waves have lit
     for name in ('group:animate', 'play', 'slot:time', 'slot:P.speed', 'slot:P.spin', 'loop'):
         assert within(r[name], right), '%s is not in the right panel: %s' % (name, r[name])
-    assert r['group:animate'][1] > r['group:detail'][1] > r['slot:attractors/thomas/b'][1] > r['shapes'][3], 'the right panel is out of order'
+    assert r['group:animate'][1] > r['slot:attractors/thomas/b'][1] > r['shapes'][3], 'the right panel is out of order'
     p = run('wait:2;%s;wait:40' % press(r['play']), size=BIG)
     assert p['playing'] and p['clock'] > 0.05 and p['shape']['travel'] > 0, 'pressing play: playing %s, clock %s' % (p['playing'], p['clock'])
     p2 = run('wait:2;%s;wait:20;%s;wait:3' % (press(r['play']), press(r['play'])), size=BIG)
@@ -1751,14 +1756,13 @@ def families_and_the_animation_work_from_the_right_panel():
     assert close(sp['settings']['spin'], 0.75, 0.011), 'the spin slider gave %s' % sp['settings']['spin']
     sd = run('wait:2;%s;wait:2' % on(base, 'P.speed', 2.0), size=BIG)
     assert close(sd['settings']['speed'], 2.0, 0.051), 'the speed slider gave %s' % sd['settings']['speed']
-    # the detail group is folded; opened with a press on its title, it shows what was built
-    o = run('wait:2;%s;wait:3' % press(r['group:detail']), size=BIG)
-    assert 'detail' not in o['closed'] and 'voxels' in o['says']['built'], o['closed']
+    # how finely the shape is built is in the left panel's output, not here
+    assert 'group:detail' not in r and not any(k.startswith('detail:') for k in r), 'the shape\'s detail is still in the right panel'
     # nothing of the shape or the animation is left in the left panel
     left = r['left']
-    astray = [k for k in r if (k.startswith(('family:', 'shape:', 'slot:attractors', 'group:detail', 'group:animate')) or k in ('play', 'slot:time', 'loop', 'slot:P.speed', 'slot:P.spin')) and not apart(r[k], left)]
+    astray = [k for k in r if (k.startswith(('family:', 'shape:', 'slot:attractors', 'group:animate')) or k in ('play', 'slot:time', 'loop', 'slot:P.speed', 'slot:P.spin')) and not apart(r[k], left)]
     assert not astray, 'in the left panel: %s' % astray
-    return '%d families in %d full lines at its head; a press chooses Knots, then Borromean rings; play plays and pauses (travel %.3f after %.2f s); the spin and speed sliders give %.2f and %.2f; detail opens from its title' % (
+    return '%d families in %d full lines at its head; a press chooses Knots, then Borromean rings; play plays and pauses (travel %.3f after %.2f s); the spin and speed sliders give %.2f and %.2f; the shape\'s detail is not here' % (
         len(tabs), len(lines), p['shape']['travel'], p['clock'], sp['settings']['spin'], sd['settings']['speed'])
 
 
@@ -1775,12 +1779,12 @@ def the_arrangement_is_as_designed():
         assert ys == sorted(ys) and all(within(r['group:' + g], left) for g in LEFT_GROUPS), 'the left panel\'s groups are out of order or out of view: %s' % ys
         assert close(r['group:material'][1], left[1] + 20, 1.0), 'the material is not at the head of the left panel'
         for name in ('mat-group:glass', 'mat-name', 'materials', 'drawn:material', 'drawn:clay', 'slot:P.ior', 'slot:P.disp', 'slot:P.nb', 'slot:P.density', 'colour:tintR', 'slot:P.rough', 'slot:P.sss',
-                     'slot:P.coat', 'slot:P.film', 'lab button', 'room button', 'slot:P.lightGain', 'slot:P.lyaw', 'cast:off', 'group:camera'):
+                     'slot:P.coat', 'slot:P.film', 'lab button', 'room button', 'slot:P.lightGain', 'studio', 'cast:off', 'group:camera'):
             assert within(r[name], left), '%s is not in view in the left panel' % name
-        hidden = [k for k in ('slot:P.dist', 'slot:R.0', 'slot:P.ev', 'render', 'slot:P.av', 'slot:P.zoom', 'lens:0') if k in r]
+        hidden = [k for k in ('slot:P.dist', 'slot:R.0', 'view:front', 'slot:P.ev', 'render', 'slot:P.av', 'slot:P.zoom', 'lens:0', 'detail:384') if k in r]
         assert not hidden, 'shown although their groups are folded (or do not apply): %s' % hidden
         # the right panel: its two groups in order
-        assert r['group:detail'][1] < r['group:animate'][1] and within(r['group:animate'], right), 'the right panel\'s groups are out of order'
+        assert within(r['group:animate'], right) and 'group:detail' not in r, 'the right panel\'s groups are out of order'
         # neither panel needs scrolling, and neither runs off the window or into the other
         p = d['panels']
         assert p['left'] <= p['room'] + 0.5 and p['right'] <= p['room'] + 0.5, 'a panel has to scroll at %s x %s points: %s' % (w, h, p)
@@ -1789,19 +1793,19 @@ def the_arrangement_is_as_designed():
         notes.append('%d x %d points (left %d, right %d of %d)' % (w, h, p['left'], p['right'], p['room']))
     # every group opens and folds from its title, and opened they are all still reachable by scrolling
     d = run('wait:2', size=BIG)
-    opened = run('wait:2;' + ';'.join('%s;wait:2' % press(d['rects']['group:' + g]) for g in ('camera', 'detail')) + ';wait:2', size=BIG)
-    assert 'camera' not in opened['closed'] and 'detail' not in opened['closed'] and 'slot:P.dist' in opened['rects'], opened['closed']
+    opened = run('wait:2;' + ';'.join('%s;wait:2' % press(d['rects']['group:' + g]) for g in ('camera', 'output')) + ';wait:2', size=BIG)
+    assert 'camera' not in opened['closed'] and 'output' not in opened['closed'] and 'slot:P.dist' in opened['rects'] and 'slot:R.0' in opened['rects'], opened['closed']
     shut = run('wait:2;%s;wait:3' % press(d['rects']['group:material']), size=BIG)
     assert 'material' in shut['closed'] and 'slot:P.ior' not in shut['rects'], 'a press on the material title did not fold it'
     everything = run(';'.join('fold:' + g for g in FOLDED) + ';set:aperture=0.05;wait:3', size=BIG)
     for knob in ('P.dist', 'P.zoom', 'P.roll', 'P.elev', 'P.shiftX', 'R.0', 'R.1', 'R.2', 'P.ev', 'P.bloom', 'P.wbTemp', 'P.contrast', 'P.smooth', 'P.scale', 'P.ns', 'P.nw',
                  'P.av', 'P.focus', 'P.band', 'P.subjectLog', 'P.lensN', 'P.bokehRot', 'P.distort', 'P.tiltX', 'P.grain',
-                 'P.ior', 'P.disp', 'P.nb', 'P.lightGain', 'P.lyaw', 'P.speed', 'P.spin'):
+                 'P.ior', 'P.disp', 'P.nb', 'P.lightGain', 'P.speed', 'P.spin'):
         assert 'slot:' + knob in everything['rects'], 'with every group open there is no slider for %s' % knob
     assert everything['closed'] == [] and everything['panels']['left'] > everything['panels']['room'], 'with everything open the left panel should need to scroll'
     lights = run('room:open;wait:4', size=BIG)['rects']
     assert all('room/slot:P.' + k in lights for k in ('lyaw', 'lpitch', 'lroll', 'lspin')), 'the light room lacks the lights\' sliders'
-    return 'material (the named materials, the glass, the way into the lab) and light open on the left, the camera folded under them, video and file folded at its foot; the shape, then detail (folded) and animate on the right; nothing scrolls at %s; every group opens from its title and every slider there was is still there' % ', '.join(notes)
+    return 'material (the named materials, the glass, the way into the lab) and light open on the left, the camera folded under them, video and file folded at its foot; the shape and animate on the right; nothing scrolls at %s; every group opens from its title and every slider there was is still there' % ', '.join(notes)
 
 
 @check
