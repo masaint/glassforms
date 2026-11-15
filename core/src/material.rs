@@ -240,7 +240,7 @@ impl Variant {
             bodies: 0,
             // (met along straight stretches inside a solid body: not with the ways of travelling that wander or curve)
             inner: crate::inner::Parts::of(p, !metal && !hollow && !walk && (biref || p.grin == 0.0)),
-            wear: p.wear > 0.0 || p.brush > 0.0 || p.mottle > 0.0,
+            wear: p.brush > 0.0 || p.mottle > 0.0 || (p.age > 0.0 && marks(p).iter().any(|v| *v > 0.0)),
             near: false,
         };
         // (light that wanders is followed once, whatever its colour; and nothing bends in a thin wall)
@@ -643,7 +643,8 @@ pub fn uniforms(p: &Settings, scale: f64) -> [f32; MU_FLOATS] {
     put(10, [a[0], a[1], a[2], 0.0]);
     // the film's sky (row 11 is the environment picture's, filled in by the engine)
     // and the surface: sharp reflections of a picture, wear, polishing lines (trace_material.wgsl: wearAt)
-    put(12, [p.film_sky.max(0.0), if p.sharp > 0.5 { 1.0 } else { 0.0 }, p.wear.clamp(0.0, 1.0), p.brush.clamp(0.0, 1.0)]);
+    // and the surface: sharp reflections of a picture, how used it is, polishing lines (trace_material.wgsl: wearAt)
+    put(12, [p.film_sky.max(0.0), if p.sharp > 0.5 { 1.0 } else { 0.0 }, p.age.max(0.0), p.brush.clamp(0.0, 1.0)]);
     // the tables: x = the metal's n, y = its k, z = absorption per unit length at this wavelength,
     // w = unused; and the three-number version of the absorption rides in the spare numbers above
     u[2 * 4 + 2] = srgb[0] as f32;
@@ -658,8 +659,22 @@ pub fn uniforms(p: &Settings, scale: f64) -> [f32; MU_FLOATS] {
         u[o + 2] = s.map_or(0.0, |s| (s.shape[k] as f64 * density * SPECTRUM_SCALE) as f32);
     }
     for (i, v) in film::numbers(p).iter().enumerate() { u[MU_FILM + i] = *v as f32; }
+    // the surface's marks, each times how used it is, and the colour recesses take on
+    let mk = marks(p);
+    for (i, at) in MU_MARKS.iter().enumerate() { u[*at] = (mk[i] * p.age.max(0.0)) as f32; }
+    for (i, at) in MU_CAVITY.iter().enumerate() { u[*at] = [p.cavity_r, p.cavity_g, p.cavity_b][i].clamp(0.0, 1.0) as f32; }
     u
 }
+
+/// The surface's marks in the order the tracer reads them: edge wear, cavity, scratches, swirls, peel,
+/// smudges, dust (each 0 to 1).
+pub fn marks(p: &Settings) -> [f64; 7] {
+    [p.edge_wear, p.cavity, p.scratches, p.swirls, p.peel, p.smudges, p.dust].map(|v| v.clamp(0.0, 1.0))
+}
+/// Where the marks (times `age`) and the recesses' colour ride: the unused fourth numbers of rows 7 to
+/// 16 of the tables (trace_material.wgsl reads them as mu.tab[7].w ...).
+pub const MU_MARKS: [usize; 7] = [20 * 4 + 3, 21 * 4 + 3, 22 * 4 + 3, 23 * 4 + 3, 24 * 4 + 3, 25 * 4 + 3, 26 * 4 + 3];
+pub const MU_CAVITY: [usize; 3] = [27 * 4 + 3, 28 * 4 + 3, 29 * 4 + 3];
 
 // ---- the lights, softened ------------------------------------------------------------------------------
 
@@ -784,7 +799,7 @@ pub const RESET: &[(&str, f64)] = &[
     ("density", 1.0), ("fit", 0.0), ("spectrum", 0.0), ("rough", 0.0), ("roughRef", 0.0),
     ("film", 0.0), ("filmIor", 1.33), ("filmVar", 0.0), ("filmScale", 1.0), ("filmFlow", 0.0), ("filmDrain", 0.0), ("filmSky", 0.5),
     ("coat", 0.0), ("coatIor", 1.5), ("metal", 0.0), ("hollow", 0.0), ("bodyR", 1.0), ("bodyG", 1.0), ("bodyB", 1.0),
-    ("sss", 0.0), ("sssDepth", 0.2), ("sssWalk", 0.0), ("sssSpread", 0.0), ("sharp", 1.0), ("brush", 0.0), ("mottle", 0.0),
+    ("sss", 0.0), ("sssDepth", 0.2), ("sssWalk", 0.0), ("sssSpread", 0.0), ("sharp", 1.0), ("age", 1.0), ("edgeWear", 0.0), ("cavity", 0.0), ("cavityR", 0.35), ("cavityG", 0.27), ("cavityB", 0.2), ("scratches", 0.0), ("swirls", 0.0), ("peel", 0.0), ("smudges", 0.0), ("dust", 0.0), ("brush", 0.0), ("mottle", 0.0),
     ("bubbles", 0.0), ("bubbleSize", 0.03), ("bubbleEven", 0.5), ("bubbleShape", 0.0), ("bubbleSeed", 1.0),
     ("glow", 0.0), ("glowR", 1.0), ("glowG", 0.32), ("glowB", 0.08), ("glowCore", 0.5),
     ("grin", 0.0), ("grinDepth", 0.02), ("biref", 0.0), ("birefAz", 0.0), ("birefEl", 90.0),
@@ -886,37 +901,37 @@ pub static NAMED: &[Named] = &[
     named!("beetle", "beetle shell", "surface", "A dark body under a film of high index: green that turns to blue and violet towards the outline. (One film stands in for the many thin layers of a real beetle's shell.)", [("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.02), ("bodyR", 0.02), ("bodyG", 0.03), ("bodyB", 0.02), ("film", 330.0), ("filmIor", 2.0), ("filmVar", 0.05), ("filmScale", 0.6), ("filmSky", 0.9), ("coat", 0.0)], absorb CLEAR),
     named!("carnival", "carnival glass", "surface", "Iridescent sprayed glass: a varying film over amber.", [("film", 520.0), ("filmIor", 2.0), ("filmVar", 0.35), ("filmScale", 2.4), ("spectrum", sp(12)), ("density", 0.6)]),
     // ---- translucent
-    named!("milk", "milk glass", "translucent", "White opal glass: light goes in and wanders out again; thin edges let some through.", [("sss", 1.0), ("sssDepth", 0.05), ("bodyR", 0.97), ("bodyG", 0.97), ("bodyB", 0.955), ("disp", 0.0), ("sssSpread", 0.6)], absorb CLEAR),
+    named!("milk", "milk glass", "translucent", "White opal glass: light goes in and wanders out again; thin edges let some through.", [("sss", 1.0), ("sssDepth", 0.05), ("bodyR", 0.97), ("bodyG", 0.97), ("bodyB", 0.955), ("disp", 0.0), ("sssSpread", 0.6), ("peel", 0.2), ("smudges", 0.2), ("dust", 0.12)], absorb CLEAR),
     named!("opal", "opalescent glass", "translucent", "Half clear, half milky, bluish where light scatters.", [("sss", 0.3), ("sssDepth", 0.5), ("bodyR", 0.78), ("bodyG", 0.88), ("bodyB", 1.0)], absorb [0.02, 0.06, 0.16]),
-    named!("jade", "jade", "translucent", "Polished green jade: bright and pale where it is thin, deep green in the bulk, glowing when lit from behind.", [("ior", 1.61), ("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.055), ("bodyR", 0.33), ("bodyG", 0.53), ("bodyB", 0.28), ("rough", 0.08), ("mottle", 0.6), ("sssSpread", 0.35)], absorb CLEAR),
-    named!("wax", "wax", "translucent", "Candle wax: soft, warm, glowing where it is thin.", [("ior", 1.44), ("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.05), ("bodyR", 0.96), ("bodyG", 0.90), ("bodyB", 0.74), ("rough", 0.35), ("mottle", 0.25), ("sssSpread", 0.2)], absorb CLEAR),
+    named!("jade", "jade", "translucent", "Polished green jade: bright and pale where it is thin, deep green in the bulk, glowing when lit from behind.", [("ior", 1.61), ("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.055), ("bodyR", 0.33), ("bodyG", 0.53), ("bodyB", 0.28), ("rough", 0.0), ("mottle", 0.6), ("sssSpread", 0.35), ("edgeWear", 0.3), ("cavity", 0.3), ("cavityR", 0.45), ("cavityG", 0.45), ("cavityB", 0.4), ("dust", 0.1)], absorb CLEAR),
+    named!("wax", "wax", "translucent", "Candle wax: soft, warm, glowing where it is thin.", [("ior", 1.44), ("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.05), ("bodyR", 0.96), ("bodyG", 0.90), ("bodyB", 0.74), ("rough", 0.35), ("mottle", 0.25), ("sssSpread", 0.2), ("smudges", 0.5)], absorb CLEAR),
     named!("alabaster", "alabaster", "translucent", "Pale stone with a soft sheen.", [("ior", 1.52), ("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.05), ("bodyR", 0.94), ("bodyG", 0.90), ("bodyB", 0.84), ("rough", 0.22), ("mottle", 0.5), ("sssSpread", 0.4)], absorb CLEAR),
     named!("rosequartz", "rose quartz", "translucent", "Cloudy pink quartz.", [("ior", 1.546), ("disp", 0.0171), ("sss", 0.5), ("sssDepth", 0.35), ("bodyR", 0.98), ("bodyG", 0.74), ("bodyB", 0.78)], absorb [0.02, 0.10, 0.07]),
     named!("honey", "honey", "translucent", "Thick, golden and slightly cloudy.", [("ior", 1.49), ("disp", 0.01), ("sss", 0.2), ("sssDepth", 0.6), ("bodyR", 0.98), ("bodyG", 0.72), ("bodyB", 0.22)], absorb [0.10, 0.75, 3.2]),
     // ---- ceramic
-    named!("porcelain", "glazed porcelain", "ceramic", "A dense white body under a clear glaze.", [("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.03), ("bodyR", 0.95), ("bodyG", 0.95), ("bodyB", 0.93), ("rough", 0.5), ("coat", 1.0), ("coatIor", 1.5), ("sssSpread", 0.15)], absorb CLEAR),
-    named!("celadon", "celadon", "ceramic", "Grey-green glazed stoneware.", [("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.05), ("bodyR", 0.60), ("bodyG", 0.77), ("bodyB", 0.66), ("rough", 0.5), ("coat", 1.0), ("coatIor", 1.5), ("mottle", 0.2)], absorb CLEAR),
+    named!("porcelain", "glazed porcelain", "ceramic", "A dense white body under a clear glaze.", [("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.03), ("bodyR", 0.95), ("bodyG", 0.95), ("bodyB", 0.93), ("rough", 0.5), ("coat", 1.0), ("coatIor", 1.5), ("sssSpread", 0.15), ("peel", 0.5), ("dust", 0.15), ("cavity", 0.2), ("cavityR", 0.5), ("cavityG", 0.48), ("cavityB", 0.45)], absorb CLEAR),
+    named!("celadon", "celadon", "ceramic", "Grey-green glazed stoneware.", [("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.05), ("bodyR", 0.60), ("bodyG", 0.77), ("bodyB", 0.66), ("rough", 0.5), ("coat", 1.0), ("coatIor", 1.5), ("mottle", 0.2), ("peel", 0.5), ("dust", 0.15), ("cavity", 0.2), ("cavityR", 0.5), ("cavityG", 0.48), ("cavityB", 0.45)], absorb CLEAR),
     named!("pearl", "pearl", "ceramic", "A milky body under a clear coat that shimmers with thin-film colour.", [("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.05), ("bodyR", 0.96), ("bodyG", 0.93), ("bodyB", 0.89), ("rough", 0.3), ("coat", 1.0), ("coatIor", 1.53), ("film", 440.0), ("filmIor", 1.68), ("filmVar", 0.22), ("filmScale", 2.5)], absorb CLEAR),
-    named!("lacquer", "black lacquer", "ceramic", "A black body under a deep clear coat.", [("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.02), ("bodyR", 0.012), ("bodyG", 0.012), ("bodyB", 0.014), ("rough", 0.6), ("coat", 1.0), ("coatIor", 1.55)], absorb CLEAR),
+    named!("lacquer", "black lacquer", "ceramic", "A black body under a deep clear coat.", [("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.02), ("bodyR", 0.012), ("bodyG", 0.012), ("bodyB", 0.014), ("rough", 0.6), ("coat", 1.0), ("coatIor", 1.55), ("peel", 0.4), ("swirls", 0.45), ("dust", 0.15), ("smudges", 0.2)], absorb CLEAR),
     // ---- metal
     named!("mirror", "perfect mirror", "metal", "Reflects everything, whatever the angle or colour.", [("metal", 1.0)]),
-    named!("silver", "silver", "metal", "Measured optical constants (Johnson & Christy).", [("metal", me(0)), ("mottle", 0.15)]),
-    named!("aluminium", "aluminium", "metal", "Measured optical constants (Rakic).", [("metal", me(1)), ("mottle", 0.15)]),
-    named!("gold", "gold", "metal", "Measured optical constants (Johnson & Christy).", [("metal", me(2)), ("mottle", 0.15)]),
-    named!("copper", "copper", "metal", "Measured optical constants (Johnson & Christy).", [("metal", me(3)), ("mottle", 0.15)]),
-    named!("chrome", "chrome", "metal", "Measured optical constants (Johnson & Christy).", [("metal", me(4)), ("mottle", 0.15)]),
-    named!("nickel", "nickel", "metal", "Measured optical constants (Johnson & Christy).", [("metal", me(5)), ("mottle", 0.15)]),
-    named!("platinum", "platinum", "metal", "Optical constants from a model fitted to measurements (Rakic et al.).", [("metal", me(6)), ("mottle", 0.15)]),
-    named!("titanium", "titanium", "metal", "Measured optical constants (Johnson & Christy).", [("metal", me(7)), ("mottle", 0.15)]),
-    named!("iron", "iron", "metal", "Measured optical constants (Johnson & Christy).", [("metal", me(8)), ("mottle", 0.15)]),
-    named!("tungsten", "tungsten", "metal", "Optical constants read from a published figure (Weaver, Olson & Lynch).", [("metal", me(9)), ("mottle", 0.15)]),
-    named!("brushed", "satin steel", "metal", "Iron with a fine, even roughness.", [("metal", me(8)), ("rough", 0.0), ("brush", 1.0)]),
-    named!("satingold", "satin gold", "metal", "Gold, lightly matted.", [("metal", me(2)), ("rough", 0.26), ("brush", 0.4), ("mottle", 0.2)]),
+    named!("silver", "silver", "metal", "Measured optical constants (Johnson & Christy).", [("metal", me(0)), ("mottle", 0.15), ("edgeWear", 0.4), ("cavity", 0.55), ("scratches", 0.3), ("smudges", 0.3), ("cavityR", 0.07), ("cavityG", 0.06), ("cavityB", 0.05)]),
+    named!("aluminium", "aluminium", "metal", "Measured optical constants (Rakic).", [("metal", me(1)), ("mottle", 0.15), ("edgeWear", 0.3), ("cavity", 0.3), ("scratches", 0.3), ("smudges", 0.2), ("cavityR", 0.32), ("cavityG", 0.22), ("cavityB", 0.13)]),
+    named!("gold", "gold", "metal", "Measured optical constants (Johnson & Christy).", [("metal", me(2)), ("mottle", 0.15), ("edgeWear", 0.5), ("cavity", 0.4), ("scratches", 0.45), ("smudges", 0.2), ("cavityR", 0.32), ("cavityG", 0.22), ("cavityB", 0.13)]),
+    named!("copper", "copper", "metal", "Measured optical constants (Johnson & Christy).", [("metal", me(3)), ("mottle", 0.15), ("edgeWear", 0.5), ("cavity", 0.5), ("scratches", 0.3), ("smudges", 0.2), ("cavityR", 0.22), ("cavityG", 0.34), ("cavityB", 0.27)]),
+    named!("chrome", "chrome", "metal", "Measured optical constants (Johnson & Christy).", [("metal", me(4)), ("mottle", 0.15), ("scratches", 0.12), ("smudges", 0.35), ("peel", 0.3), ("dust", 0.1)]),
+    named!("nickel", "nickel", "metal", "Measured optical constants (Johnson & Christy).", [("metal", me(5)), ("mottle", 0.15), ("edgeWear", 0.3), ("cavity", 0.3), ("scratches", 0.3), ("smudges", 0.2), ("cavityR", 0.32), ("cavityG", 0.22), ("cavityB", 0.13)]),
+    named!("platinum", "platinum", "metal", "Optical constants from a model fitted to measurements (Rakic et al.).", [("metal", me(6)), ("mottle", 0.15), ("edgeWear", 0.3), ("cavity", 0.3), ("scratches", 0.3), ("smudges", 0.2), ("cavityR", 0.32), ("cavityG", 0.22), ("cavityB", 0.13)]),
+    named!("titanium", "titanium", "metal", "Measured optical constants (Johnson & Christy).", [("metal", me(7)), ("mottle", 0.15), ("edgeWear", 0.3), ("cavity", 0.3), ("scratches", 0.3), ("smudges", 0.2), ("cavityR", 0.32), ("cavityG", 0.22), ("cavityB", 0.13)]),
+    named!("iron", "iron", "metal", "Measured optical constants (Johnson & Christy).", [("metal", me(8)), ("mottle", 0.15), ("edgeWear", 0.3), ("cavity", 0.3), ("scratches", 0.3), ("smudges", 0.2), ("cavityR", 0.32), ("cavityG", 0.22), ("cavityB", 0.13)]),
+    named!("tungsten", "tungsten", "metal", "Optical constants read from a published figure (Weaver, Olson & Lynch).", [("metal", me(9)), ("mottle", 0.15), ("edgeWear", 0.3), ("cavity", 0.3), ("scratches", 0.3), ("smudges", 0.2), ("cavityR", 0.32), ("cavityG", 0.22), ("cavityB", 0.13)]),
+    named!("brushed", "satin steel", "metal", "Iron with a fine, even roughness.", [("metal", me(8)), ("rough", 0.0), ("brush", 1.0), ("edgeWear", 0.4), ("scratches", 0.35), ("smudges", 0.25)]),
+    named!("satingold", "satin gold", "metal", "Gold, lightly matted.", [("metal", me(2)), ("rough", 0.26), ("brush", 0.4), ("mottle", 0.2), ("edgeWear", 0.6), ("cavity", 0.4), ("scratches", 0.6), ("cavityR", 0.32), ("cavityG", 0.22), ("cavityB", 0.13)]),
     named!("anodised", "anodised titanium", "metal", "Titanium under its own clear oxide: the colour is interference alone and follows the oxide's thickness.", [("metal", me(7)), ("film", 55.0), ("filmIor", 2.4), ("filmVar", 0.45), ("filmScale", 0.7), ("filmSky", 0.8), ("rough", 0.2)]),
     named!("heatsteel", "heat-coloured steel", "metal", "Steel blued in a flame: its oxide grows thicker towards the heat, straw to purple to blue.", [("metal", me(8)), ("film", 66.0), ("filmIor", 2.3), ("filmVar", 0.25), ("filmScale", 0.5), ("filmDrain", 0.06), ("filmSky", 0.8), ("rough", 0.12)]),
     named!("bismuth", "bismuth", "metal", "A grey metal under an oxide of uneven thickness: every colour at once.", [("metal", me(5)), ("film", 190.0), ("filmIor", 2.4), ("filmVar", 0.75), ("filmScale", 1.8), ("filmSky", 0.6)]),
     named!("oilchrome", "oil on chrome", "metal", "A film of oil on polished chrome.", [("metal", me(4)), ("film", 420.0), ("filmIor", 1.45), ("filmVar", 0.6), ("filmScale", 1.1), ("filmSky", 0.5)]),
-    named!("candy", "lacquered copper", "metal", "Copper under a clear coat: darker and richer than bare metal.", [("metal", me(3)), ("coat", 1.0), ("coatIor", 1.5), ("rough", 0.18)]),
+    named!("candy", "lacquered copper", "metal", "Copper under a clear coat: darker and richer than bare metal.", [("metal", me(3)), ("coat", 1.0), ("coatIor", 1.5), ("rough", 0.18), ("peel", 0.4), ("swirls", 0.45), ("dust", 0.15), ("smudges", 0.2)]),
     // ---- glow
     named!("neon", "neon tube", "glow", "Clear glass with a glowing core. Raise the bloom.", [("glow", 5.0), ("glowR", 1.0), ("glowG", 0.22), ("glowB", 0.05), ("glowCore", 0.6)], absorb CLEAR),
     named!("argon", "argon tube", "glow", "Clear glass glowing blue-violet from within.", [("glow", 4.0), ("glowR", 0.25), ("glowG", 0.35), ("glowB", 1.0), ("glowCore", 0.6)], absorb CLEAR),
@@ -1050,7 +1065,17 @@ pub static CONTROLS: &[Control] = &[
     ctl("meter", "expose for the body", Switch, 0.0, 1.0, 1.0, false, Lab("inside"), "Expose the picture for a milky body, as a photographer exposes for the subject: a white surface facing the brightest light comes out white. The lights glass is lit by are made to be seen in it, and a body that only gathers them would look grey."),
     ctl("sssDetail", "light detail", Slider, 96.0, 256.0, 32.0, false, Lab("inside"), "How fine the volume is in which a milky body's light is worked out (cells along a side). Finer follows thin pieces better; it is worked out again whenever the lights or the shape move, and costs more the finer it is."),
     ctl("sharp", "sharp reflections", Switch, 0.0, 1.0, 1.0, false, Lab("surface"), "A metal, a milky body or a glaze mirrors an environment picture as sharp as it is, as a photograph shows it; off, it mirrors the picture softened as the glass sees it."),
-    ctl("wear", "wear", Slider, 0.0, 1.0, 0.01, true, Lab("surface"), "The surface as a real one is: its polish undulates a little, it has duller patches where it was handled, and a faint uneven haze. 0 = a perfect surface. Fixed to the object."),
+    ctl("age", "age", Slider, 0.0, 2.0, 0.01, true, Main, "How used the surface looks: all of its marks together. 0 new and perfect, 1 as the material has them, 2 twice that."),
+    ctl("edgeWear", "worn edges", Slider, 0.0, 1.0, 0.01, true, Lab("surface"), "High points and edges rubbed smoother and brighter, as handling polishes them."),
+    ctl("cavity", "dirt in recesses", Slider, 0.0, 1.0, 0.01, true, Lab("surface"), "Recesses and folds duller and darker, holding dirt or tarnish of the colour below, where no cloth reaches."),
+    ctl("cavityR", "recess colour", Colour, 0.0, 1.0, 0.005, true, Lab("surface"), "The colour of what the recesses hold: brown dirt, black tarnish on silver, green on copper."),
+    ctl("cavityG", "recess green", Slider, 0.0, 1.0, 0.005, true, Lab("surface"), ""),
+    ctl("cavityB", "recess blue", Slider, 0.0, 1.0, 0.005, true, Lab("surface"), ""),
+    ctl("scratches", "scratches", Slider, 0.0, 1.0, 0.01, true, Lab("surface"), "Fine straight scratches, most where the surface is exposed. Seen where a highlight crosses them; from afar they are a faint sheen."),
+    ctl("swirls", "polishing swirls", Slider, 0.0, 1.0, 0.01, true, Lab("surface"), "The arcs a buffing pad leaves on polished metal and on a clear coat, seen as rings round a sharp highlight."),
+    ctl("peel", "orange peel", Slider, 0.0, 1.0, 0.01, true, Lab("surface"), "The gentle wave of a sprayed or dipped coat or glaze: sharp reflections waver a little."),
+    ctl("smudges", "smudges", Slider, 0.0, 1.0, 0.01, true, Lab("surface"), "Duller patches and finger marks where the object is handled, on its exposed parts."),
+    ctl("dust", "dust", Slider, 0.0, 1.0, 0.01, true, Lab("surface"), "Fine matte dust on faces that look up, less in the open."),
     ctl("brush", "polishing lines", Slider, 0.0, 1.0, 0.01, true, Lab("surface"), "Fine parallel lines round the shape's vertical, as on brushed metal: highlights are drawn out across them."),
     ctl("mottle", "uneven colour", Slider, 0.0, 1.0, 0.01, true, Lab("surface"), "Clouds and veins of paler and deeper colour through a milky body (jade, alabaster); a faint unevenness of a metal's colour."),
     ctl("filmIor", "film index", Slider, 1.0, 2.6, 0.01, true, Lab("thin film"), "Index of the film: 1.33 soapy water, 1.4 to 1.5 oils, 2 and up oxide coatings."),

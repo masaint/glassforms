@@ -47,6 +47,8 @@ pub struct Bubbler {
     body_layout: wgpu::BindGroupLayout,
     body_pipes: Vec<(u32, wgpu::RenderPipeline)>,
     body_vols: Option<(Volume, Volume, u32)>,
+    /// the volumes cut span [-hb, hb] (larger than ever when the layers are placed far out)
+    pub hb: f64,
 }
 
 /// The numbers of the pass that cuts each body's bubbles into the bodies' volume (`BB` in bubbles.wgsl).
@@ -82,7 +84,7 @@ impl Bubbler {
             gpu: gpu.clone(),
             lin: gpu.sampler(wgpu::FilterMode::Linear, wgpu::AddressMode::ClampToEdge),
             u: gpu.uniform_buffer("bubbles", std::mem::size_of::<BubbleU>() as u64),
-            way, vols: Vec::new(), cur: 0,
+            way, vols: Vec::new(), cur: 0, hb: HB,
             bu: gpu.uniform_buffer("bubbles in each body", std::mem::size_of::<BodiesU>() as u64),
             body_layout: {
                 let f = wgpu::ShaderStages::FRAGMENT;
@@ -123,11 +125,11 @@ impl Bubbler {
     /// memory again as the two volumes the scene was built into.
     pub fn carve_bodies(&mut self, src: &Volume, channels: u32, count: u32, per: &[Option<Bubbles>]) -> (&Volume, &Volume) {
         let res = src.res;
-        let vox = 2.0 * HB as f32 / res as f32;
+        let vox = 2.0 * self.hb as f32 / res as f32;
         let mut u = BodiesU { bub: [BubbleU::zeroed(); 4], on: [0.0; 4], count: [count as f32, 0.0, 0.0, 0.0] };
         for (k, b) in per.iter().enumerate().take(4) {
             if let Some(b) = b {
-                u.bub[k] = BubbleU { res: res as f32, hb: HB as f32, cell: b.cell, size: b.size, even: b.even, shape: b.shape, seed: b.seed, margin: 3.5 * vox };
+                u.bub[k] = BubbleU { res: res as f32, hb: self.hb as f32, cell: b.cell, size: b.size, even: b.even, shape: b.shape, seed: b.seed, margin: 3.5 * vox };
                 u.on[k] = 1.0;
             }
         }
@@ -196,10 +198,10 @@ impl Bubbler {
     /// Write `src` with the bubbles cut into it, and return that volume.
     pub fn carve(&mut self, src: &Volume, b: &Bubbles) -> &Volume {
         let res = src.res;
-        let vox = 2.0 * HB as f32 / res as f32;
+        let vox = 2.0 * self.hb as f32 / res as f32;
         // The surface is read through a smooth lookup four voxels wide, so that a bubble's edge must stay
         // a few voxels inside it if the outside of the shape is not to move.
-        let u = BubbleU { res: res as f32, hb: HB as f32, cell: b.cell, size: b.size, even: b.even, shape: b.shape, seed: b.seed, margin: 3.5 * vox };
+        let u = BubbleU { res: res as f32, hb: self.hb as f32, cell: b.cell, size: b.size, even: b.even, shape: b.shape, seed: b.seed, margin: 3.5 * vox };
         self.gpu.queue.write_buffer(&self.u, 0, bytemuck::bytes_of(&u));
         let i = self.take(res);
         let dst = &self.vols[i];

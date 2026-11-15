@@ -70,8 +70,15 @@ fn glowAt(x: vec3f) -> vec3f {
 
 // The lights from a spread of directions around rd, of standard deviation sig (radians): the softened
 // copies of the lights' map (envL). No spread at all reads the lights exactly as plain glass does.
+// While a metal body's reflection is being followed, what it finally shows of the surroundings is the
+// environment picture sharp, as a single metal's is (`mirrorSharp`: 1 + the level its first surface asks
+// for; 0 = the softened surroundings, as glass sees them).
+var<private> mirrorSharp: f32;
 fn seenB(rd: vec3f, sig: f32) -> vec3f {
-  if (sig <= 0.0) { return env(rd); }
+  if (sig <= 0.0) {
+    if (mirrorSharp > 0.0) { return mirrorEnv(rd, mirrorSharp - 1.0); }
+    return env(rd);
+  }
   return envL(rd, sig);
 }
 
@@ -590,7 +597,7 @@ fn shadeB(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
   // a polished milky body mirrors the picture sharp, and a worn one as its wear has it (trace_material.wgsl)
   if (alpha <= 0.0 && mb.kind[k] > 1.5 && mb.kind[k] < 2.5 && mb.b[k].film.x <= 0.0) { envR = sharpEnv(mir, p, n, cosi); }
 //#if WEAR
-  if (alpha <= 0.0 && mb.kind[k] > 1.5 && mb.kind[k] < 2.5 && mb.b[k].film.x <= 0.0 && mb.b[k].more.z + mb.b[k].more.w + mb.b[k].sssC.w > 0.0) {
+  if (alpha <= 0.0 && mb.kind[k] > 1.5 && mb.kind[k] < 2.5 && mb.b[k].film.x <= 0.0 && mb.b[k].more.z * (mb.b[k].tab[7].w + mb.b[k].tab[8].w + mb.b[k].tab[9].w + mb.b[k].tab[10].w + mb.b[k].tab[11].w + mb.b[k].tab[12].w + mb.b[k].tab[13].w) + mb.b[k].more.w + mb.b[k].sssC.w > 0.0) {
     let wr = wearAt(p, n);
     envR = wearSee(rd, wr, p, cosi) * (wr.keep * wr.tint);
   }
@@ -605,8 +612,21 @@ fn shadeB(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
 //#if BIREF
     pmode = 0;
 //#endif
-    let R = surfB(-1, k, cosi, p, n, 550.0);
-    return mb.b[k].glow.rgb * 0.3 + R * (beyondB(p + n * 0.006, mir, -1, 550.0, sigR * sigR) + skyB(k, mir));
+    var R = surfB(-1, k, cosi, p, n, 550.0);
+    var mirM = mir;
+    if (mb.b[k].more.y > 0.5 && alpha <= 0.0) { mirrorSharp = 1.0 + mirrorLod(p, n, cosi); }
+//#if WEAR
+    // the metal body's marks, as a single metal has them (trace_material.wgsl: wearAt), at its first surface
+    let wr = wearAt(p, n);
+    mirM = reflect(rd, wr.n);
+    R *= wr.keep * wr.tint;
+    if (wr.sig > 0.0 || wr.aniso > 0.0) { mirrorSharp = 0.0; }
+    let far = beyondB(p + n * 0.006, mirM, -1, 550.0, sigR * sigR + wr.sig * wr.sig + wr.aniso * wr.aniso);
+//#else
+    let far = beyondB(p + n * 0.006, mirM, -1, 550.0, sigR * sigR);
+//#endif
+    mirrorSharp = 0.0;
+    return mb.b[k].glow.rgb * 0.3 + R * (far + skyB(k, mir));
   }
 
   // a clear or milky body or a thin wall: its own reflection, and each wavelength's way through it

@@ -112,6 +112,23 @@ pub fn weave(src: &str) -> String {
     s = s.replace("fn nrmB(p: vec3f, k: i32) -> vec3f {\n", "fn nrmB(p: vec3f, k: i32) -> vec3f {\n  gRo = p;\n");
     // a reading spread by a rough surface or a milky body meets them widened
     s = s.replace("fn envL(rd: vec3f, sig: f32) -> vec3f {\n", "fn envL(rd: vec3f, sig: f32) -> vec3f { return lampsSoft(envL0(rd, sig), rd, sig); }\nfn envL0(rd: vec3f, sig: f32) -> vec3f {\n");
+    // a polished surface that is not glass, under an environment picture, reads the picture itself (and, worn,
+    // spread): the lamps there too
+    s = s.replace(
+        "fn mirrorEnv(rd: vec3f, lod: f32) -> vec3f {
+  let d = toEnv(rd);",
+        "fn mirrorEnv(rd: vec3f, lod: f32) -> vec3f { return lampsEnv(mirrorEnv0(rd, lod), rd); }
+fn mirrorEnv0(rd: vec3f, lod: f32) -> vec3f {
+  let d = toEnv(rd);",
+    );
+    s = s.replace(
+        "sig / (2.0 * T0), sig < 2.0 * T0), 0.0, 7.0)).rgb;
+    }
+    return c;",
+        "sig / (2.0 * T0), sig < 2.0 * T0), 0.0, 7.0)).rgb;
+    }
+    return lampsSoft(c, rd, sig);",
+    );
     // matte clay gathers their light
     s = s.replace(
         "  return c * light * filled + nine(9, toEnv(reflect(rd, n))) * (sheen * open);",

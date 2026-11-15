@@ -165,16 +165,14 @@ fn sharpEnv(rd: vec3f, p: vec3f, n: vec3f, c: f32) -> vec3f {
 }
 
 //#if WEAR
-// ---- a real surface: wear, smudges, polishing lines, uneven colour --------------------------------------
-// No made surface is perfect, and a photograph shows it at once: a mirror's reflections waver a little
-// where the polish undulates, a handled object has duller patches, brushed metal has fine parallel lines
-// that stretch highlights across them, and a metal's or a stone's colour is not quite even. All of it is
-// fixed to the object (worked out from where the point lies in the shape's own frame), nothing in it is
-// random from frame to frame, and detail finer than a pixel is not drawn but averaged into a wider
-// spread, so a single frame is clean and nothing swims as the view moves.
-//   mu.more.z   wear: how uneven the polish is and how many smudges there are (0 = a perfect surface)
-//   mu.more.w   brush: how strong the polishing lines are (they run round the shape's vertical)
-//   mu.sssC.w   mottle: how uneven the colour is
+// ---- a used surface: worn edges, dirty recesses, scratches, swirls, peel, smudges, dust, lines ----------
+// What makes a photographed object look used (docs/imperfections.md): marks that follow its form and its
+// handling, seen almost only where a highlight crosses them. All of it is fixed to the object (worked out
+// from where the point lies in the shape's own frame), nothing is random from frame to frame, and detail
+// finer than a pixel is not drawn but folded into a wider spread, so one frame is clean and nothing swims.
+//   mu.tab[7..13].w   the marks (times how used the surface is)   mu.tab[14..16].w   the recesses' colour
+//   mu.more.w         brush: how strong the polishing lines are (round the shape's vertical)
+//   mu.sssC.w         mottle: how uneven the colour is
 fn wHash(i: vec3i) -> f32 {
   var h = (u32(i.x) * 73856093u) ^ (u32(i.y) * 19349663u) ^ (u32(i.z) * 83492791u);
   h = (h ^ (h >> 16u)) * 0x45d9f3bu;
@@ -195,13 +193,54 @@ fn wNoise(x: vec3f) -> f32 {
 fn fromObj(v: vec3f) -> vec3f { return vec3f(dot(v, vec3f(u.obj0.x, u.obj1.x, u.obj2.x)), dot(v, vec3f(u.obj0.y, u.obj1.y, u.obj2.y)), dot(v, vec3f(u.obj0.z, u.obj1.z, u.obj2.z))); }
 
 struct Wear {
-  n: vec3f,       // the surface's facing, with the polish's undulation and the line under the point
+  n: vec3f,       // the surface's facing, with the marks under the point
   sig: f32,       // how much more the reflection is spread here (radians)
-  keep: f32,      // the share of the reflection kept (a smudge takes a little)
+  keep: f32,      // the share of the reflection kept
   b: vec3f,       // across the polishing lines (in the surface)
   aniso: f32,     // how far the lines tilt the surface across themselves, all the lines in a pixel together (radians)
-  tint: vec3f,    // the colour's unevenness, as a factor
+  tint: vec3f,    // what the reflection's colour is multiplied by (uneven colour; dirt or tarnish in recesses)
+  dust: f32,      // the share of the surface under matte dust
 }
+// The marks, each already times how used the surface is (material.rs: marks, MU_MARKS).
+fn mEdge() -> f32 { return mu.tab[7].w; }
+fn mCavity() -> f32 { return mu.tab[8].w; }
+fn mScratch() -> f32 { return mu.tab[9].w; }
+fn mSwirl() -> f32 { return mu.tab[10].w; }
+fn mPeel() -> f32 { return mu.tab[11].w; }
+fn mSmudge() -> f32 { return mu.tab[12].w; }
+fn mDust() -> f32 { return mu.tab[13].w; }
+
+// One cell's scratch, met at q (shape's frame) on a surface facing nq: a straight segment of random
+// length and direction through a random point of the cell, lying in the surface. Returns how strongly
+// the point lies on it (1 on its middle line, falling off over its width, thinned to its share of the
+// pixel when it is narrower than one) and which way across it the point lies.
+fn scratchIn(c: vec3i, q: vec3f, nq: vec3f, size: f32, px: f32, keepIt: f32) -> vec2f {
+  if (0.5 + 0.5 * wHash(c + vec3i(17, 3, 5)) > keepIt) { return vec2f(0.0); }
+  let o = (vec3f(c) + 0.5 + 0.45 * vec3f(wHash(c), wHash(c + vec3i(7, 1, 2)), wHash(c + vec3i(3, 9, 4)))) * size;
+  var d = vec3f(wHash(c + vec3i(5, 5, 1)), wHash(c + vec3i(2, 8, 6)), wHash(c + vec3i(9, 2, 7)));
+  d = d - nq * dot(d, nq);
+  let ld = length(d);
+  if (ld < 1e-3) { return vec2f(0.0); }
+  d /= ld;
+  let half = size * (0.35 + 0.6 * (0.5 + 0.5 * wHash(c + vec3i(4, 4, 4))));
+  let r = q - o;
+  let along = dot(r, d);
+  if (abs(along) > half) { return vec2f(0.0); }
+  let across = cross(nq, d);
+  let off = dot(r, across);
+  let width = 0.0006 + 0.0006 * (0.5 + 0.5 * wHash(c + vec3i(6, 1, 9)));
+  let w = max(width, px);
+  // (tapered at the ends, as a scratch is)
+  let taper = 1.0 - smoothstep(0.6 * half, half, abs(along));
+  return vec2f(exp(-(off * off) / (w * w)) * (width / w) * taper, sign(off));
+}
+
+// The marks at p (world), where the surface faces n. What a photograph shows of a used object follows its
+// form: the high points and edges are rubbed brighter, the recesses hold dirt and are duller, scratches
+// gather where the surface is exposed, and almost all of it is seen only where a highlight crosses it. So
+// the marks change the reflection's spread and the surface's fine slope, the colour only in recesses. The
+// form is read from the distance field: how the surface bends (three lookups across it) and how hemmed
+// in it is (three along the normal, as clay's shadow is).
 fn wearAt(p: vec3f, n: vec3f) -> Wear {
   var w: Wear;
   w.n = n;
@@ -210,36 +249,135 @@ fn wearAt(p: vec3f, n: vec3f) -> Wear {
   w.b = vec3f(0.0);
   w.aniso = 0.0;
   w.tint = vec3f(1.0);
+  w.dust = 0.0;
   let q = toObj(p);
   let nq = toObj(n);
   // the width of a pixel at p (as mirrorLod reckons it)
   let px = length(p - vec3f(0.0, 0.0, u.dist)) * 2.0 * u.tan_fov / u.res.y;
-  let a = mu.more.z;
-  if (a > 0.0) {
-    // the polish undulates gently, at two sizes
-    let k1 = q * 3.1;
-    let k2 = q * 11.0;
+  let edgeA = mEdge();
+  let cavA = mCavity();
+  let scrA = mScratch();
+  let swA = mSwirl();
+  let peelA = mPeel();
+  let smA = mSmudge();
+  let dustA = mDust();
+  // ---- the form: convex (worn) or concave and hemmed in (a recess)
+  var convex = 0.0;
+  var shut = 0.0;
+  if (edgeA + cavA + scrA + smA + dustA > 0.0) {
+    let h = 4.0 * (2.0 * HB / u.vres);
+    let sg = select(-1.0, 1.0, n.z >= 0.0);
+    let k = -1.0 / (sg + n.z);
+    let m = n.x * n.y * k;
+    let t1 = vec3f(1.0 + sg * n.x * n.x * k, sg * m, -sg * n.x);
+    let t2 = vec3f(m, sg + n.y * n.y * k, -n.y);
+    let d0 = mapW(p);
+    let bend = (mapW(p + h * t1) + mapW(p + h * (-0.5 * t1 + 0.8660254 * t2)) + mapW(p + h * (-0.5 * t1 - 0.8660254 * t2)) - 3.0 * d0) / 3.0;
+    // (a sphere of radius r bends by h^2 / 2r over h: convex 1 for a radius of about four steps or less)
+    convex = clamp(bend / (0.06 * h), -1.0, 1.0);
+    for (var i = 0; i < 3; i++) {
+      let s = 0.02 + 0.06 * f32(i);
+      shut += max(s - mapW(p + n * s), 0.0) / s;
+    }
+    shut = clamp(shut / 1.5, 0.0, 1.0);
+  }
+  let exposed = clamp(0.5 + 0.5 * convex - 0.6 * shut, 0.0, 1.0);
+  let recess = clamp(0.6 * shut + max(-convex, 0.0) * 0.6, 0.0, 1.0);
+  // ---- 1. worn edges: rubbed smoother, brighter (the lines and haze rubbed away there too, below)
+  let worn = edgeA * smoothstep(0.55, 0.95, exposed);
+  // ---- 2. recesses: duller, darker, taking the colour of what they hold
+  let dirt = cavA * recess;
+  w.sig += 0.12 * dirt;
+  w.keep *= 1.0 - 0.45 * dirt;
+  w.tint = mix(vec3f(1.0), vec3f(mu.tab[14].w, mu.tab[15].w, mu.tab[16].w) * 1.6, 0.7 * dirt);
+  // ---- 3. scratches: straight, hair-fine, of every length, more where the surface is exposed; those
+  // narrower than a pixel are thinned to their share of it, and what they would all add up to across
+  // the pixel is a faint widening of the reflection
+  if (scrA > 0.0) {
+    let keepIt = scrA * (0.25 + 0.75 * exposed) * (1.0 - 0.8 * worn);
+    var tilt = 0.0;
+    var across = vec3f(0.0);
+    for (var s = 0; s < 2; s++) {
+      let size = select(0.06, 0.16, s == 1);
+      let base = vec3i(floor(q / size));
+      for (var j = 0; j < 27; j++) {
+        let c = base + vec3i(j % 3 - 1, (j / 3) % 3 - 1, j / 9 - 1) + vec3i(s * 1000);
+        let hit = scratchIn(c - vec3i(s * 1000), q, nq, size, px, keepIt);
+        if (hit.x > tilt) {
+          tilt = hit.x;
+          var d = vec3f(wHash(c - vec3i(s * 1000) + vec3i(5, 5, 1)), wHash(c - vec3i(s * 1000) + vec3i(2, 8, 6)), wHash(c - vec3i(s * 1000) + vec3i(9, 2, 7)));
+          d = d - nq * dot(d, nq);
+          across = cross(nq, normalize(d + vec3f(1e-6))) * hit.y;
+        }
+      }
+    }
+    w.n = normalize(w.n + fromObj(across) * (0.25 * tilt));
+    w.sig += scrA * keepIt * 0.012;
+  }
+  // ---- 4. polishing swirls: rings round a few pad centres, seen as arcs round a sharp highlight
+  if (swA > 0.0) {
+    let cell = vec3i(floor(q / 0.7));
+    var ring = vec3f(0.0);
+    for (var j = 0; j < 8; j++) {
+      let c = cell + vec3i(j % 2, (j / 2) % 2, j / 4);
+      let o = (vec3f(c) + 0.5 + 0.5 * vec3f(wHash(c + vec3i(1, 2, 3)), wHash(c + vec3i(4, 5, 6)), wHash(c + vec3i(7, 8, 9)))) * 0.7;
+      var r = q - o;
+      r = r - nq * dot(r, nq);
+      let rl = length(r);
+      if (rl > 0.5 || rl < 1e-4) { continue; }
+      // fine rings, broken into arcs, fading towards the pad's edge
+      let f = 220.0 + 80.0 * wHash(c);
+      let arcs = smoothstep(0.2, 0.7, wNoise(vec3f(atan2(dot(r, cross(nq, vec3f(0.0, 1.0, 0.0001))), dot(r, vec3f(0.0, 1.0, 0.0001))) * 3.0, rl * 6.0, f32(j))));
+      let lineFine = 1.0 - smoothstep(0.3, 1.0, px * f);
+      ring += (r / rl) * (sin(rl * f) * arcs * lineFine * (1.0 - smoothstep(0.3, 0.5, rl)));
+    }
+    w.n = normalize(w.n + fromObj(ring) * (0.03 * swA * (1.0 - worn)));
+    w.sig += 0.004 * swA;
+  }
+  // ---- 5. orange peel: the gentle wave of a sprayed or dipped coat
+  if (peelA > 0.0) {
+    let k1 = q * 9.0;
+    let k2 = q * 23.0;
     var t = vec3f(wNoise(k1), wNoise(k1 + vec3f(17.1, 3.3, 9.7)), wNoise(k1 + vec3f(5.9, 23.1, 1.3)))
           + 0.5 * vec3f(wNoise(k2 + vec3f(2.2, 8.1, 4.4)), wNoise(k2 + vec3f(13.5, 1.7, 6.2)), wNoise(k2 + vec3f(7.3, 11.9, 3.1)));
     t -= nq * dot(t, nq);
-    w.n = normalize(n + fromObj(t) * (0.012 * a));
-    // smudges: soft patches, larger and smaller, where the surface is duller
-    let sm = max(smoothstep(0.1, 0.6, wNoise(q * 1.7 + vec3f(31.0, 7.0, 13.0))) * (0.65 + 0.35 * wNoise(q * 8.0 + vec3f(4.0, 9.0, 2.0))), 0.0);
-    // and a fine haze everywhere, a little uneven
-    let haze = 0.5 + 0.5 * wNoise(q * 23.0 + vec3f(1.0, 5.0, 3.0));
-    w.sig = a * (0.004 + 0.004 * haze + 0.06 * sm);
-    w.keep = 1.0 - 0.07 * a * sm;
+    w.n = normalize(w.n + fromObj(t) * (0.006 * peelA));
   }
-  let br = mu.more.w;
+  // ---- 6. smudges and finger marks: a few patches where the object is handled (its exposed parts),
+  // duller, with the whorl of a fingertip in them
+  if (smA > 0.0) {
+    let cell = vec3i(floor(q / 0.45));
+    var sm = 0.0;
+    for (var j = 0; j < 8; j++) {
+      let c = cell + vec3i(j % 2, (j / 2) % 2, j / 4);
+      if (0.5 + 0.5 * wHash(c + vec3i(11, 13, 17)) > 0.55 * smA + 0.1) { continue; }
+      let o = (vec3f(c) + 0.5 + 0.5 * vec3f(wHash(c + vec3i(2, 3, 1)), wHash(c + vec3i(5, 1, 4)), wHash(c + vec3i(8, 7, 3)))) * 0.45;
+      let r = q - o;
+      let rl = length(r - nq * dot(r, nq));
+      let pad = (1.0 - smoothstep(0.03, 0.09, rl)) * (1.0 - smoothstep(0.0, 0.08, abs(dot(r, nq))));
+      // (the ridges of a fingertip: whorls a third of a millimetre apart at life size, averaged away
+      // where they are finer than a pixel)
+      let ridges = mix(0.6, 0.5 + 0.5 * sin(rl * 260.0 + 4.0 * wNoise(q * 30.0)), 1.0 - smoothstep(0.3, 1.0, px * 260.0));
+      sm = max(sm, pad * ridges);
+    }
+    sm *= smA * (0.3 + 0.7 * exposed);
+    w.sig += 0.08 * sm;
+    w.keep *= 1.0 - 0.12 * sm;
+  }
+  // ---- 7. dust on faces that look up, less in recesses' shelter: matte specks
+  if (dustA > 0.0) {
+    let up = max(dot(nq, vec3f(0.0, 1.0, 0.0)), 0.0);
+    let specks = 0.5 + 0.5 * wNoise(q * 140.0);
+    let fine = 1.0 - smoothstep(0.3, 1.0, px * 140.0);
+    w.dust = dustA * up * up * (1.0 - 0.6 * shut) * mix(0.35, smoothstep(0.55, 0.8, specks), fine) * 0.35;
+  }
+  // ---- the polishing lines: round the shape's vertical (along latitude on a ball, round a cylinder)
+  let br = mu.more.w * (1.0 - 0.7 * worn);
   if (br > 0.0) {
-    // The lines run round the shape's vertical, as on a turned and brushed piece; across them is up
-    // along the surface (on a face that looks straight up or down, along the shape's x instead).
     var bq = vec3f(0.0, 1.0, 0.0) - nq * nq.y;
     let lb = length(bq);
     bq = mix(vec3f(1.0, 0.0, 0.0) - nq * nq.x, bq, smoothstep(0.1, 0.3, lb));
     w.b = fromObj(normalize(bq + vec3f(1e-6)));
-    // Each line tilts the surface its own way across itself; lines are short and long, never quite level.
-    // Lines narrower than a pixel are not drawn: their tilts, taken together, spread the reflection.
     let y = q.y + 0.004 * wNoise(q * 3.0);
     let r = vec3f(q.x * 9.0, q.z * 9.0, 0.0);
     let fine = 1.0 - smoothstep(0.3, 1.0, px * 380.0);
@@ -248,12 +386,16 @@ fn wearAt(p: vec3f, n: vec3f) -> Wear {
     w.n = normalize(w.n + w.b * (0.09 * br * line));
     w.aniso = br * (0.03 + 0.05 * (1.0 - 0.5 * (fine + coarse)));
   }
+  // worn high points: smoother, and the spread above taken back there
+  w.sig *= 1.0 - 0.8 * worn;
+  w.keep = mix(w.keep, 1.0, worn);
   let mo = mu.sssC.w;
   if (mo > 0.0) {
-    w.tint = vec3f(1.0) + mo * 0.06 * vec3f(wNoise(q * 2.3 + vec3f(5.0, 1.0, 8.0)), wNoise(q * 2.3 + vec3f(11.0, 3.0, 2.0)), wNoise(q * 2.3 + vec3f(2.0, 13.0, 6.0)));
+    w.tint *= vec3f(1.0) + mo * 0.06 * vec3f(wNoise(q * 2.3 + vec3f(5.0, 1.0, 8.0)), wNoise(q * 2.3 + vec3f(11.0, 3.0, 2.0)), wNoise(q * 2.3 + vec3f(2.0, 13.0, 6.0)));
   }
   return w;
 }
+
 // The surroundings a worn surface mirrors along rd: as sharpEnv does, spread a further sig (radians);
 // and across the polishing lines (b, aniso), drawn out: four looks along the line across them.
 fn wearRead(rd: vec3f, lod: f32, sig: f32) -> vec3f {
@@ -272,6 +414,11 @@ fn wearRead(rd: vec3f, lod: f32, sig: f32) -> vec3f {
   return envL(rd, sig);
 }
 fn wearSee(rd_in: vec3f, w: Wear, p: vec3f, c: f32) -> vec3f {
+  // (dust: matte specks, which show the light from all round the way they face, not a reflection)
+  let dusted = select(vec3f(0.0), w.dust * 0.6 * wearRead(w.n, 0.0, 0.9), w.dust > 0.0);
+  return (1.0 - w.dust) * wearMirror(rd_in, w, p, c) + dusted;
+}
+fn wearMirror(rd_in: vec3f, w: Wear, p: vec3f, c: f32) -> vec3f {
   let lod = mirrorLod(p, w.n, c);
   let mir = reflect(rd_in, w.n);
   if (w.aniso <= 0.0) { return wearRead(mir, lod, w.sig); }

@@ -185,9 +185,24 @@ settings! {
     /// 1 = a surface that is not glass (a metal, a milky body, a glaze) mirrors an environment picture as
     /// sharp as it is, softened only by its own roughness; 0 = softened as the glass sees it (`hdriBlur`)
     sharp, "sharp", 1.0;
-    /// the surface as a real one is: 0 = perfect; up to 1, its polish undulates, it has duller patches
-    /// (smudges) and a fine uneven haze, all fixed to the object
-    wear, "wear", 0.0;
+    /// how used the surface looks: every one of its marks below together, 0 = new and perfect, 1 = as the
+    /// material's own amounts say, 2 = twice that
+    age, "age", 1.0;
+    /// the surface's marks, each from 0 (none) to 1 (a lot), fixed to the object and tied to its form:
+    /// high points and edges rubbed smoother and brighter; recesses duller and darker, holding dirt or
+    /// tarnish (of the colour below); fine scratches, most where the surface is exposed; polishing swirls;
+    /// the gentle wave of a sprayed or dipped coat (orange peel); smudges and finger marks; dust on faces
+    /// that look up
+    edge_wear, "edgeWear", 0.0;
+    cavity, "cavity", 0.0;
+    cavity_r, "cavityR", 0.35;
+    cavity_g, "cavityG", 0.27;
+    cavity_b, "cavityB", 0.2;
+    scratches, "scratches", 0.0;
+    swirls, "swirls", 0.0;
+    peel, "peel", 0.0;
+    smudges, "smudges", 0.0;
+    dust, "dust", 0.0;
     /// fine parallel polishing lines round the shape's vertical (brushed metal): 0 = none
     brush, "brush", 0.0;
     /// uneven colour: clouds and veins in a milky body, a faint unevenness of a metal's colour (0 = even)

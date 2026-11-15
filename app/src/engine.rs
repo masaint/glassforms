@@ -639,6 +639,8 @@ impl Engine {
     /// drawn body by body, with each body's bubbles cut into the bodies' volume and the scene's.
     fn cut_bubbles(&mut self) {
         let bubbles = self.bubbles_wanted();
+        // (the box the scene's volume spans: grown when the layers are placed far out)
+        self.bubbler.hb = if self.layers.combined { self.state.scene_hb() } else { gf_core::HB };
         // (the volume the tracer reads: the one shape's, or the layers combined)
         let scene = if self.layers.combined { self.layers.combiner.volume() } else { self.baker.layer_volume(0) };
         if let Some(vol) = scene {

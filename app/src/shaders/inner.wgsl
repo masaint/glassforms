@@ -985,7 +985,7 @@ fn grains(pos: vec3f, dir: vec3f, s: f32) -> Play {
     let dm = nearest(xw / span, seed ^ 0x51ed27u);
     if (unit1(dm.h) >= iu.playA.y) { continue; }
     // the seam where two domains meet
-    let seam = smoothstep(0.015, 0.06, sqrt(dm.d2) - sqrt(dm.d1));
+    let seam = 0.4 + 0.6 * smoothstep(0.015, 0.06, sqrt(dm.d2) - sqrt(dm.d1));
     let rp = ten3(ihash(dm.h));
     let rq = ten3(ihash(dm.h + 7u));
     let o = toObj(pos + dir * t);
@@ -1050,11 +1050,12 @@ fn grains(pos: vec3f, dir: vec3f, s: f32) -> Play {
     }
     // A milky body is full of light going every way, scattered within it; the stacking sends back its
     // band of that too, so in white opal the colour shows even where no light outside is mirrored. That
-    // light meets the layers at every angle; what a flake shows of it is taken at an angle of its
-    // domain's own (so whole domains glow orange, green or blue, not all the longest colour, red).
+    // light meets the layers at every angle; what a flake shows of it is taken at an angle partly its
+    // domain's own and partly how squarely the eye meets the domain's layers (so domains glow orange, green or
+    // blue, not all the longest colour, red, and change as the stone turns).
     var rhoIn = vec3f(0.0);
     if (iu.playF.z > 0.0) {
-      let lamIn = iu.playC.x * spacing * (0.62 + 0.3 * rp.x + 0.06 * gh.z);
+      let lamIn = iu.playC.x * spacing * (0.52 + 0.16 * rp.x + 0.3 * abs(dot(od, pd)) + 0.04 * gh.z);
       if (lamIn >= 425.0 && lamIn <= 715.0) {
         rhoIn = clamp(specW(lamIn) * iu.white.rgb * (iu.white.w * iu.playB.w), vec3f(0.0), vec3f(1.0)) * share;
       }
