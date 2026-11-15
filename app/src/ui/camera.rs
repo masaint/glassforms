@@ -91,6 +91,8 @@ pub fn section(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     framing(ui, st, px);
     px.heading(ui, "cam-exposure", "exposure");
     exposure(ui, st, px);
+    px.heading(ui, "cam-motion", "motion");
+    motion(ui, st, px);
     character(ui, st, px);
     set_label_width(ui, names);
     // (where the whole camera is, for tests)
@@ -258,6 +260,20 @@ fn framing(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     if resp.on_hover_text("the camera and the shape's turn back the way this shape first appears · key R, or a double click").clicked() {
         st.reset_view();
     }
+}
+
+/// The view's own motion: the scene turning in front of the camera by itself (as on a turntable, or
+/// tumbling), whether or not the animation plays. It keeps time with the scene's clock (play, time, speed
+/// and the loop are the animation's, on the right).
+fn motion(ui: &mut Ui, st: &mut State, px: &mut Panels) {
+    knob::knob_row_with(ui, st, &engine("spin"), px, knob::Extra { tip: "how fast the view turns round the scene by itself (space starts and stops it)", ..Default::default() });
+    if let Some(i) = choice(ui, Id::unique(("spin as", px.place)), "spin as", &["tumble", "turntable"], js_round(st.p.spin_mode) as usize) {
+        // the other way of spinning carries on from the orientation the scene has now
+        let r = st.r;
+        st.p.spin_mode = i as f64;
+        st.set_r(&r);
+    }
+    note(ui, "Plays with the scene's clock: play, time, speed and the loop are in animate, on the right.");
 }
 
 /// Is the grade as it starts (warmth, tint, contrast, saturation)?

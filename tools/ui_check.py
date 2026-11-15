@@ -1218,7 +1218,7 @@ def a_render_keeps_hands_off_and_no_ffmpeg_is_said_plainly():
 
 @check
 def the_panels_keep_what_is_done_on_them():
-    base = run('fold:animate-more;wait:2', size=BIG)
+    base = run('wait:2', size=BIG)
     left, right = base['rects']['left'], base['rects']['right']
     # a drag that begins on a panel's own ground, and the wheel over a panel
     for panel in (left, right):
@@ -1227,7 +1227,7 @@ def the_panels_keep_what_is_done_on_them():
         assert same_turn(d, base, 0) and d['settings']['dist'] == base['settings']['dist'], 'a drag or the wheel on a panel reached the picture'
         assert d['knobs'] == base['knobs'] and d['family'] == base['family'], 'a drag over a panel\'s ground moved a control'
     # typing a loop length: the keys go to the field and nowhere else
-    field = base['rects']['loop']
+    field = run('fold:animate-more;wait:2', size=BIG)['rects']['loop']
     assert within(field, right), 'the loop field is not in view: %s' % field
     d = run('fold:animate-more;wait:2;%s;type:12;key:2;key:space;wait:2' % press(field), size=BIG)
     assert d['settings']['loop'] == 12 and d['says']['plan'].startswith('one loop: 12.00 s') and '720 frames' in d['says']['frames'], (d['says']['plan'], d['says']['frames'])
@@ -1717,7 +1717,7 @@ def families_and_the_animation_work_from_the_right_panel():
     d2 = run('wait:2;%s;wait:3;set:spin=0;%s;wait:3' % (press(r['family:knots']), press(d['rects']['shape:borromean'])), size=BIG)
     assert d2['family'] == 'knots' and d2['preset'] == 'borromean', 'pressing a shape gave %s / %s' % (d2['family'], d2['preset'])
     # the animation: its group is the foot of the right panel, open; the play button plays what the waves have lit
-    for name in ('group:animate', 'play', 'slot:time', 'slot:P.speed', 'slot:P.spin', 'group:animate-more'):
+    for name in ('group:animate', 'play', 'slot:time', 'slot:P.speed', 'group:animate-more'):
         assert within(r[name], right), '%s is not in the right panel: %s' % (name, r[name])
     assert r['group:animate'][1] > r['slot:attractors/thomas/b'][1] > r['shapes'][3], 'the right panel is out of order'
     p = run('wait:2;%s;wait:40' % press(r['play']), size=BIG)
@@ -1725,7 +1725,11 @@ def families_and_the_animation_work_from_the_right_panel():
     p2 = run('wait:2;%s;wait:20;%s;wait:3' % (press(r['play']), press(r['play'])), size=BIG)
     assert not p2['playing'] and p2['clock'] > 0, 'pressing it again did not pause'
     # speed and spin, by their sliders
-    sp = run('wait:2;%s;wait:2' % on(base, 'P.spin', 0.75), size=BIG)
+    # the view's spin is the camera's motion, in the left panel
+    assert 'slot:P.spin' not in r, 'the spin is still on the right'
+    cam = run('fold:material;fold:camera;wait:2;scroll:left=3000;wait:3', size=BIG)
+    assert 'group:cam-motion' in cam['rects'] and within(cam['rects']['slot:P.spin'], cam['rects']['left']), 'the spin is not with the camera'
+    sp = run('fold:material;fold:camera;wait:2;scroll:left=3000;wait:3;%s;wait:2' % on(cam, 'P.spin', 0.75), size=BIG)
     assert close(sp['settings']['spin'], 0.75, 0.011), 'the spin slider gave %s' % sp['settings']['spin']
     sd = run('wait:2;%s;wait:2' % on(base, 'P.speed', 2.0), size=BIG)
     assert close(sd['settings']['speed'], 2.0, 0.051), 'the speed slider gave %s' % sd['settings']['speed']
@@ -1733,9 +1737,9 @@ def families_and_the_animation_work_from_the_right_panel():
     assert 'group:detail' not in r and not any(k.startswith('detail:') for k in r), 'the shape\'s detail is still in the right panel'
     # nothing of the shape or the animation is left in the left panel
     left = r['left']
-    astray = [k for k in r if (k.startswith(('family:', 'shape:', 'slot:attractors', 'group:animate')) or k in ('play', 'slot:time', 'loop', 'slot:P.speed', 'slot:P.spin')) and not apart(r[k], left)]
+    astray = [k for k in r if (k.startswith(('family:', 'shape:', 'slot:attractors', 'group:animate')) or k in ('play', 'slot:time', 'loop', 'slot:P.speed')) and not apart(r[k], left)]
     assert not astray, 'in the left panel: %s' % astray
-    return '%d families in %d full lines at its head; a press chooses Knots, then Borromean rings; play plays and pauses (travel %.3f after %.2f s); the spin and speed sliders give %.2f and %.2f; the shape\'s detail is not here' % (
+    return '%d families in %d full lines at its head; a press chooses Knots, then Borromean rings; play plays and pauses (travel %.3f after %.2f s); the spin (with the camera) and speed sliders give %.2f and %.2f; the shape\'s detail is not here' % (
         len(tabs), len(lines), p['shape']['travel'], p['clock'], sp['settings']['spin'], sd['settings']['speed'])
 
 

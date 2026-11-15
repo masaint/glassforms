@@ -86,16 +86,6 @@ pub fn show(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     if moved.released { scrub_done(st); }
     knob::knob_row(ui, st, &State::engine_knob("speed"), px);
 
-    // the shape turning by itself, whether or not the animation plays
-    gap(ui, 4.0);
-    knob::knob_row(ui, st, &State::engine_knob("spin"), px);
-    if let Some(i) = choice(ui, Id::unique("spin as"), "spin as", &["tumble", "turntable"], js_round(st.p.spin_mode) as usize) {
-        // the other way of spinning carries on from the orientation the object has now
-        let r = st.r;
-        st.p.spin_mode = i as f64;
-        st.set_r(&r);
-    }
-
     // how the travelling sliders ease, and the loop everything fits into: detail, folded
     let says = if st.p.loop_len > 0.0 { format!("loop {} s", st.p.loop_len) } else { String::new() };
     px.sub(ui, "animate-more", "easing and loop", &says, |ui, px| {
