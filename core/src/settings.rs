@@ -264,6 +264,10 @@ settings! {
     /// shell-shaped they are (0 = flat with straight edges), how rough their faces are (0 = a clean break
     /// that mirrors, 1 = a white veil), and which random arrangement
     cracks, "cracks", 0.0;
+    /// fracture surfaces running through the whole body (healed veils, open cracks, cleavages, a fan
+    /// from one point): how many and how far (0 = none); they share the cracks' opening, curvature,
+    /// roughness, growth and arrangement
+    fractures, "fractures", 0.0;
     crack_size, "crackSize", 0.25;
     crack_depth, "crackDepth", 1.0;
     crack_open, "crackOpen", 0.8;

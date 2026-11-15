@@ -8,6 +8,7 @@ pub mod curve;
 pub mod env;
 pub mod field;
 pub mod inner;
+pub mod lamps;
 pub mod layers;
 pub mod material;
 pub mod math;

@@ -108,6 +108,8 @@ pub struct Variant {
     pub cast: bool,
     /// what is traced by chance is written apart from the rest and denoised (denoise.rs)
     pub denoise: bool,
+    /// lamps stand in the scene (lamps.rs): every lookup of the lights meets them
+    pub near: bool,
 }
 
 /// How a tracer marches (this differs by family).
@@ -164,7 +166,8 @@ fn tracer_from(template: &str, m: &March, v: Variant, profile: bool) -> String {
         .replace("{{BACKGROUND}}", crate::stage::background(v.stage, v.backdrop))
         .replace("{{SHADE}}", mat.shade)
         .replace("{{GRAZE}}", mat.graze);
-    // what the bodies cast is put in last, where diffuse light is gathered (never into the default tracer)
+    // the lamps, and then what the bodies cast, are put in last (never into the default tracer)
+    let src = if v.near { crate::lamps::weave(&src) } else { src };
     let src = if v.cast { crate::cast::weave(&src).unwrap_or(src) } else { src };
     // a rough clear body's tracer also writes, beside the picture, how far what is seen through the
     // surface is to be blurred afterwards (frost.rs)
@@ -344,6 +347,7 @@ pub struct Renderer {
     last_mat: Option<[f32; MU_FLOATS]>,
     /// the studio's numbers (read only by tracers built with a backdrop or a floor), and what they are
     u_stage: wgpu::Buffer,
+    u_lamps: wgpu::Buffer,
     stage: crate::stage::StageU,
     /// the bodies' volume (a distance to each body for every voxel) and how many bodies it holds, while
     /// the scene has more than one; what stands in for it otherwise; and the bodies' materials
@@ -484,6 +488,8 @@ impl Renderer {
             texture_entry(24, wgpu::TextureViewDimension::D3, true), texture_entry(25, wgpu::TextureViewDimension::D3, true),
             texture_entry(26, wgpu::TextureViewDimension::D3, true), texture_entry(27, wgpu::TextureViewDimension::D3, true),
             uniform_entry(crate::stage::BINDING, frag, false),
+            // (44: the lamps, read only by tracers built with lamps)
+            uniform_entry(crate::lamps::BINDING, frag, false),
             texture_entry(12, wgpu::TextureViewDimension::D3, true), uniform_entry(13, frag, false),
             // (32: what lies inside the body, read only by tracers built for it; 33: what lies inside each
             // of several bodies, read only by the tracer of several bodies built for it)
@@ -545,6 +551,7 @@ impl Renderer {
             last_light: None,
             u_mat: gpu.uniform_buffer("trace: material", (MU_FLOATS * 4) as u64),
             u_stage: gpu.uniform_buffer("trace: studio", std::mem::size_of::<crate::stage::StageU>() as u64),
+            u_lamps: gpu.uniform_buffer("trace: lamps", std::mem::size_of::<crate::lamps::LampsU>() as u64),
             stage: Zeroable::zeroed(),
             last_mat: None,
             bodies: None,
@@ -792,6 +799,10 @@ impl Renderer {
     }
 
     /// What the tracer and the antialiasing are told of the studio: the room, the backdrop, the floor.
+    /// Tell the tracer where the lamps stand and what they are (read only by a tracer built with lamps).
+    pub fn set_lamps(&mut self, lu: &crate::lamps::LampsU) {
+        self.gpu.queue.write_buffer(&self.u_lamps, 0, bytemuck::bytes_of(lu));
+    }
     pub fn set_stage(&mut self, su: &crate::stage::StageU) {
         self.gpu.queue.write_buffer(&self.u_stage, 0, bytemuck::bytes_of(su));
         self.stage = *su;
@@ -884,6 +895,7 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 26, resource: wgpu::BindingResource::TextureView(self.glow[2].as_ref().unwrap_or(&self.no_glow)) },
                 wgpu::BindGroupEntry { binding: 27, resource: wgpu::BindingResource::TextureView(self.glow[3].as_ref().unwrap_or(&self.no_glow)) },
                 wgpu::BindGroupEntry { binding: crate::stage::BINDING, resource: self.u_stage.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: crate::lamps::BINDING, resource: self.u_lamps.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(self.bodies.as_ref().map_or(&self.no_bodies, |b| &b.0)) },
                 wgpu::BindGroupEntry { binding: 13, resource: self.u_bodies.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 32, resource: self.u_inner.as_entire_binding() },

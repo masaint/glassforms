@@ -110,6 +110,9 @@ pub struct Setup {
     /// of the scene's material.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub bodies: BTreeMap<String, BTreeMap<String, f64>>,
+    /// The lamps standing in the scene (absent while there are none).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lamps: Vec<crate::lamps::Lamp>,
 }
 
 impl State {
@@ -131,6 +134,7 @@ impl State {
             render: self.render.clone(),
             rig: (!self.rig_is_default()).then(|| RigSetup::from(self.rig())),
             hdri: self.hdri.clone(),
+            lamps: self.lamps.clone(),
             layers: self.layers_setup(),
             bodies: (1..self.body_mats.len())
                 .filter_map(|l| self.body_mats[l].as_ref().map(|m| ((l + 1).to_string(), crate::material::body_names().filter_map(|n| m.get(n).map(|v| (n.to_string(), v))).collect())))
@@ -171,6 +175,8 @@ impl State {
             None => self.reset_rig(),
         }
         self.set_hdri(s.hdri.clone());
+        self.lamps = s.lamps.iter().take(crate::lamps::MAX_LAMPS).copied().collect();
+        self.lamps_rev += 1;
         self.p = s.settings.clone();
         crate::camera::sync(&mut self.p);
         // each body's own material: the scene's settings with the body's laid over them

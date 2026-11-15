@@ -34,7 +34,10 @@ struct IU {
   silkB: vec4f,       // x: how softened the lights they send back are, radians   y: how wavy the fibres are
   piezo: vec4f,       // rgb: light given off under pressure, per unit of length   w: how strongly a growing crack's rim glows
   playE: vec4f,       // x: how thick a grain is across the layers, as a share of its width   y: how closely the grains of
-                      // one patch share a direction   z: a patch's width, in grains   w: a grain's reflectance in its band
+                      // one domain share a direction   z: a domain's width, in grains   w: the stacking's reflectance in its band
+  playF: vec4f,       // x: how ragged the domains' outlines are   y: how strongly stacking faults streak the colour
+  fracA: vec4f,       // x: a volume fracture's widest gap, nm   y: the shape's radius   z: which arrangement   w: how many sheets
+  fracB: vec4f,       // x: how many of them make a fan   y: how many are great ones
 }
 //#if BODIES
 // (among several bodies each has its own numbers: every `iu.` below reads those of the body in hand)
@@ -110,17 +113,21 @@ fn crackSeen(d: vec3f) -> vec3f {
   if (iu.crackC.y > 0.0) { return envL(d, iu.crackC.x); }
   return env(d);
 }
-// the light from all round a face (what a rough veil sends back)
-fn crackAll(d: vec3f) -> vec3f { return envL(d, 0.9); }
 //#else
 //#if CRACK_ROUGH
 fn crackSeen(d: vec3f) -> vec3f { return envL(d, iu.crackC.x); }
-fn crackAll(d: vec3f) -> vec3f { return envL(d, 0.9); }
 //#else
 fn crackSeen(d: vec3f) -> vec3f { return env(d); }
-fn crackAll(d: vec3f) -> vec3f { return env(d); }
 //#endif
 //#endif
+// the light from all round a face (what a veil sends back)
+fn crackAll(d: vec3f) -> vec3f {
+//#if ENVL
+  return envL(d, 0.9);
+//#else
+  return env(d);
+//#endif
+}
 
 // What an air gap between two faces of the body sends back, as red, green and blue.
 // ci: cosine of the angle the light meets the faces at.  gap: its width, nm.  n: the body's index.
@@ -420,6 +427,272 @@ fn cracks(pos: vec3f, dir: vec3f, s: f32, n: f32) -> Crack {
   }
   return out;
 }
+
+// ---- what a crossing of a crack's face does to the path ----
+// R: what the face mirrors; V: what its veil sends back as light from all round; back: the mirrored
+// direction; ext: what the tint has taken on the way there. The path goes with the larger part (it
+// turns at a mirror, passes a face that mostly lets light through) and the smaller part is read at once
+// from the lights. True if the path turned.
+fn faceCross(out: ptr<function, Crack>, tt: f32, R: vec3f, V: vec3f, mirror: vec3f, all: vec3f, ahead: vec3f, back: vec3f, ext: vec3f) -> bool {
+  (*out).light += (*out).keep * ext * V * all;
+  let T = max(1.0 - R - V, vec3f(0.0));
+  if (R.g > T.g) {
+    (*out).light += (*out).keep * ext * T * ahead;
+    (*out).keep *= R;
+    (*out).t = tt;
+    (*out).dir = back;
+    return true;
+  }
+  (*out).light += (*out).keep * ext * R * mirror;
+  (*out).keep *= T;
+  return false;
+}
+
+// the lights as a fracture's face mirrors them: a little softened, so a flash is not a single point
+fn fracSeen(d: vec3f) -> vec3f {
+//#if ENVL
+  return envL(d, max(iu.crackC.x, 0.04));
+//#else
+  return env(d);
+//#endif
+}
+
+// ---- volume fractures ----
+// A few great fracture surfaces run through the body, many smaller ones, and now and then a fan of them
+// spreading from one point: each a sheet, flat or gently bent, with a ragged outline. They come in three
+// kinds, as in imperfect quartz and ice:
+//   open      an air gap held open in patches: silver where it is wide and the angle is past the
+//             critical one, the colours of a thin film where it thins, unseen where the faces touch;
+//   healed    closed again, but left as a veil of countless tiny fluid inclusions laid out in
+//             fingerprint-like lines: a faint white sheet that sparkles, with open patches here and there;
+//   cleavage  a flat split along the crystal's planes, straight-edged and thin: rainbow colours.
+// Their places, tilts, sizes, kinds and outlines all come from whole-number hashes, fixed in the shape.
+struct Sheet {
+  c: vec3f,           // a point on it (its middle, or for a fan the point it spreads from)
+  a: vec3f,           // its normal there
+  e1: vec3f,          // two directions along it
+  e2: vec3f,
+  k1: f32,            // how it bends along each
+  k2: f32,
+  r: f32,             // its reach, in the shape's units
+  kind: i32,          // 0 open, 1 healed, 2 cleavage
+  fan: bool,          // one of a fan: it spreads from c, inward only
+  h: u32,             // its own scrambled number
+}
+
+fn sheetOf(i: i32) -> Sheet {
+  var sh: Sheet;
+  let rs = iu.fracA.y;
+  let seed = u32(iu.fracA.z) * 1597334677u + 99u;
+  let nfan = i32(iu.fracB.x);
+  let nbig = i32(iu.fracB.y);
+  let h = ihash(u32(i) * 2654435761u + seed);
+  sh.h = h;
+  let r1 = ten3(ihash(h + 1u));
+  let r2 = ten3(ihash(h + 2u));
+  let curve = iu.crackB.y;
+  sh.fan = i < nfan;
+  if (sh.fan) {
+    // a fan: sheets through one line near the surface, splayed about it like the pages of a book
+    let fh = ihash(seed + 4242u);
+    let pc = sphereDir(ten3(fh).xy);
+    sh.c = pc * 0.82 * rs;
+    let ax = normalize(across1(pc) * cos(6.2831853 * ten3(fh + 1u).z) + across2(pc) * sin(6.2831853 * ten3(fh + 1u).z));
+    let u1 = normalize(cross(ax, pc));
+    let th = (f32(i) / max(f32(nfan - 1), 1.0) - 0.5) * 2.3 + 0.25 * (r1.x - 0.5);
+    sh.a = cos(th) * u1 + sin(th) * pc;
+    sh.e1 = ax;
+    sh.e2 = cross(sh.a, ax);
+    if (dot(sh.e2, pc) > 0.0) { sh.e2 = -sh.e2; }
+    sh.k1 = 0.0;
+    sh.k2 = 0.0;
+    sh.r = rs * (0.35 + 0.3 * r1.y);
+    sh.kind = 0;
+    return sh;
+  }
+  let big = i < nfan + nbig;
+  // the middle: anywhere in the body, the great ones more often towards the middle
+  let rr = select(0.85, 0.6, big) * pow(r1.z, 0.6) * rs;
+  sh.c = sphereDir(r2.xy) * rr;
+  sh.a = sphereDir(r1.xy);
+  sh.e1 = across1(sh.a);
+  sh.e2 = across2(sh.a);
+  sh.r = rs * select(0.16 + 0.32 * r2.z, 0.55 + 0.55 * r2.z, big);
+  let r3 = ten3(ihash(h + 3u));
+  let kap = (0.06 + 0.45 * curve) * (0.3 + 0.7 * r3.x) / sh.r;
+  sh.k1 = kap * select(-1.0, 1.0, r3.y > 0.5 * (1.0 - curve));
+  sh.k2 = kap * mix(2.0 * r3.z - 1.0, 0.6 + 0.4 * r3.z, curve);
+  // the kind: in glass (curve high) no cleavage
+  let kk = unit1(ihash(h + 5u));
+  sh.kind = select(select(2, 1, kk < 0.72), 0, kk < 0.36);
+  if (sh.kind == 2 && curve > 0.5) { sh.kind = 0; }
+  if (sh.kind == 2) {
+    sh.k1 *= 0.15;
+    sh.k2 *= 0.15;
+  }
+  return sh;
+}
+
+// where the ray from o along d meets a sheet: up to two distances (1e9 for none)
+fn sheetRoots(sh: Sheet, o: vec3f, d: vec3f) -> vec2f {
+  let w0 = o - sh.c;
+  let p1 = dot(w0, sh.e1);
+  let p2 = dot(w0, sh.e2);
+  let v1 = dot(d, sh.e1);
+  let v2 = dot(d, sh.e2);
+  let A = -0.5 * (sh.k1 * v1 * v1 + sh.k2 * v2 * v2);
+  let B = dot(d, sh.a) - (sh.k1 * p1 * v1 + sh.k2 * p2 * v2);
+  let C = dot(w0, sh.a) - 0.5 * (sh.k1 * p1 * p1 + sh.k2 * p2 * p2);
+  if (abs(A) < 1e-7 * abs(B)) { return vec2f(-C / B, 1e9); }
+  let disc = B * B - 4.0 * A * C;
+  if (disc <= 0.0) { return vec2f(1e9); }
+  let q = -0.5 * (B + select(-1.0, 1.0, B >= 0.0) * sqrt(disc));
+  return vec2f(min(q / A, C / q), max(q / A, C / q));
+}
+
+// The fractures crossed by the stretch from pos along dir, s long, in a body of index n: as cracks().
+const FRAC_MAX: i32 = 24;
+const FRAC_HITS: i32 = 6;
+fn fractures(pos: vec3f, dir: vec3f, s: f32, n: f32) -> Crack {
+  var out: Crack;
+  out.t = -1.0;
+  out.dir = dir;
+  out.keep = vec3f(1.0);
+  out.light = vec3f(0.0);
+  let o = toObj(pos);
+  let d = toObj(dir);
+  let rs = iu.fracA.y;
+  let count = min(i32(iu.fracA.w), FRAC_MAX);
+  // every crossing along the stretch, then taken nearest first
+  var ts: array<f32, 48>;
+  var ids: array<i32, 48>;
+  var m = 0;
+  let t0 = 2e-3 * rs;
+  for (var i = 0; i < count; i++) {
+    let sh = sheetOf(i);
+    let w0 = o - sh.c;
+    let wc = w0 - d * dot(w0, d);
+    if (dot(wc, wc) > sh.r * sh.r * 1.3) { continue; }
+    let rt = sheetRoots(sh, o, d);
+    for (var e = 0; e < 2; e++) {
+      let tt = rt[e];
+      if (tt > t0 && tt <= s && m < 48) {
+        ts[m] = tt;
+        ids[m] = i;
+        m++;
+      }
+    }
+  }
+  let pxs = iu.crackC.z / iu.crackA.x;           // a pixel's width at the shape, in its units
+  let gapw = iu.fracA.x;
+  for (var hit = 0; hit < FRAC_HITS; hit++) {
+    // the nearest crossing not yet looked at
+    var best = -1;
+    var bt = 1e9;
+    for (var j = 0; j < m; j++) {
+      if (ts[j] < bt) {
+        bt = ts[j];
+        best = j;
+      }
+    }
+    if (best < 0) { break; }
+    ts[best] = 1e10;
+    let sh = sheetOf(ids[best]);
+    let tt = bt;
+    let wl = o + d * tt - sh.c;
+    if (dot(wl, wl) >= sh.r * sh.r * 1.3) { continue; }
+    let sd = ihash(sh.h + 17u);
+    let rq = ten3(ihash(sh.h + 9u));
+    // growth: each sheet starts at its own moment and spreads from its middle
+    let g = clamp((iu.crackA.w - 0.5 * rq.x) / 0.5, 0.0, 1.0);
+    if (g <= 0.0) { continue; }
+    let r = sh.r * g;
+    // where on the sheet: as a share of its grown reach (x2), and of its full reach (xf)
+    let x2 = vec2f(dot(wl, sh.e1), dot(wl, sh.e2)) / r;
+    let xf = x2 * g;
+    // the outline
+    var edge: f32;
+    if (sh.fan) {
+      // a fan's sheet: from its line inward, widening, in a ragged half round
+      edge = min(1.0 - length(vec2f(x2.x * 1.4, x2.y)), x2.y + 0.05);
+    } else {
+      let sq = 0.45 + 0.5 * rq.y;
+      let ca = cos(6.2831853 * rq.z);
+      let sa = sin(6.2831853 * rq.z);
+      edge = 1.0 - length(vec2f(ca * x2.x + sa * x2.y, (ca * x2.y - sa * x2.x) / sq));
+      if (sh.kind == 2) {
+        // a cleavage ends on straight lines
+        let cut = ten3(ihash(sh.h + 11u));
+        for (var k = 0; k < 3; k++) {
+          let th = 2.0943951 * (f32(k) + 0.7 * cut[k]);
+          edge = min(edge, 0.3 + 0.5 * cut[(k + 1) % 3] - dot(x2, vec2f(cos(th), sin(th))));
+        }
+      }
+    }
+    let jag = fbm2(xf * 2.2, sd);
+    let crease = 1.0 - abs(2.0 * fbm2(xf * 5.0 + 1.3, sd + 7u) - 1.0);
+    let lace = vnoise2(xf * 16.0, sd + 9u);
+    edge -= 0.42 * (jag - 0.42) + 0.2 * (crease - 0.6) + 0.08 * (lace - 0.5);
+    if (edge <= 0.0) { continue; }
+    let ee = min(edge * 3.0, 1.0);
+    let prof = sqrt(ee * (2.0 - ee));
+    // the faces' gap: held open in patches that swell and thin, thin all over in a cleavage, mostly
+    // closed in a healed one
+    let sw = fbm2(xf * 1.6 + 3.3, sd + 11u);
+    var open: f32;
+    var wide = gapw * (0.35 + 1.15 * rq.x);
+    if (sh.kind == 2) {
+      open = clamp(0.55 + 1.3 * (sw - 0.5), 0.0, 1.0);
+      wide = min(wide, 900.0) * 0.6;
+    } else {
+      open = smoothstep(0.3, 0.62, sw);
+      if (sh.kind == 1) { open *= 0.35 * smoothstep(0.55, 0.75, fbm2(xf * 3.1, sd + 13u)); }
+    }
+    // feathers at the rim: the sheet frays into streaks running out from its middle
+    let fth = vnoise2(vec2f(atan2(x2.y, x2.x) * 60.0 + 8.0 * jag, length(xf) * 3.0), sd + 17u);
+    open *= mix(smoothstep(0.35, 0.65, fth), 1.0, smoothstep(0.04, 0.2, edge));
+    let gap = wide * prof * open;
+    // the faces' relief: a gentle waviness, and steps each tilted a little its own way
+    let wv = vec2f(vnoise2(xf * 3.5, sd + 21u), vnoise2(xf * 3.5, sd + 22u)) - 0.5;
+    let tq = xf * 4.0 + 2.0 * vec2f(jag - 0.5, crease - 0.6);
+    let tr = ten3(ihash(u32(i32(floor(tq.x))) + ihash(u32(i32(floor(tq.y))) + sd))).xy - 0.5;
+    let tilt = 0.08 * wv + select(0.12, 0.03, sh.kind == 2) * tr;
+    let pw = wl - sh.a * dot(wl, sh.a);
+    let nl = normalize(sh.a - sh.k1 * dot(pw, sh.e1) * sh.e1 - sh.k2 * dot(pw, sh.e2) * sh.e2 + tilt.x * sh.e1 + tilt.y * sh.e2);
+    let ci = abs(dot(d, nl));
+    // how much the gap changes across a pixel
+    let px = pxs / (r * max(ci, 0.3));
+    let hs = 0.03;
+    let sx = fbm2((xf + vec2f(hs, 0.0)) * 1.6 + 3.3, sd + 11u);
+    let sy = fbm2((xf + vec2f(0.0, hs)) * 1.6 + 3.3, sd + 11u);
+    let dopen = length(vec2f(sx - sw, sy - sw)) / hs * select(2.5, 1.3, sh.kind == 2) * g;
+    let dgap = wide * ((1.0 - ee) / max(prof, 0.03) * 3.0 * open + prof * dopen) * px;
+    var R = crackR(ci, gap, n, dgap);
+    // the veil: fluid inclusions in fingerprint lines (healed sheets, and the rough faces of open
+    // ones); fine dots that a pixel cannot tell apart are taken at their average
+    var V = vec3f(0.0);
+    // a rough face: a white veil in soft streaks and feathers, as in ice
+    if (iu.crackC.y > 0.0) {
+      let streaky = smoothstep(0.3, 0.7, fbm2(vec2f(xf.x * 1.2, xf.y * 5.0) + 1.5 * jag, sd + 29u));
+      V = vec3f(iu.crackC.y * 0.6 * prof * (0.35 + 0.65 * streaky));
+    }
+    if (sh.kind == 1) {
+      let xs = xf * (sh.r / (0.1 * rs));
+      let org = vec2f(cos(6.2831853 * rq.y), sin(6.2831853 * rq.y)) * 1.5;
+      let ridge = 0.5 + 0.5 * sin(6.2831853 * (3.0 * length(xs - org * (sh.r / (0.1 * rs))) * 0.35 + 4.0 * fbm2(xs * 0.3, sd + 23u)));
+      let pu = pxs / (0.1 * rs * max(ci, 0.3));
+      let lines = mix(smoothstep(0.6, 0.9, ridge), 0.3, clamp(pu * 3.0 - 0.5, 0.0, 1.0));
+      let dots = mix(smoothstep(0.45, 0.75, vnoise2(xs * 40.0, sd + 25u)), 0.35, clamp(pu * 40.0 - 0.5, 0.0, 1.0));
+      let patchy = smoothstep(0.25, 0.55, fbm2(xf * 1.3 + 7.1, sd + 27u));
+      V = max(V, vec3f(0.5 * prof * patchy * (0.12 + 0.88 * lines * dots)));
+    }
+    R *= 1.0 - V;
+    let back = fromObj(reflect(d, nl));
+    let ext = exp(-u.absorb.xyz * tt);
+    if (faceCross(&out, tt, R, V, fracSeen(back), crackAll(back), crackSeen(dir), back, ext)) { break; }
+  }
+  return out;
+}
 //#endif
 
 //#if PLAY
@@ -474,22 +747,70 @@ fn glitter(pos: vec3f, dir: vec3f, s: f32) -> vec3f {
   return sum * iu.playB.y;
 }
 
-// Opal. The body is made of grains, each a stack of layers of silica spheres in its own direction. A
-// grain sends back, as a mirror would, only the band of wavelengths that its layers' spacing selects for
-// the angle the light meets them at (Bragg's law): straight on the longest, more steeply shorter ones;
-// the rest it lets through. So each grain is a patch of one pure colour, which lights up when the
-// mirrored direction finds a light and goes dark when it does not.
+// Smooth noise through space, 0..1, fixed by seed.
+fn vnoise3(p: vec3f, seed: u32) -> f32 {
+  let i = floor(p);
+  let f = p - i;
+  let w = f * f * (3.0 - 2.0 * f);
+  let c = vec3i(i);
+  var v: array<f32, 8>;
+  for (var k = 0; k < 8; k++) {
+    let o = vec3i(k & 1, (k >> 1) & 1, (k >> 2) & 1);
+    v[k] = unit1(cellHash(c + o, seed));
+  }
+  return mix(mix(mix(v[0], v[1], w.x), mix(v[2], v[3], w.x), w.y), mix(mix(v[4], v[5], w.x), mix(v[6], v[7], w.x), w.y), w.z);
+}
+
+// The nearest and second nearest of the scattered centres about a place, one per cell of a lattice
+// (each centre within its cell, so the eight cells about the place are enough): the cell's scrambled
+// number, and the squared distances to the nearest and the next.
+struct Near {
+  h: u32,
+  d1: f32,
+  d2: f32,
+}
+fn nearest(x: vec3f, seed: u32) -> Near {
+  let b = vec3i(floor(x - 0.5));
+  var r: Near;
+  r.d1 = 1e9;
+  r.d2 = 1e9;
+  r.h = 0u;
+  for (var i = 0; i < 8; i++) {
+    let cc = b + vec3i(i & 1, (i >> 1) & 1, (i >> 2) & 1);
+    let hh = cellHash(cc, seed);
+    let dd = x - (vec3f(cc) + 0.5 + (ten3(hh) - 0.5) * 0.8);
+    let d2 = dot(dd, dd);
+    if (d2 < r.d1) {
+      r.d2 = r.d1;
+      r.d1 = d2;
+      r.h = hh;
+    } else if (d2 < r.d2) {
+      r.d2 = d2;
+    }
+  }
+  return r;
+}
+
+// Opal. The body is made of silica spheres stacked in layers; a stack sends back, as a mirror would,
+// only the band of wavelengths its layers' spacing selects for the angle the light meets them at
+// (Bragg's law: straight on the longest, more steeply shorter ones) and lets the rest through. So colour
+// lies where a stack's mirrored direction finds a light, and is pure.
 //
-// The grains are the cells of an uneven, jittered lattice fixed in the shape (each place belongs to the
-// nearest of eight scattered centres, the place pushed about first, so the grains are irregular and
-// sharp-edged), flattened across the layers opal is laid down in. Grains come in patches: those whose
-// centres fall in one larger cell lean the same way, so they flash together as one ragged block with
-// flecks of neighbouring hues; some patches are plain body with no play at all. With roll the patches
-// lean mostly with a smooth field across the stone, so the flash rolls over it.
-//
-// The ray is looked at in a few places along its first stretch, the grains met front to back: each
-// sends back its band of the lights and passes the rest on, so the nearest grain's colour comes through
-// pure, and the body behind a grain shows less of the colour that grain took.
+// What the photographs of opal show, and how it is made here, from large to small:
+//  - domains: regions of one stacking, several grains wide, with sharp outlines (straight-edged blocks in
+//    harlequin, ragged ones elsewhere) and often a thin seam of plain body between them. Each place
+//    belongs to the nearest of a few scattered centres (on a coarse lattice fixed in the shape); some
+//    domains have no play at all (potch).
+//  - inside a domain the layers bend slowly, so its colour drifts across it (red running into orange and
+//    green) and the flash moves a little over it as the stone turns;
+//  - grains: the domain is broken into smaller cells, each tilted a little its own way, so it lights up
+//    piece by piece rather than all at once;
+//  - streaks: stacking faults run through the layers in fine parallel streaks (straw, flame), which break
+//    the colour into flecks and lines with plain body between, and tilt the layers a little each.
+// All of it is flattened across the layers opal is laid down in (the shape's up axis). The ray is
+// looked at in a few places along its first stretch, front to back: each place sends back its share of
+// the lights in its band and passes the rest on, so deeper colour shows dimmer through the body above it,
+// and the body behind colour shows less of the colour taken.
 fn grains(pos: vec3f, dir: vec3f, s: f32) -> Play {
   var out: Play;
   out.light = vec3f(0.0);
@@ -497,75 +818,60 @@ fn grains(pos: vec3f, dir: vec3f, s: f32) -> Play {
   let G = iu.playA.x;
   let seed = u32(iu.playA.z) * 2246822519u + 777u;
   let off = iu.playA.z * vec3f(3.17, 11.3, 5.71);
-  // the lattice: in the shape's frame, squashed along its up axis so grains are thin across the layers
   let sq = vec3f(1.0, 1.0 / iu.playE.x, 1.0);
   let od = toObj(dir);
   let x0 = toLat(toObj(pos) * sq) * G + off;
   let dl = toLat(od * sq) * G;
   let span = iu.playE.z;
-  var last = 0xffffffffu;
+  let warp = iu.playF.x;
+  let rho0 = iu.playE.w * iu.playB.y;
   for (var k = 0; k < PLAY_N; k++) {
     let t = (f32(k) + 0.5) * iu.playB.x;
     if (t > s) { break; }
     let x = x0 + dl * t;
-    // the place pushed about, so that the grains' edges are ragged
-    let xw = x + 0.32 * sin(1.7 * x.yzx + 2.1 * sin(1.3 * x.zxy)) + 0.12 * sin(4.3 * x.zxy + 1.7 * x.yzx);
-    // the nearest of the eight centres about it
-    let b = vec3i(floor(xw - 0.5));
-    var best = 1e9;
-    var bc = b;
-    var bh = 0u;
-    for (var i = 0u; i < 8u; i++) {
-      let cc = b + vec3i(i32(i & 1u), i32((i >> 1u) & 1u), i32((i >> 2u) & 1u));
-      let hh = cellHash(cc, seed);
-      let dd = xw - (vec3f(cc) + 0.5 + (ten3(hh) - 0.5) * 0.75);
-      let d2 = dot(dd, dd);
-      if (d2 < best) {
-        best = d2;
-        bc = cc;
-        bh = hh;
-      }
-    }
-    if (bh == last) { continue; }
-    last = bh;
-    // its patch: plain body, or a block of grains leaning one way
-    let pc = vec3i(floor((vec3f(bc) + 0.5) / span + 0.37 * sin(0.9 * vec3f(bc.yzx))));
-    let ph = cellHash(pc, seed ^ 0x9e3779b9u);
-    if (unit1(ph) >= iu.playA.y) { continue; }
-    let rg = ten3(ihash(bh));
-    let rp = ten3(ihash(ph));
-    // the grain's direction, in the shape's own frame: the patch's, its own, or the smooth field's
+    // ragged outlines: the place pushed about before the centres are looked for (little for harlequin)
+    let xw = x + warp * (sin(0.53 * x.yzx + 1.7 * sin(0.41 * x.zxy)) + 0.4 * sin(1.9 * x.zxy + 1.3 * x.yzx));
+    let dm = nearest(xw / span, seed ^ 0x51ed27u);
+    if (unit1(dm.h) >= iu.playA.y) { continue; }
+    // the seam where two domains meet
+    let seam = smoothstep(0.015, 0.06, sqrt(dm.d2) - sqrt(dm.d1));
+    let rp = ten3(ihash(dm.h));
+    let rq = ten3(ihash(dm.h + 7u));
     let o = toObj(pos + dir * t);
     let field = normalize(vec3f(sin(1.7 * o.y + 0.3) + 0.4 * sin(2.9 * o.z), sin(1.9 * o.z + 1.1) + 0.4 * sin(2.3 * o.x), 1.2 + sin(1.3 * o.x + 2.0)));
     let pd = normalize(mix(sphereDir(rp.xy), field, iu.playB.z));
-    var gd = normalize(mix(sphereDir(rg.xy), pd, iu.playE.y * (0.75 + 0.25 * rp.z)));
-    // The spheres of a grain are stacked as a cubic close packing, which has four sets of layers (one
-    // across gd, three leaning 70.5 degrees from it, turned the grain's own way about it): each set
-    // sends back its own band, mirrored about its own layers, so a grain has four chances to catch a
-    // light. The spacing differs a little from grain to grain.
-    let e1 = across1(gd);
-    let e2 = across2(gd);
-    // (the streaks run their own way in each patch)
-    let sa = sphereDir(ten3(ihash(ph + 5u)).xy);
-    let rho0 = iu.playE.w * iu.playB.y;
+    let e1 = across1(pd);
+    let e2 = across2(pd);
+    // the layers bending slowly through the domain
+    let ph = 6.2831853 * rq;
+    let bend = vec2f(sin(0.45 * xw.x + 0.3 * xw.z + ph.x) + 0.5 * sin(0.8 * xw.y + ph.y), sin(0.4 * xw.z - 0.35 * xw.y + ph.z) + 0.5 * sin(0.7 * xw.x + ph.x));
+    // its grains, each tilted a little
+    let gr = nearest(xw * 1.0, seed);
+    let gt = (ten3(ihash(gr.h)).xy - 0.5) * (0.3 + 0.7 * (1.0 - iu.playE.y));
+    // the streaks: fine across one direction in the layers (the domain's own), long along it
+    let sa = cos(ph.z) * e1 + sin(ph.z) * e2;
+    let sb = cross(pd, sa);
+    let sn = vnoise3(vec3f(dot(xw, sa) * 0.35, dot(xw, sb) * 4.5, xw.y * 1.5), seed + 3u);
+    let fl = vnoise3(vec3f(dot(xw, sa) * 1.3, dot(xw, sb) * 9.0, xw.y * 3.0), seed + 4u);
+    let streak = mix(1.0, smoothstep(0.4, 0.6, sn) * (0.55 + 0.45 * smoothstep(0.3, 0.7, fl)), iu.playF.y);
+    let tilt = 0.3 * bend + 0.9 * gt + iu.playF.y * 0.5 * vec2f(sn - 0.5, fl - 0.5);
+    let gd = normalize(pd + tilt.x * e1 + tilt.y * e2);
     let vis = exp(-iu.playD.rgb * t);
+    // (each place stands for a layer of the stone half a grain thick)
+    let share = rho0 * streak * seam * 0.65;
     var took = vec3f(0.0);
+    // the four sets of a close packing's layers: across gd, and three leaning 70.5 degrees from it
     for (var j = 0; j < 4; j++) {
       var pn = gd;
       if (j > 0) {
-        let ph = 6.2831853 * (rp.z + 0.06 * rg.z + f32(j) / 3.0);
-        pn = -0.33333333 * gd + 0.94280904 * (cos(ph) * e1 + sin(ph) * e2);
+        let a2 = 6.2831853 * (rp.z + f32(j) / 3.0);
+        pn = -0.33333333 * gd + 0.94280904 * (cos(a2) * across1(gd) + sin(a2) * across2(gd));
       }
-      // stacking faults: inside a grain the layers waver a little in fine streaks along them, so a grain
-      // lights up in streaks and points rather than all over, and its hue shifts a little across it
-      let sv = dot(xw, sa) * 7.0 + 2.2 * sin(dot(xw, vec3f(-0.2, 0.9, 0.4)) * 3.1 + f32(j));
-      let sw2 = sin(sv) * sin(0.37 * sv + 3.1 * xw.z + 1.3 * sin(2.3 * xw.x));
-      pn = normalize(pn + 0.08 * sw2 * e1 + 0.06 * sin(1.7 * sv + 2.0 * rg.x + xw.y * 5.0) * sin(0.6 * sv + xw.x) * e2);
       if (dot(pn, od) > 0.0) { pn = -pn; }
       let gw = fromObj(pn);
-      let lam = iu.playC.x * abs(dot(dir, gw)) * (0.93 + 0.07 * rg.z);
+      let lam = iu.playC.x * abs(dot(dir, gw)) * (0.95 + 0.05 * rq.x);
       if (lam < 425.0 || lam > 715.0) { continue; }
-      let rho = clamp(specW(lam) * iu.white.rgb * (iu.white.w * iu.playB.w), vec3f(0.0), vec3f(1.0)) * rho0;
+      let rho = clamp(specW(lam) * iu.white.rgb * (iu.white.w * iu.playB.w), vec3f(0.0), vec3f(1.0)) * share;
       out.light += out.keep * rho * envL(reflect(dir, gw), iu.playC.y) * vis;
       took += rho;
     }
@@ -668,16 +974,29 @@ fn inner(pos: vec3f, dir: vec3f, s: f32, n: f32, b: i32) -> Inner {
 //#if CRACK
 //#if BODIES
   // (among several bodies only those that have each part look for it)
-  if (iu.crackA.y > 0.0 && iu.crackA.w > 0.0) {
+  if ((iu.crackA.y > 0.0 || iu.fracA.w > 0.0) && iu.crackA.w > 0.0) {
 //#else
   {
 //#endif
-    let ck = cracks(pos, dir, len, n);
-    o.t = ck.t;
-    o.dir = ck.dir;
-    o.keep = ck.keep;
-    o.light = ck.light;
-    if (ck.t >= 0.0) { len = ck.t; }
+    // the volume fractures, then the small cracks as far as the path still runs
+    if (iu.fracA.w > 0.0) {
+      let fk = fractures(pos, dir, len, n);
+      o.t = fk.t;
+      o.dir = fk.dir;
+      o.keep = fk.keep;
+      o.light = fk.light;
+      if (fk.t >= 0.0) { len = fk.t; }
+    }
+    if (iu.crackA.y > 0.0) {
+      let ck = cracks(pos, dir, len, n);
+      o.light += o.keep * ck.light;
+      o.keep *= ck.keep;
+      if (ck.t >= 0.0) {
+        o.t = ck.t;
+        o.dir = ck.dir;
+        len = ck.t;
+      }
+    }
   }
 //#endif
 //#if PLAY

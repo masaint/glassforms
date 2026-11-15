@@ -183,6 +183,8 @@ pub enum KnobRef {
     Combo(u8, Opt),
     /// a setting of the material of the body whose lowest layer is at this place in the list
     Body(usize, &'static str),
+    /// a number of the lamp at this place in the list (`lamps::LAMP_KNOBS`)
+    Lamp(usize, usize),
 }
 
 /// Anything with a slider.
@@ -322,6 +324,10 @@ pub struct State {
     rigs: Vec<Rig>,
     /// goes up whenever the lights or the environment picture change
     pub lights_rev: u64,
+    /// the lamps standing in the scene (none unless added: lamps.rs), and a number that goes up whenever
+    /// they change
+    pub lamps: Vec<crate::lamps::Lamp>,
+    pub lamps_rev: u64,
     /// the environment picture in use: its path, as given (one that is not absolute is looked for in the
     /// program's folder)
     pub hdri: Option<String>,
@@ -360,7 +366,7 @@ impl State {
         let mut s = Self {
             families, fam, shapes, stack: Stack::new(), parked: vec![None], p: Settings::default(), render: RenderOpts::default(),
             r0: I3, theta: 0.0, r: I3, lphi: 0.0, playing: false, clock: 0.0, tracks: BTreeMap::new(), moved: BTreeMap::new(), rest: BTreeMap::new(),
-            rendering: false, want: None, cut: true, flash_planes: false, rigs, lights_rev: 0, hdri: None, body_mats: Default::default(),
+            rendering: false, want: None, cut: true, flash_planes: false, rigs, lights_rev: 0, lamps: Vec::new(), lamps_rev: 0, hdri: None, body_mats: Default::default(),
             first_scene: true, args: args.to_vec(), auto,
         };
         s.set_scene(fam);
@@ -752,6 +758,8 @@ impl State {
         v.extend(self.layer_knob_list());
         // ... and the materials of the bodies that have one of their own
         for layer in 1..self.body_mats.len() { v.extend(self.body_knobs(layer)); }
+        // ... and the lamps'
+        v.extend(self.lamp_knobs());
         v
     }
     pub fn get(&self, r: &KnobRef) -> f64 {
@@ -761,6 +769,7 @@ impl State {
             KnobRef::Of(layer, r) => self.layer_shape(*layer).map_or(0.0, |st| st.knob(r)),
             KnobRef::Place(layer, c) => self.stack.place(*layer, *c),
             KnobRef::Combo(mask, o) => self.stack.opt(*mask, *o).unwrap_or(0.0),
+            KnobRef::Lamp(i, c) => self.lamp_get(*i, *c),
             KnobRef::Body(layer, name) => self.body_settings(*layer).get(name).unwrap_or(0.0),
             r => self.shape().knob(r),
         }
@@ -776,6 +785,7 @@ impl State {
             KnobRef::Of(layer, r) => { if let Some(st) = self.layer_shape_mut(*layer) { st.set_knob(r, v); } }
             KnobRef::Place(layer, c) => self.stack.set_place(*layer, *c, v),
             KnobRef::Combo(mask, o) => { self.stack.set_opt(*mask, *o, v); }
+            KnobRef::Lamp(i, c) => self.lamp_set(*i, *c, v),
             // (a slider of a material the body no longer has does nothing)
             KnobRef::Body(layer, name) => { if self.body_own(*layer) { self.body_set(*layer, name, v); } }
             r => self.shape_mut().set_knob(r, v),
@@ -952,7 +962,7 @@ impl State {
     }
     /// Is this one of the names `apply_arg` takes for the lights or the environment picture?
     pub fn is_light_arg(name: &str) -> bool {
-        matches!(name, "rig" | "ambient" | "hdri") || Self::light_arg(name).is_some()
+        matches!(name, "rig" | "ambient" | "hdri" | "lamps") || Self::light_arg(name).is_some() || name.strip_prefix("lamp").is_some_and(|r| r.starts_with(|c: char| c.is_ascii_digit()))
     }
     /// `light3` or `light3.az`: which light (counted from 1) and which part of it.
     fn light_arg(name: &str) -> Option<(usize, &str)> {
@@ -1345,6 +1355,7 @@ impl State {
         let num = value.trim().parse::<f64>().ok().filter(|v| v.is_finite());
         if let Some(done) = self.apply_body_arg(name, value) { return done; }
         if let Some(done) = self.apply_layer_arg(name, value) { return done; }
+        if let Some(done) = self.apply_lamp_arg(name, value) { return done; }
         match name {
             "scene" => match self.families.iter().position(|f| f.id == value) {
                 Some(i) => { self.set_scene(i); true }

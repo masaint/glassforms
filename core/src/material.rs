@@ -207,6 +207,8 @@ pub struct Variant {
     pub inner: crate::inner::Parts,
     /// the surface's wear, polishing lines or uneven colour (a material other than plain glass)
     pub wear: bool,
+    /// lamps stand in the scene: a tracer of the material kind is wanted even for plain glass (lamps.rs)
+    pub near: bool,
 }
 
 impl Variant {
@@ -239,6 +241,7 @@ impl Variant {
             // (met along straight stretches inside a solid body: not with the ways of travelling that wander or curve)
             inner: crate::inner::Parts::of(p, !metal && !hollow && !walk && (biref || p.grin == 0.0)),
             wear: p.wear > 0.0 || p.brush > 0.0 || p.mottle > 0.0,
+            near: false,
         };
         // (light that wanders is followed once, whatever its colour; and nothing bends in a thin wall)
         Self { mono: !v.plain() && !metal && (p.disp == 0.0 || walk || hollow), ..v }
@@ -886,13 +889,14 @@ pub static NAMED: &[Named] = &[
     named!("truejade", "jade, true scattering", "exotic", "Jade with the light followed as it wanders inside. Grainy until it settles: for still views and video.", [("ior", 1.61), ("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.055), ("bodyR", 0.33), ("bodyG", 0.53), ("bodyB", 0.28), ("rough", 0.08), ("sssWalk", 1.0), ("wear", 0.25)], absorb CLEAR, costly),
     named!("gradient", "gradient-index glass", "exotic", "Glass whose index rises below the surface, so that rays curve inside it.", [("grin", 0.35), ("grinDepth", 0.02)], costly),
     // ---- inside the body (added after everything else: a saved setup keeps a material by its position in this list)
-    named!("crackedquartz", "cracked quartz", "fractures", "Rock crystal with a few large fractures inside: each flashes like a mirror when the angle is right.", [("ior", 1.5460), ("disp", 0.0171), ("cracks", 0.8), ("crackSize", 0.4), ("crackOpen", 0.9), ("crackCurve", 0.15), ("crackRough", 0.15), ("crackSeed", 3.0)], absorb CLEAR),
-    named!("irisquartz", "iris quartz", "fractures", "Rock crystal whose fractures stand open by less than a thousandth of a millimetre: rainbow bands that follow each crack's edge.", [("ior", 1.5460), ("disp", 0.0171), ("cracks", 0.8), ("crackSize", 0.45), ("crackOpen", 0.52), ("crackCurve", 0.15), ("crackSeed", 5.0)], absorb CLEAR),
+    named!("crackedquartz", "cracked quartz", "fractures", "Rock crystal with fractures through it: healed veils, cracks held open in patches, a fan from one blow. Unseen until one catches the light, then a silver or rainbow flash.", [("ior", 1.5460), ("disp", 0.0171), ("fractures", 0.35), ("crackOpen", 0.62), ("crackCurve", 0.15), ("crackSeed", 3.0)], absorb CLEAR),
+    named!("flakequartz", "flaked quartz", "fractures", "Rock crystal full of small flat flakes: each a mirror at its own angle.", [("ior", 1.5460), ("disp", 0.0171), ("cracks", 0.8), ("crackSize", 0.4), ("crackOpen", 0.9), ("crackCurve", 0.15), ("crackRough", 0.15), ("crackSeed", 3.0)], absorb CLEAR),
+    named!("irisquartz", "iris quartz", "fractures", "Rock crystal whose fractures stand open by less than a thousandth of a millimetre: rainbow bands that follow each crack's edge.", [("ior", 1.5460), ("disp", 0.0171), ("fractures", 0.5), ("crackOpen", 0.45), ("crackCurve", 0.1), ("crackSeed", 5.0)], absorb CLEAR),
     named!("crackle", "crackle glass", "fractures", "Glass shocked by heat: full of small cracks, every face a mirror at its own angle.", [("disp", 0.0), ("cracks", 1.0), ("crackSize", 0.1), ("crackDepth", 0.3), ("crackOpen", 0.9), ("crackCurve", 0.7), ("crackSeed", 1.0)], absorb CLEAR),
-    named!("crackedice", "cracked ice", "fractures", "Clear ice with white fracture sheets through it.", [("ior", 1.3110), ("disp", 0.0125), ("cracks", 0.8), ("crackSize", 0.7), ("crackOpen", 0.95), ("crackCurve", 0.25), ("crackRough", 0.4), ("crackSeed", 2.0)], absorb [0.05, 0.012, 0.004]),
-    named!("whiteopal", "white opal", "opal", "Precious opal on a milky white body: patches of pure colour that change as the stone turns.", [("ior", 1.45), ("disp", 0.0), ("sss", 0.35), ("sssDepth", 0.15), ("bodyR", 0.72), ("bodyG", 0.75), ("bodyB", 0.8), ("play", 1.0), ("playSize", 0.15), ("playColour", 0.85), ("playSoft", 0.12)], absorb CLEAR),
+    named!("crackedice", "cracked ice", "fractures", "Clear ice with white fracture sheets through it.", [("ior", 1.3110), ("disp", 0.0125), ("fractures", 0.7), ("crackOpen", 0.95), ("crackCurve", 0.35), ("crackRough", 0.5), ("crackSeed", 2.0)], absorb [0.05, 0.012, 0.004]),
+    named!("whiteopal", "white opal", "opal", "Precious opal on a milky white body: patches of pure colour that change as the stone turns.", [("ior", 1.45), ("disp", 0.0), ("sss", 0.35), ("sssDepth", 0.15), ("bodyR", 0.72), ("bodyG", 0.75), ("bodyB", 0.8), ("play", 1.0), ("playSize", 0.15), ("playColour", 0.85), ("playSoft", 0.25)], absorb CLEAR),
     named!("blackopal", "black opal", "opal", "Precious opal on a dark body: the colours glow out of black.", [("ior", 1.45), ("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.08), ("bodyR", 0.04), ("bodyG", 0.045), ("bodyB", 0.06), ("play", 1.0), ("playSize", 0.16), ("playColour", 1.0), ("playSoft", 0.22)], absorb [4.0, 4.0, 3.5]),
-    named!("crystalopal", "crystal opal", "opal", "Precious opal that is nearly clear: the colours float inside the stone.", [("ior", 1.45), ("disp", 0.005), ("sss", 0.04), ("sssDepth", 1.0), ("bodyR", 0.95), ("bodyG", 0.96), ("bodyB", 1.0), ("play", 1.0), ("playSize", 0.14), ("playColour", 0.8), ("playSoft", 0.12)], absorb [0.01, 0.012, 0.02]),
+    named!("crystalopal", "crystal opal", "opal", "Precious opal that is nearly clear: the colours float inside the stone.", [("ior", 1.45), ("disp", 0.005), ("sss", 0.04), ("sssDepth", 1.0), ("bodyR", 0.95), ("bodyG", 0.96), ("bodyB", 1.0), ("play", 1.0), ("playSize", 0.14), ("playColour", 0.8), ("playSoft", 0.25)], absorb [0.01, 0.012, 0.02]),
     named!("fireopal", "fire opal", "opal", "Orange, nearly clear opal with a few points of colour.", [("ior", 1.44), ("disp", 0.004), ("sss", 0.06), ("sssDepth", 0.5), ("bodyR", 1.0), ("bodyG", 0.6), ("bodyB", 0.3), ("play", 0.4), ("playSize", 0.25), ("playColour", 0.8), ("playSoft", 0.12)], absorb [0.15, 2.6, 8.0]),
     named!("biquartz", "rock crystal, doubly refracting", "quartz", "Clear quartz with its weak double refraction (every ray is traced twice) and a few fractures.", [("ior", 1.5442), ("disp", 0.0171), ("biref", 0.0091), ("birefEl", 90.0), ("cracks", 0.15), ("crackSize", 0.6), ("crackOpen", 0.85), ("crackSeed", 7.0)], absorb CLEAR, costly),
     named!("chalcedony", "chalcedony", "quartz", "Quartz in crystals too small to see: a waxy, cloudy blue-grey body with faint bands.", [("ior", 1.535), ("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.12), ("bodyR", 0.82), ("bodyG", 0.86), ("bodyB", 0.92), ("rough", 0.15), ("grad", 0.6), ("gradMode", 2.0), ("gradBands", 9.0), ("gradR", 0.75), ("gradG", 0.82), ("gradB", 0.95), ("gradSoft", 0.4), ("gradWave", 0.4)], absorb CLEAR),
@@ -1038,7 +1042,8 @@ pub static CONTROLS: &[Control] = &[
     ctl("gradSoft", "how gradual", Slider, 0.0, 2.0, 0.01, true, Lab("tint through the body"), "0: a sharp line between the two tints. Larger: a long gentle change."),
     ctl("gradBands", "bands", Slider, 1.0, 30.0, 0.1, true, Lab("tint through the body"), "How many bands there are from the middle to the outside."),
     ctl("gradWave", "band waviness", Slider, 0.0, 1.0, 0.01, true, Lab("tint through the body"), "How far the bands wander from true rings."),
-    ctl("cracks", "cracks", Slider, 0.0, 1.0, 0.01, false, Lab("cracks"), "How many cracks there are inside the body (0 = none)."),
+    ctl("fractures", "fractures", Slider, 0.0, 1.0, 0.01, false, Lab("cracks"), "Fracture surfaces running through the whole body, as in imperfect quartz and ice (0 = none): healed veils of tiny inclusions, cracks held open in patches, rainbow cleavages, and from 0.45 a fan spreading from one point. Mostly unseen until one catches the light."),
+    ctl("cracks", "cracks", Slider, 0.0, 1.0, 0.01, false, Lab("cracks"), "How many small cracks or flakes there are inside the body (0 = none)."),
     ctl("crackGrow", "crack growth", Slider, 0.0, 1.0, 0.005, true, Lab("cracks"), "How far the cracks have grown: at 0 there are none; they start one after another, spread from where they began and (when they are kept near the surface) run inwards. Animate it to watch the body crack."),
     ctl("crackSize", "crack size", Slider, 0.02, 1.0, 0.005, false, Lab("cracks"), "How large the largest cracks are: small for a fine crackle, large for a few great fracture planes."),
     ctl("crackDepth", "crack depth", Slider, 0.0, 1.0, 0.01, true, Lab("cracks"), "How far below the surface cracks reach: small for cracks that only run in from the surface, 1 for cracks all through the body."),

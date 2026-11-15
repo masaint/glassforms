@@ -15,6 +15,8 @@ exe, out, tag = os.path.abspath(sys.argv[1]), sys.argv[2], sys.argv[3]
 extra = sys.argv[4:]
 os.makedirs(out, exist_ok=True)
 COMMON = ['w=' + os.environ.get('GROUND_W', '480'), 'h=' + os.environ.get('GROUND_H', '270'), 'scene=studio', 'preset=sphere', 'floor=1', 'cast=2']
+if os.environ.get('GROUND_COMMON') is not None:
+    COMMON = ['w=' + os.environ.get('GROUND_W', '480'), 'h=' + os.environ.get('GROUND_H', '270')] + json.loads(os.environ['GROUND_COMMON'])
 SHOTS = json.loads(os.environ.get('GROUND_SHOTS', 'null')) or [
     ['elev=60', 'rig=0,45,3,3,30,30,30'],
     ['elev=60', 'rig=90,45,3,3,30,30,30'],

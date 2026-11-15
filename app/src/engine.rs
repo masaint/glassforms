@@ -134,6 +134,8 @@ pub struct Engine {
     lights_lit: bool,
     /// the family's lights as nine smooth terms (worked out only when clay needs them)
     rig_sh: Option<Sh9>,
+    /// what the tracer was last told of the lamps (lamps.rs)
+    last_lamps: Option<crate::lamps::LampsU>,
     /// what turns a panorama into what the tracer reads: made the first time it is needed, by
     /// whichever thread needs it first (its pipelines take a moment to build)
     maker: Arc<OnceLock<Maker>>,
@@ -201,7 +203,7 @@ impl Engine {
         let lights_tex = renderer.env_target(env::ENV_W as u32, env::ENV_H as u32);
         let lights_view = lights_tex.create_view(&wgpu::TextureViewDescriptor::default());
         let mut e = Self {
-            baker: Baker::new(&gpu), layers: LayerWork::new(&gpu), models: crate::mesh_bake::Models::new(auto), bubbler: Bubbler::new(&gpu), stage: crate::stage::StageWork::new(auto), bubbles_in: None, body_bubbles_in: None, scatter: Scatter::new(&gpu), glow: glow::Kept::default(), shape_no: 0, thickness: None, fit_now: 1.0, soft_ok: false, bodies_always: false, body_thick: None, gpu, state, renderer, cast, lights_tex, lights_view, painted: None, painted_px: Vec::new(), lights_lit: true, rig_sh: None,
+            baker: Baker::new(&gpu), layers: LayerWork::new(&gpu), models: crate::mesh_bake::Models::new(auto), bubbler: Bubbler::new(&gpu), stage: crate::stage::StageWork::new(auto), bubbles_in: None, body_bubbles_in: None, scatter: Scatter::new(&gpu), glow: glow::Kept::default(), shape_no: 0, thickness: None, fit_now: 1.0, soft_ok: false, bodies_always: false, body_thick: None, gpu, state, renderer, cast, lights_tex, lights_view, painted: None, painted_px: Vec::new(), lights_lit: true, rig_sh: None, last_lamps: None,
             maker: Arc::new(OnceLock::new()), picture: None, picture_no: 0, glass: None, glass_from: None, hdri_seen: None, loading: None, next: None, building: false, hdri_error: None, hdri_wait: auto,
             show_wanted: Cell::new(false), show: None, shown: None, lighting_no: 0, last_lu: None,
             dirty: true, cut: true, last_tu: None, last_look: None,
@@ -380,6 +382,10 @@ impl Engine {
         // follows a ray from body to body (not under clay, which hides what things are made of)
         // (it is built with the parts any of the bodies uses, and each body chooses among them)
         if let Some(mats) = self.several_bodies().filter(|_| !clay).and_then(|_| self.state.body_materials()) { mat = material::Variant::of_bodies(&mats); }
+        // lamps standing in the scene: plain glass is then drawn by the material tracer, which meets them
+        // for next to nothing (lamps.rs); without a lamp nothing here changes
+        let near = !self.state.lamps.is_empty();
+        if near && !clay && mat.plain() { mat = material::Variant { near: true, mono: p.disp == 0.0, ..mat }; }
         let v = Variant {
             // (clay takes its light from the nine terms, whatever the lighting; a glaze over it reflects
             // the lighting itself, so then the picture is read after all)
@@ -391,6 +397,7 @@ impl Engine {
             // (the studio's floor shows what the bodies cast on it while anything casts)
             stage: crate::stage::Seen { cast: casting && self.cast.floor, ..crate::stage::StageWork::seen(&self.state) },
             denoise: crate::denoise::wanted(&mat, clay, p.denoise),
+            near,
         };
         // 3. is that tracer built? If not it is being built: carry on as things were
         // (and with the lens that is on: the plain one, or the first ray traced through the camera's own arithmetic)
@@ -465,6 +472,17 @@ impl Engine {
         }
         changed |= self.material_upkeep(v.mat);
         changed |= self.stage_upkeep();
+        // where the lamps stand as the camera sees them (they move in the picture when the view or the lights turn)
+        if near {
+            let lu = crate::lamps::uniforms(&self.state);
+            if self.last_lamps != Some(lu) {
+                self.renderer.set_lamps(&lu);
+                self.last_lamps = Some(lu);
+                changed = true;
+            }
+        } else {
+            self.last_lamps = None;
+        }
         if changed { self.dirty = true; }
         // 5. the small picture of the lighting, drawn again only when the lighting it shows has changed
         if self.show_wanted.get() { self.draw_preview(); }

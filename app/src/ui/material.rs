@@ -185,7 +185,7 @@ const STACK: [Layer; 5] = [
         title: "in it",
         bare: "nothing",
         rows: &[
-            ("bubbles", ""), ("bubbleSize", "bubbles"), ("bubbleEven", "bubbles"), ("bubbleShape", "bubbles"), ("bubbleSeed", "bubbles"), ("cracks", ""), ("crackGrow", "cracks"),
+            ("bubbles", ""), ("bubbleSize", "bubbles"), ("bubbleEven", "bubbles"), ("bubbleShape", "bubbles"), ("bubbleSeed", "bubbles"), ("fractures", ""), ("cracks", ""), ("crackGrow", "cracks"),
             ("crackSize", "cracks"), ("crackDepth", "cracks"), ("crackOpen", "cracks"), ("crackCurve", "cracks"), ("crackRough", "cracks"), ("crackSeed", "cracks"), ("play", ""),
             ("playPattern", "play"), ("playSize", "play"), ("playColour", "play"), ("playSoft", "play"), ("playRoll", "play"), ("playSeed", "play"), ("glintR", "play"), ("silk", ""),
             ("silkAz", "silk"), ("silkEl", "silk"), ("silkSoft", "silk"), ("silkWave", "silk"), ("glow", ""), ("glowR", "glow"), ("glowCore", "glow"), ("piezo", ""),

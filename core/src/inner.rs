@@ -18,8 +18,10 @@ use crate::settings::Settings;
 pub struct Parts {
     /// the tint changes through the body
     pub grad: bool,
-    /// there are cracks in the body
+    /// there are cracks in the body (small sheets in a lattice, or volume fractures, or both)
     pub crack: bool,
+    /// ... among them volume fractures (they read the softened lights)
+    pub frac: bool,
     /// ... which reach only so far below the surface (the tracer then reads the depth at each)
     pub crack_depth: bool,
     /// ... and whose faces are rough (they read the lights softened)
@@ -38,12 +40,13 @@ impl Parts {
     /// `solid`: the body has an inside that light travels through in straight lines (not a metal, not a
     /// thin wall, and not one of the ways of travelling that wander or curve).
     pub fn of(p: &Settings, solid: bool) -> Self {
-        let crack = solid && p.cracks > 0.0 && p.crack_grow > 0.0 && p.crack_open > 0.0;
+        let crack = solid && (p.cracks > 0.0 || p.fractures > 0.0) && p.crack_grow > 0.0 && p.crack_open > 0.0;
         let play = solid && p.play > 0.0;
         Self {
             grad: solid && p.grad > 0.0,
             crack,
-            crack_depth: crack && p.crack_depth < DEPTH_ALL,
+            frac: crack && p.fractures > 0.0,
+            crack_depth: crack && p.cracks > 0.0 && p.crack_depth < DEPTH_ALL,
             crack_rough: crack && p.crack_rough > 0.0,
             play,
             glitter: play && p.play_pattern.round() as i64 == GLITTER,
@@ -57,16 +60,16 @@ impl Parts {
     }
 
     /// The names the tracer's source is cut by (`//#if CRACK` and so on).
-    pub fn flags(&self) -> [(&'static str, bool); 9] {
+    pub fn flags(&self) -> [(&'static str, bool); 10] {
         [
-            ("INNER", self.any()), ("GRAD", self.grad), ("CRACK", self.crack), ("CRACK_DEPTH", self.crack_depth), ("CRACK_ROUGH", self.crack_rough),
+            ("INNER", self.any()), ("GRAD", self.grad), ("CRACK", self.crack), ("FRACT", self.frac), ("CRACK_DEPTH", self.crack_depth), ("CRACK_ROUGH", self.crack_rough),
             ("PLAY", self.play), ("GLITTER", self.glitter), ("SILK", self.silk), ("PIEZO", self.piezo),
         ]
     }
 
     /// Does the tracer need the softened copies of the lights' map for these?
     pub fn soft_lights(&self) -> bool {
-        self.crack_rough || self.play || self.silk
+        self.crack_rough || self.frac || self.play || self.silk
     }
 
     /// A short name, added to the variant's.
@@ -83,13 +86,14 @@ impl Parts {
             Parts { grad: true, ..d },
             c,
             Parts { crack_depth: true, ..c },
+            Parts { frac: true, ..c },
             Parts { crack_rough: true, ..c },
             Parts { crack_depth: true, crack_rough: true, piezo: true, ..c },
             o,
             Parts { glitter: true, ..o },
             Parts { silk: true, ..d },
             Parts { piezo: true, ..d },
-            Parts { grad: true, crack: true, crack_depth: true, crack_rough: true, play: true, silk: true, piezo: true, glitter: false },
+            Parts { grad: true, crack: true, frac: true, crack_depth: true, crack_rough: true, play: true, silk: true, piezo: true, glitter: false },
             Parts { grad: true, crack: true, play: true, glitter: true, silk: true, piezo: true, ..d },
         ]
     }
@@ -101,7 +105,7 @@ impl Parts {
 pub const RESET: &[(&str, f64)] = &[
     ("grad", 0.0), ("gradMode", 0.0), ("gradR", 0.55), ("gradG", 0.85), ("gradB", 1.0), ("gradAz", 0.0), ("gradEl", 90.0),
     ("gradOffset", 0.0), ("gradSoft", 0.6), ("gradBands", 6.0), ("gradWave", 0.3),
-    ("cracks", 0.0), ("crackSize", 0.25), ("crackDepth", 1.0), ("crackOpen", 0.8), ("crackGrow", 1.0), ("crackCurve", 0.5), ("crackRough", 0.0), ("crackSeed", 1.0),
+    ("fractures", 0.0), ("cracks", 0.0), ("crackSize", 0.25), ("crackDepth", 1.0), ("crackOpen", 0.8), ("crackGrow", 1.0), ("crackCurve", 0.5), ("crackRough", 0.0), ("crackSeed", 1.0),
     ("play", 0.0), ("playSize", 0.12), ("playPattern", 0.0), ("playColour", 0.8), ("playSoft", 0.3), ("playRoll", 0.0), ("playSeed", 1.0),
     ("glintR", 1.0), ("glintG", 0.85), ("glintB", 0.6),
     ("silk", 0.0), ("silkAz", 0.0), ("silkEl", 0.0), ("silkSoft", 0.3), ("silkWave", 0.0),
@@ -117,12 +121,12 @@ pub fn owns(name: &str) -> bool {
 pub fn applies(name: &str, p: &Settings, solid: bool) -> bool {
     let i = Parts::of(p, solid);
     match name {
-        "grad" | "cracks" | "play" | "silk" | "piezo" => solid,
-        "crackGrow" => solid && p.cracks > 0.0,
+        "grad" | "cracks" | "fractures" | "play" | "silk" | "piezo" => solid,
+        "crackGrow" | "crackOpen" | "crackCurve" | "crackRough" | "crackSeed" => solid && (p.cracks > 0.0 || p.fractures > 0.0),
         "gradBands" | "gradWave" => i.grad && p.grad_mode.round() as i64 == 2,
         "gradAz" | "gradEl" => i.grad && p.grad_mode.round() as i64 == 0,
         n if n.starts_with("grad") => i.grad,
-        "crackRough" | "crackSize" | "crackDepth" | "crackOpen" | "crackCurve" | "crackSeed" => solid && p.cracks > 0.0,
+        "crackSize" | "crackDepth" => solid && p.cracks > 0.0,
         "playColour" => i.play && !i.glitter,
         "glintR" | "glintG" | "glintB" => i.glitter,
         n if n.starts_with("play") => i.play,
@@ -146,7 +150,7 @@ pub fn choices(name: &str) -> Vec<&'static str> {
 /// Bands the visible spectrum is divided into when a crack's colours are worked out.
 pub const BANDS: usize = 8;
 /// Rows of four numbers in the block the tracer reads (`IU` in inner.wgsl).
-pub const IU_ROWS: usize = 3 + BANDS + 13;
+pub const IU_ROWS: usize = 3 + BANDS + 16;
 pub const IU_FLOATS: usize = IU_ROWS * 4;
 
 /// `crackDepth` at or above this means cracks everywhere in the body (the depth is then not read at all).
@@ -229,24 +233,36 @@ pub struct Pattern {
     pub flat: f64,
     /// how closely the grains of one patch share a direction (1: they flash as one block)
     pub together: f64,
-    /// a patch's width, in grains
+    /// a domain's width, in grains
     pub patch: f64,
+    /// how ragged the domains' outlines are (little: straight-edged blocks)
+    pub warp: f64,
+    /// how strongly stacking faults streak the colour
+    pub streak: f64,
 }
 
 /// What a grain of each pattern is: blocks side by side (harlequin), small scattered points (pinfire),
 /// great patches that flash together (broad flash), or platelets.
 pub fn pattern(p: &Settings) -> Pattern {
-    let (size, cover, roll, flat, together, patch) = match p.play_pattern.round() as i64 {
-        1 => (0.45, 0.6, 0.0, 0.7, 0.35, 2.2),
-        2 => (1.5, 1.0, 0.55, 0.5, 0.95, 3.5),
-        3 => (0.6, 0.3, 0.0, 1.0, 0.0, 1.0),
-        _ => (1.0, 0.7, 0.0, 0.55, 0.85, 3.5),
+    let (size, cover, roll, flat, together, patch, warp, streak) = match p.play_pattern.round() as i64 {
+        1 => (0.4, 0.65, 0.0, 0.7, 0.3, 2.5, 0.35, 0.5),
+        2 => (1.4, 1.0, 0.55, 0.5, 0.9, 4.0, 0.45, 0.8),
+        3 => (0.6, 0.3, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0),
+        _ => (1.0, 0.8, 0.0, 0.6, 0.8, 2.2, 0.12, 0.65),
     };
-    Pattern { size, cover, roll, flat, together, patch }
+    Pattern { size, cover, roll, flat, together, patch, warp, streak }
 }
 
 /// How much of its band a grain of opal sends back at the middle of the band.
 pub const GRAIN_R: f64 = 0.9;
+
+/// How many volume fractures there are for `fractures` 0 to 1: those of a fan, great ones, smaller ones.
+pub fn fracture_counts(f: f64) -> (usize, usize, usize) {
+    if f <= 0.0 { return (0, 0, 0); }
+    let f = f.min(1.0);
+    let fan = if f >= 0.45 { 5 } else { 0 };
+    (fan, 1 + (3.0 * f).round() as usize, (14.0 * f).round() as usize)
+}
 
 /// The colour that is the second tint, said as absorption per unit length (as `absorb` is the first).
 pub fn grad_absorb(p: &Settings) -> [f64; 3] {
@@ -329,6 +345,12 @@ pub fn uniforms(p: &Settings, scale: f64, pixel: f64, tint: [f64; 3]) -> [f32; I
     put(r + 11, [col[0] * body, col[1] * body, col[2] * body, g * PIEZO_RIM]);
     // ---- opal's grains: how flat, how they gather into patches, how much of their band they send back
     put(r + 12, [pat.flat, pat.together, pat.patch, GRAIN_R]);
+    put(r + 13, [pat.warp, pat.streak, 0.0, 0.0]);
+
+    // ---- volume fractures: a few great sheets, more smaller ones, and from 0.45 on a fan of five
+    let (nfan, nbig, nmed) = fracture_counts(p.fractures);
+    put(r + 14, [gap_nm(p.crack_open), SHAPE, p.crack_seed.round().rem_euclid(4096.0), (nfan + nbig + nmed) as f64]);
+    put(r + 15, [nfan as f64, nbig as f64, 0.0, 0.0]);
     u
 }
 
