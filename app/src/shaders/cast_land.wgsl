@@ -41,7 +41,8 @@ fn putAt(level: u32, x: vec3f, a: vec3f, seed: u32) {
   }
 }
 // The same for light landed on the floor: its maps come after the volumes in the same run of numbers,
-// and x holds the place on the floor in its first two numbers.
+// and x holds the place on the floor in its first two numbers. The floor's maps all have the same texels a
+// side; each covers twice the width of the one before (finest round the middle, under the shape).
 fn putOnFloor(level: u32, x: vec3f, a: vec3f, seed: u32) {
   let res0 = u32(lu.lev.x);
   var base = 0u;
@@ -49,15 +50,19 @@ fn putOnFloor(level: u32, x: vec3f, a: vec3f, seed: u32) {
     let r = res0 >> k;
     base += r * r * r * 3u;
   }
+  // (the first lu.grid.w maps: the same texels a side, each twice as wide as the one before; then maps as
+  // wide as the last of those, each half as fine: a texel of map k is always 2^k texels of the first)
   let map0 = u32(lu.fl2.w);
+  let clip = u32(lu.grid.w);
   for (var k = 0u; k < level; k++) {
-    let r = map0 >> k;
+    let r = map0 >> (max(k + 1u, clip) - clip);
     base += r * r * 3u;
   }
-  let res = i32(map0 >> level);
-  let h = 2.0 * lu.fl1.w / f32(res);
+  let res = i32(map0 >> (max(level + 1u, clip) - clip));
+  let half = lu.fl1.w * exp2(f32(min(level + 1u, clip) - 1u));
+  let h = 2.0 * half / f32(res);
   let q = a * (lu.soft.y * 65536.0 / (h * h));
-  let c = (x.xy / (2.0 * lu.fl1.w) + 0.5) * f32(res) - 0.5;
+  let c = (x.xy / (2.0 * half) + 0.5) * f32(res) - 0.5;
   let i0 = vec2i(floor(c));
   let f = c - floor(c);
   for (var k = 0; k < 4; k++) {
@@ -75,8 +80,17 @@ fn putOnFloor(level: u32, x: vec3f, a: vec3f, seed: u32) {
 // Light that belongs between two levels is shared between them. (Going whole into one or the other by
 // turns would halve the work, but where light is thin the finer level then shows each piece as a speck.)
 // onFloor: it landed on the floor, not on a body.
-fn put(level: f32, x: vec3f, a: vec3f, seed: u32, onFloor: bool) {
-  let l = clamp(level, 0.0, select(lu.lev.y, lu.fl3.w, onFloor) - 1.0);
+// On the floor, a place further out than a map reaches (with a margin, see castFloor) goes to the first
+// map that reaches it.
+fn floorLevelAt(x: vec2f) -> f32 {
+  let m = max(abs(x.x), abs(x.y));
+  return max(ceil(log2(max(m, 1e-6) / (0.9 * lu.fl1.w))), 0.0);
+}
+fn put(level: f32, x: vec3f, a: vec3f, seed_in: u32, onFloor: bool) {
+  let seed = seed_in + u32(lu.grid.z) * 0x632be5abu;
+  var l = level;
+  if (onFloor) { l = max(l, floorLevelAt(x.xy)); }
+  l = clamp(l, 0.0, select(lu.lev.y, lu.fl3.w, onFloor) - 1.0);
   let l0 = floor(l);
   let fr = l - l0;
   if (onFloor) {
@@ -113,8 +127,7 @@ fn cs_land(@builtin(global_invocation_id) id: vec3u) {
   let f10 = hits[i10]; let f01 = hits[i01]; let f11 = hits[i11];
   let l10 = hits[i10 + last]; let l01 = hits[i01 + last]; let l11 = hits[i11 + last];
   // the light that came in through this cell of the grid
-  let side = 2.0 * one.u.w / f32(n);
-  let light = one.rgb.rgb * (side * side);
+  let light = gridOf(one).light;
   // where this light is kept: the volumes of the bodies, or (rays that left them and met the floor) the
   // floor's maps, which are finer
   let onFloor = ((f00.sig | l00.sig) & 15u) == 15u;

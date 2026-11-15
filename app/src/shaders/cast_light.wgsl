@@ -50,11 +50,17 @@ struct LU {
   gone0: vec4f,      // for each body: BIG if light not yet bent passes it as if it were not there
   gone1: vec4f,      // the same for light already bent
   fl0: vec4f,        // a floor under the shape, in the object's frame. xyz: a point of it   w: 1 = there is one
-  fl1: vec4f,        // xyz: the way up from it   w: half the width of its map of arriving light
+  fl1: vec4f,        // xyz: the way up from it   w: half the width of its finest map of arriving light (each
+                     //    further map covers twice the width of the one before, at the same texels a side)
   fl2: vec4f,        // xyz: one way along it   w: texels a side of the finest map
-  fl3: vec4f,        // xyz: the other way along it   w: how many maps, each half the size
+  fl3: vec4f,        // xyz: the other way along it   w: how many maps
   bands: array<vec4f, 16>,     // the spectrum in 16 bands. rgb: the colour of each (together they make white)
                                // w: how far its bending lies from that of 400 nm (0) towards that of 700 nm (1)
+  grid: vec4f,       // xy: this making's offset of every grid of rays, in cells (0 for the first making after a
+                     //     change; a different one for each making that refines a still picture)
+                     // z: a number that differs for each such making (the scramble that rounds landed light)
+                     // w: how many of the floor's maps are each twice as wide as the one before (the rest are as
+                     //    wide as the last of those, each half as fine)
 }
 struct One {
   dir: vec4f,        // xyz: towards the light, in the object's frame   w: tangent of the angle the light is taken to cover
@@ -84,6 +90,110 @@ struct Hit {
 @group(0) @binding(4) var<storage, read_write> hits: array<Hit>;
 @group(0) @binding(5) var<storage, read_write> acc: array<atomic<i32>>;      // landed light: whole numbers, three a voxel
 @group(0) @binding(6) var coarseTex: texture_3d<f32>;     // the distance to each body at modest detail, one body a channel
+// The box round the bodies that start a caustic, in voxels of coarseTex (cs_bound): [0..3) the largest of
+// (res - i), [3..6) the largest of (i + 1), so that a buffer cleared to nothing holds "no box".
+@group(0) @binding(7) var<storage, read_write> bound: array<atomic<i32>, 8>;
+
+// ---- where each light's rays are sent ---------------------------------------------------------------------
+//
+// A ray that meets no body that bends or reflects light carries no caustic, so the rays are sent only
+// across the box round those bodies (made from the coarse distances every making), not across the whole
+// scene: for a shape that fills a third of the scene's width that is nine times the rays on it.
+
+var<workgroup> wb: array<atomic<i32>, 6>;
+
+@compute @workgroup_size(4, 4, 4)
+fn cs_bound(@builtin(global_invocation_id) id: vec3u, @builtin(local_invocation_index) li: u32) {
+  if (li < 6u) { atomicStore(&wb[li], 0); }
+  workgroupBarrier();
+  let res = u32(lu.soft.z);
+  if (all(id < vec3u(res))) {
+    let d = textureLoad(coarseTex, vec3i(id), 0);
+    let hc = 2.0 * HB / f32(res);
+    var hit = false;
+    for (var k = 0; k < 4; k++) {
+      let s = lu.body[k].a.z;
+      if ((s == 1.0 || s == 2.0) && dot(d, lu.body[k].mask) < 1.5 * hc) { hit = true; }
+    }
+    if (hit) {
+      let r = i32(res);
+      let v = vec3i(id);
+      atomicMax(&wb[0], r - v.x); atomicMax(&wb[1], r - v.y); atomicMax(&wb[2], r - v.z);
+      atomicMax(&wb[3], v.x + 1); atomicMax(&wb[4], v.y + 1); atomicMax(&wb[5], v.z + 1);
+    }
+  }
+  workgroupBarrier();
+  if (li < 6u) {
+    let w = atomicLoad(&wb[li]);
+    if (w > 0) { atomicMax(&bound[li], w); }
+  }
+}
+
+// One light's grid of rays as this making sends it.
+struct Grid {
+  c: vec3f,          // its middle
+  a: vec3f,          // its two ways across, and half its width along each
+  b: vec3f,
+  ra: f32,
+  rb: f32,
+  mode: i32,         // 0: parallel rays (a light at infinity); 1: from a lamp through the grid; 2: a lamp among
+                     // the bodies, every way
+  light: vec3f,      // the light that enters through one cell of it
+}
+
+fn gridOf(one: One) -> Grid {
+  var g: Grid;
+  let n = one.v.w;
+  // the box round the bodies that start a caustic (or, if none was found, the whole scene)
+  let res = lu.soft.z;
+  let hc = 2.0 * HB / res;
+  let has = atomicLoad(&bound[3]) > 0;
+  var lo = vec3f(-BOUND);
+  var hi = vec3f(BOUND);
+  if (has) {
+    let i0 = vec3f(res) - vec3f(f32(atomicLoad(&bound[0])), f32(atomicLoad(&bound[1])), f32(atomicLoad(&bound[2])));
+    let i1 = vec3f(f32(atomicLoad(&bound[3])), f32(atomicLoad(&bound[4])), f32(atomicLoad(&bound[5]))) - 1.0;
+    lo = max(((i0 + 0.5) / res * 2.0 - 1.0) * HB - 2.0 * hc, vec3f(-BOUND));
+    hi = min(((i1 + 0.5) / res * 2.0 - 1.0) * HB + 2.0 * hc, vec3f(BOUND));
+  }
+  let c = 0.5 * (lo + hi);
+  let e = 0.5 * (hi - lo);
+  let R = length(e);
+  g.c = c;
+  if (one.at.w < 0.5) {
+    g.mode = 0;
+    g.a = one.u.xyz;
+    g.b = one.v.xyz;
+    g.ra = select(one.u.w, dot(abs(g.a), e), has);
+    g.rb = select(one.u.w, dot(abs(g.b), e), has);
+    g.light = one.rgb.rgb * (4.0 * g.ra * g.rb / (n * n));
+    return g;
+  }
+  // a lamp: its light as a strength (a white surface facing it at distance r shows strength / r^2)
+  let P = one.at.xyz;
+  let I = one.rgb.rgb * select(dot(P, P), one.u.w * one.u.w / 3.14159265, one.at.w > 1.5);
+  let D = distance(P, c);
+  if (D > 1.05 * R) {
+    // outside the box's sphere: through a grid across it, just wide enough to take in the whole sphere
+    g.mode = 1;
+    let w = (P - c) / D;
+    let s = select(-1.0, 1.0, w.z >= 0.0);
+    let q = -1.0 / (s + w.z);
+    let m = w.x * w.y * q;
+    g.a = vec3f(1.0 + s * w.x * w.x * q, s * m, -s * w.x);
+    g.b = vec3f(m, s + w.y * w.y * q, -w.y);
+    g.ra = R * D / sqrt(D * D - R * R);
+    g.rb = g.ra;
+    g.light = I / (D * D) * (4.0 * g.ra * g.rb / (n * n));
+    return g;
+  }
+  // among the bodies: every way from where it stands, each ray standing for the same solid angle
+  g.mode = 2;
+  g.a = one.u.xyz;
+  g.b = one.v.xyz;
+  g.light = I * (4.0 * 3.14159265 / (n * n));
+  return g;
+}
 
 // ---- the bodies ------------------------------------------------------------------------------------------
 
@@ -261,7 +371,7 @@ fn follow(p_in: vec3f, d_in: vec3f, j_in: i32, n_in: vec3f, lam: f32) -> Hit {
         let tf = dot(p - lu.fl0.xyz, lu.fl1.xyz) / down;
         let q = p + d * tf - lu.fl0.xyz;
         let at = vec2f(dot(q, lu.fl2.xyz), dot(q, lu.fl3.xyz));
-        if (tf > 0.0 && max(abs(at.x), abs(at.y)) < lu.fl1.w) {
+        if (tf > 0.0 && max(abs(at.x), abs(at.y)) < 0.9 * lu.fl1.w * exp2(lu.grid.w - 1.0)) {
           out = Hit(at.x, at.y, 0.0, sig * 16u + 15u, pack(w), travel + tf);
         }
       }
@@ -288,20 +398,22 @@ fn cs_follow(@builtin(global_invocation_id) id: vec3u) {
   let base = u32(one.rgb.w) + (id.y * n + id.x) * W;
   let none = Hit(0.0, 0.0, 0.0, 0u, 0u, 0.0);
   for (var k = 0u; k < W; k++) { hits[base + k] = none; }
-  // this ray of the grid: parallel to all the others, from the light's side of the scene
-  let g = (vec2f(id.xy) + 0.5) / f32(n) * 2.0 - 1.0;
+  // this ray of the grid (moved by a part of a cell for each making that refines a still picture)
+  let gr = gridOf(one);
+  let g = clamp((vec2f(id.xy) + 0.5 + lu.grid.xy) / f32(n) * 2.0 - 1.0, vec2f(-1.0), vec2f(1.0));
+  // parallel to all the others, from the light's side of the scene
   var d = -one.dir.xyz;
-  var o = (g.x * one.u.xyz + g.y * one.v.xyz) * one.u.w + one.dir.xyz * BOUND;
-  if (one.at.w > 1.5) {
+  var o = gr.c + g.x * gr.ra * gr.a + g.y * gr.rb * gr.b + one.dir.xyz * (2.0 * BOUND);
+  if (gr.mode == 2) {
     // a lamp among the bodies: every way from where it stands, the grid laid over the sphere of
     // directions so that every ray stands for the same solid angle (round its axis, and evenly in height)
     let ph = 3.14159265 * g.x;
     let r = sqrt(max(1.0 - g.y * g.y, 0.0));
     d = r * cos(ph) * one.u.xyz + r * sin(ph) * one.v.xyz + g.y * one.dir.xyz;
     o = one.at.xyz;
-  } else if (one.at.w > 0.5) {
-    // a lamp: from where it stands, through this point of the grid across the middle
-    d = normalize((g.x * one.u.xyz + g.y * one.v.xyz) * one.u.w - one.at.xyz);
+  } else if (gr.mode == 1) {
+    // a lamp: from where it stands, through this point of the grid across the bodies
+    d = normalize(gr.c + g.x * gr.ra * gr.a + g.y * gr.rb * gr.b - one.at.xyz);
     o = one.at.xyz;
   }
   let b = dot(o, d);

@@ -721,6 +721,12 @@ impl Renderer {
         true
     }
 
+    /// How many frames the still picture has averaged so far (0 while the view moves and the antialiasing
+    /// follows it).
+    pub fn still_frames(&self) -> u32 {
+        if self.was_taa { 0 } else { self.accum_n }
+    }
+
     /// Say whether the view is moving. A rough surface is drawn two ways at once (see `ROUGH_SAMPLED` in
     /// material.rs): while the view moves less of the roughness is sampled and more of it softened, which
     /// costs less and leaves less grain in the few frames a moving picture is made of; once it is still

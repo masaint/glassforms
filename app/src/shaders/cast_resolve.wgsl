@@ -112,12 +112,38 @@ fn cs_resolve(@builtin(global_invocation_id) id: vec3u) {
 
 // The floor's maps. A floor is flat and its maps lie in its plane, so each texel holds exactly a texel's
 // worth of floor: the landed light is light per area already (nothing to divide by).
+// The next map read at uv through a cubic B-spline (four bilinear lookups): a map twice as coarse read
+// bilinearly shows its texels as straight ramps with creases between them, bands in a soft caustic.
+fn smoothCoarser(uv: vec2f) -> vec3f {
+  let size = vec2f(textureDimensions(floorCoarser));
+  let p = uv * size - 0.5;
+  let i = floor(p);
+  let f = p - i;
+  let f2 = f * f;
+  let f3 = f2 * f;
+  let w0 = (1.0 - 3.0 * f + 3.0 * f2 - f3) / 6.0;
+  let w1 = (4.0 - 6.0 * f2 + 3.0 * f3) / 6.0;
+  let w2 = (1.0 + 3.0 * f + 3.0 * f2 - 3.0 * f3) / 6.0;
+  let w3 = f3 / 6.0;
+  let g0 = w0 + w1;
+  let g1 = w2 + w3;
+  let a = (i - 0.5 + w1 / g0) / size;
+  let b = (i + 1.5 + w3 / g1) / size;
+  let s00 = textureSampleLevel(floorCoarser, smp, vec2f(a.x, a.y), 0.0).rgb;
+  let s10 = textureSampleLevel(floorCoarser, smp, vec2f(b.x, a.y), 0.0).rgb;
+  let s01 = textureSampleLevel(floorCoarser, smp, vec2f(a.x, b.y), 0.0).rgb;
+  let s11 = textureSampleLevel(floorCoarser, smp, vec2f(b.x, b.y), 0.0).rgb;
+  return g0.y * (g0.x * s00 + g1.x * s10) + g1.y * (g0.x * s01 + g1.x * s11);
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn cs_floor(@builtin(global_invocation_id) id: vec3u) {
   let res = ru.ku.x;
   if (any(id.xy >= vec2u(res))) { return; }
   let i = ru.ku.y + (id.y * res + id.x) * 3u;
   var e = vec3f(vec3i(acc[i], acc[i + 1u], acc[i + 2u])) * (ru.k.y / 65536.0);
-  if (ru.ku.w == 1u) { e += textureSampleLevel(floorCoarser, smp, (vec2f(id.xy) + 0.5) / f32(res), 0.0).rgb; }
+  // (the next map covers twice the width round the same middle (ru.k.w = 1), or the same width more coarsely)
+  let uv = (vec2f(id.xy) + 0.5) / f32(res);
+  if (ru.ku.w == 1u) { e += smoothCoarser(select(uv, (uv - 0.5) * 0.5 + 0.5, ru.k.w > 0.5)); }
   textureStore(floorOut, vec2i(id.xy), vec4f(e, 1.0));
 }

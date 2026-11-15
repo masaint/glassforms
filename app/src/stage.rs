@@ -135,7 +135,7 @@ pub fn tracer_decl(seen: Seen, picture: bool, shade: &str) -> String {
     out.replace("{{STAGE_BINDING}}", &BINDING.to_string())
         .replace("{{MIRROR_PARAMS}}", if seen.mirror { ", xi: f32, W: i32, fc: vec2f" } else { "" })
         .replace("{{BEHIND}}", if seen.backdrop { "backdropAt(d)" } else if picture { "backdrop(rd)" } else { "vec3f(0.0)" })
-        .replace("{{CAST_FLOOR}}", if seen.cast { "castFloor(p)" } else { "vec3f(1.0)" })
+        .replace("{{CAST_FLOOR}}", if seen.cast { "castFloor(p) + castFloorLight(p)" } else { "vec3f(1.0)" })
         .replace("{{MIRROR}}", if seen.mirror { "stageMirror(ro + rd * tf, r, xi, W, fc)" } else { "env(r)" })
         .replace("{{SHADE}}", shade)
 }

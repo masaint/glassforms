@@ -36,7 +36,9 @@ pub const BODIES_RES: u32 = 192;
 /// light volume worked out beforehand (scatter.rs), and what the bodies cast reaches it there
 /// (`Cast::for_light_volume`), not in the tracer.
 const SITES: [(&str, &str); 2] = [
-    ("  var light = nine(0, toEnv(n));", "  let castM = castAt(p, n);\n  var light = nine(0, toEnv(n)) * castM;"),
+    // (what is hidden multiplies the gathered light; what the bodies focus onto it is added, so that a lamp's
+    // caustic shows however dim the lights at infinity are)
+    ("  var light = nine(0, toEnv(n));", "  let castP = castParts(p, n);\n  let castM = max(castP.total - castP.lost, vec3f(0.0)) / max(castP.total, vec3f(1e-5));\n  var light = nine(0, toEnv(n)) * castM + castP.added;"),
     ("* (sheen * open);", "* (sheen * open * min(dot(castM, vec3f(0.2126, 0.7152, 0.0722)), 1.0));"),
 ];
 /// What a ray from the camera sees where it misses the shape, when nothing lies behind it; and the same
@@ -76,8 +78,8 @@ pub fn weave(src: &str) -> Option<String> {
 /// numbers, two volumes, a sampler and a map: one uniform buffer, three textures and one sampler in all.
 pub fn receiver_layout(gpu: &Gpu) -> wgpu::BindGroupLayout {
     let frag = wgpu::ShaderStages::FRAGMENT;
-    let (d2, d3) = (wgpu::TextureViewDimension::D2, wgpu::TextureViewDimension::D3);
-    gpu.bind_layout("cast", &[uniform_entry(0, frag, false), texture_entry(1, d3, true), texture_entry(2, d3, true), sampler_entry(3), texture_entry(4, d2, true)])
+    let d3 = wgpu::TextureViewDimension::D3;
+    gpu.bind_layout("cast", &[uniform_entry(0, frag, false), texture_entry(1, d3, true), texture_entry(2, d3, true), sampler_entry(3), texture_entry(4, wgpu::TextureViewDimension::D2Array, true)])
 }
 
 /// One light as the tracer is told of it (see cast.wgsl).
@@ -107,6 +109,8 @@ pub struct CastU {
     pub lights: [LightU; MAX_LIGHTS],
     /// for each body: how much of the light from all round it hides from a floor beneath it
     pub veil: [f32; 4],
+    /// the floor's albedo: what it gives back of the light that bodies focus onto it
+    pub floor_albedo: [f32; 4],
 }
 
 #[repr(C)]
@@ -193,7 +197,7 @@ impl Cast {
         let p_bodies = gpu.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("cast: bodies"), layout: Some(&pl), module: &module, entry_point: Some("cs"), compilation_options: Default::default(), cache: None });
         let rgba = wgpu::TextureFormat::Rgba16Float;
         let no_light = gpu.volume("cast: no light", 1, 1, rgba, false).create_view(&wgpu::TextureViewDescriptor::default());
-        let no_map = gpu.target("cast: no light on the floor", 1, 1, rgba, &[]).create_view(&wgpu::TextureViewDescriptor::default());
+        let no_map = gpu.target("cast: no light on the floor", 1, 1, rgba, &[]).create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() });
         Self {
             gpu: gpu.clone(),
             layout: layout.clone(),
@@ -572,7 +576,12 @@ impl Engine {
                     u.floor_share[i] = [(l.rgb[0] * share * strength) as f32, (l.rgb[1] * share * strength) as f32, (l.rgb[2] * share * strength) as f32, 0.0];
                 }
             }
-            u.floor = [f.height as f32, f.half as f32, 1.0, if focusing { 1.0 } else { 0.0 }];
+            // (the floor's maps of arriving light: the finest round the middle, each further one twice as wide)
+            let (nf, half0) = crate::cast_light::floor_levels(f.half);
+            u.floor = [f.height as f32, half0 as f32, 1.0, if focusing { 1.0 } else { 0.0 }];
+            let g = p.floor_gain.max(0.0);
+            u.floor_albedo = [(p.floor_r * g) as f32, (p.floor_g * g) as f32, (p.floor_b * g) as f32, 0.0];
+            u.k2[2] = nf as f32;
             // (and the share of it that comes from all round, not from the lights: the backdrop, the light from
             // everywhere, a picture; the bodies standing over the floor hide part of that too, softly)
             let all_round = 1.0 - shares.iter().zip(&lit.lights).map(|(sh, l)| core::lum(l.rgb) * sh).sum::<f64>() / core::lum(total).max(1e-9);
@@ -589,13 +598,6 @@ impl Engine {
                 res: if p.cast_detail >= 1.5 { 2048 } else { 1024 },
             });
         }
-        if self.cast.last_u != Some(u) {
-            self.gpu.queue.write_buffer(&self.cast.u, 0, bytemuck::bytes_of(&u));
-            self.cast.last_u = Some(u);
-            // (what is cast has changed: the picture so far is out of date)
-            self.dirty = true;
-        }
-
         if focusing {
             let top = lit.lights.first().map_or(0.0, |l| l.weight());
             let (mut ones, mut weights) = (Vec::new(), Vec::new());
@@ -629,9 +631,30 @@ impl Engine {
             let scene = Scene { fine: &fine, fine_res, count, built, casters, march: (m.0, m.1, m.2), res: light_res, coarse, coarse_res: BODIES_RES, floor: floor_in, hb };
             // (a video's frames, and frames averaged for a still, are each made in full)
             let rest = self.state.rendering || self.averaging;
-            let (made, fresh) = self.cast.caustics.run(&scene, &ones, &weights, rest, timed());
+            // (frames the still picture has averaged so far: the first few have the caustics refined)
+            let pass = self.renderer.still_frames();
+            let (made, fresh, refined) = self.cast.caustics.run(&scene, &ones, &weights, rest, timed(), pass);
             if fresh { self.cast.group = None; }
-            if made { self.dirty = true; }
+            // (a making that refines leaves the picture so far as good as it was: it averages on)
+            if made && !refined { self.dirty = true; }
+            // the floor's maps as the last making moved them
+            let sh = self.cast.caustics.shift;
+            u.room[1][3] = sh[0] as f32;
+            u.room[2][3] = sh[1] as f32;
+            // (and while things move the finest of them is not made: the tracer reads from the next)
+            if self.cast.caustics.was_quick() && u.k2[2] > 1.5 { u.k2[3] = 1.0; }
+        }
+        if self.cast.last_u != Some(u) {
+            self.gpu.queue.write_buffer(&self.cast.u, 0, bytemuck::bytes_of(&u));
+            // (what is cast has changed: the picture so far is out of date; unless only the floor's maps
+            // were moved, by a making that refines)
+            let unmoved = |mut x: CastU| {
+                x.room[1][3] = 0.0;
+                x.room[2][3] = 0.0;
+                x
+            };
+            if self.cast.last_u.map(unmoved) != Some(unmoved(u)) { self.dirty = true; }
+            self.cast.last_u = Some(u);
         }
         if focusing != self.cast.focusing {
             self.cast.focusing = focusing;
@@ -675,7 +698,7 @@ mod tests {
     fn the_block_is_laid_out_as_the_shader_declares_it() {
         // 16 + 144 + 64 + 64 (k, the nine terms, the bodies, three rows of switches and k2)
         //   + 48 + 32 + 12 x 16 (the room, the floor and its lights' shares) + 12 x 80 (the lights)
-        assert_eq!(std::mem::size_of::<CastU>(), 16 + 9 * 16 + 4 * 16 + 4 * 16 + 3 * 16 + 2 * 16 + MAX_LIGHTS * 16 + MAX_LIGHTS * 80);
+        assert_eq!(std::mem::size_of::<CastU>(), 16 + 9 * 16 + 4 * 16 + 4 * 16 + 3 * 16 + 2 * 16 + MAX_LIGHTS * 16 + MAX_LIGHTS * 80 + 2 * 16);
         assert!(CAST_WGSL.contains(&format!("lights: array<CastLightU, {MAX_LIGHTS}>")) && CAST_WGSL.contains(&format!("floorShare: array<vec4f, {MAX_LIGHTS}>")));
         assert_eq!(CAST_WGSL.matches(&format!("i < {MAX_LIGHTS}; i++")).count(), 2);
     }

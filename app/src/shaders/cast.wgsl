@@ -26,22 +26,25 @@ struct CastU {
   far: vec4f,                 // for each body: 0 if it casts, a large distance if not (so that it does not shorten the strides)
   k2: vec4f,                  // x: voxels a side of the volume of arriving light (0 = nothing makes caustics)
                               // y: how far off the surface that light was landed (and is read)
+                              // z: how many maps of light on the floor (each twice as wide as the one before)
+                              // w: the finest of them that is made (1 while things move)
   room0: vec4f,               // the room (in which a floor lies level) -> what the camera sees, as three rows
   room1: vec4f,
   room2: vec4f,
-  floor: vec4f,               // x: the floor's height in the room   y: half the width of its map of arriving light
+  floor: vec4f,               // x: the floor's height in the room   y: half the width of its finest map of arriving light
                               // z: 1 = there is a floor   w: 1 = caustics are landed on it
   floorTotal: vec4f,          // rgb: the light an unshadowed floor gathers from the whole lighting
                               // w: the share of it that comes from all round (not from the lights), times the strength of shadows
   floorShare: array<vec4f, 12>,      // rgb: of that, each light's own share (times the strength of shadows)
   lights: array<CastLightU, 12>,
   veil: vec4f,                // for each body: how much of the light from all round it hides from a floor beneath it
+  floorAlbedo: vec4f,         // rgb: the floor's albedo (what it gives back of the light bodies focus onto it)
 }
 @group(1) @binding(0) var<uniform> cu: CastU;
 @group(1) @binding(1) var castBodies: texture_3d<f32>;      // the distance to each body, one a channel, at modest detail
 @group(1) @binding(2) var castLight: texture_3d<f32>;       // light arriving by way of the bodies (caustics), in the object's frame
 @group(1) @binding(3) var castSmp: sampler;
-@group(1) @binding(4) var castOnFloor: texture_2d<f32>;     // the same on the floor: a map of its plane, in the room's frame
+@group(1) @binding(4) var castOnFloor: texture_2d_array<f32>;     // the same on the floor: maps of its plane, in the room's frame
 
 const CAST_STEPS: i32 = 40;
 const CAST_STRIDE: f32 = 0.7;         // the longest stride
@@ -191,15 +194,30 @@ fn castFloor(p: vec3f) -> vec3f {
     if (share.x + share.y + share.z <= 0.0) { continue; }
     lost += share * (vec3f(1.0) - castShadow(ro, cu.lights[i].dir.xyz, cu.lights[i].dir.w));
   }
-  var added = vec3f(0.0);
-  let q = p.xz / (2.0 * cu.floor.y);
-  if (cu.floor.w > 0.5 && max(abs(q.x), abs(q.y)) < 0.5) {
-    added = textureSampleLevel(castOnFloor, castSmp, q + 0.5, 0.0).rgb * cu.k.y;
-  }
   let total = cu.floorTotal.rgb;
   // the light from all round, hidden where bodies stand over the floor: a soft pool of shade under them
   lost += total * (cu.floorTotal.w * castUnder(ro, toObj(nw)));
-  return max(total - lost + added, vec3f(0.0)) / max(total, vec3f(1e-5));
+  return max(total - lost, vec3f(0.0)) / max(total, vec3f(1e-5));
+}
+
+// The light the bodies focus onto the floor at p (room's frame), as the floor gives it back: added to
+// the floor's colour, not a multiple of it. (It was a multiple once, castFloor's, against the light the
+// floor gathers from the lights at infinity: the light a lamp focuses then vanished whenever those were
+// dim or off, and the lamp the only light.)
+fn castFloorLight(p: vec3f) -> vec3f {
+  if (cu.floor.z < 0.5 || cu.floor.w < 0.5) { return vec3f(0.0); }
+  var added = vec3f(0.0);
+  // the floor's maps all have the same texels a side, each covering twice the width of the one before: the
+  // finest that reaches this point, with a margin (light further out than 0.9 of a map's half width was
+  // landed in the next). The maps are moved by a part of a texel for each making that refines a still
+  // picture (room1.w, room2.w), so that the average of the frames shows no texels.
+  let x = p.xz - vec2f(cu.room1.w, cu.room2.w);
+  let lv = min(max(ceil(log2(max(max(abs(x.x), abs(x.y)), 1e-6) / (0.9 * cu.floor.y))), cu.k2.w), cu.k2.z - 1.0);
+  let q = x / (2.0 * cu.floor.y * exp2(lv));
+  if (cu.floor.w > 0.5 && max(abs(q.x), abs(q.y)) < 0.5) {
+    added = textureSampleLevel(castOnFloor, castSmp, q + 0.5, i32(lv), 0.0).rgb * cu.k.y;
+  }
+  return added * cu.floorAlbedo.rgb;
 }
 
 // For checks and for looking (GLASSFORMS_CAST_FLOOR): a plain matte floor drawn where a ray from the camera
@@ -211,7 +229,8 @@ fn castFloorSeen(ro: vec3f, rd: vec3f) -> vec3f {
   let tf = (cu.floor.x - o.y) / d.y;
   if (!(tf > 0.0)) { return vec3f(0.0); }
   let p = o + d * tf;
-  let edge = 1.0 - smoothstep(0.75 * cu.floor.y, 0.98 * cu.floor.y, length(p.xz));
+  let reach = cu.floor.y * exp2(max(cu.k2.z, 1.0) - 1.0);
+  let edge = 1.0 - smoothstep(0.75 * reach, 0.98 * reach, length(p.xz));
   if (edge <= 0.0) { return vec3f(0.0); }
-  return 0.7 * cu.floorTotal.rgb * castFloor(p) * edge;
+  return 0.7 * (cu.floorTotal.rgb * castFloor(p) + castFloorLight(p) / max(cu.floorAlbedo.rgb, vec3f(1e-5))) * edge;
 }

@@ -35,7 +35,7 @@ pub fn light_source() -> String {
 
 /// Rays a side of the grid sent from one light at most: when the picture is at rest, and while things move.
 pub const RAYS_REST: u32 = 768;
-pub const RAYS_MOVING: u32 = 512;
+pub const RAYS_MOVING: u32 = 384;
 /// Rays sent from all the lights together at most, as so many grids of the largest size: the lights
 /// share them by how much light each sends.
 const GRIDS_REST: f64 = 3.0;
@@ -57,8 +57,34 @@ pub const OFF_SURFACE: f64 = 1.0;
 /// eight voxels of the finest volume): where rays part company the light is thin and scattered, and
 /// landed any finer each ray shows as a speck.
 const LONE_LEVEL: f32 = 3.0;
-/// The smallest of a floor's maps is this many texels a side.
+/// A floor's finest map reaches at least this far from the middle (each further map twice as far, all with
+/// the same texels a side, until the last reaches as far as the floor's light is kept).
+const FLOOR_NEAR: f64 = 1.5;
+/// The coarsest of a floor's maps (for light spread wide) is this many texels a side.
 const FLOOR_LEAST: u32 = 128;
+/// Makings that refine a still picture: while the picture is still and averaging frames, each of its first
+/// so many frames is drawn with the caustics made again, every grid of rays moved by a different part of a
+/// cell and the floor's maps by a different part of a texel. The picture's own average of those frames is
+/// then the caustic sampled that many times finer, with no grid and no texels left in it.
+pub const REFINE: u32 = 32;
+
+/// How many maps a floor has whose light is kept out to `half` from the middle, and half the width of the
+/// finest of them.
+pub fn floor_levels(half: f64) -> (u32, f64) {
+    let n = (1.0 + (half / FLOOR_NEAR).log2().floor()).clamp(1.0, 4.0) as u32;
+    (n, half / (1u32 << (n - 1)) as f64)
+}
+
+/// Halton's sequence: a part of 1 that spreads evenly over the makings that refine.
+fn halton(mut i: u32, b: u32) -> f64 {
+    let (mut f, mut r) = (1.0, 0.0);
+    while i > 0 {
+        f /= b as f64;
+        r += f * (i % b) as f64;
+        i /= b;
+    }
+    r
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, PartialEq)]
@@ -80,6 +106,7 @@ struct LightsU {
     gone1: [f32; 4],
     fl: [[f32; 4]; 4],
     bands: [[f32; 4]; 16],
+    grid: [f32; 4],
 }
 
 /// One light's rays (see cast_light.wgsl: `One`).
@@ -176,6 +203,9 @@ pub struct Caustics {
     p_area: wgpu::ComputePipeline,
     p_resolve: wgpu::ComputePipeline,
     p_floor: wgpu::ComputePipeline,
+    p_bound: wgpu::ComputePipeline,
+    /// the box round the bodies that start a caustic (cast_light.wgsl: `bound`)
+    bound: wgpu::Buffer,
     u_lights: wgpu::Buffer,
     u_one: wgpu::Buffer,
     u_resolve: wgpu::Buffer,
@@ -186,14 +216,26 @@ pub struct Caustics {
     acc: Option<wgpu::Buffer>,
     levels: Vec<Level>,
     floor: Vec<Level>,
+    /// the floor's maps as one texture of layers, as the tracer reads them; how many maps there are of
+    /// those (the floor's other maps, each as wide as the last of them and half as fine, follow them in
+    /// `floor`)
+    floor_all: Option<wgpu::TextureView>,
+    floor_clip: u32,
     blank: wgpu::TextureView,
     blank2: wgpu::TextureView,
     /// what the areas were worked out from: the volume, its build, which bodies gather light
     area_from: Option<(wgpu::TextureView, u64, ResolveU)>,
+    /// what the box round the bodies that start a caustic was found from: the coarse volume, its build,
+    /// what each body does to light not yet bent
+    bound_from: Option<(wgpu::TextureView, u64, [f32; 4])>,
     made: Option<Made>,
     /// the last making was the quick one (fewer rays), and something changed in the frame before this
     quick: bool,
     moved: bool,
+    /// which making that refines a still picture the last one was (0: none), and how far the floor's maps were
+    /// moved for it (along the floor's two ways; the tracer must read them moved the same)
+    pub pass: u32,
+    pub shift: [f64; 2],
     /// how many rays the last making sent, how many makings there have been, and (when makings are
     /// timed) the milliseconds the last one took to the end
     pub rays: u64,
@@ -224,12 +266,6 @@ pub fn level_count(res: u32) -> u32 {
     while (res >> n) >= 16 && n < 6 { n += 1; }
     n
 }
-/// How many maps a floor has for a finest one of this size (each half the one before).
-pub fn floor_level_count(res: u32) -> u32 {
-    let mut n = 1;
-    while (res >> n) >= FLOOR_LEAST && n < 6 { n += 1; }
-    n
-}
 
 /// Parts of a making left out, for finding what each costs (`GLASSFORMS_CAST_SKIP=follow,land`: see
 /// tools/cast_bench.py). Read once.
@@ -243,7 +279,7 @@ impl Caustics {
         let c = wgpu::ShaderStages::COMPUTE;
         let (d2, d3) = (wgpu::TextureViewDimension::D2, wgpu::TextureViewDimension::D3);
         let rgba = wgpu::TextureFormat::Rgba16Float;
-        let l_follow = gpu.bind_layout("cast: follow", &[uniform_entry(0, c, false), uniform_entry(1, c, false), tex(2, d3), smp_entry(3), storage_rw(4), storage_rw(5), tex(6, d3)]);
+        let l_follow = gpu.bind_layout("cast: follow", &[uniform_entry(0, c, false), uniform_entry(1, c, false), tex(2, d3), smp_entry(3), storage_rw(4), storage_rw(5), tex(6, d3), storage_rw(7)]);
         let l_ru = gpu.bind_layout("cast: level", &[uniform_entry(0, c, true), tex(1, d3), smp_entry(2)]);
         // a volume of one number a voxel: 16-bit floats where a compute shader can write those, else 32-bit
         let area_format = if gpu.storage16 { wgpu::TextureFormat::R16Float } else { wgpu::TextureFormat::R32Float };
@@ -266,13 +302,15 @@ impl Caustics {
             p_area: pipe("cast: area", &resolve, "cs_area", &[Some(&l_ru), Some(&l_area)]),
             p_resolve: pipe("cast: resolve", &resolve, "cs_resolve", &[Some(&l_ru), Some(&l_resolve)]),
             p_floor: pipe("cast: floor", &resolve, "cs_floor", &[Some(&l_ru), Some(&l_floor)]),
+            p_bound: pipe("cast: bound", &light, "cs_bound", &[Some(&l_follow)]),
+            bound: gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("cast: bound"), size: 32, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }),
             l_follow, l_ru, l_area, l_resolve, l_floor,
             u_lights: gpu.uniform_buffer("cast: lights", std::mem::size_of::<LightsU>() as u64),
             u_one: gpu.uniform_buffer("cast: the lights' rays", (std::mem::size_of::<OneU>() * core::MAX_CAUSTIC_LIGHTS) as u64),
             u_resolve: gpu.uniform_buffer("cast: levels", BLOCK * 16),
             area_format,
-            hits: None, acc: None, levels: Vec::new(), floor: Vec::new(), blank, blank2,
-            area_from: None, made: None, quick: false, moved: false, rays: 0, runs: 0, ms: 0.0,
+            hits: None, acc: None, levels: Vec::new(), floor: Vec::new(), floor_all: None, floor_clip: 0, blank, blank2,
+            area_from: None, bound_from: None, made: None, quick: false, moved: false, pass: 0, shift: [0.0; 2], rays: 0, runs: 0, ms: 0.0,
         }
     }
 
@@ -280,9 +318,9 @@ impl Caustics {
     pub fn view(&self) -> Option<&wgpu::TextureView> {
         self.levels.first().map(|l| &l.light)
     }
-    /// The map of light arriving on the floor (None while there is no floor).
+    /// The maps of light arriving on the floor, as layers of one texture (None while there is no floor).
     pub fn floor_view(&self) -> Option<&wgpu::TextureView> {
-        self.floor.first().map(|l| &l.light)
+        self.floor_all.as_ref()
     }
 
     /// Voxels a side of the finest volume, and video memory held in all (bytes).
@@ -303,21 +341,34 @@ impl Caustics {
     pub fn clear(&mut self) {
         self.levels.clear();
         self.floor.clear();
+        self.floor_all = None;
+        self.floor_clip = 0;
         self.acc = None;
         self.hits = None;
         self.made = None;
         self.area_from = None;
     }
 
-    /// The volumes for a finest one of `res` voxels a side, and the floor's maps for a finest one of
-    /// `floor_res` texels (0: no floor): made if they are not there or another size. True if they were
-    /// made (whoever reads the finest of either must be given the new one).
-    fn size_to(&mut self, res: u32, floor_res: u32) -> bool {
-        if self.levels.first().is_some_and(|l| l.res == res) && self.floor.first().map_or(0, |l| l.res) == floor_res { return false; }
+    /// The volumes for a finest one of `res` voxels a side, and `nf` maps of the floor of `floor_res` texels
+    /// a side (0: no floor): made if they are not there or another size. True if they were made (whoever
+    /// reads the finest volume or the floor's maps must be given the new ones).
+    fn size_to(&mut self, res: u32, floor_res: u32, nf: u32) -> bool {
+        let nf = if floor_res > 0 { nf } else { 0 };
+        if self.levels.first().is_some_and(|l| l.res == res) && self.floor.first().map_or(0, |l| l.res) == floor_res && self.floor_clip == nf { return false; }
         let gpu = &self.gpu;
         let n = level_count(res);
-        let nf = if floor_res > 0 { floor_level_count(floor_res) } else { 0 };
-        let total: u64 = (0..n).map(|l| ((res >> l) as u64).pow(3) * 12).sum::<u64>() + (0..nf).map(|l| ((floor_res >> l) as u64).pow(2) * 12).sum::<u64>();
+        // the floor's maps: `nf` of `floor_res` texels a side, each twice as wide as the one before; then, as
+        // wide as the last, maps each half as fine (for light spread wide), down to FLOOR_LEAST texels
+        let floor_sizes: Vec<u32> = if nf == 0 { Vec::new() } else {
+            let mut v = vec![floor_res; nf as usize];
+            let mut k = 1;
+            while (floor_res >> k) >= FLOOR_LEAST && v.len() < 8 {
+                v.push(floor_res >> k);
+                k += 1;
+            }
+            v
+        };
+        let total: u64 = (0..n).map(|l| ((res >> l) as u64).pow(3) * 12).sum::<u64>() + floor_sizes.iter().map(|r| (*r as u64).pow(2) * 12).sum::<u64>();
         let acc = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("cast: landed light"), size: total, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let view = |t: wgpu::Texture| t.create_view(&wgpu::TextureViewDescriptor::default());
         let texs: Vec<(u32, wgpu::TextureView, wgpu::TextureView)> = (0..n)
@@ -347,24 +398,41 @@ impl Caustics {
                 level
             })
             .collect();
-        // the floor's maps: 2D textures a compute shader can write and the tracer can read
-        let maps: Vec<(u32, wgpu::TextureView)> = (0..nf)
-            .map(|l| {
-                let r = floor_res >> l;
+        // the floor's maps: layers of one 2D texture a compute shader can write (a layer at a time) and the
+        // tracer can read (all of them)
+        self.floor_all = None;
+        let maps: Vec<(u32, wgpu::TextureView)> = if nf == 0 { Vec::new() } else {
+            let t = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("cast: light on the floor"),
+                size: wgpu::Extent3d { width: floor_res, height: floor_res, depth_or_array_layers: nf },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            self.floor_all = Some(t.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() }));
+            let mut maps: Vec<(u32, wgpu::TextureView)> = (0..nf)
+                .map(|l| (floor_res, t.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2), base_array_layer: l, array_layer_count: Some(1), ..Default::default() })))
+                .collect();
+            for r in &floor_sizes[nf as usize..] {
                 let t = gpu.device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("cast: light on the floor"),
-                    size: wgpu::Extent3d { width: r, height: r, depth_or_array_layers: 1 },
+                    label: Some("cast: light on the floor, spread"),
+                    size: wgpu::Extent3d { width: *r, height: *r, depth_or_array_layers: 1 },
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
                     format: wgpu::TextureFormat::Rgba16Float,
-                    usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+                    usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
                     view_formats: &[],
                 });
-                (r, view(t))
-            })
-            .collect();
-        self.floor = (0..nf as usize)
+                maps.push((*r, view(t)));
+            }
+            maps
+        };
+        self.floor_clip = nf;
+        self.floor = (0..maps.len())
             .map(|l| {
                 let (r, light) = &maps[l];
                 let coarser = maps.get(l + 1).map_or(&self.blank2, |t| &t.1);
@@ -384,6 +452,7 @@ impl Caustics {
             .collect();
         self.acc = Some(acc);
         self.area_from = None;
+        self.bound_from = None;
         self.made = None;
         true
     }
@@ -394,9 +463,14 @@ impl Caustics {
     /// still, a video frame), so the full number of rays is sent at once; otherwise the first making
     /// after a change sends fewer, and the full number follows when changes stop.
     /// `timed`: wait for the GPU before and after, so that `ms` is the whole of what the making took.
-    /// Returns (they were made again, the finest volume or map is a new texture).
-    pub fn run(&mut self, scene: &Scene, lights: &[OneU], weights: &[f64], rest: bool, timed: bool) -> (bool, bool) {
-        let fresh = self.size_to(scene.res, scene.floor.map_or(0, |f| f.res));
+    /// `pass`: how many frames the still picture has averaged so far (0 while it moves): while nothing has
+    /// changed, each of its first `REFINE` frames has the caustics made again, moved by a part of a cell
+    /// (see `REFINE`).
+    /// Returns (they were made again, the finest volume or the floor's maps are a new texture, the making
+    /// was one that refines: the picture so far stays good).
+    pub fn run(&mut self, scene: &Scene, lights: &[OneU], weights: &[f64], rest: bool, timed: bool, pass: u32) -> (bool, bool, bool) {
+        let (nf, half0) = scene.floor.map_or((0, 0.0), |f| floor_levels(f.half));
+        let fresh = self.size_to(scene.res, scene.floor.map_or(0, |f| f.res), nf);
         let res = scene.res;
         let h0 = 2.0 * scene.hb / res as f64;
         let n_levels = self.levels.len() as u32;
@@ -448,7 +522,8 @@ impl Caustics {
         let bend = |lam: f64| 1.0 / (lam * lam);
         if let Some(f) = &scene.floor {
             let row = |v: [f64; 3], w: f64| [v[0] as f32, v[1] as f32, v[2] as f32, w as f32];
-            u.fl = [row(f.origin, 1.0), row(f.up, f.half), row(f.u, f.res as f64), row(f.v, self.floor.len() as f64)];
+            u.fl = [row(f.origin, 1.0), row(f.up, half0), row(f.u, f.res as f64), row(f.v, self.floor.len() as f64)];
+            u.grid[3] = nf as f32;
         }
         for (i, b) in core::bands(16).iter().enumerate() {
             let lam = 400.0 + 300.0 * (i as f64 + 0.5) / 16.0;
@@ -460,9 +535,24 @@ impl Caustics {
         let lights = &lights[..lights.len().min(core::MAX_CAUSTIC_LIGHTS)];
         let want = Made { lights: lights.iter().map(|l| OneU { v: [l.v[0], l.v[1], l.v[2], 0.0], rgb: [l.rgb[0], l.rgb[1], l.rgb[2], 0.0], ..*l }).collect(), u, fine: scene.fine.clone(), coarse: scene.coarse.clone(), built: scene.built };
         let same = self.made.as_ref() == Some(&want);
-        if same && !self.quick {
+        let refine = same && !self.quick && (1..=REFINE).contains(&pass) && pass != self.pass;
+        if same && !self.quick && !refine {
             self.moved = false;
-            return (false, fresh);
+            return (false, fresh, false);
+        }
+        // a making that refines: every grid moved by a part of a cell, the floor's maps by a part of a texel,
+        // and the scramble that rounds landed light another (none for the first making after a change)
+        let k = if refine { pass } else { 0 };
+        let mut shift = [0.0; 2];
+        if k > 0 {
+            u.grid = [(halton(k, 2) - 0.5) as f32, (halton(k, 3) - 0.5) as f32, k as f32, u.grid[3]];
+            if let Some(f) = &scene.floor {
+                let texel = 2.0 * half0 / f.res as f64;
+                shift = [(halton(k, 5) - 0.5) * texel, (halton(k, 7) - 0.5) * texel];
+                for c in 0..3 {
+                    u.fl[0][c] += (shift[0] * f.u[c] + shift[1] * f.v[c]) as f32;
+                }
+            }
         }
         // A change straight after a change: things are moving, and fewer rays are sent until they stop.
         // (Nothing changed but the last making was such a quick one: now it is made in full.)
@@ -491,7 +581,7 @@ impl Caustics {
             .collect();
 
         let gpu = self.gpu.clone();
-        let Some(acc) = self.acc.as_ref() else { return (false, fresh) };
+        let Some(acc) = self.acc.as_ref() else { return (false, fresh, false) };
         // room for every light's landings (kept when fewer are needed: a turning view asks for fewer)
         let largest = lights.iter().map(|l| l.v[3] as u32).max().unwrap_or(RAYS_LEAST);
         if self.hits.as_ref().is_none_or(|h| h.1 < landings) {
@@ -507,6 +597,7 @@ impl Caustics {
         for (list, at) in [(&self.levels, 0), (&self.floor, self.levels.len())] {
             for (i, l) in list.iter().enumerate() {
                 ru.ku = [l.res, l.base, i as u32, if i + 1 < list.len() { 1 } else { 0 }];
+                ru.k[3] = if at > 0 && i + 1 < self.floor_clip as usize { 1.0 } else { 0.0 };
                 level_blocks[(at + i) * BLOCK as usize..][..std::mem::size_of::<ResolveU>()].copy_from_slice(bytemuck::bytes_of(&ru));
             }
         }
@@ -523,6 +614,7 @@ impl Caustics {
                 wgpu::BindGroupEntry { binding: 4, resource: hits.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 5, resource: acc.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(scene.coarse) },
+                wgpu::BindGroupEntry { binding: 7, resource: self.bound.as_entire_binding() },
             ],
         });
         let g_level = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -552,7 +644,32 @@ impl Caustics {
             self.area_from = Some(area_key);
         }
         let skip = skipped();
-        if !skip.contains("clear") { enc.clear_buffer(acc, 0, None); }
+        // (while things move nothing is landed in the floor's finest map, and the tracer does not read it: it
+        // is neither cleared nor made)
+        let skip_fine = u.soft[3] > 0.5 && self.floor_clip > 1;
+        if !skip.contains("clear") {
+            match self.floor.first().filter(|_| skip_fine) {
+                Some(f0) => {
+                    let (b0, b1) = (f0.base as u64 * 4, (f0.base as u64 + (f0.res as u64).pow(2) * 3) * 4);
+                    enc.clear_buffer(acc, 0, Some(b0));
+                    enc.clear_buffer(acc, b1, None);
+                }
+                None => enc.clear_buffer(acc, 0, None),
+            }
+        }
+        // the box round the bodies that start a caustic (the lights' rays are sent across it only): again
+        // only when the shape or which bodies start a caustic change
+        let bound_key = (scene.coarse.clone(), scene.built, u.body.map(|b| b.a[2]));
+        if !lights.is_empty() && self.bound_from.as_ref() != Some(&bound_key) {
+            enc.clear_buffer(&self.bound, 0, None);
+            let mut p = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("cast: bound"), timestamp_writes: None });
+            p.set_pipeline(&self.p_bound);
+            p.set_bind_group(0, &g_follow, &[]);
+            let r = scene.coarse_res.div_ceil(4);
+            p.dispatch_workgroups(r, r, r);
+            drop(p);
+            self.bound_from = Some(bound_key);
+        }
         let rays: u64 = lights.iter().map(|l| (l.v[3] as u64).pow(2)).sum();
         // every light's rays followed in one pass, then landed in one pass (a ray's third number is its light)
         for (pi, pipe) in [&self.p_follow, &self.p_land].into_iter().enumerate() {
@@ -572,6 +689,7 @@ impl Caustics {
                 p.dispatch_workgroups(l.res.div_ceil(8), l.res.div_ceil(8), l.res.div_ceil(4));
             }
             for (i, l) in self.floor.iter().enumerate().rev() {
+                if i == 0 && skip_fine { continue; }
                 let mut p = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("cast: floor"), timestamp_writes: None });
                 p.set_pipeline(&self.p_floor);
                 p.set_bind_group(0, &g_level, &[((self.levels.len() + i) as u64 * BLOCK) as u32]);
@@ -585,8 +703,10 @@ impl Caustics {
             self.ms = t0.elapsed().as_secs_f64() * 1e3;
         }
         self.made = Some(want);
+        self.pass = k;
+        self.shift = shift;
         self.rays = rays;
         self.runs += 1;
-        (true, fresh)
+        (true, fresh, refine)
     }
 }
