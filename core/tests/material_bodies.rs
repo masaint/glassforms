@@ -140,3 +140,38 @@ fn the_tracer_is_given_each_bodys_numbers() {
     let parts = material::bodies_parts(&material::Variant::of_bodies(&m), "", "const COUNT: i32 = {{COUNT}};", false);
     assert!(parts.decl.contains("COUNT: i32 = 2;") && parts.shade.starts_with("shadeB") && parts.min_layers == 2);
 }
+
+#[test]
+fn every_part_of_a_material_is_drawn_on_a_body_among_several() {
+    // each named material that has colour by wavelength, a graded index, double refraction, bubbles or
+    // something inside it keeps that part as the heart of a knot (only true scattering is left out)
+    for (name, bit) in [("didymium", 1u32), ("gradient", 2), ("calcite", 4), ("crackedquartz", 8), ("whiteopal", 8), ("tigerseye", 8), ("agate", 8), ("piezoquartz", 24)] {
+        let s = scene(&[("B2.material", name)]);
+        let m = s.body_materials().unwrap();
+        assert!(material::body_lacks(m[1]).is_empty(), "{name}");
+        assert_eq!(material::body_bits(m[1]) & bit, bit, "{name}");
+        assert_eq!(material::bodies_uniforms(&m, &[])[13], material::body_bits(m[1]) as f32, "{name}");
+        let v = material::Variant::of_bodies(&m);
+        assert_eq!((v.spectrum, v.grin, v.biref, v.inner.any()), (bit & 1 != 0, bit & 2 != 0, bit & 4 != 0, bit & 8 != 0), "{name}");
+    }
+    let s = scene(&[("B2.material", "foam")]);
+    assert!(material::body_variant(s.body_materials().unwrap()[1]).bubbles);
+    // true scattering is the light volume among several bodies; what lies inside is then still drawn
+    let s = scene(&[("B2.material", "whiteopal"), ("B2.sssWalk", "1")]);
+    let m = s.body_materials().unwrap();
+    assert_eq!(material::body_lacks(m[1]).len(), 1);
+    assert!(material::body_variant(m[1]).inner.play && !material::body_variant(m[1]).walk);
+    // each body is told its own numbers of what lies inside it
+    let u = material::bodies_inner(&m, &[], 0.001);
+    let n = gf_core::inner::IU_FLOATS;
+    assert_eq!(u.len(), material::MAX_BODIES * n);
+    assert_ne!(&u[..n], &u[n..2 * n]);
+}
+
+#[test]
+fn a_scene_that_glows_under_pressure_is_drawn_body_by_body() {
+    // so that it glows where its bodies press on each other, though no body has a material of its own
+    let s = scene(&[("material", "piezoquartz")]);
+    assert!(s.body_materials().is_some_and(|m| m.len() == 2));
+    assert!(scene(&[("material", "quartz")]).body_materials().is_none());
+}

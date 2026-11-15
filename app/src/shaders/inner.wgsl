@@ -34,7 +34,12 @@ struct IU {
   silkB: vec4f,       // x: how softened the lights they send back are, radians   y: how wavy the fibres are
   piezo: vec4f,       // rgb: light given off under pressure, per unit of length   w: how strongly a growing crack's rim glows
 }
+//#if BODIES
+// (among several bodies each has its own numbers: every `iu.` below reads those of the body in hand)
+@group(0) @binding(33) var<uniform> ibod: array<IU, 4>;
+//#else
 @group(0) @binding(32) var<uniform> iu: IU;
+//#endif
 
 // a whole number scrambled into another
 fn ihash(v: u32) -> u32 {
@@ -75,10 +80,17 @@ fn across2(a: vec3f) -> vec3f {
 
 //#if CRACK
 // the lights as a crack's face sends them back along d: sharp for a clean break, spread for a rough one
+//#if BODIES
+fn crackSeen(d: vec3f) -> vec3f {
+  if (iu.crackC.y > 0.0) { return envL(d, iu.crackC.x); }
+  return env(d);
+}
+//#else
 //#if CRACK_ROUGH
 fn crackSeen(d: vec3f) -> vec3f { return envL(d, iu.crackC.x); }
 //#else
 fn crackSeen(d: vec3f) -> vec3f { return env(d); }
+//#endif
 //#endif
 
 // What an air gap between two faces of the body sends back, as red, green and blue.
@@ -239,7 +251,12 @@ fn cracks(pos: vec3f, dir: vec3f, s: f32, n: f32) -> Crack {
           }
 //#if CRACK_DEPTH
           // cracks that start at the surface: none deeper than the limit (which deepens as they grow)
+//#if BODIES
+          // (the depth below the surface of the body in hand)
+          if (iu.crackB.z < 1e8) { edge = min(edge, (iu.crackB.z * g + mapOB(o + d * tt)) * cells / r); }
+//#else
           edge = min(edge, (iu.crackB.z * g + map(o + d * tt)) * cells / r);
+//#endif
 //#endif
           if (edge <= 0.0) { continue; }
           // the gap: nothing at the crack's edge, widening steeply and then levelling off, as a crack
@@ -331,7 +348,17 @@ fn play(pos: vec3f, dir: vec3f, s: f32) -> vec3f {
     if (dot(gd, toObj(dir)) > 0.0) { gd = -gd; }
     let gw = fromObj(gd);
     let back = reflect(dir, gw);
+    // platelets or opal's grains (among several bodies each body has its own: both are compiled in)
+//#if BODIES
+    let flat = iu.playA.w > 0.5;
+//#else
 //#if GLITTER
+    let flat = true;
+//#else
+    let flat = false;
+//#endif
+//#endif
+    if (flat) {
     // the platelet: a disc about the cell's middle, across gd; where the ray meets its plane
     let mid = vec3f(c) + 0.5 + (r4 - 0.5) * 0.3;
     let gl = toLat(gd);
@@ -343,13 +370,13 @@ fn play(pos: vec3f, dir: vec3f, s: f32) -> vec3f {
     let rad = iu.glint.w * (0.6 + 0.4 * r3.z);
     if (dot(off2, off2) > rad * rad) { continue; }
     sum += iu.glint.rgb * envL(back, iu.playC.y) * exp(-iu.playD.rgb * th);
-//#else
+    } else {
     // the wavelength this grain sends back at this angle (each grain's spacing differs a little)
     let lam = iu.playC.x * abs(dot(dir, gw)) * (0.9 + 0.1 * r3.z);
     if (lam < 390.0 || lam > 710.0) { continue; }
     let band = min(specW(lam) * iu.white.rgb * (iu.white.w * iu.playB.w), vec3f(1.0));
     sum += max(band, vec3f(0.0)) * envL(back, iu.playC.y) * exp(-iu.playD.rgb * t) * (2.0 / f32(PLAY_N));
-//#endif
+    }
   }
   return sum * iu.playB.y;
 }
@@ -432,18 +459,33 @@ fn inner(pos: vec3f, dir: vec3f, s: f32, n: f32, b: i32) -> Inner {
   o.light = vec3f(0.0);
   var len = max(s, 0.0);
 //#if CRACK
-  let ck = cracks(pos, dir, len, n);
-  o.t = ck.t;
-  o.dir = ck.dir;
-  o.keep = ck.keep;
-  o.light = ck.light;
-  if (ck.t >= 0.0) { len = ck.t; }
+//#if BODIES
+  // (among several bodies only those that have each part look for it)
+  if (iu.crackA.y > 0.0 && iu.crackA.w > 0.0) {
+//#else
+  {
+//#endif
+    let ck = cracks(pos, dir, len, n);
+    o.t = ck.t;
+    o.dir = ck.dir;
+    o.keep = ck.keep;
+    o.light = ck.light;
+    if (ck.t >= 0.0) { len = ck.t; }
+  }
 //#endif
 //#if PLAY
+//#if BODIES
+  if (b < 2 && iu.playB.y > 0.0) { o.light += o.keep * play(pos, dir, len); }
+//#else
   if (b < 2) { o.light += o.keep * play(pos, dir, len); }
 //#endif
+//#endif
 //#if SILK
+//#if BODIES
+  if (b < 2 && iu.silkA.w > 0.0) {
+//#else
   if (b < 2) {
+//#endif
     // what the fibres scatter towards the eye along the stretch, and what is left that goes on
     let k = iu.silkA.w;
     let kt = vec3f(k) + u.absorb.xyz;
@@ -458,7 +500,11 @@ fn inner(pos: vec3f, dir: vec3f, s: f32, n: f32, b: i32) -> Inner {
   o.light += o.keep * iu.piezo.rgb * len * exp(-0.5 * u.absorb.xyz * len);
 //#endif
 //#if GRAD
+//#if BODIES
+  if (any(iu.gradB.rgb != vec3f(0.0))) { o.keep *= gradKeep(pos, dir, len, b); }
+//#else
   o.keep *= gradKeep(pos, dir, len, b);
+//#endif
 //#endif
   return o;
 }

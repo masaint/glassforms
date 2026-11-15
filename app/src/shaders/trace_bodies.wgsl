@@ -19,14 +19,17 @@
 // glass, rough or polished), this one chooses at each surface by the numbers of the body there.
 //
 // Each body is clear (its own index, dispersion and tint), a metal or mirror, milky, or a thin wall
-// around air. What a single material has and a body among several has not: colour by wavelength (here as
-// three colours), true scattering (the light volume is used), double refraction, the graded index, bubbles.
+// around air; and each may have colour by wavelength, a graded index, double refraction, bubbles (cut
+// into both volumes beforehand, bubbles.rs) and what lies inside (inner.wgsl: a changing tint, cracks,
+// grains, fibres, a glow under pressure, which also glows where the body presses on another). What a
+// single material has and a body among several has not: true scattering (the light volume is used).
 
 struct MB {
   kind: vec4f,              // for each body: 0 clear, 1 a metal or a mirror, 2 milky, 3 a thin wall around air
   ior: vec4f,               // its index at 550 nm
   disp: vec4f,              // its dispersion (index at 400 nm less index at 700 nm)
-  spare: vec4f,
+  has: vec4f,               // what else it has, as bits (material.rs, body_bits): 1 colour by wavelength,
+                            // 2 a graded index, 4 double refraction, 8 something inside it, 16 a glow under pressure
   absorb: array<vec4f, 4>,  // rgb: what its inside absorbs per unit length
   b: array<MU, 4>,
 }
@@ -39,6 +42,12 @@ var<private> cb: i32;
 
 const COUNT: i32 = {{COUNT}};           // how many bodies there are: only that many channels mean anything
 const EVENTS: i32 = 2 * LAYERS + 2;     // surfaces a ray that has left the first body may still cross
+
+// does body k have this part (a bit of mb.has)
+fn hasB(k: i32, bit: u32) -> bool {
+  if (k < 0) { return false; }
+  return (u32(mb.has[k]) & bit) != 0u;
+}
 
 //#if HOLLOW
 // (whether the body in hand is a thin wall around air: its film then thins to black film)
@@ -203,30 +212,208 @@ fn eventB(pos: vec3f, dir: vec3f, m: i32, q: ptr<function, vec3f>, nq: ptr<funct
     t += d * STEP_SCALE;
     if (t > 2.5 * BOUND) { break; }
   }
-  var p = pos + dir * t;
+  let p = pos + dir * t;
   if (j >= 0) {
     *b = j;
     *nq = nrmB(p, j);
     *q = p;
     return t;
   }
-  // m ends here: beyond it is a body numbered below m that this place is also inside, or the air
+  return t + leaveB(p, dir, m, q, nq, b);
+}
+
+// Body m ends at p, heading dir: beyond it is a body numbered below m that this place is also inside, or
+// the air. Sets what lies beyond, the place and the normal there; returns how far the place was moved
+// along dir to settle on the surface.
+fn leaveB(p: vec3f, dir: vec3f, m: i32, q: ptr<function, vec3f>, nq: ptr<function, vec3f>, b: ptr<function, i32>) -> f32 {
   let v = dist4(p + dir * 0.004);
   var lower = -1;
   for (var k = 0; k < m; k++) { if (v[k] < 0.0) { lower = k; } }
+  var t = 0.0;
   if (lower < 0) {
     // the outside of the whole scene: settle on the scene's own smooth surface, as plain glass does
-    t -= mapNW(pos + dir * t);
-    t -= mapNW(pos + dir * t);
-    p = pos + dir * t;
-    *nq = nrm(p);
+    t -= mapNW(p);
+    t -= mapNW(p + dir * t);
+    *nq = nrm(p + dir * t);
   } else {
     *nq = nrmB(p, m);
   }
   *b = lower;
-  *q = p;
+  *q = p + dir * t;
   return t;
 }
+
+//#if GRIN
+// Inside body m, whose index rises with depth below its own surface: the path curves towards where the
+// index is higher, as travel() follows it in a body of one material, but through the body's own
+// distances, and it ends where a body numbered above m begins. From pos heading *dir (left as the path
+// heads where it ends); n0: the index at the surface for this wavelength. Returns the length of the
+// path; q, nq and b as eventB sets them.
+fn travelB(pos: vec3f, dir: ptr<function, vec3f>, m: i32, n0: f32, q: ptr<function, vec3f>, nq: ptr<function, vec3f>, b: ptr<function, i32>) -> f32 {
+  cb = m;
+  let ex = mb.b[m].exo;
+  var p = pos;
+  var d = *dir;
+  var len = 0.0;
+  let vox = 2.0 * HB / u.vres;
+  let deep = 5.0 / ex.y;                  // below this the index no longer changes
+  let hs = max(0.4 / ex.y, 1.5 * vox);    // the short step
+  var j = -1;
+  for (var i = 0; i < 96; i++) {
+    let v = dist4(p);
+    let depth = -v[m];
+    // the nearest body numbered above m
+    var dh = 1e9;
+    var jh = -1;
+    for (var k = m + 1; k < COUNT; k++) { if (v[k] < dh) { dh = v[k]; jh = k; } }
+    if (dh < 0.0008) { j = jh; break; }
+    if (depth < 0.0008 && i > 0) { break; }
+    if (depth > deep + hs) {
+      let s = min(depth - deep, dh) * STEP_SCALE;
+      p += d * s;
+      len += s;
+    } else {
+      // the index rises with depth, and depth rises against the slope of the body's distance
+      let dn = -nrmB(p, m) * (ex.x * ex.y * exp(-max(depth, 0.0) * ex.y));
+      let s = min(hs, max(min(depth, dh) * STEP_SCALE, 0.25 * vox));
+      d = normalize(d * (n0 + grinAt(depth)) + dn * s);
+      p += d * s;
+      len += s;
+    }
+    if (len > 2.5 * BOUND) { break; }
+  }
+  *dir = d;
+  if (j >= 0) {
+    *b = j;
+    *nq = nrmB(p, j);
+    *q = p;
+    return len;
+  }
+  return len + leaveB(p, d, m, q, nq, b);
+}
+//#endif
+
+// From pos inside body m heading *dir: on to the next surface (eventB), along a curved path in a body
+// whose index changes with depth.
+fn stretchB(pos: vec3f, dir: ptr<function, vec3f>, m: i32, lam: f32, q: ptr<function, vec3f>, nq: ptr<function, vec3f>, b: ptr<function, i32>) -> f32 {
+//#if GRIN
+  if (hasB(m, 2u)) { return travelB(pos, dir, m, iorB(m, lam), q, nq, b); }
+//#endif
+  return eventB(pos, *dir, m, q, nq, b);
+}
+
+//#if CRACK_DEPTH
+// the distance to the surface of the body in hand (cb), at a point in the shape's own frame
+fn mapOB(o: vec3f) -> f32 { return textureSampleLevel(bodTex, volSmp, o / (2.0 * HB) + 0.5, 0.0)[cb]; }
+//#endif
+
+//#if SPECTRUM
+// The band of wavelengths the path in hand stands for (where it begins, how wide), at how many
+// wavelengths across it absorption by wavelength is weighed, and where in their steps they lie.
+var<private> bandLo: f32;
+var<private> bandW: f32;
+var<private> bandN: i32;
+var<private> bandXi: f32;
+// What body m, absorbing by wavelength, leaves by colour of the path's band after a stretch s through
+// it: each wavelength of the band absorbed by its own amount and weighed by its share of red, green and
+// blue, so that a narrow absorption band takes its own colour out.
+fn keepSpecB(m: i32, s: f32) -> vec3f {
+  cb = m;
+  var num = vec3f(0.0);
+  var den = vec3f(0.0);
+  for (var j = 0; j < bandN; j++) {
+    let l = bandLo + bandW * (f32(j) + bandXi) / f32(bandN);
+    let w = max(specW(l), vec3f(0.0));
+    num += w * exp(-tabAt(l).z * max(s, 0.0));
+    den += w;
+  }
+  return num / max(den, vec3f(1e-6));
+}
+// the path in hand stands for wavelengths lo .. lo + w, weighed at n of them
+fn bandB(lo: f32, w: f32, n: i32, xi: f32) {
+  bandLo = lo;
+  bandW = w;
+  bandN = n;
+  bandXi = xi;
+}
+//#endif
+
+//#if BIREF
+// Double refraction. A path in a doubly refracting body is one of its two rays: ordinary (an index like
+// glass's) or extraordinary (an index that depends on its direction to the crystal's axis); every path
+// is followed twice, once as each, as for a single such material. pmode: which the path in hand is.
+// kw: its wave (its length is the index it meets), read only while it is extraordinary in such a body.
+var<private> pmode: i32;
+var<private> kw: vec3f;
+// is the path extraordinary in body k
+fn biB(k: i32) -> bool { return pmode == 1 && hasB(k, 4u); }
+// is any body doubly refracting (every path is then followed twice)
+fn anyBiref() -> bool {
+  for (var k = 0; k < COUNT; k++) { if (hasB(k, 4u)) { return true; } }
+  return false;
+}
+// the wave of a path heading d in m (a body, or -1: the air)
+fn waveOf(m: i32, d: vec3f, lam: f32) -> vec3f {
+  if (biB(m)) { return kw; }
+  return d * iorB(m, lam);
+}
+// A wave kin crossing a surface into b (a body or the air; b is the body it is in for what the surface
+// sends back), N the surface's normal pointing into b: the wave keeps the part of itself that lies along
+// the surface. Returns the way the light then travels (zero if no wave fits: total reflection) and sets
+// kw to the new wave.
+fn crossW(kin: vec3f, N: vec3f, b: i32, lam: f32) -> vec3f {
+  let kt = kin - dot(kin, N) * N;
+  let nb = iorB(b, lam);
+  if (biB(b)) {
+    let ax = mb.b[b].axis.xyz;
+    let a = normalize(vec3f(dot(u.obj0.xyz, ax), dot(u.obj1.xyz, ax), dot(u.obj2.xyz, ax)));
+    let ne = nb + mb.b[b].exo.z;
+    kw = waveE(kt, N, a, nb, ne);
+    if (dot(kw, kw) < 0.01) { return vec3f(0.0); }
+    return rayE(kw, a, nb, ne);
+  }
+  let h = nb * nb - dot(kt, kt);
+  if (h <= 0.0) {
+    kw = vec3f(0.0);
+    return vec3f(0.0);
+  }
+  kw = kt + sqrt(h) * N;
+  return kw / nb;
+}
+//#endif
+
+//#if PIEZO
+// The glow where a body presses on another (piezoluminescence): light given off inside body m wherever
+// another body's surface is near it or lies inside it, most at the meeting itself, by m's own pressure
+// glow (its colour, and `piezo`, so that it pulses and loops as that does). The stretch is walked in
+// steps that shorten near the other bodies, so that a thin zone of contact is never stepped over.
+const PRESS_W: f32 = 0.02;              // how far from the meeting the glow reaches (the shape is about 2 across)
+const PRESS_GAIN: f32 = 8.0;            // with PRESS_W: about 0.2 of white on each side of a meeting a path crosses straight, at piezo 1
+fn pressB(m: i32, pos: vec3f, dir: vec3f, s: f32) -> vec3f {
+  if (!hasB(m, 16u)) { return vec3f(0.0); }
+  var t = 0.0;
+  var sum = 0.0;
+  for (var i = 0; i < 32; i++) {
+    if (t >= s) { break; }
+    let v = dist4(pos + dir * t);
+    var f = 0.0;
+    var near = 1e9;
+    for (var k = 0; k < COUNT; k++) {
+      if (k == m) { continue; }
+      let d = v[k];
+      // at the other's surface, where the two meet (or, where they overlap, where the other's surface
+      // lies inside this one), falling off to either side
+      f += exp(-abs(d) / PRESS_W);
+      near = min(near, abs(d));
+    }
+    let h = min(max(0.8 * near, 0.5 * PRESS_W), s - t);
+    sum += f * h;
+    t += h;
+  }
+  let pz = ibod[m].piezo;
+  return pz.rgb / max(pz.r, 1e-6) * (pz.w * PRESS_GAIN * sum);
+}
+//#endif
 
 // How much wider (as a variance, radians squared) a rough surface of spread alpha makes light that
 // passes through it from index na at cosine c into index nb.
@@ -241,8 +428,19 @@ fn widenB(alpha: f32, na: f32, c: f32, nb: f32, od: vec3f, nq: vec3f) -> f32 {
 // and what it leaves of the light passing through (thr, by colour). sg2: the spread of what is seen
 // beyond it, widened by a milky body's haze.
 fn throughB(m: i32, pos: vec3f, dir: vec3f, s: f32, thr: ptr<function, vec3f>, sg2: ptr<function, f32>) -> vec3f {
+//#if SPECTRUM
+  if (hasB(m, 1u)) {
+    *thr *= keepSpecB(m, s);
+  } else {
+    *thr *= exp(-mb.absorb[m].rgb * s);
+  }
+//#else
   *thr *= exp(-mb.absorb[m].rgb * s);
+//#endif
   var add = *thr * mb.b[m].glow.rgb * s;
+//#if PIEZO
+  add += *thr * pressB(m, pos, dir, s);
+//#endif
 //#if SSS
   if (mb.kind[m] > 1.5 && mb.kind[m] < 2.5) {
     cb = m;
@@ -304,9 +502,26 @@ fn beyondB(ro_in: vec3f, rd_in: vec3f, m0: i32, lam: f32, sg0: f32) -> vec3f {
       b = mediumOf(dist4(q - nq * 0.004));
       if (b < 0) { b = nearestOf(dist4(q)); }
     } else {
-      // through body m to where it ends or another takes over
-      let s = eventB(ro, rd, m, &q, &nq, &b);
-      col += throughB(m, ro, rd, s, &thr, &sg2);
+      // through body m to where it ends or another takes over (curving, if its index changes with depth)
+      let d0 = rd;
+      let s = stretchB(ro, &rd, m, lam, &q, &nq, &b);
+//#if INNER
+      if (hasB(m, 8u)) {
+        // what lies inside this body along the way; a crack that would turn the path ends it there,
+        // seeing the lights the way it then heads
+        cb = m;
+        let inn = inner(ro, d0, s, iorB(m, lam), 1);
+        col += thr * inn.light;
+        thr *= inn.keep;
+//#if CRACK
+        if (inn.t >= 0.0) {
+          col += throughB(m, ro, d0, inn.t, &thr, &sg2);
+          return col + thr * seenB(inn.dir, sqrt(sg2));
+        }
+//#endif
+      }
+//#endif
+      col += throughB(m, ro, d0, s, &thr, &sg2);
     }
     var c = -dot(rd, nq);
     if (c < 0.0) { nq = -nq; c = -c; }      // nq now faces the ray
@@ -320,13 +535,22 @@ fn beyondB(ro_in: vec3f, rd_in: vec3f, m0: i32, lam: f32, sg0: f32) -> vec3f {
       thr *= R;
       sg2 += 2.0 * alpha * alpha;
       if (max3(thr) < 0.02) { return col; }
+//#if BIREF
+      rd = crossW(waveOf(m, rd, lam), nq, m, lam);
+      if (dot(rd, rd) < 0.5) { return col; }
+//#else
       rd = mir;
+//#endif
       ro = q + nq * 0.004;
       continue;
     }
     let na = iorB(m, lam);
     let nb = iorB(b, lam);
+//#if BIREF
+    let od = crossW(waveOf(m, rd, lam), -nq, b, lam);
+//#else
     let od = refract(rd, nq, na / nb);
+//#endif
     if (dot(od, od) < 0.5) {
       // trapped by total reflection: take the bounce and stop there
       return col + thr * seenB(mir, sqrt(sg2));
@@ -366,6 +590,13 @@ fn shadeB(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
   envR += skyB(k, mir);
   if (opaqueB(k)) {
     // a metal: what it mirrors is followed on, to the lights or to the other bodies
+    // (one path for the whole spectrum, an ordinary one)
+//#if SPECTRUM
+    bandB(400.0, 300.0, 12, xi);
+//#endif
+//#if BIREF
+    pmode = 0;
+//#endif
     let R = surfB(-1, k, cosi, p, n, 550.0);
     return mb.b[k].glow.rgb * 0.3 + R * (beyondB(p + n * 0.006, mir, -1, 550.0, sigR * sigR) + skyB(k, mir));
   }
@@ -377,15 +608,43 @@ fn shadeB(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
   var wsum = vec3f(0.0);
   var racc = vec3f(0.0);
   var r1 = vec3f(0.0);
+//#if BIREF
+  // (with a doubly refracting body among them every path is followed twice: as an ordinary ray, then as
+  // an extraordinary one; each carries half the light, and the surface's own reflection is counted once)
+  var rsum = vec3f(0.0);
+  let modes = select(1, 2, anyBiref());
+  for (var j = 0; j < 2 * MAX_NW; j++) {
+    let i = j / modes;
+    pmode = j % modes;
+//#else
   for (var i = 0; i < MAX_NW; i++) {
+//#endif
     if (i >= W || (alike && i >= 1)) { break; }
     let lam = 400.0 + 300.0 * (f32(i) + xi) / f32(W);
+//#if SPECTRUM
+    // (absorption by wavelength is weighed across the band this path stands for: the whole spectrum
+    // when one path stands for every wavelength)
+    if (alike) { bandB(400.0, 300.0, 12, xi); } else { bandB(400.0 + 300.0 * f32(i) / f32(W), 300.0 / f32(W), 4, xi); }
+//#endif
     let w = specW(lam);
     let R0 = surfB(-1, k, cosi, p, n, lam);
+//#if BIREF
+    if (pmode == 0) {
+      racc += w * R0;
+      rsum += w;
+      r1 = R0;
+    }
+//#else
     racc += w * R0;
     r1 = R0;
+//#endif
     let n1 = iorB(k, lam);
+//#if BIREF
+    var dir = crossW(rd, -n, k, lam);
+    if (dot(dir, dir) < 0.5) { continue; }
+//#else
     var dir = refract(rd, n, 1.0 / n1);
+//#endif
     var sg2 = widenB(alpha, 1.0, cosi, n1, dir, n);
 //#if ROUGH
     if (alpha > 0.0) {
@@ -406,19 +665,55 @@ fn shadeB(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
     // exactly as one piece would.
     var b = 0;
     var filmed = false;                     // a film has sent the light back inside at least once
+//#if INNER
+    var turns = 0;                          // how often cracks have turned this path (not bounces either)
+    for (var e = 0; e < MAX_NB + 2 * COUNT + 6; e++) {
+//#else
     for (var e = 0; e < MAX_NB + 2 * COUNT; e++) {
+//#endif
       if (b >= u.nb || max3(att) < 0.02) { break; }
       var q: vec3f;
       var nq: vec3f;
       var nx: i32;
-      let s = eventB(pos, dir, m, &q, &nq, &nx);
-      L += throughB(m, pos, dir, s, &att, &sg2);
+      let d0 = dir;
+      let s = stretchB(pos, &dir, m, lam, &q, &nq, &nx);
+//#if INNER
+      if (hasB(m, 8u)) {
+        // what lies inside the body along this stretch (inner.wgsl): what it adds is gathered, what it
+        // takes is taken, and a crack may turn the path on the way
+        cb = m;
+        let inn = inner(pos, d0, s, iorB(m, lam), b);
+        L += att * inn.light;
+        att *= inn.keep;
+//#if CRACK
+        if (inn.t >= 0.0) {
+          L += throughB(m, pos, d0, inn.t, &att, &sg2);
+          // after so many turns the path is taken to leave the way it then heads
+          if (turns >= i32(ibod[m].crackC.w)) {
+            L += att * crackSeen(inn.dir);
+            break;
+          }
+          turns += 1;
+          pos = pos + d0 * inn.t;
+          dir = inn.dir;
+//#if BIREF
+          kw = inn.dir * length(kw);
+//#endif
+          continue;
+        }
+//#endif
+      }
+//#endif
+      L += throughB(m, pos, d0, s, &att, &sg2);
       var c = -dot(dir, nq);
       if (c < 0.0) { nq = -nq; c = -c; }
       let o = max(m, nx);
       var R = surfB(m, nx, c, q, nq, lam);
       let al = mb.b[o].surf.x;
       let mir = reflect(dir, nq);
+//#if BIREF
+      let kin = waveOf(m, dir, lam);        // (the wave as it meets the surface: both ways on are worked out from it)
+//#endif
       var next = sg2 + 2.0 * al * al;      // the spread of what this surface sends back inside
       if (opaqueB(nx)) {
         // a metal met from inside this body
@@ -426,7 +721,11 @@ fn shadeB(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
       } else {
         let na = iorB(m, lam);
         let nb = iorB(nx, lam);
+//#if BIREF
+        var od = crossW(kin, -nq, nx, lam);
+//#else
         var od = refract(dir, nq, na / nb);
+//#endif
         var through = 1.0 - R;
         var wide = sg2 + widenB(al, na, c, nb, od, nq);
 //#if ROUGH
@@ -469,15 +768,30 @@ fn shadeB(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
       if (!opaqueB(nx) && mb.b[o].film.x > 0.0) { filmed = true; }
       att *= R;
       sg2 = next;
+//#if BIREF
+      // (what is sent back keeps the part of the wave that lies along the surface: an extraordinary wave
+      // that has no such reflection ends here)
+      dir = crossW(kin, nq, m, lam);
+      if (dot(dir, dir) < 0.5) { break; }
+//#else
       dir = mir;
+//#endif
       pos = q + nq * 0.004;
       b++;
     }
     acc += w * L;
     wsum += w;
+//#if BIREF
+    one += L / f32(modes);
+//#else
     one = L;
+//#endif
   }
+//#if BIREF
+  var top = racc / rsum;
+//#else
   var top = racc / wsum;
+//#endif
   var res = envR * top + acc / wsum;
   if (alike) {
     top = r1;

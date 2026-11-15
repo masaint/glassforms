@@ -487,10 +487,6 @@ fn weigh(i: i32, xi: f32, W: i32, t0: vec4f, t1: vec4f, t2: vec4f) -> vec3f {
 //#endif
 
 //#if GRIN
-// The index at depth d below the surface, less the index at the surface: it changes by mu.exo.x over a
-// depth of about 1 / mu.exo.y and then stays.
-fn grinAt(depth: f32) -> f32 { return mu.exo.x * (1.0 - exp(-max(depth, 0.0) * mu.exo.y)); }
-
 // Inside a body whose index changes with depth a ray curves towards where the index is higher. Follow
 // it from pos heading dir (both are moved on to where it reaches the surface again); returns the length
 // of the path. n0: the index at the surface for this wavelength.
@@ -535,34 +531,6 @@ fn travel(pos: ptr<function, vec3f>, dir: ptr<function, vec3f>, n0: f32) -> f32 
 //#endif
 
 //#if BIREF
-// Double refraction. In a crystal with one axis (calcite, quartz) a ray splits in two: an ordinary one
-// that behaves as in glass, with index no, and an extraordinary one whose index depends on its direction
-// relative to the axis, between no (along the axis) and nE (across it). For the extraordinary ray the
-// waves and the light itself travel in slightly different directions, so both are kept: k is the wave
-// (its length is the index it meets), and the ray is what is marched.
-
-// the direction the light of an extraordinary wave k travels
-fn rayE(k: vec3f, a: vec3f, no: f32, nE: f32) -> vec3f {
-  return normalize(k / (nE * nE) + (1.0 / (no * no) - 1.0 / (nE * nE)) * dot(k, a) * a);
-}
-// A wave crossing a surface keeps the part of k that lies along the surface. kt: that part. N: the
-// surface's normal, pointing the way the new wave is to go. a: the axis. Returns the new wave, or zero
-// if there is none (total reflection).
-fn waveE(kt: vec3f, N: vec3f, a: vec3f, no: f32, nE: f32) -> vec3f {
-  let ie = 1.0 / (nE * nE);
-  let dl = 1.0 / (no * no) - ie;
-  let na = dot(N, a);
-  let ka = dot(kt, a);
-  let A = ie + dl * na * na;
-  let B = 2.0 * dl * ka * na;
-  let Cc = dot(kt, kt) * ie + dl * ka * ka - 1.0;
-  let disc = B * B - 4.0 * A * Cc;
-  if (disc <= 0.0) { return vec3f(0.0); }
-  // of the two waves that fit, the one whose light travels towards N
-  let k1 = kt + (-B + sqrt(disc)) / (2.0 * A) * N;
-  if (dot(rayE(k1, a, no, nE), N) > 0.0) { return k1; }
-  return kt + (-B - sqrt(disc)) / (2.0 * A) * N;
-}
 // the crystal's axis as the camera sees it
 fn axisW() -> vec3f {
   return normalize(vec3f(dot(u.obj0.xyz, mu.axis.xyz), dot(u.obj1.xyz, mu.axis.xyz), dot(u.obj2.xyz, mu.axis.xyz)));
@@ -1429,4 +1397,43 @@ fn grazeM(p: vec3f, rd: vec3f) -> vec3f {
 //#endif
 //#endif
 //#endif
+//#endif
+
+// ---- the graded index and double refraction, as the tracer of several bodies shares them ---------------
+// (kept apart from the rest so that they are there whatever the bodies are made of: a metal among the
+// bodies leaves out the part above for one material of glass)
+//#if GRIN
+// The index at depth d below the surface, less the index at the surface: it changes by mu.exo.x over a
+// depth of about 1 / mu.exo.y and then stays.
+fn grinAt(depth: f32) -> f32 { return mu.exo.x * (1.0 - exp(-max(depth, 0.0) * mu.exo.y)); }
+//#endif
+//#if BIREF
+// Double refraction. In a crystal with one axis (calcite, quartz) a ray splits in two: an ordinary one
+// that behaves as in glass, with index no, and an extraordinary one whose index depends on its direction
+// relative to the axis, between no (along the axis) and nE (across it). For the extraordinary ray the
+// waves and the light itself travel in slightly different directions, so both are kept: k is the wave
+// (its length is the index it meets), and the ray is what is marched.
+
+// the direction the light of an extraordinary wave k travels
+fn rayE(k: vec3f, a: vec3f, no: f32, nE: f32) -> vec3f {
+  return normalize(k / (nE * nE) + (1.0 / (no * no) - 1.0 / (nE * nE)) * dot(k, a) * a);
+}
+// A wave crossing a surface keeps the part of k that lies along the surface. kt: that part. N: the
+// surface's normal, pointing the way the new wave is to go. a: the axis. Returns the new wave, or zero
+// if there is none (total reflection).
+fn waveE(kt: vec3f, N: vec3f, a: vec3f, no: f32, nE: f32) -> vec3f {
+  let ie = 1.0 / (nE * nE);
+  let dl = 1.0 / (no * no) - ie;
+  let na = dot(N, a);
+  let ka = dot(kt, a);
+  let A = ie + dl * na * na;
+  let B = 2.0 * dl * ka * na;
+  let Cc = dot(kt, kt) * ie + dl * ka * ka - 1.0;
+  let disc = B * B - 4.0 * A * Cc;
+  if (disc <= 0.0) { return vec3f(0.0); }
+  // of the two waves that fit, the one whose light travels towards N
+  let k1 = kt + (-B + sqrt(disc)) / (2.0 * A) * N;
+  if (dot(rayE(k1, a, no, nE), N) > 0.0) { return k1; }
+  return kt + (-B - sqrt(disc)) / (2.0 * A) * N;
+}
 //#endif

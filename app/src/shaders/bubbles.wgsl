@@ -33,7 +33,11 @@ fn pcg(v: u32) -> u32 {
 fn u01(h: u32) -> f32 { return f32(h >> 8u) / 16777216.0; }
 
 // the field at voxel `id` with the bubbles taken out; d0: the field there as it stands
-fn carve(id: vec3u, d0: f32) -> f32 {
+fn carve(id: vec3u, d0: f32) -> f32 { return carveWith(id, d0, b, 0); }
+
+// ... with the bubbles `b` describes, in the body whose distances are channel k of src (the scene's own
+// volume has one channel; the bodies' volume one for each body)
+fn carveWith(id: vec3u, d0: f32, b: B, k: i32) -> f32 {
   let vox = 2.0 * b.hb / b.res;
   // at the surface or outside it: nothing changes
   if (d0 > -0.5 * vox) { return d0; }
@@ -56,7 +60,7 @@ fn carve(id: vec3u, d0: f32) -> f32 {
     let lv = length(v);
     if (lv - r * far > best) { continue; }
     // does it fit? The field at its centre says how deep inside the body that is.
-    let room = -textureSampleLevel(src, lin, ctr / (2.0 * b.hb) + 0.5, 0.0).r - b.margin;
+    let room = -textureSampleLevel(src, lin, ctr / (2.0 * b.hb) + 0.5, 0.0)[k] - b.margin;
     r = min(r, room / far);
     if (r < 1.2 * vox) { continue; }                  // too small to draw
     // the distance to it: a ball, a needle (a ball swept along an axis) or a disc with a rounded rim
@@ -95,6 +99,37 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) inst: u32) -> Ful
 fn fs(in: Full) -> @location(0) vec4f {
   let id = vec3u(vec2u(in.pos.xy), in.inst);
   return vec4f(carve(id, textureLoad(src, id, 0).r), 0.0, 0.0, 1.0);
+}
+
+// Several bodies, each with bubbles of its own or none: the bodies' volume (bound as src) with each
+// body's bubbles cut into its own channel, and the scene's volume made again from it as the smallest of
+// the channels (so the two agree, as they do when they are made).
+struct BB {
+  bub: array<B, 4>,       // each body's bubbles
+  on: vec4f,              // 1 where the body has bubbles
+  count: vec4f,           // x: how many bodies there are
+}
+@group(0) @binding(4) var<uniform> bb: BB;
+struct Two {
+  @location(0) bodies: vec4f,
+  @location(1) scene: vec4f,
+}
+@fragment
+fn fs_bodies(in: Full) -> Two {
+  let id = vec3u(vec2u(in.pos.xy), in.inst);
+  let v = textureLoad(src, id, 0);
+  var a = array<f32, 4>(v.x, v.y, v.z, v.w);
+  let n = i32(bb.count.x);
+  var m = 1e9;
+  for (var k = 0; k < 4; k++) {
+    if (k >= n) { break; }
+    if (bb.on[k] > 0.5) { a[k] = carveWith(id, a[k], bb.bub[k], k); }
+    m = min(m, a[k]);
+  }
+  var o: Two;
+  o.bodies = vec4f(a[0], a[1], a[2], a[3]);
+  o.scene = vec4f(m, 0.0, 0.0, 1.0);
+  return o;
 }
 
 //#compute  (everything below is left out where volumes cannot be written by compute shaders)

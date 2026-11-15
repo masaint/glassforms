@@ -553,11 +553,16 @@ impl State {
         self.body_mats[layer] = Some(Box::new(m));
         true
     }
-    /// The material of every body, in the order of `bodies()`, when at least one of them has its own.
-    /// None while every body is made of the scene's material: the scene is then drawn as one material.
+    /// The material of every body, in the order of `bodies()`, when at least one of them has its own, or
+    /// when the scene's material glows under pressure (it then glows also where one body presses on
+    /// another, which only the tracer of several bodies sees). None otherwise: the scene is then drawn as
+    /// one material.
     pub fn body_materials(&self) -> Option<Vec<&Settings>> {
         let bodies = self.bodies();
-        if bodies.len() < 2 || !bodies.iter().any(|b| self.body_own(b[0])) { return None; }
+        // (a pressure glow that is animated counts while it is at nothing too: the way of drawing does not
+        // change back and forth as it pulses)
+        let pressed = self.p.piezo > 0.0 || self.tracks.get("piezo").is_some_and(|t| t.on);
+        if bodies.len() < 2 || !(pressed || bodies.iter().any(|b| self.body_own(b[0]))) { return None; }
         Some(bodies.iter().map(|b| self.body_settings(b[0])).collect())
     }
     /// The sliders of the material of the body whose lowest layer this is (none unless it has its own).

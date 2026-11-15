@@ -10,6 +10,7 @@ use gf_core::HB;
 
 use crate::bake::{Volume, VOL_FORMAT};
 use crate::gpu::*;
+use crate::combine::bodies_format;
 
 const BUBBLES_WGSL: &str = include_str!("shaders/bubbles.wgsl");
 
@@ -40,6 +41,21 @@ pub struct Bubbler {
     /// bubbled volumes kept for reuse, and which of them was written last
     vols: Vec<Volume>,
     cur: usize,
+    /// for several bodies: the numbers, the layout and (made when first wanted) the passes for a bodies'
+    /// volume of two and of four channels, and the bodies' volume and the scene's last written
+    bu: wgpu::Buffer,
+    body_layout: wgpu::BindGroupLayout,
+    body_pipes: Vec<(u32, wgpu::RenderPipeline)>,
+    body_vols: Option<(Volume, Volume, u32)>,
+}
+
+/// The numbers of the pass that cuts each body's bubbles into the bodies' volume (`BB` in bubbles.wgsl).
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct BodiesU {
+    bub: [BubbleU; 4],
+    on: [f32; 4],
+    count: [f32; 4],
 }
 
 impl Bubbler {
@@ -67,7 +83,94 @@ impl Bubbler {
             lin: gpu.sampler(wgpu::FilterMode::Linear, wgpu::AddressMode::ClampToEdge),
             u: gpu.uniform_buffer("bubbles", std::mem::size_of::<BubbleU>() as u64),
             way, vols: Vec::new(), cur: 0,
+            bu: gpu.uniform_buffer("bubbles in each body", std::mem::size_of::<BodiesU>() as u64),
+            body_layout: {
+                let f = wgpu::ShaderStages::FRAGMENT;
+                let tex = wgpu::BindGroupLayoutEntry { binding: 1, visibility: f, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D3, multisampled: false }, count: None };
+                let smp = wgpu::BindGroupLayoutEntry { binding: 2, visibility: f, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None };
+                gpu.bind_layout("bubbles in each body", &[tex, smp, uniform_entry(4, f, false)])
+            },
+            body_pipes: Vec::new(),
+            body_vols: None,
         }
+    }
+
+    /// The pass that writes a bodies' volume of this many channels (2 or 4) and the scene's volume beside it.
+    fn body_pipe(&mut self, channels: u32) -> usize {
+        if let Some(i) = self.body_pipes.iter().position(|p| p.0 == channels) { return i; }
+        let drawn = BUBBLES_WGSL.split("//#compute").next().unwrap();
+        let module = self.gpu.shader("bubbles in each body", drawn, false);
+        let layout = self.gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("bubbles in each body"), bind_group_layouts: &[Some(&self.body_layout)], immediate_size: 0 });
+        let target = |format| Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL });
+        let pipe = self.gpu.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("bubbles in each body"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState { module: &module, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState { module: &module, entry_point: Some("fs_bodies"), compilation_options: Default::default(), targets: &[target(bodies_format(channels)), target(VOL_FORMAT)] }),
+            multiview_mask: None,
+            cache: None,
+        });
+        self.body_pipes.push((channels, pipe));
+        self.body_pipes.len() - 1
+    }
+
+    /// Cut each body's bubbles (`per[k]`: body k's, or None) into its own channel of the bodies' volume
+    /// `src` (`channels` of them, `count` bodies), and make the scene's volume afresh from the result.
+    /// Returns (the bodies' volume, the scene's volume), both kept until the next call: as much video
+    /// memory again as the two volumes the scene was built into.
+    pub fn carve_bodies(&mut self, src: &Volume, channels: u32, count: u32, per: &[Option<Bubbles>]) -> (&Volume, &Volume) {
+        let res = src.res;
+        let vox = 2.0 * HB as f32 / res as f32;
+        let mut u = BodiesU { bub: [BubbleU::zeroed(); 4], on: [0.0; 4], count: [count as f32, 0.0, 0.0, 0.0] };
+        for (k, b) in per.iter().enumerate().take(4) {
+            if let Some(b) = b {
+                u.bub[k] = BubbleU { res: res as f32, hb: HB as f32, cell: b.cell, size: b.size, even: b.even, shape: b.shape, seed: b.seed, margin: 3.5 * vox };
+                u.on[k] = 1.0;
+            }
+        }
+        self.gpu.queue.write_buffer(&self.bu, 0, bytemuck::bytes_of(&u));
+        let pi = self.body_pipe(channels);
+        if self.body_vols.as_ref().is_none_or(|v| v.0.res != res || v.2 != channels) {
+            // (the old pair goes before the new is made, so that the two are never held at once)
+            self.body_vols = None;
+            let make = |label, format| {
+                let tex = self.gpu.volume(label, res, res, format, false);
+                let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+                Volume { tex, view, res }
+            };
+            self.body_vols = Some((make("bodies with bubbles", bodies_format(channels)), make("scene with each body's bubbles", VOL_FORMAT), channels));
+        }
+        let (bodies, scene, _) = self.body_vols.as_ref().unwrap();
+        let g = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.body_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&src.view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.lin) },
+                wgpu::BindGroupEntry { binding: 4, resource: self.bu.as_entire_binding() },
+            ],
+        });
+        let mut enc = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("bubbles in each body") });
+        let attach = |view, z| Some(wgpu::RenderPassColorAttachment { view, depth_slice: Some(z), resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store } });
+        for z in 0..res {
+            let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[attach(&bodies.view, z), attach(&scene.view, z)],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            rp.set_pipeline(&self.body_pipes[pi].1);
+            rp.set_bind_group(0, &g, &[]);
+            rp.draw(0..3, z..z + 1);
+        }
+        self.gpu.queue.submit([enc.finish()]);
+        let (bodies, scene, _) = self.body_vols.as_ref().unwrap();
+        (bodies, scene)
     }
 
     /// The bubbled volume written last.

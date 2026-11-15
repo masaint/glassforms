@@ -197,9 +197,11 @@ pub struct Variant {
     pub hollow: bool,
     /// 0: the scene has one material. Otherwise how many bodies it has, at least one of them of a
     /// material of its own: the tracer is then the one that follows a ray from body to body, which
-    /// takes each body's material from numbers. Of the rest only `metal`, `rough`, `film`, `hollow` and
-    /// `sss` are then set, each when any of the bodies has it: they say which parts are compiled in, and
-    /// at each surface the body there chooses among them (`Variant::of_bodies`).
+    /// takes each body's material from numbers. Of the rest each part is then set when any of the bodies
+    /// has it (`walk`, `rough_ref`, `coat`, `glow`, `mono` and `bubbles` never are: a body among several has
+    /// no true scattering, its roughness is drawn the live way, its coat, glow and bubbles need nothing
+    /// compiled in); they say which parts are compiled in, and at each surface and along each stretch the
+    /// body there chooses among them (`Variant::of_bodies`).
     pub bodies: u8,
     /// what lies inside the body: a tint that changes, cracks, grains, fibres, a glow (inner.rs)
     pub inner: crate::inner::Parts,
@@ -240,18 +242,31 @@ impl Variant {
     }
 
     /// The tracer of several bodies, for bodies made of these materials (in the order of the bodies):
-    /// the parts any of them uses. A body among several has no true scattering (its light volume is
-    /// used, as for the estimate), double refraction, graded index, bubbles or colour by wavelength
-    /// (`body_lacks`), and its roughness is always drawn the live way.
+    /// the parts any of them uses (each body's as `body_variant` has them). At each surface and along each
+    /// stretch the body there chooses among the parts compiled in by its own numbers. A body among several
+    /// has no true scattering (its light volume is used, as for the estimate), and its roughness is always
+    /// drawn the live way.
     pub fn of_bodies(mats: &[&Settings]) -> Self {
         let mut v = Self { bodies: mats.len().clamp(2, MAX_BODIES) as u8, ..Self::default() };
         for p in mats {
-            let x = Self::of(p);
+            let x = body_variant(p);
             v.metal |= x.metal;
             v.rough |= x.rough;
             v.film |= x.film;
             v.hollow |= x.hollow;
             v.sss |= x.sss;
+            v.spectrum |= x.spectrum;
+            v.grin |= x.grin;
+            v.biref |= x.biref;
+            let (a, b) = (&mut v.inner, x.inner);
+            a.grad |= b.grad;
+            a.crack |= b.crack;
+            a.crack_depth |= b.crack_depth;
+            a.crack_rough |= b.crack_rough;
+            a.play |= b.play;
+            a.glitter |= b.glitter;
+            a.silk |= b.silk;
+            a.piezo |= b.piezo;
         }
         v
     }
@@ -1097,6 +1112,16 @@ pub fn body_names() -> impl Iterator<Item = &'static str> {
     ["mat", "ior", "disp"].into_iter().chain(CONTROLS.iter().map(|c| c.name))
 }
 
+/// A material as a body among several has it: as `Variant::of`, but with no true scattering (a milky
+/// body among several is lit by its light volume, as the estimate is), so that what lies inside it, the
+/// graded index and double refraction are what they would be without the wandering.
+pub fn body_variant(p: &Settings) -> Variant {
+    if p.sss_walk <= 0.5 { return Variant::of(p); }
+    let mut q = p.clone();
+    q.sss_walk = 0.0;
+    Variant::of(&q)
+}
+
 /// What kind of body a material makes, to the tracer of several bodies: 0 clear, 1 a metal or a mirror,
 /// 2 milky, 3 a thin wall around air.
 pub fn body_kind(p: &Settings) -> f32 {
@@ -1104,21 +1129,24 @@ pub fn body_kind(p: &Settings) -> f32 {
     if v.metal { 1.0 } else if v.sss { 2.0 } else if v.hollow { 3.0 } else { 0.0 }
 }
 
+/// What else a body has, as the tracer of several bodies reads it (bits of `MB.has`, one number a
+/// body): 1 colour by wavelength, 2 a graded index, 4 double refraction, 8 something inside it (inner.rs),
+/// 16 a glow under pressure (given off also where it presses on another body).
+pub fn body_bits(p: &Settings) -> u32 {
+    let v = body_variant(p);
+    (v.spectrum as u32) | (v.grin as u32) << 1 | (v.biref as u32) << 2 | (v.inner.any() as u32) << 3 | (v.inner.piezo as u32) << 4
+}
+
 /// What a body among several does not have, though its material asks for it (for the window to say so).
 pub fn body_lacks(p: &Settings) -> Vec<&'static str> {
     let v = Variant::of(p);
     let mut out = Vec::new();
     if v.walk { out.push("true scattering (the light volume is used)"); }
-    if v.biref { out.push("double refraction"); }
-    if v.grin { out.push("the graded index"); }
-    if v.bubbles { out.push("bubbles"); }
-    if v.spectrum { out.push("colour by wavelength (three colours are used)"); }
-    if v.inner.any() { out.push("what lies inside (cracks, play of colour, silk, a changing tint, the pressure glow)"); }
     out
 }
 
-/// Numbers ahead of the bodies' own in the block: kind, index, dispersion and four spare; then what each
-/// body's inside absorbs.
+/// Numbers ahead of the bodies' own in the block: kind, index, dispersion and what else each has
+/// (`body_bits`); then what each body's inside absorbs.
 pub const MB_HEAD: usize = 4 * 4 + MAX_BODIES * 4;
 /// Numbers in the block the tracer of several bodies is given (`MB` in trace_bodies.wgsl).
 pub const MB_FLOATS: usize = MB_HEAD + MAX_BODIES * MU_FLOATS;
@@ -1135,6 +1163,7 @@ pub fn bodies_uniforms(mats: &[&Settings], thick: &[f64]) -> Vec<f32> {
         u[k] = kind;
         u[4 + k] = p.ior as f32;
         u[8 + k] = p.disp as f32;
+        u[12 + k] = body_bits(p) as f32;
         // what the inside absorbs: the tint by its depth; with a colour by wavelength, that colour as
         // three numbers; nothing for a thin wall (which holds air) or a body light does not enter
         let density = p.density / scale;
@@ -1151,34 +1180,58 @@ pub fn bodies_uniforms(mats: &[&Settings], thick: &[f64]) -> Vec<f32> {
     u
 }
 
+/// What lies inside each body (`crate::inner::uniforms` for each, in the order of the bodies; the block
+/// the tracer of several bodies reads as `ibod`). `thick`: as for `bodies_uniforms`. `pixel`: the width
+/// of a pixel at the shape. Each body is told the tint the tracer already takes off along its stretches.
+pub fn bodies_inner(mats: &[&Settings], thick: &[f64], pixel: f64) -> Vec<f32> {
+    let n = crate::inner::IU_FLOATS;
+    let mut u = vec![0.0f32; MAX_BODIES * n];
+    let body = bodies_uniforms(mats, thick);
+    for k in 0..MAX_BODIES {
+        let p = mats.get(k).copied().unwrap_or(mats[0]);
+        let scale = fit_scale(p, thick.get(k).copied().filter(|t| *t > 0.0));
+        let tint = [0, 1, 2].map(|c| body[16 + 4 * k + c] as f64);
+        u[k * n..(k + 1) * n].copy_from_slice(&crate::inner::uniforms(p, scale, pixel, tint));
+    }
+    u
+}
+
 /// The tracer's parts for a scene of several bodies with materials of their own (`v`: `Variant::of_bodies`).
 /// `material_wgsl` is the same text as `tracer_parts` is given, cut with BODIES on and with the parts
 /// any of the bodies uses, and with what it reads of the scene's one material made to read the numbers of
 /// the body in hand (`cb` in `bodies_wgsl`): the material's uniform block (`mu.`), the body's index
 /// (`u.ior`) and what its inside absorbs (`u.absorb`). `bodies_wgsl` (trace_bodies.wgsl) follows it.
 pub fn bodies_parts(v: &Variant, material_wgsl: &str, bodies_wgsl: &str, picture: bool) -> TracerParts {
-    let flags = [
+    let mut flags = vec![
         ("BODIES", true), ("ENVL", true), ("PICTURE", picture), ("METAL", v.metal), ("ROUGH", v.rough), ("RANDOM", v.rough),
-        ("FILM", v.film), ("HOLLOW", v.hollow), ("SSS", v.sss),
+        ("FILM", v.film), ("HOLLOW", v.hollow), ("SSS", v.sss), ("SPECTRUM", v.spectrum), ("GRIN", v.grin), ("BIREF", v.biref),
     ];
+    // (what lies inside the bodies: each part that any of them has; each body is told its own numbers)
+    flags.extend(v.inner.flags());
     let shared = per_body(&preprocess(material_wgsl, &flags));
     let decl = shared + &preprocess(bodies_wgsl, &flags).replace("{{COUNT}}", &v.bodies.clamp(2, MAX_BODIES as u8).to_string());
     // (a ray that has left one body must be able to reach the others, whatever the family allows itself)
     TracerParts { decl, shade: "shadeB(ro, rd, t, xi, W, fc)", graze: "grazeB(p, rd)", min_layers: 2 }
 }
 
-/// The material's text made to read the numbers of the body in hand: `mu.x` becomes `mb.b[cb].x`, the
-/// scene's index `u.ior` the body's `mb.ior[cb]`, and what the scene's inside absorbs the body's.
+/// The material's text made to read the numbers of the body in hand: `mu.x` becomes `mb.b[cb].x`, what
+/// lies inside (`iu.x`) the body's own `ibod[cb].x`, the scene's index `u.ior` the body's `mb.ior[cb]`,
+/// and what the scene's inside absorbs the body's.
 fn per_body(src: &str) -> String {
     let src = src.replace("u.ior", "mb.ior[cb]").replace("u.absorb.xyz", "mb.absorb[cb].rgb");
+    let src = rename(&src, "mu.", "mb.b[cb].");
+    rename(&src, "iu.", "ibod[cb].")
+}
+
+/// Every `from` that stands alone (is not the end of a longer name) written as `to`.
+fn rename(src: &str, from: &str, to: &str) -> String {
     let mut out = String::with_capacity(src.len() + src.len() / 8);
-    let mut rest = src.as_str();
-    while let Some(i) = rest.find("mu.") {
-        // (only `mu` standing alone: not the end of a longer name)
+    let mut rest = src;
+    while let Some(i) = rest.find(from) {
         let alone = rest[..i].chars().next_back().is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
         out.push_str(&rest[..i]);
-        out.push_str(if alone { "mb.b[cb]." } else { "mu." });
-        rest = &rest[i + 3..];
+        out.push_str(if alone { to } else { from });
+        rest = &rest[i + from.len()..];
     }
     out.push_str(rest);
     out

@@ -366,7 +366,7 @@ fn part_of_colour(at: usize) -> bool {
 
 /// What a body is drawn without while the scene's bodies have materials of their own: the tracer that
 /// follows a ray from one body into the next leaves these out.
-const NOT_AMONG: [&str; 11] = ["sssWalk", "biref", "birefAz", "birefEl", "grin", "grinDepth", "bubbles", "bubbleSize", "bubbleEven", "bubbleShape", "bubbleSeed"];
+const NOT_AMONG: [&str; 2] = ["sssWalk", "roughRef"];
 
 /// Does this setting do anything as things stand? Not if the material's other choices leave it without
 /// meaning; not if it is one of the parts left out while bodies have materials of their own; and not if
@@ -1058,16 +1058,16 @@ mod tests {
 
     #[test]
     fn bodies_of_several_materials_are_drawn_without_some_parts() {
-        let p = with(&[("bubbles", 0.3), ("film", 300.0)]);
+        let p = with(&[("bubbles", 0.3), ("film", 300.0), ("sss", 1.0), ("sssWalk", 1.0), ("rough", 0.3), ("roughRef", 1.0)]);
         let (alone, among) = (How { clay: false, several: false }, How { clay: false, several: true });
-        assert!(acts_as("bubbles", &p, alone) && acts_as("bubbleSize", &p, alone) && acts_as("biref", &p, alone));
+        assert!(acts_as("sssWalk", &p, alone));
         for name in NOT_AMONG {
             assert!(Settings::default().get(name).is_some(), "{name} is not a setting");
             assert!(!acts_as(name, &p, among), "{name} acts among bodies of several materials");
         }
-        assert_eq!(wants_as("bubbles", &p, among).as_deref(), Some("not while bodies have materials of their own"));
+        assert_eq!(wants_as("sssWalk", &p, among).as_deref(), Some("not while bodies have materials of their own"));
         // everything else is as it is alone
-        for name in ["film", "filmIor", "rough", "coat", "ior", "sss", "glow"] { assert_eq!(acts_as(name, &p, among), acts_as(name, &p, alone), "{name}"); }
+        for name in ["film", "filmIor", "rough", "coat", "ior", "sss", "glow", "bubbles", "bubbleSize", "biref", "grin"] { assert_eq!(acts_as(name, &p, among), acts_as(name, &p, alone), "{name}"); }
     }
 
     #[test]
@@ -1085,7 +1085,7 @@ mod tests {
         // under clay, the clay is switched off
         assert_eq!(enabler("ior", &with(&[("clay", 1.0)]), How { clay: true, several: false }), Some(vec![("clay", 0.0)]));
         // what bodies of several materials are drawn without cannot be woken
-        assert_eq!(enabler("bubbles", &glass, How { clay: false, several: true }), None);
+        assert_eq!(enabler("sssWalk", &glass, How { clay: false, several: true }), None);
         assert_eq!(enabler_words(&[("sss", 1.0)]), "turns on milkiness too");
     }
 

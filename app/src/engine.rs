@@ -106,6 +106,8 @@ pub struct Engine {
     /// volume holds now
     bubbler: Bubbler,
     bubbles_in: Option<material::Bubbles>,
+    /// each body's bubbles as they were last cut into the bodies' volume (None: none were)
+    body_bubbles_in: Option<Vec<Option<material::Bubbles>>>,
     /// the light inside a milky body: what works it out, what it was last worked out from, and a count
     /// of the times the volume the tracer reads has changed (scatter_engine.rs)
     pub scatter: Scatter,
@@ -199,7 +201,7 @@ impl Engine {
         let lights_tex = renderer.env_target(env::ENV_W as u32, env::ENV_H as u32);
         let lights_view = lights_tex.create_view(&wgpu::TextureViewDescriptor::default());
         let mut e = Self {
-            baker: Baker::new(&gpu), layers: LayerWork::new(&gpu), models: crate::mesh_bake::Models::new(auto), bubbler: Bubbler::new(&gpu), stage: crate::stage::StageWork::new(auto), bubbles_in: None, scatter: Scatter::new(&gpu), glow: glow::Kept::default(), shape_no: 0, thickness: None, fit_now: 1.0, soft_ok: false, bodies_always: false, body_thick: None, gpu, state, renderer, cast, lights_tex, lights_view, painted: None, painted_px: Vec::new(), lights_lit: true, rig_sh: None,
+            baker: Baker::new(&gpu), layers: LayerWork::new(&gpu), models: crate::mesh_bake::Models::new(auto), bubbler: Bubbler::new(&gpu), stage: crate::stage::StageWork::new(auto), bubbles_in: None, body_bubbles_in: None, scatter: Scatter::new(&gpu), glow: glow::Kept::default(), shape_no: 0, thickness: None, fit_now: 1.0, soft_ok: false, bodies_always: false, body_thick: None, gpu, state, renderer, cast, lights_tex, lights_view, painted: None, painted_px: Vec::new(), lights_lit: true, rig_sh: None,
             maker: Arc::new(OnceLock::new()), picture: None, picture_no: 0, glass: None, glass_from: None, hdri_seen: None, loading: None, next: None, building: false, hdri_error: None, hdri_wait: auto,
             show_wanted: Cell::new(false), show: None, shown: None, lighting_no: 0, last_lu: None,
             dirty: true, cut: true, last_tu: None, last_look: None,
@@ -474,7 +476,7 @@ impl Engine {
     fn material_upkeep(&mut self, v: material::Variant) -> bool {
         let mut changed = false;
         // the bubbles were changed: cut them afresh (the shape itself need not be built again)
-        if self.bubbles_wanted() != self.bubbles_in && self.scene_volume().is_some() {
+        if (self.bubbles_wanted() != self.bubbles_in || self.body_bubbles_wanted() != self.body_bubbles_in) && self.scene_volume().is_some() {
             self.cut_bubbles();
             changed = true;
         }
@@ -488,7 +490,7 @@ impl Engine {
             // (a material fitted to the shape is fitted to its own body)
             if self.body_thick.is_none() && mats.iter().any(|m| m.fit > 0.5) { self.body_thick = self.measure_bodies(); }
             let thick = self.body_thick.clone().unwrap_or_default();
-            if mats.iter().any(|m| m.rough > 0.0 || (m.metal < 0.5 && m.sss > 0.0)) && !self.soft_ok && !self.painted_px.is_empty() {
+            if (v.rough || v.sss || v.inner.soft_lights()) && !self.soft_ok && !self.painted_px.is_empty() {
                 self.renderer.soften_lights(&self.painted_px, env::ENV_W as u32, env::ENV_H as u32);
                 self.soft_ok = true;
                 changed = true;
@@ -503,6 +505,13 @@ impl Engine {
                 }
             }
             changed |= self.renderer.set_bodies_material(&numbers);
+            // what lies inside each body, with the width of a pixel at the shape (as for one material)
+            if v.inner.any() {
+                let p = &self.state.p;
+                let (_, (_, th)) = self.renderer.size();
+                let pixel = p.dist * 2.0 * (p.fov * DEG / 2.0).tan() / th.max(1) as f64;
+                changed |= self.renderer.set_inner_bodies(&material::bodies_inner(&mats, &thick, pixel));
+            }
             // each milky body's light, worked out through its own distances
             let scales: Vec<f64> = mats.iter().enumerate().map(|(k, m)| material::fit_scale(m, thick.get(k).copied().filter(|t| *t > 0.0))).collect();
             let owned: Vec<gf_core::settings::Settings> = mats.iter().map(|m| (*m).clone()).collect();
@@ -577,7 +586,16 @@ impl Engine {
         if self.state.body_materials().is_some() { None } else { material::bubbles(&self.state.p) }
     }
 
-    /// Point the tracer at the shape as built, with the material's bubbles cut into it if it has any.
+    /// Each body's bubbles, while the scene is drawn body by body and at least one body has bubbles (in
+    /// the order of the bodies; None for a body that has none).
+    fn body_bubbles_wanted(&self) -> Option<Vec<Option<material::Bubbles>>> {
+        let mats = self.state.body_materials()?;
+        let per: Vec<Option<material::Bubbles>> = mats.iter().map(|m| if material::body_variant(m).bubbles { material::bubbles(m) } else { None }).collect();
+        per.iter().any(|b| b.is_some()).then_some(per)
+    }
+
+    /// Point the tracer at the shape as built, with the material's bubbles cut into it if it has any;
+    /// drawn body by body, with each body's bubbles cut into the bodies' volume and the scene's.
     fn cut_bubbles(&mut self) {
         let bubbles = self.bubbles_wanted();
         // (the volume the tracer reads: the one shape's, or the layers combined)
@@ -590,6 +608,22 @@ impl Engine {
             self.renderer.set_volume(vol);
         }
         self.bubbles_in = bubbles;
+        // several bodies: each one's bubbles in its own channel, and the scene's volume made again from
+        // them; or, if they have none now but had before, the volumes as built
+        let per = self.body_bubbles_wanted();
+        if let Some(src) = self.layers.combiner.bodies_volume() {
+            let (channels, count) = (self.layers.combiner.bodies_channels(), self.state.stack.bodies().len() as u32);
+            match &per {
+                Some(per) => {
+                    let (bodies, scene) = self.bubbler.carve_bodies(src, channels, count, per);
+                    self.renderer.set_bodies(Some((bodies, count)));
+                    self.renderer.set_volume(scene);
+                }
+                None if self.body_bubbles_in.is_some() => self.renderer.set_bodies(Some((src, count))),
+                None => {}
+            }
+        }
+        self.body_bubbles_in = per;
         self.shape_no += 1;
     }
 
@@ -710,7 +744,8 @@ impl Engine {
         self.shape_no += 1;
         // the tracer has just been pointed at the new volume: the material's bubbles go into it
         self.bubbles_in = None;
-        if self.bubbles_wanted().is_some() { self.cut_bubbles(); }
+        self.body_bubbles_in = None;
+        if self.bubbles_wanted().is_some() || self.body_bubbles_wanted().is_some() { self.cut_bubbles(); }
         Ok(())
     }
 

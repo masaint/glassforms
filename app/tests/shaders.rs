@@ -97,8 +97,18 @@ fn tracer_bodies() {
     let unfilled = |src: &str| src.split("{{").skip(1).any(|rest| rest.starts_with(|c: char| c.is_ascii_uppercase())) || src.contains("//#");
     use gf_core::material::Variant as M;
     // (the parts the bodies use between them: none beyond clear glass, each alone, and all at once)
-    let parts = [M::default(), M { film: true, ..M::default() }, M { rough: true, ..M::default() }, M { sss: true, ..M::default() }, M { metal: true, ..M::default() },
+    let mut parts = vec![M::default(), M { film: true, ..M::default() }, M { rough: true, ..M::default() }, M { sss: true, ..M::default() }, M { metal: true, ..M::default() },
         M { hollow: true, film: true, ..M::default() }, M { metal: true, rough: true, film: true, hollow: true, sss: true, ..M::default() }];
+    // colour by wavelength, the graded index, double refraction and what lies inside, each alone, beside
+    // the others, and everything at once
+    let d = M::default();
+    parts.extend([M { spectrum: true, ..d }, M { grin: true, ..d }, M { biref: true, ..d }, M { spectrum: true, grin: true, biref: true, ..d }]);
+    for i in gf_core::inner::Parts::samples() {
+        parts.push(M { inner: i, ..d });
+        parts.push(M { inner: i, biref: true, sss: true, ..d });
+    }
+    let all = gf_core::inner::Parts { grad: true, crack: true, crack_depth: true, crack_rough: true, play: true, glitter: true, silk: true, piezo: true };
+    parts.push(M { metal: true, rough: true, film: true, hollow: true, sss: true, spectrum: true, grin: true, biref: true, inner: all, ..d });
     for (bodies, with) in (2..=4u8).flat_map(|b| parts.iter().map(move |p| (b, *p))) {
         let mat = M { bodies, ..with };
         for (step_scale, layers) in [(0.95, 2), (1.0, 0)] {
@@ -108,7 +118,7 @@ fn tracer_bodies() {
                 for profile in [false, true] {
                     let src = tracer_source(&m, v, profile);
                     assert!(!unfilled(&src), "{v:?}: something was left unfilled");
-                    assert!(src.contains("shadeB(ro, rd, t, xi, W, fc)") && !src.contains("fn shadeM") && !src.contains("mu.") && src.contains(&format!("const COUNT: i32 = {bodies};")));
+                    assert!(src.contains("shadeB(ro, rd, t, xi, W, fc)") && !src.contains("fn shadeM") && !src.contains("mu.") && !src.contains(" iu.") && !src.contains("(iu.") && src.contains(&format!("const COUNT: i32 = {bodies};")));
                     check(&format!("trace.wgsl {v:?}{}", if profile { " (counting)" } else { "" }), &src);
                 }
             }

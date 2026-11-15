@@ -354,6 +354,8 @@ pub struct Renderer {
     /// what the tracer is told about what lies inside the body (cracks, grains, fibres, a changing tint)
     u_inner: wgpu::Buffer,
     last_inner: Vec<f32>,
+    u_inner_bodies: wgpu::Buffer,
+    last_inner_bodies: Vec<f32>,
     /// the share of a rough surface's roughness that is sampled, as the tracer has it now
     rough_share: f32,
     /// the lights' map again with softened copies of itself as further levels, for rough and milky
@@ -481,8 +483,9 @@ impl Renderer {
             texture_entry(26, wgpu::TextureViewDimension::D3, true), texture_entry(27, wgpu::TextureViewDimension::D3, true),
             uniform_entry(crate::stage::BINDING, frag, false),
             texture_entry(12, wgpu::TextureViewDimension::D3, true), uniform_entry(13, frag, false),
-            // (32: what lies inside the body, read only by tracers built for it)
-            uniform_entry(32, frag, false),
+            // (32: what lies inside the body, read only by tracers built for it; 33: what lies inside each
+            // of several bodies, read only by the tracer of several bodies built for it)
+            uniform_entry(32, frag, false), uniform_entry(33, frag, false),
         ]);
         let no_bodies = gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("no bodies"),
@@ -548,6 +551,8 @@ impl Renderer {
             last_bodies: Vec::new(),
             u_inner: gpu.uniform_buffer("trace: inside the body", (gf_core::inner::IU_FLOATS * 4) as u64),
             last_inner: Vec::new(),
+            u_inner_bodies: gpu.uniform_buffer("trace: inside each body", (material::MAX_BODIES * gf_core::inner::IU_FLOATS * 4) as u64),
+            last_inner_bodies: Vec::new(),
             rough_share: -1.0,
             glow: [None, None, None, None],
             no_glow: crate::scatter::blank(gpu),
@@ -658,6 +663,15 @@ impl Renderer {
         if slot.as_ref() == volume { return; }
         *slot = volume.cloned();
         self.bind_tracer();
+    }
+
+    /// The numbers of what lies inside each of several bodies (`gf_core::material::bodies_inner`). True if
+    /// they changed.
+    pub fn set_inner_bodies(&mut self, numbers: &[f32]) -> bool {
+        if self.last_inner_bodies == numbers { return false; }
+        self.gpu.queue.write_buffer(&self.u_inner_bodies, 0, bytemuck::cast_slice(numbers));
+        self.last_inner_bodies = numbers.to_vec();
+        true
     }
 
     /// The numbers of what lies inside the body (`gf_core::inner::uniforms`). True if they changed.
@@ -866,6 +880,7 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(self.bodies.as_ref().map_or(&self.no_bodies, |b| &b.0)) },
                 wgpu::BindGroupEntry { binding: 13, resource: self.u_bodies.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 32, resource: self.u_inner.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 33, resource: self.u_inner_bodies.as_entire_binding() },
             ],
         }));
     }
