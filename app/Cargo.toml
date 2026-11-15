@@ -1,0 +1,31 @@
+[package]
+name = "glassforms"
+version.workspace = true
+edition.workspace = true
+description = "Glass Forms: shapes defined by mathematics, rendered live as dispersive glass."
+
+[lib]
+name = "glassforms"
+path = "src/lib.rs"
+
+[[bin]]
+name = "glassforms"
+path = "src/main.rs"
+
+[dependencies]
+gf-core = { path = "../core" }
+wgpu = { version = "30.0.2", default-features = false, features = ["std", "parking_lot", "vulkan", "dx12", "wgsl"] }
+bytemuck = { version = "1.25", features = ["derive"] }
+pollster = "0.4"
+png = "0.18"
+half = { version = "2", features = ["bytemuck"] }
+# the window: egui on the same wgpu device as the renderer; rfd for the folder, save and open dialogs
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "wgpu_no_default_features"] }
+rfd = { version = "0.18", default-features = false }
+# reading environment pictures (.exr)
+exr = "1.74"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }      # numbers read back exactly as written
+
+[dev-dependencies]
+naga = { version = "30.0.2", features = ["wgsl-in"] }

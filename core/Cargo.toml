@@ -1,0 +1,14 @@
+[package]
+name = "gf-core"
+version.workspace = true
+edition.workspace = true
+description = "Glass Forms: everything that needs no GPU. Shapes, curves, animation, settings."
+
+[dependencies]
+libm = "0.2"          # the same sin/cos/exp as the browser's (fdlibm), so chaotic orbits come out the same
+rayon = "1.11"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }      # numbers read back exactly as written
+
+[dev-dependencies]
+naga = { version = "30.0.2", features = ["wgsl-in"] }

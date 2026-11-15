@@ -1,0 +1,2948 @@
+{
+ "about": "written by tools/dump_fields.mjs from forms.js, scenes/surfaces.js and scenes/algebraic.js",
+ "vertex": "#version 300 es\nvoid main(){\n  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\n  gl_Position = vec4(p*2.0 - 1.0, 0.0, 1.0);\n}",
+ "families": [
+  {
+   "id": "surfaces",
+   "name": "Minimal surfaces",
+   "kind": "field",
+   "defaults": [
+    [
+     "ior",
+     1.5
+    ],
+    [
+     "disp",
+     0.07
+    ],
+    [
+     "absorb",
+     [
+      0.3,
+      0.14,
+      0.06
+     ]
+    ],
+    [
+     "ns",
+     1
+    ],
+    [
+     "nw",
+     3
+    ],
+    [
+     "nb",
+     3
+    ],
+    [
+     "dist",
+     6.6
+    ],
+    [
+     "fov",
+     26
+    ],
+    [
+     "rot",
+     [
+      22,
+      32,
+      0
+     ]
+    ],
+    [
+     "spin",
+     0.25
+    ],
+    [
+     "bloom",
+     0.35
+    ],
+    [
+     "exposure",
+     1
+    ]
+   ],
+   "lights": [
+    {
+     "az": 38,
+     "el": 18,
+     "w": 14,
+     "h": 32,
+     "rgb": [
+      5,
+      4.9,
+      4.7
+     ],
+     "soft": 0.7
+    },
+    {
+     "az": -55,
+     "el": -8,
+     "w": 10,
+     "h": 42,
+     "rgb": [
+      0.5,
+      1.4,
+      4
+     ],
+     "soft": 0.7
+    },
+    {
+     "az": -140,
+     "el": 5,
+     "w": 8,
+     "h": 42,
+     "rgb": [
+      5,
+      1.6,
+      0.25
+     ],
+     "soft": 0.7
+    },
+    {
+     "az": 150,
+     "el": 28,
+     "w": 24,
+     "h": 16,
+     "rgb": [
+      3.2,
+      3.1,
+      3
+     ],
+     "soft": 0.8
+    },
+    {
+     "az": 0,
+     "el": 85,
+     "w": 34,
+     "h": 34,
+     "rgb": [
+      0.8,
+      0.9,
+      1.1
+     ],
+     "soft": 0.9
+    },
+    {
+     "az": 0,
+     "el": -80,
+     "w": 30,
+     "h": 30,
+     "rgb": [
+      0.5,
+      0.22,
+      0.05
+     ],
+     "soft": 0.9
+    }
+   ],
+   "ambient": [
+    0.006,
+    0.011,
+    0.022
+   ],
+   "stepScale": 0.9,
+   "stepsOut": null,
+   "stepsIn": null,
+   "layers": 2,
+   "tracer": {
+    "STEP_SCALE": "0.90",
+    "STEPS_OUT": "220",
+    "STEPS_IN": "56",
+    "LAYERS": "2"
+   },
+   "presets": [
+    {
+     "id": "gyroid",
+     "name": "Gyroid",
+     "eq": [
+      "sin x cos y + sin y cos z + sin z cos x = 0"
+     ],
+     "note": "Found by Alan Schoen in 1970. It splits space into two identical intertwined labyrinths and contains no straight lines.",
+     "params": [
+      {
+       "id": "cells",
+       "entry": [
+        1.5,
+        0.6,
+        5,
+        0.05
+       ]
+      },
+      {
+       "id": "level",
+       "entry": [
+        0,
+        -1.2,
+        1.2,
+        0.01
+       ]
+      },
+      {
+       "id": "solid",
+       "entry": [
+        0,
+        0,
+        1,
+        1
+       ]
+      },
+      {
+       "id": "wall",
+       "entry": [
+        0.045,
+        0.012,
+        0.14,
+        0.002
+       ]
+      },
+      {
+       "id": "box",
+       "entry": [
+        0,
+        0,
+        1,
+        1,
+        "cube"
+       ]
+      }
+     ],
+     "rot": null,
+     "animate": [
+      "cells"
+     ],
+     "glsl": "float g(vec3 q){ return dot(sin(q), cos(q.yzx)); }\nfloat raw(vec3 p){\n  float v = g(p * 3.14159265 * cells) - level;        // \"cells\" repeats across the width of the piece\n  return solid > 0.5 ? -v : v;\n}",
+     "clip": "mix(length(p) - 1.22, length(max(abs(p) - 0.66, 0.0)) + min(max(abs(p.x) - 0.66, max(abs(p.y) - 0.66, abs(p.z) - 0.66)), 0.0) - 0.14, box)",
+     "shell": "solid > 0.5 ? 0.0 : wall",
+     "knobs": [
+      {
+       "id": "cells",
+       "label": "cells",
+       "lo": 0.6,
+       "hi": 5,
+       "step": 0.05,
+       "own": true,
+       "value": 1.5
+      },
+      {
+       "id": "level",
+       "label": "level",
+       "lo": -1.2,
+       "hi": 1.2,
+       "step": 0.01,
+       "own": true,
+       "value": 0
+      },
+      {
+       "id": "solid",
+       "label": "solid",
+       "lo": 0,
+       "hi": 1,
+       "step": 1,
+       "own": true,
+       "value": 0
+      },
+      {
+       "id": "wall",
+       "label": "wall",
+       "lo": 0.012,
+       "hi": 0.14,
+       "step": 0.002,
+       "own": true,
+       "value": 0.045
+      },
+      {
+       "id": "box",
+       "label": "cube",
+       "lo": 0,
+       "hi": 1,
+       "step": 1,
+       "own": true,
+       "value": 0
+      },
+      {
+       "id": "@puff",
+       "label": "inflate",
+       "lo": -0.06,
+       "hi": 0.06,
+       "step": 0.001,
+       "own": false,
+       "value": 0
+      }
+     ],
+     "animated": [
+      "cells"
+     ],
+     "rotSet": null,
+     "fragment": "#version 300 es\nprecision highp float;\nuniform float uZ, uHB, uRes, uPuff;\nuniform float uPr[8];\nout vec4 o;\nfloat smin(float a, float b, float k){ float h = max(k - abs(a - b), 0.0) / k; return min(a, b) - h*h*k*0.25; }\nfloat smax(float a, float b, float k){ return -smin(-a, -b, k); }\nfloat sdBall(vec3 p, float r){ return length(p) - r; }\nfloat sdBox(vec3 p, vec3 b, float r){ vec3 q = abs(p) - b + r; return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - r; }\n#define cells uPr[0]\n#define level uPr[1]\n#define solid uPr[2]\n#define wall uPr[3]\n#define box uPr[4]\n#define CLIP (mix(length(p) - 1.22, length(max(abs(p) - 0.66, 0.0)) + min(max(abs(p.x) - 0.66, max(abs(p.y) - 0.66, abs(p.z) - 0.66)), 0.0) - 0.14, box))\n#define SHELL (solid > 0.5 ? 0.0 : wall)\nfloat g(vec3 q){ return dot(sin(q), cos(q.yzx)); }\nfloat raw(vec3 p){\n  float v = g(p * 3.14159265 * cells) - level;        // \"cells\" repeats across the width of the piece\n  return solid > 0.5 ? -v : v;\n}\n\nvoid main(){\n  vec3 p = (vec3(gl_FragCoord.xy / uRes, uZ) * 2.0 - 1.0) * uHB;\n  const float e = 0.0007;\n  const vec2 k = vec2(1.0, -1.0);\n  vec3 x = p;\n  float v0 = 0.0, last = 1.0;\n  for (int i = 0; i < 8; i++){\n    float a = raw(x + e*k.xyy), b = raw(x + e*k.yyx), c = raw(x + e*k.yxy), d = raw(x + e*k.xxx);\n    float fv = 0.25 * (a + b + c + d);\n    vec3 g = (k.xyy*a + k.yyx*b + k.yxy*c + k.xxx*d) / (4.0 * e);\n    if (i == 0) v0 = fv;\n    vec3 st = g * (fv / max(dot(g, g), 1e-12));\n    last = length(st);\n    if (last > 0.12) st *= 0.12 / last;                 // never leap: far from the surface the gradient misleads\n    x -= st;\n    if (last < 2e-5) break;\n  }\n  float dist = length(x - p);\n  dist *= mix(1.0, 0.7, smoothstep(0.06, 0.2, dist));   // a long walk may not have ended at the nearest point: stay cautious\n  float sd = (v0 < 0.0 ? -dist : dist) - uPuff;          // uPuff swells (or shrinks) the whole surface evenly\n  float w = SHELL;\n  if (w > 0.0) sd = abs(sd) - w;\n  o = vec4(clamp(smax(sd, CLIP, 0.03), -1.0, 1.0), 0.0, 0.0, 1.0);\n}",
+     "bake": {
+      "res": 768,
+      "uniforms": {
+       "uPr": [
+        1.5,
+        0,
+        0,
+        0.04500000178813934,
+        0,
+        0,
+        0,
+        0
+       ],
+       "uHB": 1.5,
+       "uRes": 768,
+       "uPuff": 0
+      },
+      "volume": {
+       "levels": 1,
+       "format": "R16F",
+       "w": 768,
+       "h": 768,
+       "d": 768
+      },
+      "viewport": [
+       0,
+       0,
+       768,
+       768
+      ],
+      "uniformBits": [
+       1069547520,
+       1145044992,
+       0,
+       0,
+       1069547520,
+       0,
+       0,
+       1027101164,
+       0,
+       0,
+       0,
+       0
+      ],
+      "zcBits": [
+       [
+        0,
+        975874731
+       ],
+       [
+        1,
+        989855744
+       ],
+       [
+        384,
+        1056975531
+       ],
+       [
+        767,
+        1065342293
+       ]
+      ]
+     }
+    },
+    {
+     "id": "gyroidnet",
+     "name": "Gyroid lattice",
+     "eq": [
+      "sin x cos y + sin y cos z + sin z cos x > c"
+     ],
+     "note": "One of the gyroid’s two labyrinths, filled in.",
+     "params": [
+      {
+       "id": "cells",
+       "entry": [
+        1.5,
+        0.6,
+        5,
+        0.05
+       ]
+      },
+      {
+       "id": "level",
+       "entry": [
+        0.55,
+        -1.2,
+        1.2,
+        0.01
+       ]
+      },
+      {
+       "id": "solid",
+       "entry": [
+        1,
+        0,
+        1,
+        1
+       ]
+      },
+      {
+       "id": "wall",
+       "entry": [
+        0.045,
+        0.012,
+        0.14,
+        0.002
+       ]
+      },
+      {
+       "id": "box",
+       "entry": [
+        0,
+        0,
+        1,
+        1,
+        "cube"
+       ]
+      }
+     ],
+     "rot": null,
+     "animate": [
+      "level"
+     ],
+     "glsl": "float g(vec3 q){ return dot(sin(q), cos(q.yzx)); }\nfloat raw(vec3 p){\n  float v = g(p * 3.14159265 * cells) - level;        // \"cells\" repeats across the width of the piece\n  return solid > 0.5 ? -v : v;\n}",
+     "clip": "mix(length(p) - 1.22, length(max(abs(p) - 0.66, 0.0)) + min(max(abs(p.x) - 0.66, max(abs(p.y) - 0.66, abs(p.z) - 0.66)), 0.0) - 0.14, box)",
+     "shell": "solid > 0.5 ? 0.0 : wall",
+     "knobs": [
+      {
+       "id": "cells",
+       "label": "cells",
+       "lo": 0.6,
+       "hi": 5,
+       "step": 0.05,
+       "own": true,
+       "value": 1.5
+      },
+      {
+       "id": "level",
+       "label": "level",
+       "lo": -1.2,
+       "hi": 1.2,
+       "step": 0.01,
+       "own": true,
+       "value": 0.55
+      },
+      {
+       "id": "solid",
+       "label": "solid",
+       "lo": 0,
+       "hi": 1,
+       "step": 1,
+       "own": true,
+       "value": 1
+      },
+      {
+       "id": "wall",
+       "label": "wall",
+       "lo": 0.012,
+       "hi": 0.14,
+       "step": 0.002,
+       "own": true,
+       "value": 0.045
+      },
+      {
+       "id": "box",
+       "label": "cube",
+       "lo": 0,
+       "hi": 1,
+       "step": 1,
+       "own": true,
+       "value": 0
+      },
+      {
+       "id": "@puff",
+       "label": "inflate",
+       "lo": -0.06,
+       "hi": 0.06,
+       "step": 0.001,
+       "own": false,
+       "value": 0
+      }
+     ],
+     "animated": [
+      "level"
+     ],
+     "rotSet": null,
+     "fragment": "#version 300 es\nprecision highp float;\nuniform float uZ, uHB, uRes, uPuff;\nuniform float uPr[8];\nout vec4 o;\nfloat smin(float a, float b, float k){ float h = max(k - abs(a - b), 0.0) / k; return min(a, b) - h*h*k*0.25; }\nfloat smax(float a, float b, float k){ return -smin(-a, -b, k); }\nfloat sdBall(vec3 p, float r){ return length(p) - r; }\nfloat sdBox(vec3 p, vec3 b, float r){ vec3 q = abs(p) - b + r; return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - r; }\n#define cells uPr[0]\n#define level uPr[1]\n#define solid uPr[2]\n#define wall uPr[3]\n#define box uPr[4]\n#define CLIP (mix(length(p) - 1.22, length(max(abs(p) - 0.66, 0.0)) + min(max(abs(p.x) - 0.66, max(abs(p.y) - 0.66, abs(p.z) - 0.66)), 0.0) - 0.14, box))\n#define SHELL (solid > 0.5 ? 0.0 : wall)\nfloat g(vec3 q){ return dot(sin(q), cos(q.yzx)); }\nfloat raw(vec3 p){\n  float v = g(p * 3.14159265 * cells) - level;        // \"cells\" repeats across the width of the piece\n  return solid > 0.5 ? -v : v;\n}\n\nvoid main(){\n  vec3 p = (vec3(gl_FragCoord.xy / uRes, uZ) * 2.0 - 1.0) * uHB;\n  const float e = 0.0007;\n  const vec2 k = vec2(1.0, -1.0);\n  vec3 x = p;\n  float v0 = 0.0, last = 1.0;\n  for (int i = 0; i < 8; i++){\n    float a = raw(x + e*k.xyy), b = raw(x + e*k.yyx), c = raw(x + e*k.yxy), d = raw(x + e*k.xxx);\n    float fv = 0.25 * (a + b + c + d);\n    vec3 g = (k.xyy*a + k.yyx*b + k.yxy*c + k.xxx*d) / (4.0 * e);\n    if (i == 0) v0 = fv;\n    vec3 st = g * (fv / max(dot(g, g), 1e-12));\n    last = length(st);\n    if (last > 0.12) st *= 0.12 / last;                 // never leap: far from the surface the gradient misleads\n    x -= st;\n    if (last < 2e-5) break;\n  }\n  float dist = length(x - p);\n  dist *= mix(1.0, 0.7, smoothstep(0.06, 0.2, dist));   // a long walk may not have ended at the nearest point: stay cautious\n  float sd = (v0 < 0.0 ? -dist : dist) - uPuff;          // uPuff swells (or shrinks) the whole surface evenly\n  float w = SHELL;\n  if (w > 0.0) sd = abs(sd) - w;\n  o = vec4(clamp(smax(sd, CLIP, 0.03), -1.0, 1.0), 0.0, 0.0, 1.0);\n}",
+     "bake": {
+      "res": 768,
+      "uniforms": {
+       "uPr": [
+        1.5,
+        0.550000011920929,
+        1,
+        0.04500000178813934,
+        0,
+        0,
+        0,
+        0
+       ],
+       "uHB": 1.5,
+       "uRes": 768,
+       "uPuff": 0
+      },
+      "volume": {
+       "levels": 1,
+       "format": "R16F",
+       "w": 768,
+       "h": 768,
+       "d": 768
+      },
+      "viewport": [
+       0,
+       0,
+       768,
+       768
+      ],
+      "uniformBits": [
+       1069547520,
+       1145044992,
+       0,
+       0,
+       1069547520,
+       1057803469,
+       1065353216,
+       1027101164,
+       0,
+       0,
+       0,
+       0
+      ],
+      "zcBits": [
+       [
+        0,
+        975874731
+       ],
+       [
+        1,
+        989855744
+       ],
+       [
+        384,
+        1056975531
+       ],
+       [
+        767,
+        1065342293
+       ]
+      ]
+     }
+    },
+    {
+     "id": "schwarzp",
+     "name": "Schwarz P",
+     "eq": [
+      "cos x + cos y + cos z = 0"
+     ],
+     "note": "The \"primitive\" surface: a cubic lattice of chambers joined by necks.",
+     "params": [
+      {
+       "id": "cells",
+       "entry": [
+        1.5,
+        0.6,
+        5,
+        0.05
+       ]
+      },
+      {
+       "id": "level",
+       "entry": [
+        0.25,
+        -1.2,
+        1.2,
+        0.01
+       ]
+      },
+      {
+       "id": "solid",
+       "entry": [
+        1,
+        0,
+        1,
+        1
+       ]
+      },
+      {
+       "id": "wall",
+       "entry": [
+        0.045,
+        0.012,
+        0.14,
+        0.002
+       ]
+      },
+      {
+       "id": "box",
+       "entry": [
+        0,
+        0,
+        1,
+        1,
+        "cube"
+       ]
+      }
+     ],
+     "rot": null,
+     "animate": [
+      "level"
+     ],
+     "glsl": "float g(vec3 q){ return cos(q.x) + cos(q.y) + cos(q.z); }\nfloat raw(vec3 p){\n  float v = g(p * 3.14159265 * cells) - level;        // \"cells\" repeats across the width of the piece\n  return solid > 0.5 ? -v : v;\n}",
+     "clip": "mix(length(p) - 1.22, length(max(abs(p) - 0.66, 0.0)) + min(max(abs(p.x) - 0.66, max(abs(p.y) - 0.66, abs(p.z) - 0.66)), 0.0) - 0.14, box)",
+     "shell": "solid > 0.5 ? 0.0 : wall",
+     "knobs": [
+      {
+       "id": "cells",
+       "label": "cells",
+       "lo": 0.6,
+       "hi": 5,
+       "step": 0.05,
+       "own": true,
+       "value": 1.5
+      },
+      {
+       "id": "level",
+       "label": "level",
+       "lo": -1.2,
+       "hi": 1.2,
+       "step": 0.01,
+       "own": true,
+       "value": 0.25
+      },
+      {
+       "id": "solid",
+       "label": "solid",
+       "lo": 0,
+       "hi": 1,
+       "step": 1,
+       "own": true,
+       "value": 1
+      },
+      {
+       "id": "wall",
+       "label": "wall",
+       "lo": 0.012,
+       "hi": 0.14,
+       "step": 0.002,
+       "own": true,
+       "value": 0.045
+      },
+      {
+       "id": "box",
+       "label": "cube",
+       "lo": 0,
+       "hi": 1,
+       "step": 1,
+       "own": true,
+       "value": 0
+      },
+      {
+       "id": "@puff",
+       "label": "inflate",
+       "lo": -0.06,
+       "hi": 0.06,
+       "step": 0.001,
+       "own": false,
+       "value": 0
+      }
+     ],
+     "animated": [
+      "level"
+     ],
+     "rotSet": null,
+     "fragment": "#version 300 es\nprecision highp float;\nuniform float uZ, uHB, uRes, uPuff;\nuniform float uPr[8];\nout vec4 o;\nfloat smin(float a, float b, float k){ float h = max(k - abs(a - b), 0.0) / k; return min(a, b) - h*h*k*0.25; }\nfloat smax(float a, float b, float k){ return -smin(-a, -b, k); }\nfloat sdBall(vec3 p, float r){ return length(p) - r; }\nfloat sdBox(vec3 p, vec3 b, float r){ vec3 q = abs(p) - b + r; return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - r; }\n#define cells uPr[0]\n#define level uPr[1]\n#define solid uPr[2]\n#define wall uPr[3]\n#define box uPr[4]\n#define CLIP (mix(length(p) - 1.22, length(max(abs(p) - 0.66, 0.0)) + min(max(abs(p.x) - 0.66, max(abs(p.y) - 0.66, abs(p.z) - 0.66)), 0.0) - 0.14, box))\n#define SHELL (solid > 0.5 ? 0.0 : wall)\nfloat g(vec3 q){ return cos(q.x) + cos(q.y) + cos(q.z); }\nfloat raw(vec3 p){\n  float v = g(p * 3.14159265 * cells) - level;        // \"cells\" repeats across the width of the piece\n  return solid > 0.5 ? -v : v;\n}\n\nvoid main(){\n  vec3 p = (vec3(gl_FragCoord.xy / uRes, uZ) * 2.0 - 1.0) * uHB;\n  const float e = 0.0007;\n  const vec2 k = vec2(1.0, -1.0);\n  vec3 x = p;\n  float v0 = 0.0, last = 1.0;\n  for (int i = 0; i < 8; i++){\n    float a = raw(x + e*k.xyy), b = raw(x + e*k.yyx), c = raw(x + e*k.yxy), d = raw(x + e*k.xxx);\n    float fv = 0.25 * (a + b + c + d);\n    vec3 g = (k.xyy*a + k.yyx*b + k.yxy*c + k.xxx*d) / (4.0 * e);\n    if (i == 0) v0 = fv;\n    vec3 st = g * (fv / max(dot(g, g), 1e-12));\n    last = length(st);\n    if (last > 0.12) st *= 0.12 / last;                 // never leap: far from the surface the gradient misleads\n    x -= st;\n    if (last < 2e-5) break;\n  }\n  float dist = length(x - p);\n  dist *= mix(1.0, 0.7, smoothstep(0.06, 0.2, dist));   // a long walk may not have ended at the nearest point: stay cautious\n  float sd = (v0 < 0.0 ? -dist : dist) - uPuff;          // uPuff swells (or shrinks) the whole surface evenly\n  float w = SHELL;\n  if (w > 0.0) sd = abs(sd) - w;\n  o = vec4(clamp(smax(sd, CLIP, 0.03), -1.0, 1.0), 0.0, 0.0, 1.0);\n}",
+     "bake": {
+      "res": 768,
+      "uniforms": {
+       "uPr": [
+        1.5,
+        0.25,
+        1,
+        0.04500000178813934,
+        0,
+        0,
+        0,
+        0
+       ],
+       "uHB": 1.5,
+       "uRes": 768,
+       "uPuff": 0
+      },
+      "volume": {
+       "levels": 1,
+       "format": "R16F",
+       "w": 768,
+       "h": 768,
+       "d": 768
+      },
+      "viewport": [
+       0,
+       0,
+       768,
+       768
+      ],
+      "uniformBits": [
+       1069547520,
+       1145044992,
+       0,
+       0,
+       1069547520,
+       1048576000,
+       1065353216,
+       1027101164,
+       0,
+       0,
+       0,
+       0
+      ],
+      "zcBits": [
+       [
+        0,
+        975874731
+       ],
+       [
+        1,
+        989855744
+       ],
+       [
+        384,
+        1056975531
+       ],
+       [
+        767,
+        1065342293
+       ]
+      ]
+     }
+    },
+    {
+     "id": "schwarzd",
+     "name": "Schwarz D",
+     "eq": [
+      "sin x sin y sin z + sin x cos y cos z",
+      "+ cos x sin y cos z + cos x cos y sin z = 0"
+     ],
+     "note": "The \"diamond\" surface: each of its two labyrinths is a diamond lattice.",
+     "params": [
+      {
+       "id": "cells",
+       "entry": [
+        1.2,
+        0.6,
+        5,
+        0.05
+       ]
+      },
+      {
+       "id": "level",
+       "entry": [
+        0,
+        -1.2,
+        1.2,
+        0.01
+       ]
+      },
+      {
+       "id": "solid",
+       "entry": [
+        0,
+        0,
+        1,
+        1
+       ]
+      },
+      {
+       "id": "wall",
+       "entry": [
+        0.045,
+        0.012,
+        0.14,
+        0.002
+       ]
+      },
+      {
+       "id": "box",
+       "entry": [
+        0,
+        0,
+        1,
+        1,
+        "cube"
+       ]
+      }
+     ],
+     "rot": null,
+     "animate": [
+      "cells"
+     ],
+     "glsl": "float g(vec3 q){ vec3 s = sin(q), c = cos(q); return s.x*s.y*s.z + s.x*c.y*c.z + c.x*s.y*c.z + c.x*c.y*s.z; }\nfloat raw(vec3 p){\n  float v = g(p * 3.14159265 * cells) - level;        // \"cells\" repeats across the width of the piece\n  return solid > 0.5 ? -v : v;\n}",
+     "clip": "mix(length(p) - 1.22, length(max(abs(p) - 0.66, 0.0)) + min(max(abs(p.x) - 0.66, max(abs(p.y) - 0.66, abs(p.z) - 0.66)), 0.0) - 0.14, box)",
+     "shell": "solid > 0.5 ? 0.0 : wall",
+     "knobs": [
+      {
+       "id": "cells",
+       "label": "cells",
+       "lo": 0.6,
+       "hi": 5,
+       "step": 0.05,
+       "own": true,
+       "value": 1.2
+      },
+      {
+       "id": "level",
+       "label": "level",
+       "lo": -1.2,
+       "hi": 1.2,
+       "step": 0.01,
+       "own": true,
+       "value": 0
+      },
+      {
+       "id": "solid",
+       "label": "solid",
+       "lo": 0,
+       "hi": 1,
+       "step": 1,
+       "own": true,
+       "value": 0
+      },
+      {
+       "id": "wall",
+       "label": "wall",
+       "lo": 0.012,
+       "hi": 0.14,
+       "step": 0.002,
+       "own": true,
+       "value": 0.045
+      },
+      {
+       "id": "box",
+       "label": "cube",
+       "lo": 0,
+       "hi": 1,
+       "step": 1,
+       "own": true,
+       "value": 0
+      },
+      {
+       "id": "@puff",
+       "label": "inflate",
+       "lo": -0.06,
+       "hi": 0.06,
+       "step": 0.001,
+       "own": false,
+       "value": 0
+      }
+     ],
+     "animated": [
+      "cells"
+     ],
+     "rotSet": null,
+     "fragment": "#version 300 es\nprecision highp float;\nuniform float uZ, uHB, uRes, uPuff;\nuniform float uPr[8];\nout vec4 o;\nfloat smin(float a, float b, float k){ float h = max(k - abs(a - b), 0.0) / k; return min(a, b) - h*h*k*0.25; }\nfloat smax(float a, float b, float k){ return -smin(-a, -b, k); }\nfloat sdBall(vec3 p, float r){ return length(p) - r; }\nfloat sdBox(vec3 p, vec3 b, float r){ vec3 q = abs(p) - b + r; return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - r; }\n#define cells uPr[0]\n#define level uPr[1]\n#define solid uPr[2]\n#define wall uPr[3]\n#define box uPr[4]\n#define CLIP (mix(length(p) - 1.22, length(max(abs(p) - 0.66, 0.0)) + min(max(abs(p.x) - 0.66, max(abs(p.y) - 0.66, abs(p.z) - 0.66)), 0.0) - 0.14, box))\n#define SHELL (solid > 0.5 ? 0.0 : wall)\nfloat g(vec3 q){ vec3 s = sin(q), c = cos(q); return s.x*s.y*s.z + s.x*c.y*c.z + c.x*s.y*c.z + c.x*c.y*s.z; }\nfloat raw(vec3 p){\n  float v = g(p * 3.14159265 * cells) - level;        // \"cells\" repeats across the width of the piece\n  return solid > 0.5 ? -v : v;\n}\n\nvoid main(){\n  vec3 p = (vec3(gl_FragCoord.xy / uRes, uZ) * 2.0 - 1.0) * uHB;\n  const float e = 0.0007;\n  const vec2 k = vec2(1.0, -1.0);\n  vec3 x = p;\n  float v0 = 0.0, last = 1.0;\n  for (int i = 0; i < 8; i++){\n    float a = raw(x + e*k.xyy), b = raw(x + e*k.yyx), c = raw(x + e*k.yxy), d = raw(x + e*k.xxx);\n    float fv = 0.25 * (a + b + c + d);\n    vec3 g = (k.xyy*a + k.yyx*b + k.yxy*c + k.xxx*d) / (4.0 * e);\n    if (i == 0) v0 = fv;\n    vec3 st = g * (fv / max(dot(g, g), 1e-12));\n    last = length(st);\n    if (last > 0.12) st *= 0.12 / last;                 // never leap: far from the surface the gradient misleads\n    x -= st;\n    if (last < 2e-5) break;\n  }\n  float dist = length(x - p);\n  dist *= mix(1.0, 0.7, smoothstep(0.06, 0.2, dist));   // a long walk may not have ended at the nearest point: stay cautious\n  float sd = (v0 < 0.0 ? -dist : dist) - uPuff;          // uPuff swells (or shrinks) the whole surface evenly\n  float w = SHELL;\n  if (w > 0.0) sd = abs(sd) - w;\n  o = vec4(clamp(smax(sd, CLIP, 0.03), -1.0, 1.0), 0.0, 0.0, 1.0);\n}",
+     "bake": {
+      "res": 768,
+      "uniforms": {
+       "uPr": [
+        1.2000000476837158,
+        0,
+        0,
+        0.04500000178813934,
+        0,
+        0,
+        0,
+        0
+       ],
+       "uHB": 1.5,
+       "uRes": 768,
+       "uPuff": 0
+      },
+      "volume": {
+       "levels": 1,
+       "format": "R16F",
+       "w": 768,
+       "h": 768,
+       "d": 768
+      },
+      "viewport": [
+       0,
+       0,
+       768,
+       768
+      ],
+      "uniformBits": [
+       1069547520,
+       1145044992,
+       0,
+       0,
+       1067030938,
+       0,
+       0,
+       1027101164,
+       0,
+       0,
+       0,
+       0
+      ],
+      "zcBits": [
+       [
+        0,
+        975874731
+       ],
+       [
+        1,
+        989855744
+       ],
+       [
+        384,
+        1056975531
+       ],
+       [
+        767,
+        1065342293
+       ]
+      ]
+     }
+    },
+    {
+     "id": "neovius",
+     "name": "Neovius",
+     "eq": [
+      "3(cos x + cos y + cos z) + 4 cos x cos y cos z = 0"
+     ],
+     "note": null,
+     "params": [
+      {
+       "id": "cells",
+       "entry": [
+        1,
+        0.6,
+        5,
+        0.05
+       ]
+      },
+      {
+       "id": "level",
+       "entry": [
+        0,
+        -1.2,
+        1.2,
+        0.01
+       ]
+      },
+      {
+       "id": "solid",
+       "entry": [
+        0,
+        0,
+        1,
+        1
+       ]
+      },
+      {
+       "id": "wall",
+       "entry": [
+        0.045,
+        0.012,
+        0.14,
+        0.002
+       ]
+      },
+      {
+       "id": "box",
+       "entry": [
+        1,
+        0,
+        1,
+        1,
+        "cube"
+       ]
+      }
+     ],
+     "rot": null,
+     "animate": [
+      "cells"
+     ],
+     "glsl": "float g(vec3 q){ vec3 c = cos(q); return (3.0*(c.x + c.y + c.z) + 4.0*c.x*c.y*c.z) / 3.0; }\nfloat raw(vec3 p){\n  float v = g(p * 3.14159265 * cells) - level;        // \"cells\" repeats across the width of the piece\n  return solid > 0.5 ? -v : v;\n}",
+     "clip": "mix(length(p) - 1.22, length(max(abs(p) - 0.66, 0.0)) + min(max(abs(p.x) - 0.66, max(abs(p.y) - 0.66, abs(p.z) - 0.66)), 0.0) - 0.14, box)",
+     "shell": "solid > 0.5 ? 0.0 : wall",
+     "knobs": [
+      {
+       "id": "cells",
+       "label": "cells",
+       "lo": 0.6,
+       "hi": 5,
+       "step": 0.05,
+       "own": true,
+       "value": 1
+      },
+      {
+       "id": "level",
+       "label": "level",
+       "lo": -1.2,
+       "hi": 1.2,
+       "step": 0.01,
+       "own": true,
+       "value": 0
+      },
+      {
+       "id": "solid",
+       "label": "solid",
+       "lo": 0,
+       "hi": 1,
+       "step": 1,
+       "own": true,
+       "value": 0
+      },
+      {
+       "id": "wall",
+       "label": "wall",
+       "lo": 0.012,
+       "hi": 0.14,
+       "step": 0.002,
+       "own": true,
+       "value": 0.045
+      },
+      {
+       "id": "box",
+       "label": "cube",
+       "lo": 0,
+       "hi": 1,
+       "step": 1,
+       "own": true,
+       "value": 1
+      },
+      {
+       "id": "@puff",
+       "label": "inflate",
+       "lo": -0.06,
+       "hi": 0.06,
+       "step": 0.001,
+       "own": false,
+       "value": 0
+      }
+     ],
+     "animated": [
+      "cells"
+     ],
+     "rotSet": null,
+     "fragment": "#version 300 es\nprecision highp float;\nuniform float uZ, uHB, uRes, uPuff;\nuniform float uPr[8];\nout vec4 o;\nfloat smin(float a, float b, float k){ float h = max(k - abs(a - b), 0.0) / k; return min(a, b) - h*h*k*0.25; }\nfloat smax(float a, float b, float k){ return -smin(-a, -b, k); }\nfloat sdBall(vec3 p, float r){ return length(p) - r; }\nfloat sdBox(vec3 p, vec3 b, float r){ vec3 q = abs(p) - b + r; return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - r; }\n#define cells uPr[0]\n#define level uPr[1]\n#define solid uPr[2]\n#define wall uPr[3]\n#define box uPr[4]\n#define CLIP (mix(length(p) - 1.22, length(max(abs(p) - 0.66, 0.0)) + min(max(abs(p.x) - 0.66, max(abs(p.y) - 0.66, abs(p.z) - 0.66)), 0.0) - 0.14, box))\n#define SHELL (solid > 0.5 ? 0.0 : wall)\nfloat g(vec3 q){ vec3 c = cos(q); return (3.0*(c.x + c.y + c.z) + 4.0*c.x*c.y*c.z) / 3.0; }\nfloat raw(vec3 p){\n  float v = g(p * 3.14159265 * cells) - level;        // \"cells\" repeats across the width of the piece\n  return solid > 0.5 ? -v : v;\n}\n\nvoid main(){\n  vec3 p = (vec3(gl_FragCoord.xy / uRes, uZ) * 2.0 - 1.0) * uHB;\n  const float e = 0.0007;\n  const vec2 k = vec2(1.0, -1.0);\n  vec3 x = p;\n  float v0 = 0.0, last = 1.0;\n  for (int i = 0; i < 8; i++){\n    float a = raw(x + e*k.xyy), b = raw(x + e*k.yyx), c = raw(x + e*k.yxy), d = raw(x + e*k.xxx);\n    float fv = 0.25 * (a + b + c + d);\n    vec3 g = (k.xyy*a + k.yyx*b + k.yxy*c + k.xxx*d) / (4.0 * e);\n    if (i == 0) v0 = fv;\n    vec3 st = g * (fv / max(dot(g, g), 1e-12));\n    last = length(st);\n    if (last > 0.12) st *= 0.12 / last;                 // never leap: far from the surface the gradient misleads\n    x -= st;\n    if (last < 2e-5) break;\n  }\n  float dist = length(x - p);\n  dist *= mix(1.0, 0.7, smoothstep(0.06, 0.2, dist));   // a long walk may not have ended at the nearest point: stay cautious\n  float sd = (v0 < 0.0 ? -dist : dist) - uPuff;          // uPuff swells (or shrinks) the whole surface evenly\n  float w = SHELL;\n  if (w > 0.0) sd = abs(sd) - w;\n  o = vec4(clamp(smax(sd, CLIP, 0.03), -1.0, 1.0), 0.0, 0.0, 1.0);\n}",
+     "bake": {
+      "res": 768,
+      "uniforms": {
+       "uPr": [
+        1,
+        0,
+        0,
+        0.04500000178813934,
+        1,
+        0,
+        0,
+        0
+       ],
+       "uHB": 1.5,
+       "uRes": 768,
+       "uPuff": 0
+      },
+      "volume": {
+       "levels": 1,
+       "format": "R16F",
+       "w": 768,
+       "h": 768,
+       "d": 768
+      },
+      "viewport": [
+       0,
+       0,
+       768,
+       768
+      ],
+      "uniformBits": [
+       1069547520,
+       1145044992,
+       0,
+       0,
+       1065353216,
+       0,
+       0,
+       1027101164,
+       1065353216,
+       0,
+       0,
+       0
+      ],
+      "zcBits": [
+       [
+        0,
+        975874731
+       ],
+       [
+        1,
+        989855744
+       ],
+       [
+        384,
+        1056975531
+       ],
+       [
+        767,
+        1065342293
+       ]
+      ]
+     }
+    },
+    {
+     "id": "iwp",
+     "name": "I-WP",
+     "eq": [
+      "2(cos x cos y + cos y cos z + cos z cos x)",
+      "− (cos 2x + cos 2y + cos 2z) = 0"
+     ],
+     "note": null,
+     "params": [
+      {
+       "id": "cells",
+       "entry": [
+        1.2,
+        0.6,
+        5,
+        0.05
+       ]
+      },
+      {
+       "id": "level",
+       "entry": [
+        0.3,
+        -1.2,
+        1.2,
+        0.01
+       ]
+      },
+      {
+       "id": "solid",
+       "entry": [
+        1,
+        0,
+        1,
+        1
+       ]
+      },
+      {
+       "id": "wall",
+       "entry": [
+        0.045,
+        0.012,
+        0.14,
+        0.002
+       ]
+      },
+      {
+       "id": "box",
+       "entry": [
+        0,
+        0,
+        1,
+        1,
+        "cube"
+       ]
+      }
+     ],
+     "rot": null,
+     "animate": [
+      "level"
+     ],
+     "glsl": "float g(vec3 q){ vec3 c = cos(q), d = cos(2.0*q); return (2.0*(c.x*c.y + c.y*c.z + c.z*c.x) - (d.x + d.y + d.z)) / 2.5; }\nfloat raw(vec3 p){\n  float v = g(p * 3.14159265 * cells) - level;        // \"cells\" repeats across the width of the piece\n  return solid > 0.5 ? -v : v;\n}",
+     "clip": "mix(length(p) - 1.22, length(max(abs(p) - 0.66, 0.0)) + min(max(abs(p.x) - 0.66, max(abs(p.y) - 0.66, abs(p.z) - 0.66)), 0.0) - 0.14, box)",
+     "shell": "solid > 0.5 ? 0.0 : wall",
+     "knobs": [
+      {
+       "id": "cells",
+       "label": "cells",
+       "lo": 0.6,
+       "hi": 5,
+       "step": 0.05,
+       "own": true,
+       "value": 1.2
+      },
+      {
+       "id": "level",
+       "label": "level",
+       "lo": -1.2,
+       "hi": 1.2,
+       "step": 0.01,
+       "own": true,
+       "value": 0.3
+      },
+      {
+       "id": "solid",
+       "label": "solid",
+       "lo": 0,
+       "hi": 1,
+       "step": 1,
+       "own": true,
+       "value": 1
+      },
+      {
+       "id": "wall",
+       "label": "wall",
+       "lo": 0.012,
+       "hi": 0.14,
+       "step": 0.002,
+       "own": true,
+       "value": 0.045
+      },
+      {
+       "id": "box",
+       "label": "cube",
+       "lo": 0,
+       "hi": 1,
+       "step": 1,
+       "own": true,
+       "value": 0
+      },
+      {
+       "id": "@puff",
+       "label": "inflate",
+       "lo": -0.06,
+       "hi": 0.06,
+       "step": 0.001,
+       "own": false,
+       "value": 0
+      }
+     ],
+     "animated": [
+      "level"
+     ],
+     "rotSet": null,
+     "fragment": "#version 300 es\nprecision highp float;\nuniform float uZ, uHB, uRes, uPuff;\nuniform float uPr[8];\nout vec4 o;\nfloat smin(float a, float b, float k){ float h = max(k - abs(a - b), 0.0) / k; return min(a, b) - h*h*k*0.25; }\nfloat smax(float a, float b, float k){ return -smin(-a, -b, k); }\nfloat sdBall(vec3 p, float r){ return length(p) - r; }\nfloat sdBox(vec3 p, vec3 b, float r){ vec3 q = abs(p) - b + r; return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - r; }\n#define cells uPr[0]\n#define level uPr[1]\n#define solid uPr[2]\n#define wall uPr[3]\n#define box uPr[4]\n#define CLIP (mix(length(p) - 1.22, length(max(abs(p) - 0.66, 0.0)) + min(max(abs(p.x) - 0.66, max(abs(p.y) - 0.66, abs(p.z) - 0.66)), 0.0) - 0.14, box))\n#define SHELL (solid > 0.5 ? 0.0 : wall)\nfloat g(vec3 q){ vec3 c = cos(q), d = cos(2.0*q); return (2.0*(c.x*c.y + c.y*c.z + c.z*c.x) - (d.x + d.y + d.z)) / 2.5; }\nfloat raw(vec3 p){\n  float v = g(p * 3.14159265 * cells) - level;        // \"cells\" repeats across the width of the piece\n  return solid > 0.5 ? -v : v;\n}\n\nvoid main(){\n  vec3 p = (vec3(gl_FragCoord.xy / uRes, uZ) * 2.0 - 1.0) * uHB;\n  const float e = 0.0007;\n  const vec2 k = vec2(1.0, -1.0);\n  vec3 x = p;\n  float v0 = 0.0, last = 1.0;\n  for (int i = 0; i < 8; i++){\n    float a = raw(x + e*k.xyy), b = raw(x + e*k.yyx), c = raw(x + e*k.yxy), d = raw(x + e*k.xxx);\n    float fv = 0.25 * (a + b + c + d);\n    vec3 g = (k.xyy*a + k.yyx*b + k.yxy*c + k.xxx*d) / (4.0 * e);\n    if (i == 0) v0 = fv;\n    vec3 st = g * (fv / max(dot(g, g), 1e-12));\n    last = length(st);\n    if (last > 0.12) st *= 0.12 / last;                 // never leap: far from the surface the gradient misleads\n    x -= st;\n    if (last < 2e-5) break;\n  }\n  float dist = length(x - p);\n  dist *= mix(1.0, 0.7, smoothstep(0.06, 0.2, dist));   // a long walk may not have ended at the nearest point: stay cautious\n  float sd = (v0 < 0.0 ? -dist : dist) - uPuff;          // uPuff swells (or shrinks) the whole surface evenly\n  float w = SHELL;\n  if (w > 0.0) sd = abs(sd) - w;\n  o = vec4(clamp(smax(sd, CLIP, 0.03), -1.0, 1.0), 0.0, 0.0, 1.0);\n}",
+     "bake": {
+      "res": 768,
+      "uniforms": {
+       "uPr": [
+        1.2000000476837158,
+        0.30000001192092896,
+        1,
+        0.04500000178813934,
+        0,
+        0,
+        0,
+        0
+       ],
+       "uHB": 1.5,
+       "uRes": 768,
+       "uPuff": 0
+      },
+      "volume": {
+       "levels": 1,
+       "format": "R16F",
+       "w": 768,
+       "h": 768,
+       "d": 768
+      },
+      "viewport": [
+       0,
+       0,
+       768,
+       768
+      ],
+      "uniformBits": [
+       1069547520,
+       1145044992,
+       0,
+       0,
+       1067030938,
+       1050253722,
+       1065353216,
+       1027101164,
+       0,
+       0,
+       0,
+       0
+      ],
+      "zcBits": [
+       [
+        0,
+        975874731
+       ],
+       [
+        1,
+        989855744
+       ],
+       [
+        384,
+        1056975531
+       ],
+       [
+        767,
+        1065342293
+       ]
+      ]
+     }
+    },
+    {
+     "id": "lidinoid",
+     "name": "Lidinoid",
+     "eq": [
+      "½(sin 2x cos y sin z + sin 2y cos z sin x + sin 2z cos x sin y)",
+      "− ½(cos 2x cos 2y + cos 2y cos 2z + cos 2z cos 2x) + 0.15 = 0"
+     ],
+     "note": null,
+     "params": [
+      {
+       "id": "cells",
+       "entry": [
+        0.9,
+        0.6,
+        5,
+        0.05
+       ]
+      },
+      {
+       "id": "level",
+       "entry": [
+        0.3,
+        -1.2,
+        1.2,
+        0.01
+       ]
+      },
+      {
+       "id": "solid",
+       "entry": [
+        1,
+        0,
+        1,
+        1
+       ]
+      },
+      {
+       "id": "wall",
+       "entry": [
+        0.045,
+        0.012,
+        0.14,
+        0.002
+       ]
+      },
+      {
+       "id": "box",
+       "entry": [
+        0,
+        0,
+        1,
+        1,
+        "cube"
+       ]
+      }
+     ],
+     "rot": null,
+     "animate": [
+      "level"
+     ],
+     "glsl": "float g(vec3 q){ vec3 s = sin(q), c = cos(q), s2 = sin(2.0*q), c2 = cos(2.0*q); return 0.5*(s2.x*c.y*s.z + s2.y*c.z*s.x + s2.z*c.x*s.y) - 0.5*(c2.x*c2.y + c2.y*c2.z + c2.z*c2.x) + 0.15; }\nfloat raw(vec3 p){\n  float v = g(p * 3.14159265 * cells) - level;        // \"cells\" repeats across the width of the piece\n  return solid > 0.5 ? -v : v;\n}",
+     "clip": "mix(length(p) - 1.22, length(max(abs(p) - 0.66, 0.0)) + min(max(abs(p.x) - 0.66, max(abs(p.y) - 0.66, abs(p.z) - 0.66)), 0.0) - 0.14, box)",
+     "shell": "solid > 0.5 ? 0.0 : wall",
+     "knobs": [
+      {
+       "id": "cells",
+       "label": "cells",
+       "lo": 0.6,
+       "hi": 5,
+       "step": 0.05,
+       "own": true,
+       "value": 0.9
+      },
+      {
+       "id": "level",
+       "label": "level",
+       "lo": -1.2,
+       "hi": 1.2,
+       "step": 0.01,
+       "own": true,
+       "value": 0.3
+      },
+      {
+       "id": "solid",
+       "label": "solid",
+       "lo": 0,
+       "hi": 1,
+       "step": 1,
+       "own": true,
+       "value": 1
+      },
+      {
+       "id": "wall",
+       "label": "wall",
+       "lo": 0.012,
+       "hi": 0.14,
+       "step": 0.002,
+       "own": true,
+       "value": 0.045
+      },
+      {
+       "id": "box",
+       "label": "cube",
+       "lo": 0,
+       "hi": 1,
+       "step": 1,
+       "own": true,
+       "value": 0
+      },
+      {
+       "id": "@puff",
+       "label": "inflate",
+       "lo": -0.06,
+       "hi": 0.06,
+       "step": 0.001,
+       "own": false,
+       "value": 0
+      }
+     ],
+     "animated": [
+      "level"
+     ],
+     "rotSet": null,
+     "fragment": "#version 300 es\nprecision highp float;\nuniform float uZ, uHB, uRes, uPuff;\nuniform float uPr[8];\nout vec4 o;\nfloat smin(float a, float b, float k){ float h = max(k - abs(a - b), 0.0) / k; return min(a, b) - h*h*k*0.25; }\nfloat smax(float a, float b, float k){ return -smin(-a, -b, k); }\nfloat sdBall(vec3 p, float r){ return length(p) - r; }\nfloat sdBox(vec3 p, vec3 b, float r){ vec3 q = abs(p) - b + r; return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - r; }\n#define cells uPr[0]\n#define level uPr[1]\n#define solid uPr[2]\n#define wall uPr[3]\n#define box uPr[4]\n#define CLIP (mix(length(p) - 1.22, length(max(abs(p) - 0.66, 0.0)) + min(max(abs(p.x) - 0.66, max(abs(p.y) - 0.66, abs(p.z) - 0.66)), 0.0) - 0.14, box))\n#define SHELL (solid > 0.5 ? 0.0 : wall)\nfloat g(vec3 q){ vec3 s = sin(q), c = cos(q), s2 = sin(2.0*q), c2 = cos(2.0*q); return 0.5*(s2.x*c.y*s.z + s2.y*c.z*s.x + s2.z*c.x*s.y) - 0.5*(c2.x*c2.y + c2.y*c2.z + c2.z*c2.x) + 0.15; }\nfloat raw(vec3 p){\n  float v = g(p * 3.14159265 * cells) - level;        // \"cells\" repeats across the width of the piece\n  return solid > 0.5 ? -v : v;\n}\n\nvoid main(){\n  vec3 p = (vec3(gl_FragCoord.xy / uRes, uZ) * 2.0 - 1.0) * uHB;\n  const float e = 0.0007;\n  const vec2 k = vec2(1.0, -1.0);\n  vec3 x = p;\n  float v0 = 0.0, last = 1.0;\n  for (int i = 0; i < 8; i++){\n    float a = raw(x + e*k.xyy), b = raw(x + e*k.yyx), c = raw(x + e*k.yxy), d = raw(x + e*k.xxx);\n    float fv = 0.25 * (a + b + c + d);\n    vec3 g = (k.xyy*a + k.yyx*b + k.yxy*c + k.xxx*d) / (4.0 * e);\n    if (i == 0) v0 = fv;\n    vec3 st = g * (fv / max(dot(g, g), 1e-12));\n    last = length(st);\n    if (last > 0.12) st *= 0.12 / last;                 // never leap: far from the surface the gradient misleads\n    x -= st;\n    if (last < 2e-5) break;\n  }\n  float dist = length(x - p);\n  dist *= mix(1.0, 0.7, smoothstep(0.06, 0.2, dist));   // a long walk may not have ended at the nearest point: stay cautious\n  float sd = (v0 < 0.0 ? -dist : dist) - uPuff;          // uPuff swells (or shrinks) the whole surface evenly\n  float w = SHELL;\n  if (w > 0.0) sd = abs(sd) - w;\n  o = vec4(clamp(smax(sd, CLIP, 0.03), -1.0, 1.0), 0.0, 0.0, 1.0);\n}",
+     "bake": {
+      "res": 768,
+      "uniforms": {
+       "uPr": [
+        0.8999999761581421,
+        0.30000001192092896,
+        1,
+        0.04500000178813934,
+        0,
+        0,
+        0,
+        0
+       ],
+       "uHB": 1.5,
+       "uRes": 768,
+       "uPuff": 0
+      },
+      "volume": {
+       "levels": 1,
+       "format": "R16F",
+       "w": 768,
+       "h": 768,
+       "d": 768
+      },
+      "viewport": [
+       0,
+       0,
+       768,
+       768
+      ],
+      "uniformBits": [
+       1069547520,
+       1145044992,
+       0,
+       0,
+       1063675494,
+       1050253722,
+       1065353216,
+       1027101164,
+       0,
+       0,
+       0,
+       0
+      ],
+      "zcBits": [
+       [
+        0,
+        975874731
+       ],
+       [
+        1,
+        989855744
+       ],
+       [
+        384,
+        1056975531
+       ],
+       [
+        767,
+        1065342293
+       ]
+      ]
+     }
+    },
+    {
+     "id": "fischerkoch",
+     "name": "Fischer–Koch S",
+     "eq": [
+      "cos 2x sin y cos z + cos x cos 2y sin z",
+      "+ sin x cos y cos 2z = 0"
+     ],
+     "note": null,
+     "params": [
+      {
+       "id": "cells",
+       "entry": [
+        0.9,
+        0.6,
+        5,
+        0.05
+       ]
+      },
+      {
+       "id": "level",
+       "entry": [
+        0.3,
+        -1.2,
+        1.2,
+        0.01
+       ]
+      },
+      {
+       "id": "solid",
+       "entry": [
+        1,
+        0,
+        1,
+        1
+       ]
+      },
+      {
+       "id": "wall",
+       "entry": [
+        0.045,
+        0.012,
+        0.14,
+        0.002
+       ]
+      },
+      {
+       "id": "box",
+       "entry": [
+        0,
+        0,
+        1,
+        1,
+        "cube"
+       ]
+      }
+     ],
+     "rot": null,
+     "animate": [
+      "level"
+     ],
+     "glsl": "float g(vec3 q){ vec3 s = sin(q), c = cos(q), c2 = cos(2.0*q); return c2.x*s.y*c.z + c.x*c2.y*s.z + s.x*c.y*c2.z; }\nfloat raw(vec3 p){\n  float v = g(p * 3.14159265 * cells) - level;        // \"cells\" repeats across the width of the piece\n  return solid > 0.5 ? -v : v;\n}",
+     "clip": "mix(length(p) - 1.22, length(max(abs(p) - 0.66, 0.0)) + min(max(abs(p.x) - 0.66, max(abs(p.y) - 0.66, abs(p.z) - 0.66)), 0.0) - 0.14, box)",
+     "shell": "solid > 0.5 ? 0.0 : wall",
+     "knobs": [
+      {
+       "id": "cells",
+       "label": "cells",
+       "lo": 0.6,
+       "hi": 5,
+       "step": 0.05,
+       "own": true,
+       "value": 0.9
+      },
+      {
+       "id": "level",
+       "label": "level",
+       "lo": -1.2,
+       "hi": 1.2,
+       "step": 0.01,
+       "own": true,
+       "value": 0.3
+      },
+      {
+       "id": "solid",
+       "label": "solid",
+       "lo": 0,
+       "hi": 1,
+       "step": 1,
+       "own": true,
+       "value": 1
+      },
+      {
+       "id": "wall",
+       "label": "wall",
+       "lo": 0.012,
+       "hi": 0.14,
+       "step": 0.002,
+       "own": true,
+       "value": 0.045
+      },
+      {
+       "id": "box",
+       "label": "cube",
+       "lo": 0,
+       "hi": 1,
+       "step": 1,
+       "own": true,
+       "value": 0
+      },
+      {
+       "id": "@puff",
+       "label": "inflate",
+       "lo": -0.06,
+       "hi": 0.06,
+       "step": 0.001,
+       "own": false,
+       "value": 0
+      }
+     ],
+     "animated": [
+      "level"
+     ],
+     "rotSet": null,
+     "fragment": "#version 300 es\nprecision highp float;\nuniform float uZ, uHB, uRes, uPuff;\nuniform float uPr[8];\nout vec4 o;\nfloat smin(float a, float b, float k){ float h = max(k - abs(a - b), 0.0) / k; return min(a, b) - h*h*k*0.25; }\nfloat smax(float a, float b, float k){ return -smin(-a, -b, k); }\nfloat sdBall(vec3 p, float r){ return length(p) - r; }\nfloat sdBox(vec3 p, vec3 b, float r){ vec3 q = abs(p) - b + r; return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - r; }\n#define cells uPr[0]\n#define level uPr[1]\n#define solid uPr[2]\n#define wall uPr[3]\n#define box uPr[4]\n#define CLIP (mix(length(p) - 1.22, length(max(abs(p) - 0.66, 0.0)) + min(max(abs(p.x) - 0.66, max(abs(p.y) - 0.66, abs(p.z) - 0.66)), 0.0) - 0.14, box))\n#define SHELL (solid > 0.5 ? 0.0 : wall)\nfloat g(vec3 q){ vec3 s = sin(q), c = cos(q), c2 = cos(2.0*q); return c2.x*s.y*c.z + c.x*c2.y*s.z + s.x*c.y*c2.z; }\nfloat raw(vec3 p){\n  float v = g(p * 3.14159265 * cells) - level;        // \"cells\" repeats across the width of the piece\n  return solid > 0.5 ? -v : v;\n}\n\nvoid main(){\n  vec3 p = (vec3(gl_FragCoord.xy / uRes, uZ) * 2.0 - 1.0) * uHB;\n  const float e = 0.0007;\n  const vec2 k = vec2(1.0, -1.0);\n  vec3 x = p;\n  float v0 = 0.0, last = 1.0;\n  for (int i = 0; i < 8; i++){\n    float a = raw(x + e*k.xyy), b = raw(x + e*k.yyx), c = raw(x + e*k.yxy), d = raw(x + e*k.xxx);\n    float fv = 0.25 * (a + b + c + d);\n    vec3 g = (k.xyy*a + k.yyx*b + k.yxy*c + k.xxx*d) / (4.0 * e);\n    if (i == 0) v0 = fv;\n    vec3 st = g * (fv / max(dot(g, g), 1e-12));\n    last = length(st);\n    if (last > 0.12) st *= 0.12 / last;                 // never leap: far from the surface the gradient misleads\n    x -= st;\n    if (last < 2e-5) break;\n  }\n  float dist = length(x - p);\n  dist *= mix(1.0, 0.7, smoothstep(0.06, 0.2, dist));   // a long walk may not have ended at the nearest point: stay cautious\n  float sd = (v0 < 0.0 ? -dist : dist) - uPuff;          // uPuff swells (or shrinks) the whole surface evenly\n  float w = SHELL;\n  if (w > 0.0) sd = abs(sd) - w;\n  o = vec4(clamp(smax(sd, CLIP, 0.03), -1.0, 1.0), 0.0, 0.0, 1.0);\n}",
+     "bake": {
+      "res": 768,
+      "uniforms": {
+       "uPr": [
+        0.8999999761581421,
+        0.30000001192092896,
+        1,
+        0.04500000178813934,
+        0,
+        0,
+        0,
+        0
+       ],
+       "uHB": 1.5,
+       "uRes": 768,
+       "uPuff": 0
+      },
+      "volume": {
+       "levels": 1,
+       "format": "R16F",
+       "w": 768,
+       "h": 768,
+       "d": 768
+      },
+      "viewport": [
+       0,
+       0,
+       768,
+       768
+      ],
+      "uniformBits": [
+       1069547520,
+       1145044992,
+       0,
+       0,
+       1063675494,
+       1050253722,
+       1065353216,
+       1027101164,
+       0,
+       0,
+       0,
+       0
+      ],
+      "zcBits": [
+       [
+        0,
+        975874731
+       ],
+       [
+        1,
+        989855744
+       ],
+       [
+        384,
+        1056975531
+       ],
+       [
+        767,
+        1065342293
+       ]
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "id": "algebraic",
+   "name": "Algebraic surfaces",
+   "kind": "field",
+   "defaults": [
+    [
+     "ior",
+     1.5
+    ],
+    [
+     "disp",
+     0.07
+    ],
+    [
+     "absorb",
+     [
+      0.34,
+      0.16,
+      0.07
+     ]
+    ],
+    [
+     "ns",
+     1
+    ],
+    [
+     "nw",
+     3
+    ],
+    [
+     "nb",
+     3
+    ],
+    [
+     "dist",
+     6.6
+    ],
+    [
+     "fov",
+     26
+    ],
+    [
+     "rot",
+     [
+      24,
+      34,
+      0
+     ]
+    ],
+    [
+     "spin",
+     0.25
+    ],
+    [
+     "bloom",
+     0.35
+    ],
+    [
+     "exposure",
+     1
+    ]
+   ],
+   "lights": [
+    {
+     "az": 38,
+     "el": 18,
+     "w": 14,
+     "h": 32,
+     "rgb": [
+      5,
+      4.9,
+      4.7
+     ],
+     "soft": 0.7
+    },
+    {
+     "az": -55,
+     "el": -8,
+     "w": 10,
+     "h": 42,
+     "rgb": [
+      0.5,
+      1.4,
+      4
+     ],
+     "soft": 0.7
+    },
+    {
+     "az": -140,
+     "el": 5,
+     "w": 8,
+     "h": 42,
+     "rgb": [
+      5,
+      1.6,
+      0.25
+     ],
+     "soft": 0.7
+    },
+    {
+     "az": 150,
+     "el": 28,
+     "w": 24,
+     "h": 16,
+     "rgb": [
+      3.2,
+      3.1,
+      3
+     ],
+     "soft": 0.8
+    },
+    {
+     "az": 0,
+     "el": 85,
+     "w": 34,
+     "h": 34,
+     "rgb": [
+      0.8,
+      0.9,
+      1.1
+     ],
+     "soft": 0.9
+    },
+    {
+     "az": 0,
+     "el": -80,
+     "w": 30,
+     "h": 30,
+     "rgb": [
+      0.5,
+      0.22,
+      0.05
+     ],
+     "soft": 0.9
+    }
+   ],
+   "ambient": [
+    0.006,
+    0.011,
+    0.022
+   ],
+   "stepScale": 0.9,
+   "stepsOut": null,
+   "stepsIn": null,
+   "layers": 2,
+   "tracer": {
+    "STEP_SCALE": "0.90",
+    "STEPS_OUT": "220",
+    "STEPS_IN": "56",
+    "LAYERS": "2"
+   },
+   "presets": [
+    {
+     "id": "tanglecube",
+     "name": "Tanglecube",
+     "eq": [
+      "x⁴ − 5x² + y⁴ − 5y² + z⁴ − 5z² + c = 0"
+     ],
+     "note": "Eight blobs at the corners of a cube. Lower c and they reach out and join.",
+     "params": [
+      {
+       "id": "tangle",
+       "entry": [
+        11.8,
+        7.5,
+        14.5,
+        0.02,
+        "c"
+       ]
+      }
+     ],
+     "rot": null,
+     "animate": [
+      "tangle"
+     ],
+     "glsl": "float f(vec3 q){ vec3 a = q*q; return dot(a, a) - 5.0*(a.x + a.y + a.z) + tangle; }\nfloat raw(vec3 p){ return f(p * 2.5500); }",
+     "clip": "length(p) - 1.420",
+     "shell": null,
+     "knobs": [
+      {
+       "id": "tangle",
+       "label": "c",
+       "lo": 7.5,
+       "hi": 14.5,
+       "step": 0.02,
+       "own": true,
+       "value": 11.8
+      },
+      {
+       "id": "@puff",
+       "label": "inflate",
+       "lo": -0.06,
+       "hi": 0.06,
+       "step": 0.001,
+       "own": false,
+       "value": 0
+      }
+     ],
+     "animated": [
+      "tangle"
+     ],
+     "rotSet": null,
+     "fragment": "#version 300 es\nprecision highp float;\nuniform float uZ, uHB, uRes, uPuff;\nuniform float uPr[8];\nout vec4 o;\nfloat smin(float a, float b, float k){ float h = max(k - abs(a - b), 0.0) / k; return min(a, b) - h*h*k*0.25; }\nfloat smax(float a, float b, float k){ return -smin(-a, -b, k); }\nfloat sdBall(vec3 p, float r){ return length(p) - r; }\nfloat sdBox(vec3 p, vec3 b, float r){ vec3 q = abs(p) - b + r; return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - r; }\n#define tangle uPr[0]\n#define CLIP (length(p) - 1.420)\n#define SHELL (0.0)\nfloat f(vec3 q){ vec3 a = q*q; return dot(a, a) - 5.0*(a.x + a.y + a.z) + tangle; }\nfloat raw(vec3 p){ return f(p * 2.5500); }\n\nvoid main(){\n  vec3 p = (vec3(gl_FragCoord.xy / uRes, uZ) * 2.0 - 1.0) * uHB;\n  const float e = 0.0007;\n  const vec2 k = vec2(1.0, -1.0);\n  vec3 x = p;\n  float v0 = 0.0, last = 1.0;\n  for (int i = 0; i < 8; i++){\n    float a = raw(x + e*k.xyy), b = raw(x + e*k.yyx), c = raw(x + e*k.yxy), d = raw(x + e*k.xxx);\n    float fv = 0.25 * (a + b + c + d);\n    vec3 g = (k.xyy*a + k.yyx*b + k.yxy*c + k.xxx*d) / (4.0 * e);\n    if (i == 0) v0 = fv;\n    vec3 st = g * (fv / max(dot(g, g), 1e-12));\n    last = length(st);\n    if (last > 0.12) st *= 0.12 / last;                 // never leap: far from the surface the gradient misleads\n    x -= st;\n    if (last < 2e-5) break;\n  }\n  float dist = length(x - p);\n  dist *= mix(1.0, 0.7, smoothstep(0.06, 0.2, dist));   // a long walk may not have ended at the nearest point: stay cautious\n  float sd = (v0 < 0.0 ? -dist : dist) - uPuff;          // uPuff swells (or shrinks) the whole surface evenly\n  float w = SHELL;\n  if (w > 0.0) sd = abs(sd) - w;\n  o = vec4(clamp(smax(sd, CLIP, 0.03), -1.0, 1.0), 0.0, 0.0, 1.0);\n}",
+     "bake": {
+      "res": 768,
+      "uniforms": {
+       "uPr": [
+        11.800000190734863,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+       ],
+       "uHB": 1.5,
+       "uRes": 768,
+       "uPuff": 0
+      },
+      "volume": {
+       "levels": 1,
+       "format": "R16F",
+       "w": 768,
+       "h": 768,
+       "d": 768
+      },
+      "viewport": [
+       0,
+       0,
+       768,
+       768
+      ],
+      "uniformBits": [
+       1069547520,
+       1145044992,
+       0,
+       0,
+       1094503629,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0
+      ],
+      "zcBits": [
+       [
+        0,
+        975874731
+       ],
+       [
+        1,
+        989855744
+       ],
+       [
+        384,
+        1056975531
+       ],
+       [
+        767,
+        1065342293
+       ]
+      ]
+     }
+    },
+    {
+     "id": "chmutov4",
+     "name": "Chmutov quartic",
+     "eq": [
+      "T₄(x) + T₄(y) + T₄(z) = c",
+      "T₄(u) = 8u⁴ − 8u² + 1"
+     ],
+     "note": "Built from Chebyshev polynomials, the ones that wiggle evenly between −1 and 1. Take c below zero and it breaks into pebbles.",
+     "params": [
+      {
+       "id": "cheb",
+       "entry": [
+        1.2,
+        -2.2,
+        2.2,
+        0.01,
+        "c"
+       ]
+      }
+     ],
+     "rot": null,
+     "animate": [
+      "cheb"
+     ],
+     "glsl": "float f(vec3 q){ vec3 a = q*q; vec3 t = 8.0*a*a - 8.0*a + 1.0; return t.x + t.y + t.z - cheb; }\nfloat raw(vec3 p){ return f(p * 1.3300); }",
+     "clip": "length(p) - 1.420",
+     "shell": null,
+     "knobs": [
+      {
+       "id": "cheb",
+       "label": "c",
+       "lo": -2.2,
+       "hi": 2.2,
+       "step": 0.01,
+       "own": true,
+       "value": 1.2
+      },
+      {
+       "id": "@puff",
+       "label": "inflate",
+       "lo": -0.06,
+       "hi": 0.06,
+       "step": 0.001,
+       "own": false,
+       "value": 0
+      }
+     ],
+     "animated": [
+      "cheb"
+     ],
+     "rotSet": null,
+     "fragment": "#version 300 es\nprecision highp float;\nuniform float uZ, uHB, uRes, uPuff;\nuniform float uPr[8];\nout vec4 o;\nfloat smin(float a, float b, float k){ float h = max(k - abs(a - b), 0.0) / k; return min(a, b) - h*h*k*0.25; }\nfloat smax(float a, float b, float k){ return -smin(-a, -b, k); }\nfloat sdBall(vec3 p, float r){ return length(p) - r; }\nfloat sdBox(vec3 p, vec3 b, float r){ vec3 q = abs(p) - b + r; return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - r; }\n#define cheb uPr[0]\n#define CLIP (length(p) - 1.420)\n#define SHELL (0.0)\nfloat f(vec3 q){ vec3 a = q*q; vec3 t = 8.0*a*a - 8.0*a + 1.0; return t.x + t.y + t.z - cheb; }\nfloat raw(vec3 p){ return f(p * 1.3300); }\n\nvoid main(){\n  vec3 p = (vec3(gl_FragCoord.xy / uRes, uZ) * 2.0 - 1.0) * uHB;\n  const float e = 0.0007;\n  const vec2 k = vec2(1.0, -1.0);\n  vec3 x = p;\n  float v0 = 0.0, last = 1.0;\n  for (int i = 0; i < 8; i++){\n    float a = raw(x + e*k.xyy), b = raw(x + e*k.yyx), c = raw(x + e*k.yxy), d = raw(x + e*k.xxx);\n    float fv = 0.25 * (a + b + c + d);\n    vec3 g = (k.xyy*a + k.yyx*b + k.yxy*c + k.xxx*d) / (4.0 * e);\n    if (i == 0) v0 = fv;\n    vec3 st = g * (fv / max(dot(g, g), 1e-12));\n    last = length(st);\n    if (last > 0.12) st *= 0.12 / last;                 // never leap: far from the surface the gradient misleads\n    x -= st;\n    if (last < 2e-5) break;\n  }\n  float dist = length(x - p);\n  dist *= mix(1.0, 0.7, smoothstep(0.06, 0.2, dist));   // a long walk may not have ended at the nearest point: stay cautious\n  float sd = (v0 < 0.0 ? -dist : dist) - uPuff;          // uPuff swells (or shrinks) the whole surface evenly\n  float w = SHELL;\n  if (w > 0.0) sd = abs(sd) - w;\n  o = vec4(clamp(smax(sd, CLIP, 0.03), -1.0, 1.0), 0.0, 0.0, 1.0);\n}",
+     "bake": {
+      "res": 768,
+      "uniforms": {
+       "uPr": [
+        1.2000000476837158,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+       ],
+       "uHB": 1.5,
+       "uRes": 768,
+       "uPuff": 0
+      },
+      "volume": {
+       "levels": 1,
+       "format": "R16F",
+       "w": 768,
+       "h": 768,
+       "d": 768
+      },
+      "viewport": [
+       0,
+       0,
+       768,
+       768
+      ],
+      "uniformBits": [
+       1069547520,
+       1145044992,
+       0,
+       0,
+       1067030938,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0
+      ],
+      "zcBits": [
+       [
+        0,
+        975874731
+       ],
+       [
+        1,
+        989855744
+       ],
+       [
+        384,
+        1056975531
+       ],
+       [
+        767,
+        1065342293
+       ]
+      ]
+     }
+    },
+    {
+     "id": "chmutov6",
+     "name": "Chmutov sextic",
+     "eq": [
+      "T₆(x) + T₆(y) + T₆(z) = c",
+      "T₆(u) = 32u⁶ − 48u⁴ + 18u² − 1"
+     ],
+     "note": null,
+     "params": [
+      {
+       "id": "cheb",
+       "entry": [
+        1.5,
+        -2.2,
+        2.2,
+        0.01,
+        "c"
+       ]
+      }
+     ],
+     "rot": null,
+     "animate": [
+      "cheb"
+     ],
+     "glsl": "float f(vec3 q){ vec3 a = q*q; vec3 t = 32.0*a*a*a - 48.0*a*a + 18.0*a - 1.0; return t.x + t.y + t.z - cheb; }\nfloat raw(vec3 p){ return f(p * 1.3600); }",
+     "clip": "length(p) - 1.420",
+     "shell": null,
+     "knobs": [
+      {
+       "id": "cheb",
+       "label": "c",
+       "lo": -2.2,
+       "hi": 2.2,
+       "step": 0.01,
+       "own": true,
+       "value": 1.5
+      },
+      {
+       "id": "@puff",
+       "label": "inflate",
+       "lo": -0.06,
+       "hi": 0.06,
+       "step": 0.001,
+       "own": false,
+       "value": 0
+      }
+     ],
+     "animated": [
+      "cheb"
+     ],
+     "rotSet": null,
+     "fragment": "#version 300 es\nprecision highp float;\nuniform float uZ, uHB, uRes, uPuff;\nuniform float uPr[8];\nout vec4 o;\nfloat smin(float a, float b, float k){ float h = max(k - abs(a - b), 0.0) / k; return min(a, b) - h*h*k*0.25; }\nfloat smax(float a, float b, float k){ return -smin(-a, -b, k); }\nfloat sdBall(vec3 p, float r){ return length(p) - r; }\nfloat sdBox(vec3 p, vec3 b, float r){ vec3 q = abs(p) - b + r; return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - r; }\n#define cheb uPr[0]\n#define CLIP (length(p) - 1.420)\n#define SHELL (0.0)\nfloat f(vec3 q){ vec3 a = q*q; vec3 t = 32.0*a*a*a - 48.0*a*a + 18.0*a - 1.0; return t.x + t.y + t.z - cheb; }\nfloat raw(vec3 p){ return f(p * 1.3600); }\n\nvoid main(){\n  vec3 p = (vec3(gl_FragCoord.xy / uRes, uZ) * 2.0 - 1.0) * uHB;\n  const float e = 0.0007;\n  const vec2 k = vec2(1.0, -1.0);\n  vec3 x = p;\n  float v0 = 0.0, last = 1.0;\n  for (int i = 0; i < 8; i++){\n    float a = raw(x + e*k.xyy), b = raw(x + e*k.yyx), c = raw(x + e*k.yxy), d = raw(x + e*k.xxx);\n    float fv = 0.25 * (a + b + c + d);\n    vec3 g = (k.xyy*a + k.yyx*b + k.yxy*c + k.xxx*d) / (4.0 * e);\n    if (i == 0) v0 = fv;\n    vec3 st = g * (fv / max(dot(g, g), 1e-12));\n    last = length(st);\n    if (last > 0.12) st *= 0.12 / last;                 // never leap: far from the surface the gradient misleads\n    x -= st;\n    if (last < 2e-5) break;\n  }\n  float dist = length(x - p);\n  dist *= mix(1.0, 0.7, smoothstep(0.06, 0.2, dist));   // a long walk may not have ended at the nearest point: stay cautious\n  float sd = (v0 < 0.0 ? -dist : dist) - uPuff;          // uPuff swells (or shrinks) the whole surface evenly\n  float w = SHELL;\n  if (w > 0.0) sd = abs(sd) - w;\n  o = vec4(clamp(smax(sd, CLIP, 0.03), -1.0, 1.0), 0.0, 0.0, 1.0);\n}",
+     "bake": {
+      "res": 768,
+      "uniforms": {
+       "uPr": [
+        1.5,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+       ],
+       "uHB": 1.5,
+       "uRes": 768,
+       "uPuff": 0
+      },
+      "volume": {
+       "levels": 1,
+       "format": "R16F",
+       "w": 768,
+       "h": 768,
+       "d": 768
+      },
+      "viewport": [
+       0,
+       0,
+       768,
+       768
+      ],
+      "uniformBits": [
+       1069547520,
+       1145044992,
+       0,
+       0,
+       1069547520,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0
+      ],
+      "zcBits": [
+       [
+        0,
+        975874731
+       ],
+       [
+        1,
+        989855744
+       ],
+       [
+        384,
+        1056975531
+       ],
+       [
+        767,
+        1065342293
+       ]
+      ]
+     }
+    },
+    {
+     "id": "decocube",
+     "name": "Decocube",
+     "eq": [
+      "((x² + y² − a²)² + (z² − 1)²) ·",
+      "((y² + z² − a²)² + (x² − 1)²) ·",
+      "((z² + x² − a²)² + (y² − 1)²) = b"
+     ],
+     "note": "A ring on every face of a cube, fused where they meet.",
+     "params": [
+      {
+       "id": "deco",
+       "entry": [
+        0.02,
+        0.003,
+        0.12,
+        0.001,
+        "b"
+       ]
+      }
+     ],
+     "rot": null,
+     "animate": [
+      "deco"
+     ],
+     "glsl": "float f(vec3 q){ vec3 a = q*q; float c2 = 0.64; return ((a.x + a.y - c2)*(a.x + a.y - c2) + (a.z - 1.0)*(a.z - 1.0)) * ((a.y + a.z - c2)*(a.y + a.z - c2) + (a.x - 1.0)*(a.x - 1.0)) * ((a.z + a.x - c2)*(a.z + a.x - c2) + (a.y - 1.0)*(a.y - 1.0)) - deco; }\nfloat raw(vec3 p){ return f(p * 1.2000); }",
+     "clip": "length(p) - 1.420",
+     "shell": null,
+     "knobs": [
+      {
+       "id": "deco",
+       "label": "b",
+       "lo": 0.003,
+       "hi": 0.12,
+       "step": 0.001,
+       "own": true,
+       "value": 0.02
+      },
+      {
+       "id": "@puff",
+       "label": "inflate",
+       "lo": -0.06,
+       "hi": 0.06,
+       "step": 0.001,
+       "own": false,
+       "value": 0
+      }
+     ],
+     "animated": [
+      "deco"
+     ],
+     "rotSet": null,
+     "fragment": "#version 300 es\nprecision highp float;\nuniform float uZ, uHB, uRes, uPuff;\nuniform float uPr[8];\nout vec4 o;\nfloat smin(float a, float b, float k){ float h = max(k - abs(a - b), 0.0) / k; return min(a, b) - h*h*k*0.25; }\nfloat smax(float a, float b, float k){ return -smin(-a, -b, k); }\nfloat sdBall(vec3 p, float r){ return length(p) - r; }\nfloat sdBox(vec3 p, vec3 b, float r){ vec3 q = abs(p) - b + r; return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - r; }\n#define deco uPr[0]\n#define CLIP (length(p) - 1.420)\n#define SHELL (0.0)\nfloat f(vec3 q){ vec3 a = q*q; float c2 = 0.64; return ((a.x + a.y - c2)*(a.x + a.y - c2) + (a.z - 1.0)*(a.z - 1.0)) * ((a.y + a.z - c2)*(a.y + a.z - c2) + (a.x - 1.0)*(a.x - 1.0)) * ((a.z + a.x - c2)*(a.z + a.x - c2) + (a.y - 1.0)*(a.y - 1.0)) - deco; }\nfloat raw(vec3 p){ return f(p * 1.2000); }\n\nvoid main(){\n  vec3 p = (vec3(gl_FragCoord.xy / uRes, uZ) * 2.0 - 1.0) * uHB;\n  const float e = 0.0007;\n  const vec2 k = vec2(1.0, -1.0);\n  vec3 x = p;\n  float v0 = 0.0, last = 1.0;\n  for (int i = 0; i < 8; i++){\n    float a = raw(x + e*k.xyy), b = raw(x + e*k.yyx), c = raw(x + e*k.yxy), d = raw(x + e*k.xxx);\n    float fv = 0.25 * (a + b + c + d);\n    vec3 g = (k.xyy*a + k.yyx*b + k.yxy*c + k.xxx*d) / (4.0 * e);\n    if (i == 0) v0 = fv;\n    vec3 st = g * (fv / max(dot(g, g), 1e-12));\n    last = length(st);\n    if (last > 0.12) st *= 0.12 / last;                 // never leap: far from the surface the gradient misleads\n    x -= st;\n    if (last < 2e-5) break;\n  }\n  float dist = length(x - p);\n  dist *= mix(1.0, 0.7, smoothstep(0.06, 0.2, dist));   // a long walk may not have ended at the nearest point: stay cautious\n  float sd = (v0 < 0.0 ? -dist : dist) - uPuff;          // uPuff swells (or shrinks) the whole surface evenly\n  float w = SHELL;\n  if (w > 0.0) sd = abs(sd) - w;\n  o = vec4(clamp(smax(sd, CLIP, 0.03), -1.0, 1.0), 0.0, 0.0, 1.0);\n}",
+     "bake": {
+      "res": 768,
+      "uniforms": {
+       "uPr": [
+        0.019999999552965164,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+       ],
+       "uHB": 1.5,
+       "uRes": 768,
+       "uPuff": 0
+      },
+      "volume": {
+       "levels": 1,
+       "format": "R16F",
+       "w": 768,
+       "h": 768,
+       "d": 768
+      },
+      "viewport": [
+       0,
+       0,
+       768,
+       768
+      ],
+      "uniformBits": [
+       1069547520,
+       1145044992,
+       0,
+       0,
+       1017370378,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0
+      ],
+      "zcBits": [
+       [
+        0,
+        975874731
+       ],
+       [
+        1,
+        989855744
+       ],
+       [
+        384,
+        1056975531
+       ],
+       [
+        767,
+        1065342293
+       ]
+      ]
+     }
+    },
+    {
+     "id": "orthocircles",
+     "name": "Orthocircles",
+     "eq": [
+      "((x² + y² − 1)² + z²) ·",
+      "((y² + z² − 1)² + x²) ·",
+      "((z² + x² − 1)² + y²) = a²(1 + b·r²)"
+     ],
+     "note": "Three circles at right angles, thickened until they merge.",
+     "params": [
+      {
+       "id": "ortho",
+       "entry": [
+        0.06,
+        0.02,
+        0.3,
+        0.002,
+        "a"
+       ]
+      }
+     ],
+     "rot": null,
+     "animate": [
+      "ortho"
+     ],
+     "glsl": "float f(vec3 q){ vec3 a = q*q; float r2 = a.x + a.y + a.z; return ((a.x + a.y - 1.0)*(a.x + a.y - 1.0) + a.z) * ((a.y + a.z - 1.0)*(a.y + a.z - 1.0) + a.x) * ((a.z + a.x - 1.0)*(a.z + a.x - 1.0) + a.y) - ortho*ortho*(1.0 + 3.0*r2); }\nfloat raw(vec3 p){ return f(p * 1.0000); }",
+     "clip": "length(p) - 1.420",
+     "shell": null,
+     "knobs": [
+      {
+       "id": "ortho",
+       "label": "a",
+       "lo": 0.02,
+       "hi": 0.3,
+       "step": 0.002,
+       "own": true,
+       "value": 0.06
+      },
+      {
+       "id": "@puff",
+       "label": "inflate",
+       "lo": -0.06,
+       "hi": 0.06,
+       "step": 0.001,
+       "own": false,
+       "value": 0
+      }
+     ],
+     "animated": [
+      "ortho"
+     ],
+     "rotSet": null,
+     "fragment": "#version 300 es\nprecision highp float;\nuniform float uZ, uHB, uRes, uPuff;\nuniform float uPr[8];\nout vec4 o;\nfloat smin(float a, float b, float k){ float h = max(k - abs(a - b), 0.0) / k; return min(a, b) - h*h*k*0.25; }\nfloat smax(float a, float b, float k){ return -smin(-a, -b, k); }\nfloat sdBall(vec3 p, float r){ return length(p) - r; }\nfloat sdBox(vec3 p, vec3 b, float r){ vec3 q = abs(p) - b + r; return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - r; }\n#define ortho uPr[0]\n#define CLIP (length(p) - 1.420)\n#define SHELL (0.0)\nfloat f(vec3 q){ vec3 a = q*q; float r2 = a.x + a.y + a.z; return ((a.x + a.y - 1.0)*(a.x + a.y - 1.0) + a.z) * ((a.y + a.z - 1.0)*(a.y + a.z - 1.0) + a.x) * ((a.z + a.x - 1.0)*(a.z + a.x - 1.0) + a.y) - ortho*ortho*(1.0 + 3.0*r2); }\nfloat raw(vec3 p){ return f(p * 1.0000); }\n\nvoid main(){\n  vec3 p = (vec3(gl_FragCoord.xy / uRes, uZ) * 2.0 - 1.0) * uHB;\n  const float e = 0.0007;\n  const vec2 k = vec2(1.0, -1.0);\n  vec3 x = p;\n  float v0 = 0.0, last = 1.0;\n  for (int i = 0; i < 8; i++){\n    float a = raw(x + e*k.xyy), b = raw(x + e*k.yyx), c = raw(x + e*k.yxy), d = raw(x + e*k.xxx);\n    float fv = 0.25 * (a + b + c + d);\n    vec3 g = (k.xyy*a + k.yyx*b + k.yxy*c + k.xxx*d) / (4.0 * e);\n    if (i == 0) v0 = fv;\n    vec3 st = g * (fv / max(dot(g, g), 1e-12));\n    last = length(st);\n    if (last > 0.12) st *= 0.12 / last;                 // never leap: far from the surface the gradient misleads\n    x -= st;\n    if (last < 2e-5) break;\n  }\n  float dist = length(x - p);\n  dist *= mix(1.0, 0.7, smoothstep(0.06, 0.2, dist));   // a long walk may not have ended at the nearest point: stay cautious\n  float sd = (v0 < 0.0 ? -dist : dist) - uPuff;          // uPuff swells (or shrinks) the whole surface evenly\n  float w = SHELL;\n  if (w > 0.0) sd = abs(sd) - w;\n  o = vec4(clamp(smax(sd, CLIP, 0.03), -1.0, 1.0), 0.0, 0.0, 1.0);\n}",
+     "bake": {
+      "res": 768,
+      "uniforms": {
+       "uPr": [
+        0.05999999865889549,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+       ],
+       "uHB": 1.5,
+       "uRes": 768,
+       "uPuff": 0
+      },
+      "volume": {
+       "levels": 1,
+       "format": "R16F",
+       "w": 768,
+       "h": 768,
+       "d": 768
+      },
+      "viewport": [
+       0,
+       0,
+       768,
+       768
+      ],
+      "uniformBits": [
+       1069547520,
+       1145044992,
+       0,
+       0,
+       1031127695,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0
+      ],
+      "zcBits": [
+       [
+        0,
+        975874731
+       ],
+       [
+        1,
+        989855744
+       ],
+       [
+        384,
+        1056975531
+       ],
+       [
+        767,
+        1065342293
+       ]
+      ]
+     }
+    },
+    {
+     "id": "pretzel",
+     "name": "Double torus",
+     "eq": [
+      "(x²(1 − x²) − y²)² + z² = c"
+     ],
+     "note": "A surface with two holes: a doughnut for two.",
+     "params": [
+      {
+       "id": "holes",
+       "entry": [
+        0.03,
+        0.004,
+        0.08,
+        0.001,
+        "c"
+       ]
+      }
+     ],
+     "rot": [
+      18,
+      20,
+      0
+     ],
+     "animate": [
+      "holes"
+     ],
+     "glsl": "float f(vec3 q){ float w = q.x*q.x*(1.0 - q.x*q.x) - q.y*q.y; return w*w + q.z*q.z - holes; }\nfloat raw(vec3 p){ return f(p * 0.9000); }",
+     "clip": "length(p) - 1.450",
+     "shell": null,
+     "knobs": [
+      {
+       "id": "holes",
+       "label": "c",
+       "lo": 0.004,
+       "hi": 0.08,
+       "step": 0.001,
+       "own": true,
+       "value": 0.03
+      },
+      {
+       "id": "@puff",
+       "label": "inflate",
+       "lo": -0.06,
+       "hi": 0.06,
+       "step": 0.001,
+       "own": false,
+       "value": 0
+      }
+     ],
+     "animated": [
+      "holes"
+     ],
+     "rotSet": [
+      18,
+      20,
+      0
+     ],
+     "fragment": "#version 300 es\nprecision highp float;\nuniform float uZ, uHB, uRes, uPuff;\nuniform float uPr[8];\nout vec4 o;\nfloat smin(float a, float b, float k){ float h = max(k - abs(a - b), 0.0) / k; return min(a, b) - h*h*k*0.25; }\nfloat smax(float a, float b, float k){ return -smin(-a, -b, k); }\nfloat sdBall(vec3 p, float r){ return length(p) - r; }\nfloat sdBox(vec3 p, vec3 b, float r){ vec3 q = abs(p) - b + r; return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - r; }\n#define holes uPr[0]\n#define CLIP (length(p) - 1.450)\n#define SHELL (0.0)\nfloat f(vec3 q){ float w = q.x*q.x*(1.0 - q.x*q.x) - q.y*q.y; return w*w + q.z*q.z - holes; }\nfloat raw(vec3 p){ return f(p * 0.9000); }\n\nvoid main(){\n  vec3 p = (vec3(gl_FragCoord.xy / uRes, uZ) * 2.0 - 1.0) * uHB;\n  const float e = 0.0007;\n  const vec2 k = vec2(1.0, -1.0);\n  vec3 x = p;\n  float v0 = 0.0, last = 1.0;\n  for (int i = 0; i < 8; i++){\n    float a = raw(x + e*k.xyy), b = raw(x + e*k.yyx), c = raw(x + e*k.yxy), d = raw(x + e*k.xxx);\n    float fv = 0.25 * (a + b + c + d);\n    vec3 g = (k.xyy*a + k.yyx*b + k.yxy*c + k.xxx*d) / (4.0 * e);\n    if (i == 0) v0 = fv;\n    vec3 st = g * (fv / max(dot(g, g), 1e-12));\n    last = length(st);\n    if (last > 0.12) st *= 0.12 / last;                 // never leap: far from the surface the gradient misleads\n    x -= st;\n    if (last < 2e-5) break;\n  }\n  float dist = length(x - p);\n  dist *= mix(1.0, 0.7, smoothstep(0.06, 0.2, dist));   // a long walk may not have ended at the nearest point: stay cautious\n  float sd = (v0 < 0.0 ? -dist : dist) - uPuff;          // uPuff swells (or shrinks) the whole surface evenly\n  float w = SHELL;\n  if (w > 0.0) sd = abs(sd) - w;\n  o = vec4(clamp(smax(sd, CLIP, 0.03), -1.0, 1.0), 0.0, 0.0, 1.0);\n}",
+     "bake": {
+      "res": 768,
+      "uniforms": {
+       "uPr": [
+        0.029999999329447746,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+       ],
+       "uHB": 1.5,
+       "uRes": 768,
+       "uPuff": 0
+      },
+      "volume": {
+       "levels": 1,
+       "format": "R16F",
+       "w": 768,
+       "h": 768,
+       "d": 768
+      },
+      "viewport": [
+       0,
+       0,
+       768,
+       768
+      ],
+      "uniformBits": [
+       1069547520,
+       1145044992,
+       0,
+       0,
+       1022739087,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0
+      ],
+      "zcBits": [
+       [
+        0,
+        975874731
+       ],
+       [
+        1,
+        989855744
+       ],
+       [
+        384,
+        1056975531
+       ],
+       [
+        767,
+        1065342293
+       ]
+      ]
+     }
+    },
+    {
+     "id": "heart",
+     "name": "Heart",
+     "eq": [
+      "(x² + 9⁄4·y² + z² − 1)³ − x²z³ − 9⁄80·y²z³ = 0"
+     ],
+     "note": "Taubin’s heart surface: a sixth-degree polynomial.",
+     "params": [],
+     "rot": [
+      8,
+      25,
+      0
+     ],
+     "animate": [
+      "@puff"
+     ],
+     "glsl": "float f(vec3 q){ vec3 h = q.xzy; float a = h.x*h.x + 2.25*h.y*h.y + h.z*h.z - 1.0; return a - h.z * pow(h.x*h.x + 0.1125*h.y*h.y + 1e-9, 1.0/3.0); }\nfloat raw(vec3 p){ return f(p * 1.0200); }",
+     "clip": "length(p) - 1.420",
+     "shell": null,
+     "knobs": [
+      {
+       "id": "@puff",
+       "label": "inflate",
+       "lo": -0.06,
+       "hi": 0.06,
+       "step": 0.001,
+       "own": false,
+       "value": 0
+      }
+     ],
+     "animated": [
+      "@puff"
+     ],
+     "rotSet": [
+      8,
+      25,
+      0
+     ],
+     "fragment": "#version 300 es\nprecision highp float;\nuniform float uZ, uHB, uRes, uPuff;\nuniform float uPr[8];\nout vec4 o;\nfloat smin(float a, float b, float k){ float h = max(k - abs(a - b), 0.0) / k; return min(a, b) - h*h*k*0.25; }\nfloat smax(float a, float b, float k){ return -smin(-a, -b, k); }\nfloat sdBall(vec3 p, float r){ return length(p) - r; }\nfloat sdBox(vec3 p, vec3 b, float r){ vec3 q = abs(p) - b + r; return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - r; }\n\n#define CLIP (length(p) - 1.420)\n#define SHELL (0.0)\nfloat f(vec3 q){ vec3 h = q.xzy; float a = h.x*h.x + 2.25*h.y*h.y + h.z*h.z - 1.0; return a - h.z * pow(h.x*h.x + 0.1125*h.y*h.y + 1e-9, 1.0/3.0); }\nfloat raw(vec3 p){ return f(p * 1.0200); }\n\nvoid main(){\n  vec3 p = (vec3(gl_FragCoord.xy / uRes, uZ) * 2.0 - 1.0) * uHB;\n  const float e = 0.0007;\n  const vec2 k = vec2(1.0, -1.0);\n  vec3 x = p;\n  float v0 = 0.0, last = 1.0;\n  for (int i = 0; i < 8; i++){\n    float a = raw(x + e*k.xyy), b = raw(x + e*k.yyx), c = raw(x + e*k.yxy), d = raw(x + e*k.xxx);\n    float fv = 0.25 * (a + b + c + d);\n    vec3 g = (k.xyy*a + k.yyx*b + k.yxy*c + k.xxx*d) / (4.0 * e);\n    if (i == 0) v0 = fv;\n    vec3 st = g * (fv / max(dot(g, g), 1e-12));\n    last = length(st);\n    if (last > 0.12) st *= 0.12 / last;                 // never leap: far from the surface the gradient misleads\n    x -= st;\n    if (last < 2e-5) break;\n  }\n  float dist = length(x - p);\n  dist *= mix(1.0, 0.7, smoothstep(0.06, 0.2, dist));   // a long walk may not have ended at the nearest point: stay cautious\n  float sd = (v0 < 0.0 ? -dist : dist) - uPuff;          // uPuff swells (or shrinks) the whole surface evenly\n  float w = SHELL;\n  if (w > 0.0) sd = abs(sd) - w;\n  o = vec4(clamp(smax(sd, CLIP, 0.03), -1.0, 1.0), 0.0, 0.0, 1.0);\n}",
+     "bake": {
+      "res": 768,
+      "uniforms": {
+       "uPr": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+       ],
+       "uHB": 1.5,
+       "uRes": 768,
+       "uPuff": 0
+      },
+      "volume": {
+       "levels": 1,
+       "format": "R16F",
+       "w": 768,
+       "h": 768,
+       "d": 768
+      },
+      "viewport": [
+       0,
+       0,
+       768,
+       768
+      ],
+      "uniformBits": [
+       1069547520,
+       1145044992,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0
+      ],
+      "zcBits": [
+       [
+        0,
+        975874731
+       ],
+       [
+        1,
+        989855744
+       ],
+       [
+        384,
+        1056975531
+       ],
+       [
+        767,
+        1065342293
+       ]
+      ]
+     }
+    },
+    {
+     "id": "kummer",
+     "name": "Kummer surface",
+     "eq": [
+      "(x² + y² + z² − μ²)² = λ·p·q·r·s",
+      "p, q, r, s: the four faces of a tetrahedron"
+     ],
+     "note": "A quartic with sixteen cone points, the most a quartic can have.",
+     "params": [
+      {
+       "id": "mu",
+       "entry": [
+        1.3,
+        1.02,
+        2.6,
+        0.01,
+        "μ²"
+       ]
+      }
+     ],
+     "rot": null,
+     "animate": [
+      "mu"
+     ],
+     "glsl": "float f(vec3 q){ float m2 = mu; float lam = (3.0*m2 - 1.0) / (3.0 - m2); const float R2 = 1.41421356; float p1 = 1.0 - q.z - R2*q.x, p2 = 1.0 - q.z + R2*q.x, p3 = 1.0 + q.z + R2*q.y, p4 = 1.0 + q.z - R2*q.y; float a = dot(q, q) - m2; return a*a - lam*p1*p2*p3*p4; }\nfloat raw(vec3 p){ return f(p * 2.3000); }",
+     "clip": "length(p) - 1.300",
+     "shell": null,
+     "knobs": [
+      {
+       "id": "mu",
+       "label": "μ²",
+       "lo": 1.02,
+       "hi": 2.6,
+       "step": 0.01,
+       "own": true,
+       "value": 1.3
+      },
+      {
+       "id": "@puff",
+       "label": "inflate",
+       "lo": -0.06,
+       "hi": 0.06,
+       "step": 0.001,
+       "own": false,
+       "value": 0
+      }
+     ],
+     "animated": [
+      "mu"
+     ],
+     "rotSet": null,
+     "fragment": "#version 300 es\nprecision highp float;\nuniform float uZ, uHB, uRes, uPuff;\nuniform float uPr[8];\nout vec4 o;\nfloat smin(float a, float b, float k){ float h = max(k - abs(a - b), 0.0) / k; return min(a, b) - h*h*k*0.25; }\nfloat smax(float a, float b, float k){ return -smin(-a, -b, k); }\nfloat sdBall(vec3 p, float r){ return length(p) - r; }\nfloat sdBox(vec3 p, vec3 b, float r){ vec3 q = abs(p) - b + r; return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - r; }\n#define mu uPr[0]\n#define CLIP (length(p) - 1.300)\n#define SHELL (0.0)\nfloat f(vec3 q){ float m2 = mu; float lam = (3.0*m2 - 1.0) / (3.0 - m2); const float R2 = 1.41421356; float p1 = 1.0 - q.z - R2*q.x, p2 = 1.0 - q.z + R2*q.x, p3 = 1.0 + q.z + R2*q.y, p4 = 1.0 + q.z - R2*q.y; float a = dot(q, q) - m2; return a*a - lam*p1*p2*p3*p4; }\nfloat raw(vec3 p){ return f(p * 2.3000); }\n\nvoid main(){\n  vec3 p = (vec3(gl_FragCoord.xy / uRes, uZ) * 2.0 - 1.0) * uHB;\n  const float e = 0.0007;\n  const vec2 k = vec2(1.0, -1.0);\n  vec3 x = p;\n  float v0 = 0.0, last = 1.0;\n  for (int i = 0; i < 8; i++){\n    float a = raw(x + e*k.xyy), b = raw(x + e*k.yyx), c = raw(x + e*k.yxy), d = raw(x + e*k.xxx);\n    float fv = 0.25 * (a + b + c + d);\n    vec3 g = (k.xyy*a + k.yyx*b + k.yxy*c + k.xxx*d) / (4.0 * e);\n    if (i == 0) v0 = fv;\n    vec3 st = g * (fv / max(dot(g, g), 1e-12));\n    last = length(st);\n    if (last > 0.12) st *= 0.12 / last;                 // never leap: far from the surface the gradient misleads\n    x -= st;\n    if (last < 2e-5) break;\n  }\n  float dist = length(x - p);\n  dist *= mix(1.0, 0.7, smoothstep(0.06, 0.2, dist));   // a long walk may not have ended at the nearest point: stay cautious\n  float sd = (v0 < 0.0 ? -dist : dist) - uPuff;          // uPuff swells (or shrinks) the whole surface evenly\n  float w = SHELL;\n  if (w > 0.0) sd = abs(sd) - w;\n  o = vec4(clamp(smax(sd, CLIP, 0.03), -1.0, 1.0), 0.0, 0.0, 1.0);\n}",
+     "bake": {
+      "res": 768,
+      "uniforms": {
+       "uPr": [
+        1.2999999523162842,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+       ],
+       "uHB": 1.5,
+       "uRes": 768,
+       "uPuff": 0
+      },
+      "volume": {
+       "levels": 1,
+       "format": "R16F",
+       "w": 768,
+       "h": 768,
+       "d": 768
+      },
+      "viewport": [
+       0,
+       0,
+       768,
+       768
+      ],
+      "uniformBits": [
+       1069547520,
+       1145044992,
+       0,
+       0,
+       1067869798,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0
+      ],
+      "zcBits": [
+       [
+        0,
+        975874731
+       ],
+       [
+        1,
+        989855744
+       ],
+       [
+        384,
+        1056975531
+       ],
+       [
+        767,
+        1065342293
+       ]
+      ]
+     }
+    },
+    {
+     "id": "barth",
+     "name": "Barth sextic",
+     "eq": [
+      "4(φ²x² − y²)(φ²y² − z²)(φ²z² − x²)",
+      "= (1 + 2φ)(x² + y² + z² − 1)²"
+     ],
+     "note": "Sixty-five cone points, the most a sixth-degree surface can have, arranged with the symmetry of an icosahedron. φ is the golden ratio.",
+     "params": [
+      {
+       "id": "side",
+       "entry": [
+        -1,
+        -1,
+        1,
+        2
+       ]
+      }
+     ],
+     "rot": null,
+     "animate": [
+      "@puff"
+     ],
+     "glsl": "float f(vec3 q){ const float ph = 1.618034; vec3 a = q*q; return side * (4.0*(ph*ph*a.x - a.y)*(ph*ph*a.y - a.z)*(ph*ph*a.z - a.x) - (1.0 + 2.0*ph)*(a.x + a.y + a.z - 1.0)*(a.x + a.y + a.z - 1.0)); }\nfloat raw(vec3 p){ return f(p * 1.9000); }",
+     "clip": "length(p) - 1.300",
+     "shell": null,
+     "knobs": [
+      {
+       "id": "side",
+       "label": "side",
+       "lo": -1,
+       "hi": 1,
+       "step": 2,
+       "own": true,
+       "value": -1
+      },
+      {
+       "id": "@puff",
+       "label": "inflate",
+       "lo": -0.06,
+       "hi": 0.06,
+       "step": 0.001,
+       "own": false,
+       "value": 0
+      }
+     ],
+     "animated": [
+      "@puff"
+     ],
+     "rotSet": null,
+     "fragment": "#version 300 es\nprecision highp float;\nuniform float uZ, uHB, uRes, uPuff;\nuniform float uPr[8];\nout vec4 o;\nfloat smin(float a, float b, float k){ float h = max(k - abs(a - b), 0.0) / k; return min(a, b) - h*h*k*0.25; }\nfloat smax(float a, float b, float k){ return -smin(-a, -b, k); }\nfloat sdBall(vec3 p, float r){ return length(p) - r; }\nfloat sdBox(vec3 p, vec3 b, float r){ vec3 q = abs(p) - b + r; return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - r; }\n#define side uPr[0]\n#define CLIP (length(p) - 1.300)\n#define SHELL (0.0)\nfloat f(vec3 q){ const float ph = 1.618034; vec3 a = q*q; return side * (4.0*(ph*ph*a.x - a.y)*(ph*ph*a.y - a.z)*(ph*ph*a.z - a.x) - (1.0 + 2.0*ph)*(a.x + a.y + a.z - 1.0)*(a.x + a.y + a.z - 1.0)); }\nfloat raw(vec3 p){ return f(p * 1.9000); }\n\nvoid main(){\n  vec3 p = (vec3(gl_FragCoord.xy / uRes, uZ) * 2.0 - 1.0) * uHB;\n  const float e = 0.0007;\n  const vec2 k = vec2(1.0, -1.0);\n  vec3 x = p;\n  float v0 = 0.0, last = 1.0;\n  for (int i = 0; i < 8; i++){\n    float a = raw(x + e*k.xyy), b = raw(x + e*k.yyx), c = raw(x + e*k.yxy), d = raw(x + e*k.xxx);\n    float fv = 0.25 * (a + b + c + d);\n    vec3 g = (k.xyy*a + k.yyx*b + k.yxy*c + k.xxx*d) / (4.0 * e);\n    if (i == 0) v0 = fv;\n    vec3 st = g * (fv / max(dot(g, g), 1e-12));\n    last = length(st);\n    if (last > 0.12) st *= 0.12 / last;                 // never leap: far from the surface the gradient misleads\n    x -= st;\n    if (last < 2e-5) break;\n  }\n  float dist = length(x - p);\n  dist *= mix(1.0, 0.7, smoothstep(0.06, 0.2, dist));   // a long walk may not have ended at the nearest point: stay cautious\n  float sd = (v0 < 0.0 ? -dist : dist) - uPuff;          // uPuff swells (or shrinks) the whole surface evenly\n  float w = SHELL;\n  if (w > 0.0) sd = abs(sd) - w;\n  o = vec4(clamp(smax(sd, CLIP, 0.03), -1.0, 1.0), 0.0, 0.0, 1.0);\n}",
+     "bake": {
+      "res": 768,
+      "uniforms": {
+       "uPr": [
+        -1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+       ],
+       "uHB": 1.5,
+       "uRes": 768,
+       "uPuff": 0
+      },
+      "volume": {
+       "levels": 1,
+       "format": "R16F",
+       "w": 768,
+       "h": 768,
+       "d": 768
+      },
+      "viewport": [
+       0,
+       0,
+       768,
+       768
+      ],
+      "uniformBits": [
+       1069547520,
+       1145044992,
+       0,
+       0,
+       3212836864,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0
+      ],
+      "zcBits": [
+       [
+        0,
+        975874731
+       ],
+       [
+        1,
+        989855744
+       ],
+       [
+        384,
+        1056975531
+       ],
+       [
+        767,
+        1065342293
+       ]
+      ]
+     }
+    },
+    {
+     "id": "clebsch",
+     "name": "Clebsch cubic",
+     "eq": [
+      "81(x³ + y³ + z³) − 189(x²y + x²z + y²x + y²z + z²x + z²y)",
+      "+ 54xyz + 126(xy + yz + zx) − 9(x² + y² + z²) − 9(x + y + z) + 1 = 0"
+     ],
+     "note": "A cubic surface containing 27 straight lines, all of them real.",
+     "params": [],
+     "rot": null,
+     "animate": [
+      "@puff"
+     ],
+     "glsl": "float f(vec3 q){ float x = q.x, y = q.y, z = q.z; return 81.0*(x*x*x + y*y*y + z*z*z) - 189.0*(x*x*y + x*x*z + y*y*x + y*y*z + z*z*x + z*z*y) + 54.0*x*y*z + 126.0*(x*y + y*z + z*x) - 9.0*(x*x + y*y + z*z) - 9.0*(x + y + z) + 1.0; }\nfloat raw(vec3 p){ return f(p * 1.1000); }",
+     "clip": "length(p) - 1.300",
+     "shell": null,
+     "knobs": [
+      {
+       "id": "@puff",
+       "label": "inflate",
+       "lo": -0.06,
+       "hi": 0.06,
+       "step": 0.001,
+       "own": false,
+       "value": 0
+      }
+     ],
+     "animated": [
+      "@puff"
+     ],
+     "rotSet": null,
+     "fragment": "#version 300 es\nprecision highp float;\nuniform float uZ, uHB, uRes, uPuff;\nuniform float uPr[8];\nout vec4 o;\nfloat smin(float a, float b, float k){ float h = max(k - abs(a - b), 0.0) / k; return min(a, b) - h*h*k*0.25; }\nfloat smax(float a, float b, float k){ return -smin(-a, -b, k); }\nfloat sdBall(vec3 p, float r){ return length(p) - r; }\nfloat sdBox(vec3 p, vec3 b, float r){ vec3 q = abs(p) - b + r; return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - r; }\n\n#define CLIP (length(p) - 1.300)\n#define SHELL (0.0)\nfloat f(vec3 q){ float x = q.x, y = q.y, z = q.z; return 81.0*(x*x*x + y*y*y + z*z*z) - 189.0*(x*x*y + x*x*z + y*y*x + y*y*z + z*z*x + z*z*y) + 54.0*x*y*z + 126.0*(x*y + y*z + z*x) - 9.0*(x*x + y*y + z*z) - 9.0*(x + y + z) + 1.0; }\nfloat raw(vec3 p){ return f(p * 1.1000); }\n\nvoid main(){\n  vec3 p = (vec3(gl_FragCoord.xy / uRes, uZ) * 2.0 - 1.0) * uHB;\n  const float e = 0.0007;\n  const vec2 k = vec2(1.0, -1.0);\n  vec3 x = p;\n  float v0 = 0.0, last = 1.0;\n  for (int i = 0; i < 8; i++){\n    float a = raw(x + e*k.xyy), b = raw(x + e*k.yyx), c = raw(x + e*k.yxy), d = raw(x + e*k.xxx);\n    float fv = 0.25 * (a + b + c + d);\n    vec3 g = (k.xyy*a + k.yyx*b + k.yxy*c + k.xxx*d) / (4.0 * e);\n    if (i == 0) v0 = fv;\n    vec3 st = g * (fv / max(dot(g, g), 1e-12));\n    last = length(st);\n    if (last > 0.12) st *= 0.12 / last;                 // never leap: far from the surface the gradient misleads\n    x -= st;\n    if (last < 2e-5) break;\n  }\n  float dist = length(x - p);\n  dist *= mix(1.0, 0.7, smoothstep(0.06, 0.2, dist));   // a long walk may not have ended at the nearest point: stay cautious\n  float sd = (v0 < 0.0 ? -dist : dist) - uPuff;          // uPuff swells (or shrinks) the whole surface evenly\n  float w = SHELL;\n  if (w > 0.0) sd = abs(sd) - w;\n  o = vec4(clamp(smax(sd, CLIP, 0.03), -1.0, 1.0), 0.0, 0.0, 1.0);\n}",
+     "bake": {
+      "res": 768,
+      "uniforms": {
+       "uPr": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+       ],
+       "uHB": 1.5,
+       "uRes": 768,
+       "uPuff": 0
+      },
+      "volume": {
+       "levels": 1,
+       "format": "R16F",
+       "w": 768,
+       "h": 768,
+       "d": 768
+      },
+      "viewport": [
+       0,
+       0,
+       768,
+       768
+      ],
+      "uniformBits": [
+       1069547520,
+       1145044992,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0
+      ],
+      "zcBits": [
+       [
+        0,
+        975874731
+       ],
+       [
+        1,
+        989855744
+       ],
+       [
+        384,
+        1056975531
+       ],
+       [
+        767,
+        1065342293
+       ]
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

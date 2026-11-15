@@ -1,0 +1,1958 @@
+{
+ "families": [
+  {
+   "id": "attractors",
+   "name": "Attractors",
+   "kind": "curve",
+   "melt": 0.006,
+   "tube": 0.03,
+   "align": false,
+   "ambient": [
+    0.006,
+    0.011,
+    0.022
+   ],
+   "defaults": {},
+   "lights": [
+    {
+     "az": 20,
+     "el": 0,
+     "w": 5,
+     "h": 40,
+     "rgb": [
+      5,
+      4.9,
+      4.7
+     ],
+     "soft": 0.6
+    },
+    {
+     "az": 80,
+     "el": 0,
+     "w": 5,
+     "h": 40,
+     "rgb": [
+      5,
+      1.6,
+      0.25
+     ],
+     "soft": 0.6
+    },
+    {
+     "az": 140,
+     "el": 0,
+     "w": 5,
+     "h": 40,
+     "rgb": [
+      0.5,
+      1.4,
+      4
+     ],
+     "soft": 0.6
+    },
+    {
+     "az": 200,
+     "el": 0,
+     "w": 5,
+     "h": 40,
+     "rgb": [
+      4,
+      3.9,
+      3.8
+     ],
+     "soft": 0.6
+    },
+    {
+     "az": 260,
+     "el": 0,
+     "w": 5,
+     "h": 40,
+     "rgb": [
+      5,
+      1.6,
+      0.25
+     ],
+     "soft": 0.6
+    },
+    {
+     "az": 320,
+     "el": 0,
+     "w": 5,
+     "h": 40,
+     "rgb": [
+      0.5,
+      1.4,
+      4
+     ],
+     "soft": 0.6
+    },
+    {
+     "az": 0,
+     "el": 85,
+     "w": 30,
+     "h": 30,
+     "rgb": [
+      0.6,
+      0.7,
+      0.9
+     ],
+     "soft": 0.9
+    }
+   ],
+   "stepScale": 0.95,
+   "stepsOut": 220,
+   "stepsIn": 56,
+   "layers": 2,
+   "presets": [
+    {
+     "id": "thomas",
+     "name": "Thomas",
+     "eq": [
+      "ẋ = sin y − b·x",
+      "ẏ = sin z − b·y",
+      "ż = sin x − b·z"
+     ],
+     "note": "Cyclically symmetric: swap x→y→z→x and nothing changes. b is friction.",
+     "params": [
+      {
+       "id": "b",
+       "label": "b",
+       "value": 0.208186,
+       "lo": 0.08,
+       "hi": 0.33,
+       "step": 0.0005
+      }
+     ],
+     "rot": null,
+     "animate": null,
+     "tube": 0.036,
+     "axes": null,
+     "align": null,
+     "fit": null,
+     "centre": true,
+     "fixedLength": false,
+     "radius": false,
+     "info": false,
+     "flow": {
+      "start": [
+       1.1,
+       1.1,
+       -0.01
+      ],
+      "dt": 0.05,
+      "steps": 9000,
+      "settle": 3000
+     }
+    },
+    {
+     "id": "thomas19",
+     "name": "Thomas · linked",
+     "eq": [
+      "ẋ = sin y − b·x",
+      "ẏ = sin z − b·y",
+      "ż = sin x − b·z"
+     ],
+     "note": "A little less friction and the orbit reaches into neighbouring cells: rings through rings.",
+     "params": [
+      {
+       "id": "b",
+       "label": "b",
+       "value": 0.19,
+       "lo": 0.08,
+       "hi": 0.33,
+       "step": 0.0005
+      }
+     ],
+     "rot": null,
+     "animate": null,
+     "tube": 0.034,
+     "axes": null,
+     "align": null,
+     "fit": null,
+     "centre": true,
+     "fixedLength": false,
+     "radius": false,
+     "info": false,
+     "flow": {
+      "start": [
+       1.1,
+       1.1,
+       -0.01
+      ],
+      "dt": 0.05,
+      "steps": 9000,
+      "settle": 3000
+     }
+    },
+    {
+     "id": "thomas15",
+     "name": "Thomas · woven",
+     "eq": [
+      "ẋ = sin y − b·x",
+      "ẏ = sin z − b·y",
+      "ż = sin x − b·z"
+     ],
+     "note": "Less friction again.",
+     "params": [
+      {
+       "id": "b",
+       "label": "b",
+       "value": 0.15,
+       "lo": 0.08,
+       "hi": 0.33,
+       "step": 0.0005
+      }
+     ],
+     "rot": null,
+     "animate": null,
+     "tube": 0.034,
+     "axes": null,
+     "align": null,
+     "fit": null,
+     "centre": true,
+     "fixedLength": false,
+     "radius": false,
+     "info": false,
+     "flow": {
+      "start": [
+       1.1,
+       1.1,
+       -0.01
+      ],
+      "dt": 0.05,
+      "steps": 9000,
+      "settle": 3000
+     }
+    },
+    {
+     "id": "thomas10",
+     "name": "Thomas · tangle",
+     "eq": [
+      "ẋ = sin y − b·x",
+      "ẏ = sin z − b·y",
+      "ż = sin x − b·z"
+     ],
+     "note": "Almost frictionless: the orbit wanders a three-dimensional lattice.",
+     "params": [
+      {
+       "id": "b",
+       "label": "b",
+       "value": 0.1,
+       "lo": 0.08,
+       "hi": 0.33,
+       "step": 0.0005
+      }
+     ],
+     "rot": null,
+     "animate": null,
+     "tube": 0.03,
+     "axes": null,
+     "align": null,
+     "fit": null,
+     "centre": true,
+     "fixedLength": false,
+     "radius": false,
+     "info": false,
+     "flow": {
+      "start": [
+       1.1,
+       1.1,
+       -0.01
+      ],
+      "dt": 0.05,
+      "steps": 9000,
+      "settle": 3000
+     }
+    },
+    {
+     "id": "nosehoover",
+     "name": "Nosé–Hoover",
+     "eq": [
+      "ẋ = y",
+      "ẏ = −x + y·z",
+      "ż = a − y²"
+     ],
+     "note": "A thermostat for a single oscillator. No friction overall, so it never thins down to a sheet.",
+     "params": [
+      {
+       "id": "a",
+       "label": "a",
+       "value": 1.5,
+       "lo": 0.6,
+       "hi": 3,
+       "step": 0.01
+      }
+     ],
+     "rot": null,
+     "animate": null,
+     "tube": 0.024,
+     "axes": null,
+     "align": null,
+     "fit": null,
+     "centre": true,
+     "fixedLength": false,
+     "radius": false,
+     "info": false,
+     "flow": {
+      "start": [
+       1,
+       0,
+       0
+      ],
+      "dt": 0.005,
+      "steps": 24000,
+      "settle": 3000
+     }
+    },
+    {
+     "id": "sprott",
+     "name": "Sprott",
+     "eq": [
+      "ẋ = y + a·x·y + x·z",
+      "ẏ = 1 − b·x² + y·z",
+      "ż = x − x² − y²"
+     ],
+     "note": "",
+     "params": [
+      {
+       "id": "a",
+       "label": "a",
+       "value": 2.07,
+       "lo": 1.9,
+       "hi": 2.2,
+       "step": 0.002
+      }
+     ],
+     "rot": null,
+     "animate": null,
+     "tube": 0.028,
+     "axes": null,
+     "align": null,
+     "fit": null,
+     "centre": true,
+     "fixedLength": false,
+     "radius": false,
+     "info": false,
+     "flow": {
+      "start": [
+       0.63,
+       0.47,
+       -0.54
+      ],
+      "dt": 0.004,
+      "steps": 12000,
+      "settle": 3000
+     }
+    },
+    {
+     "id": "fourwing",
+     "name": "Four-wing",
+     "eq": [
+      "ẋ = a·x + y·z",
+      "ẏ = b·x + c·y − x·z",
+      "ż = −z − x·y"
+     ],
+     "note": "",
+     "params": [
+      {
+       "id": "a",
+       "label": "a",
+       "value": 0.2,
+       "lo": 0.1,
+       "hi": 0.3,
+       "step": 0.002
+      }
+     ],
+     "rot": null,
+     "animate": null,
+     "tube": 0.03,
+     "axes": null,
+     "align": null,
+     "fit": null,
+     "centre": true,
+     "fixedLength": false,
+     "radius": false,
+     "info": false,
+     "flow": {
+      "start": [
+       1.3,
+       -0.18,
+       0.01
+      ],
+      "dt": 0.01,
+      "steps": 16000,
+      "settle": 3000
+     }
+    },
+    {
+     "id": "wangsun",
+     "name": "Wang–Sun",
+     "eq": [
+      "ẋ = a·x + c·y·z",
+      "ẏ = b·x + d·y − x·z",
+      "ż = e·z + f·x·y"
+     ],
+     "note": "",
+     "params": [
+      {
+       "id": "a",
+       "label": "a",
+       "value": 0.2,
+       "lo": 0.1,
+       "hi": 0.3,
+       "step": 0.002
+      }
+     ],
+     "rot": null,
+     "animate": null,
+     "tube": 0.028,
+     "axes": null,
+     "align": null,
+     "fit": null,
+     "centre": true,
+     "fixedLength": false,
+     "radius": false,
+     "info": false,
+     "flow": {
+      "start": [
+       0.5,
+       0.1,
+       0.1
+      ],
+      "dt": 0.01,
+      "steps": 20000,
+      "settle": 3000
+     }
+    },
+    {
+     "id": "halvorsen",
+     "name": "Halvorsen",
+     "eq": [
+      "ẋ = −a·x − 4y − 4z − y²",
+      "ẏ = −a·y − 4z − 4x − z²",
+      "ż = −a·z − 4x − 4y − x²"
+     ],
+     "note": "Cyclically symmetric, like Thomas.",
+     "params": [
+      {
+       "id": "a",
+       "label": "a",
+       "value": 1.4,
+       "lo": 1.27,
+       "hi": 1.9,
+       "step": 0.005
+      }
+     ],
+     "rot": null,
+     "animate": null,
+     "tube": 0.03,
+     "axes": null,
+     "align": null,
+     "fit": null,
+     "centre": true,
+     "fixedLength": false,
+     "radius": false,
+     "info": false,
+     "flow": {
+      "start": [
+       -5,
+       0,
+       0
+      ],
+      "dt": 0.004,
+      "steps": 8000,
+      "settle": 3000
+     }
+    },
+    {
+     "id": "aizawa",
+     "name": "Aizawa",
+     "eq": [
+      "ẋ = (z − b)x − d·y",
+      "ẏ = d·x + (z − b)y",
+      "ż = c + a·z − z³/3 − (x² + y²)(1 + e·z) + f·z·x³"
+     ],
+     "note": "",
+     "params": [
+      {
+       "id": "e",
+       "label": "e",
+       "value": 0.25,
+       "lo": 0,
+       "hi": 0.6,
+       "step": 0.005
+      }
+     ],
+     "rot": null,
+     "animate": null,
+     "tube": 0.028,
+     "axes": [
+      0,
+      2,
+      1
+     ],
+     "align": null,
+     "fit": null,
+     "centre": true,
+     "fixedLength": false,
+     "radius": false,
+     "info": false,
+     "flow": {
+      "start": [
+       0.1,
+       0,
+       0
+      ],
+      "dt": 0.01,
+      "steps": 6000,
+      "settle": 3000
+     }
+    },
+    {
+     "id": "lorenz",
+     "name": "Lorenz",
+     "eq": [
+      "ẋ = σ(y − x)",
+      "ẏ = x(ρ − z) − y",
+      "ż = x·y − β·z"
+     ],
+     "note": "The butterfly: σ = 10, β = 8/3.",
+     "params": [
+      {
+       "id": "rho",
+       "label": "ρ",
+       "value": 28,
+       "lo": 20,
+       "hi": 60,
+       "step": 0.1
+      }
+     ],
+     "rot": null,
+     "animate": null,
+     "tube": 0.028,
+     "axes": null,
+     "align": true,
+     "fit": null,
+     "centre": true,
+     "fixedLength": false,
+     "radius": false,
+     "info": false,
+     "flow": {
+      "start": [
+       1,
+       1,
+       20
+      ],
+      "dt": 0.004,
+      "steps": 8000,
+      "settle": 3000
+     }
+    },
+    {
+     "id": "rossler",
+     "name": "Rössler",
+     "eq": [
+      "ẋ = −y − z",
+      "ẏ = x + a·y",
+      "ż = b + z(x − c)"
+     ],
+     "note": "Raise c and one loop becomes two, four, eight … then chaos, with windows of order inside it.",
+     "params": [
+      {
+       "id": "c",
+       "label": "c",
+       "value": 5.7,
+       "lo": 2.4,
+       "hi": 6.2,
+       "step": 0.005
+      }
+     ],
+     "rot": [
+      38,
+      22,
+      0
+     ],
+     "animate": null,
+     "tube": 0.022,
+     "axes": [
+      0,
+      2,
+      1
+     ],
+     "align": null,
+     "fit": null,
+     "centre": true,
+     "fixedLength": false,
+     "radius": false,
+     "info": true,
+     "flow": {
+      "start": [
+       1,
+       1,
+       0
+      ],
+      "dt": 0.01,
+      "steps": 26000,
+      "settle": 300000
+     }
+    },
+    {
+     "id": "dadras",
+     "name": "Dadras",
+     "eq": [
+      "ẋ = y − a·x + b·y·z",
+      "ẏ = c·y − x·z + z",
+      "ż = d·x·y − e·z"
+     ],
+     "note": "",
+     "params": [
+      {
+       "id": "c",
+       "label": "c",
+       "value": 1.7,
+       "lo": 1.2,
+       "hi": 2.2,
+       "step": 0.01
+      }
+     ],
+     "rot": null,
+     "animate": null,
+     "tube": 0.03,
+     "axes": null,
+     "align": true,
+     "fit": null,
+     "centre": true,
+     "fixedLength": false,
+     "radius": false,
+     "info": false,
+     "flow": {
+      "start": [
+       1.1,
+       2.1,
+       -2
+      ],
+      "dt": 0.004,
+      "steps": 9000,
+      "settle": 3000
+     }
+    },
+    {
+     "id": "chenlee",
+     "name": "Chen–Lee",
+     "eq": [
+      "ẋ = a·x − y·z",
+      "ẏ = b·y + x·z",
+      "ż = c·z + x·y/3"
+     ],
+     "note": "",
+     "params": [
+      {
+       "id": "c",
+       "label": "c",
+       "value": -0.38,
+       "lo": -0.6,
+       "hi": -0.2,
+       "step": 0.002
+      }
+     ],
+     "rot": null,
+     "animate": null,
+     "tube": 0.028,
+     "axes": null,
+     "align": null,
+     "fit": null,
+     "centre": true,
+     "fixedLength": false,
+     "radius": false,
+     "info": false,
+     "flow": {
+      "start": [
+       1,
+       0,
+       4.5
+      ],
+      "dt": 0.002,
+      "steps": 12000,
+      "settle": 3000
+     }
+    },
+    {
+     "id": "burkeshaw",
+     "name": "Burke–Shaw",
+     "eq": [
+      "ẋ = −s(x + y)",
+      "ẏ = −y − s·x·z",
+      "ż = s·x·y + v"
+     ],
+     "note": "",
+     "params": [
+      {
+       "id": "v",
+       "label": "v",
+       "value": 4.272,
+       "lo": 2.5,
+       "hi": 6,
+       "step": 0.01
+      }
+     ],
+     "rot": null,
+     "animate": null,
+     "tube": 0.028,
+     "axes": null,
+     "align": true,
+     "fit": null,
+     "centre": true,
+     "fixedLength": false,
+     "radius": false,
+     "info": false,
+     "flow": {
+      "start": [
+       0.6,
+       0,
+       0
+      ],
+      "dt": 0.002,
+      "steps": 9000,
+      "settle": 3000
+     }
+    },
+    {
+     "id": "shimizu",
+     "name": "Shimizu–Morioka",
+     "eq": [
+      "ẋ = y",
+      "ẏ = (1 − z)x − a·y",
+      "ż = x² − b·z"
+     ],
+     "note": "",
+     "params": [
+      {
+       "id": "a",
+       "label": "a",
+       "value": 0.75,
+       "lo": 0.6,
+       "hi": 1.1,
+       "step": 0.005
+      }
+     ],
+     "rot": null,
+     "animate": null,
+     "tube": 0.028,
+     "axes": null,
+     "align": true,
+     "fit": null,
+     "centre": true,
+     "fixedLength": false,
+     "radius": false,
+     "info": false,
+     "flow": {
+      "start": [
+       0.1,
+       0,
+       0
+      ],
+      "dt": 0.01,
+      "steps": 12000,
+      "settle": 3000
+     }
+    },
+    {
+     "id": "hadley",
+     "name": "Hadley",
+     "eq": [
+      "ẋ = −y² − z² − a·x + a·F",
+      "ẏ = x·y − b·x·z − y + G",
+      "ż = b·x·y + x·z − z"
+     ],
+     "note": "A toy model of the atmosphere’s circulation.",
+     "params": [
+      {
+       "id": "F",
+       "label": "F",
+       "value": 8,
+       "lo": 6,
+       "hi": 10,
+       "step": 0.02
+      }
+     ],
+     "rot": null,
+     "animate": null,
+     "tube": 0.026,
+     "axes": null,
+     "align": true,
+     "fit": null,
+     "centre": true,
+     "fixedLength": false,
+     "radius": false,
+     "info": false,
+     "flow": {
+      "start": [
+       0.39,
+       -1,
+       0
+      ],
+      "dt": 0.005,
+      "steps": 16000,
+      "settle": 3000
+     }
+    },
+    {
+     "id": "rabfab",
+     "name": "Rabinovich–Fabrikant",
+     "eq": [
+      "ẋ = y(z − 1 + x²) + γ·x",
+      "ẏ = x(3z + 1 − x²) + γ·y",
+      "ż = −2z(α + x·y)"
+     ],
+     "note": "",
+     "params": [
+      {
+       "id": "gamma",
+       "label": "γ",
+       "value": 0.87,
+       "lo": 0.75,
+       "hi": 0.95,
+       "step": 0.002
+      }
+     ],
+     "rot": null,
+     "animate": null,
+     "tube": 0.026,
+     "axes": null,
+     "align": null,
+     "fit": null,
+     "centre": true,
+     "fixedLength": false,
+     "radius": false,
+     "info": false,
+     "flow": {
+      "start": [
+       -1,
+       0,
+       0.5
+      ],
+      "dt": 0.0015,
+      "steps": 30000,
+      "settle": 3000
+     }
+    },
+    {
+     "id": "bouali",
+     "name": "Bouali",
+     "eq": [
+      "ẋ = x(4 − y) + α·z",
+      "ẏ = −y(1 − x²)",
+      "ż = −x(1.5 − s·z) − 0.05z"
+     ],
+     "note": "",
+     "params": [
+      {
+       "id": "alpha",
+       "label": "α",
+       "value": 0.3,
+       "lo": 0.2,
+       "hi": 0.5,
+       "step": 0.002
+      }
+     ],
+     "rot": null,
+     "animate": null,
+     "tube": 0.028,
+     "axes": null,
+     "align": null,
+     "fit": null,
+     "centre": true,
+     "fixedLength": false,
+     "radius": false,
+     "info": false,
+     "flow": {
+      "start": [
+       1,
+       1,
+       0
+      ],
+      "dt": 0.003,
+      "steps": 20000,
+      "settle": 3000
+     }
+    },
+    {
+     "id": "sakarya",
+     "name": "Sakarya",
+     "eq": [
+      "ẋ = −x + y + y·z",
+      "ẏ = −x − y + a·x·z",
+      "ż = z − b·x·y"
+     ],
+     "note": "",
+     "params": [
+      {
+       "id": "a",
+       "label": "a",
+       "value": 0.4,
+       "lo": 0.3,
+       "hi": 0.6,
+       "step": 0.002
+      }
+     ],
+     "rot": null,
+     "animate": null,
+     "tube": 0.026,
+     "axes": null,
+     "align": null,
+     "fit": null,
+     "centre": true,
+     "fixedLength": false,
+     "radius": false,
+     "info": false,
+     "flow": {
+      "start": [
+       1,
+       -1,
+       1
+      ],
+      "dt": 0.002,
+      "steps": 20000,
+      "settle": 3000
+     }
+    },
+    {
+     "id": "genesio",
+     "name": "Genesio–Tesi",
+     "eq": [
+      "ẋ = y",
+      "ẏ = z",
+      "ż = −c·x − b·y − a·z + x²"
+     ],
+     "note": "",
+     "params": [
+      {
+       "id": "a",
+       "label": "a",
+       "value": 0.44,
+       "lo": 0.4,
+       "hi": 0.6,
+       "step": 0.002
+      }
+     ],
+     "rot": null,
+     "animate": null,
+     "tube": 0.028,
+     "axes": null,
+     "align": true,
+     "fit": null,
+     "centre": true,
+     "fixedLength": false,
+     "radius": false,
+     "info": false,
+     "flow": {
+      "start": [
+       0.1,
+       0.1,
+       0.1
+      ],
+      "dt": 0.01,
+      "steps": 14000,
+      "settle": 3000
+     }
+    },
+    {
+     "id": "sprottb",
+     "name": "Sprott B",
+     "eq": [
+      "ẋ = a·y·z",
+      "ẏ = x − b·y",
+      "ż = c − x·y"
+     ],
+     "note": "One of the simplest flows that is chaotic at all: five terms, two of them nonlinear.",
+     "params": [
+      {
+       "id": "a",
+       "label": "a",
+       "value": 0.4,
+       "lo": 0.3,
+       "hi": 0.6,
+       "step": 0.002
+      }
+     ],
+     "rot": null,
+     "animate": null,
+     "tube": 0.03,
+     "axes": null,
+     "align": true,
+     "fit": null,
+     "centre": true,
+     "fixedLength": false,
+     "radius": false,
+     "info": false,
+     "flow": {
+      "start": [
+       0.1,
+       0.1,
+       0.1
+      ],
+      "dt": 0.01,
+      "steps": 14000,
+      "settle": 3000
+     }
+    },
+    {
+     "id": "arneodo",
+     "name": "Arneodo",
+     "eq": [
+      "ẋ = y",
+      "ẏ = z",
+      "ż = −a·x − b·y − z + c·x³"
+     ],
+     "note": "",
+     "params": [
+      {
+       "id": "b",
+       "label": "b",
+       "value": 3.5,
+       "lo": 3,
+       "hi": 4.2,
+       "step": 0.005
+      }
+     ],
+     "rot": null,
+     "animate": null,
+     "tube": 0.028,
+     "axes": null,
+     "align": true,
+     "fit": null,
+     "centre": true,
+     "fixedLength": false,
+     "radius": false,
+     "info": false,
+     "flow": {
+      "start": [
+       0.2,
+       0.2,
+       -0.75
+      ],
+      "dt": 0.005,
+      "steps": 12000,
+      "settle": 30000
+     }
+    },
+    {
+     "id": "newton",
+     "name": "Newton–Leipnik",
+     "eq": [
+      "ẋ = −a·x + y + 10y·z",
+      "ẏ = −x − 0.4y + 5x·z",
+      "ż = b·z − 5x·y"
+     ],
+     "note": "",
+     "params": [
+      {
+       "id": "b",
+       "label": "b",
+       "value": 0.175,
+       "lo": 0.1,
+       "hi": 0.25,
+       "step": 0.001
+      }
+     ],
+     "rot": null,
+     "animate": null,
+     "tube": 0.026,
+     "axes": null,
+     "align": true,
+     "fit": null,
+     "centre": true,
+     "fixedLength": false,
+     "radius": false,
+     "info": false,
+     "flow": {
+      "start": [
+       0.349,
+       0,
+       -0.16
+      ],
+      "dt": 0.005,
+      "steps": 20000,
+      "settle": 3000
+     }
+    },
+    {
+     "id": "rucklidge",
+     "name": "Rucklidge",
+     "eq": [
+      "ẋ = −κ·x + λ·y − y·z",
+      "ẏ = x",
+      "ż = −z + y²"
+     ],
+     "note": "",
+     "params": [
+      {
+       "id": "lambda",
+       "label": "λ",
+       "value": 6.7,
+       "lo": 5,
+       "hi": 9,
+       "step": 0.02
+      }
+     ],
+     "rot": null,
+     "animate": null,
+     "tube": 0.028,
+     "axes": null,
+     "align": null,
+     "fit": null,
+     "centre": true,
+     "fixedLength": false,
+     "radius": false,
+     "info": false,
+     "flow": {
+      "start": [
+       1,
+       0,
+       4.5
+      ],
+      "dt": 0.005,
+      "steps": 10000,
+      "settle": 3000
+     }
+    },
+    {
+     "id": "tsucs",
+     "name": "Three-scroll",
+     "eq": [
+      "ẋ = a(y − x) + d·x·z",
+      "ẏ = b·x − x·z + f·y",
+      "ż = c·z + x·y − e·x²"
+     ],
+     "note": "",
+     "params": [
+      {
+       "id": "f",
+       "label": "f",
+       "value": 14.7,
+       "lo": 12,
+       "hi": 16,
+       "step": 0.02
+      }
+     ],
+     "rot": null,
+     "animate": null,
+     "tube": 0.026,
+     "axes": null,
+     "align": true,
+     "fit": null,
+     "centre": true,
+     "fixedLength": false,
+     "radius": false,
+     "info": false,
+     "flow": {
+      "start": [
+       -0.29,
+       -0.25,
+       -0.59
+      ],
+      "dt": 0.0002,
+      "steps": 30000,
+      "settle": 3000
+     }
+    },
+    {
+     "id": "dequanli",
+     "name": "Dequan Li",
+     "eq": [
+      "ẋ = a(y − x) + d·x·z",
+      "ẏ = k·x + f·y − x·z",
+      "ż = c·z + x·y − e·x²"
+     ],
+     "note": "",
+     "params": [
+      {
+       "id": "k",
+       "label": "k",
+       "value": 55,
+       "lo": 45,
+       "hi": 65,
+       "step": 0.1
+      }
+     ],
+     "rot": null,
+     "animate": null,
+     "tube": 0.026,
+     "axes": null,
+     "align": null,
+     "fit": null,
+     "centre": true,
+     "fixedLength": false,
+     "radius": false,
+     "info": false,
+     "flow": {
+      "start": [
+       0.349,
+       0,
+       -0.16
+      ],
+      "dt": 0.0002,
+      "steps": 30000,
+      "settle": 3000
+     }
+    },
+    {
+     "id": "sprottf",
+     "name": "Sprott F",
+     "eq": [
+      "ẋ = y + z",
+      "ẏ = −x + a·y",
+      "ż = x² − z"
+     ],
+     "note": "",
+     "params": [
+      {
+       "id": "a",
+       "label": "a",
+       "value": 0.5,
+       "lo": 0.4,
+       "hi": 0.55,
+       "step": 0.002
+      }
+     ],
+     "rot": null,
+     "animate": null,
+     "tube": 0.03,
+     "axes": null,
+     "align": null,
+     "fit": null,
+     "centre": true,
+     "fixedLength": false,
+     "radius": false,
+     "info": false,
+     "flow": {
+      "start": [
+       0.1,
+       0.1,
+       0.1
+      ],
+      "dt": 0.01,
+      "steps": 14000,
+      "settle": 3000
+     }
+    }
+   ]
+  },
+  {
+   "id": "knots",
+   "name": "Knots",
+   "kind": "curve",
+   "melt": 0.004,
+   "tube": 0.03,
+   "align": false,
+   "ambient": [
+    0.006,
+    0.011,
+    0.022
+   ],
+   "defaults": {
+    "absorb": [
+     0.14,
+     0.07,
+     0.03
+    ],
+    "rot": [
+     20,
+     25,
+     0
+    ]
+   },
+   "lights": [
+    {
+     "az": 20,
+     "el": 0,
+     "w": 5,
+     "h": 40,
+     "rgb": [
+      5,
+      4.9,
+      4.7
+     ],
+     "soft": 0.6
+    },
+    {
+     "az": 80,
+     "el": 0,
+     "w": 5,
+     "h": 40,
+     "rgb": [
+      5,
+      1.6,
+      0.25
+     ],
+     "soft": 0.6
+    },
+    {
+     "az": 140,
+     "el": 0,
+     "w": 5,
+     "h": 40,
+     "rgb": [
+      0.5,
+      1.4,
+      4
+     ],
+     "soft": 0.6
+    },
+    {
+     "az": 200,
+     "el": 0,
+     "w": 5,
+     "h": 40,
+     "rgb": [
+      4,
+      3.9,
+      3.8
+     ],
+     "soft": 0.6
+    },
+    {
+     "az": 260,
+     "el": 0,
+     "w": 5,
+     "h": 40,
+     "rgb": [
+      5,
+      1.6,
+      0.25
+     ],
+     "soft": 0.6
+    },
+    {
+     "az": 320,
+     "el": 0,
+     "w": 5,
+     "h": 40,
+     "rgb": [
+      0.5,
+      1.4,
+      4
+     ],
+     "soft": 0.6
+    },
+    {
+     "az": 0,
+     "el": 85,
+     "w": 30,
+     "h": 30,
+     "rgb": [
+      0.6,
+      0.7,
+      0.9
+     ],
+     "soft": 0.9
+    }
+   ],
+   "stepScale": 0.95,
+   "stepsOut": 220,
+   "stepsIn": 56,
+   "layers": 2,
+   "presets": [
+    {
+     "id": "trefoil",
+     "name": "Trefoil",
+     "eq": [
+      "x = sin t + 2 sin 2t",
+      "y = cos t − 2 cos 2t",
+      "z = −sin 3t"
+     ],
+     "note": "The simplest knot there is: three crossings. It cannot be untied without cutting.",
+     "params": [],
+     "rot": [
+      8,
+      0,
+      0
+     ],
+     "animate": [
+      "@thick"
+     ],
+     "tube": 0.13,
+     "axes": null,
+     "align": null,
+     "fit": null,
+     "centre": true,
+     "fixedLength": true,
+     "radius": false,
+     "info": false,
+     "flow": null
+    },
+    {
+     "id": "figure8",
+     "name": "Figure-eight",
+     "eq": [
+      "x = (2 + cos 2t) cos 3t",
+      "y = (2 + cos 2t) sin 3t",
+      "z = sin 4t"
+     ],
+     "note": "Four crossings. Unlike the trefoil, it is the same knot as its own mirror image.",
+     "params": [],
+     "rot": [
+      14,
+      0,
+      0
+     ],
+     "animate": [
+      "@thick"
+     ],
+     "tube": 0.11,
+     "axes": null,
+     "align": null,
+     "fit": null,
+     "centre": true,
+     "fixedLength": true,
+     "radius": false,
+     "info": false,
+     "flow": null
+    },
+    {
+     "id": "torus",
+     "name": "Torus knot",
+     "eq": [
+      "x = (1 + r cos qt) cos pt",
+      "y = (1 + r cos qt) sin pt",
+      "z = r sin qt"
+     ],
+     "note": "p times round the axis, q times round the tube. Try p = 2, q = 5 or p = 5, q = 8.",
+     "params": [
+      {
+       "id": "p",
+       "label": "p",
+       "value": 3,
+       "lo": 1,
+       "hi": 9,
+       "step": 1
+      },
+      {
+       "id": "q",
+       "label": "q",
+       "value": 7,
+       "lo": 1,
+       "hi": 30,
+       "step": 1
+      },
+      {
+       "id": "r",
+       "label": "r",
+       "value": 0.42,
+       "lo": 0.15,
+       "hi": 0.8,
+       "step": 0.01
+      }
+     ],
+     "rot": [
+      28,
+      0,
+      0
+     ],
+     "animate": [
+      "r"
+     ],
+     "tube": 0.065,
+     "axes": null,
+     "align": null,
+     "fit": null,
+     "centre": true,
+     "fixedLength": true,
+     "radius": false,
+     "info": true,
+     "flow": null
+    },
+    {
+     "id": "cinquefoil",
+     "name": "Cinquefoil",
+     "eq": [
+      "x = (1 + r cos qt) cos pt",
+      "y = (1 + r cos qt) sin pt",
+      "z = r sin qt"
+     ],
+     "note": "The (2, 5) torus knot: five crossings, like a pentagram.",
+     "params": [
+      {
+       "id": "p",
+       "label": "p",
+       "value": 2,
+       "lo": 1,
+       "hi": 9,
+       "step": 1
+      },
+      {
+       "id": "q",
+       "label": "q",
+       "value": 5,
+       "lo": 1,
+       "hi": 30,
+       "step": 1
+      },
+      {
+       "id": "r",
+       "label": "r",
+       "value": 0.45,
+       "lo": 0.15,
+       "hi": 0.8,
+       "step": 0.01
+      }
+     ],
+     "rot": [
+      18,
+      0,
+      0
+     ],
+     "animate": [
+      "r"
+     ],
+     "tube": 0.1,
+     "axes": null,
+     "align": null,
+     "fit": null,
+     "centre": true,
+     "fixedLength": true,
+     "radius": false,
+     "info": true,
+     "flow": null
+    },
+    {
+     "id": "solomon",
+     "name": "Solomon’s link",
+     "eq": [
+      "x = (1 + r cos qt) cos pt",
+      "y = (1 + r cos qt) sin pt",
+      "z = r sin qt"
+     ],
+     "note": "p and q share a factor of 2, so the curve closes twice: two loops, linked twice.",
+     "params": [
+      {
+       "id": "p",
+       "label": "p",
+       "value": 2,
+       "lo": 1,
+       "hi": 9,
+       "step": 1
+      },
+      {
+       "id": "q",
+       "label": "q",
+       "value": 4,
+       "lo": 1,
+       "hi": 30,
+       "step": 1
+      },
+      {
+       "id": "r",
+       "label": "r",
+       "value": 0.45,
+       "lo": 0.15,
+       "hi": 0.8,
+       "step": 0.01
+      }
+     ],
+     "rot": [
+      18,
+      0,
+      0
+     ],
+     "animate": [
+      "r"
+     ],
+     "tube": 0.11,
+     "axes": null,
+     "align": null,
+     "fit": null,
+     "centre": true,
+     "fixedLength": true,
+     "radius": false,
+     "info": true,
+     "flow": null
+    },
+    {
+     "id": "coil",
+     "name": "Coil",
+     "eq": [
+      "x = (1 + r cos qt) cos pt",
+      "y = (1 + r cos qt) sin pt",
+      "z = r sin qt"
+     ],
+     "note": "Once round the axis, many times round the tube.",
+     "params": [
+      {
+       "id": "p",
+       "label": "p",
+       "value": 1,
+       "lo": 1,
+       "hi": 9,
+       "step": 1
+      },
+      {
+       "id": "q",
+       "label": "q",
+       "value": 22,
+       "lo": 1,
+       "hi": 30,
+       "step": 1
+      },
+      {
+       "id": "r",
+       "label": "r",
+       "value": 0.36,
+       "lo": 0.15,
+       "hi": 0.8,
+       "step": 0.01
+      }
+     ],
+     "rot": [
+      58,
+      0,
+      0
+     ],
+     "animate": [
+      "r"
+     ],
+     "tube": 0.045,
+     "axes": null,
+     "align": null,
+     "fit": null,
+     "centre": true,
+     "fixedLength": true,
+     "radius": false,
+     "info": true,
+     "flow": null
+    },
+    {
+     "id": "lissajous",
+     "name": "Lissajous knot",
+     "eq": [
+      "x = cos(a·t + φ)",
+      "y = cos(b·t + ψ)",
+      "z = cos(c·t)"
+     ],
+     "note": "Three cosines with whole-number frequencies. Shift a phase and crossings swap over, changing the knot.",
+     "params": [
+      {
+       "id": "fa",
+       "label": "a",
+       "value": 3,
+       "lo": 1,
+       "hi": 9,
+       "step": 1
+      },
+      {
+       "id": "fb",
+       "label": "b",
+       "value": 2,
+       "lo": 1,
+       "hi": 9,
+       "step": 1
+      },
+      {
+       "id": "fc",
+       "label": "c",
+       "value": 7,
+       "lo": 1,
+       "hi": 11,
+       "step": 1
+      },
+      {
+       "id": "phi",
+       "label": "φ",
+       "value": 0.7,
+       "lo": 0,
+       "hi": 3.14,
+       "step": 0.01
+      },
+      {
+       "id": "psi",
+       "label": "ψ",
+       "value": 0.2,
+       "lo": 0,
+       "hi": 3.14,
+       "step": 0.01
+      }
+     ],
+     "rot": [
+      20,
+      30,
+      0
+     ],
+     "animate": [
+      "phi",
+      "psi"
+     ],
+     "tube": 0.075,
+     "axes": null,
+     "align": null,
+     "fit": null,
+     "centre": true,
+     "fixedLength": true,
+     "radius": false,
+     "info": false,
+     "flow": null
+    },
+    {
+     "id": "borromean",
+     "name": "Borromean rings",
+     "eq": [
+      "three ellipses, one in each coordinate plane:",
+      "(a cos t, b sin t, 0) and its cyclic shifts"
+     ],
+     "note": "No two rings are linked, yet the three cannot be pulled apart. Remove any one and the others fall free.",
+     "params": [
+      {
+       "id": "squash",
+       "label": "b / a",
+       "value": 0.55,
+       "lo": 0.35,
+       "hi": 0.8,
+       "step": 0.01
+      }
+     ],
+     "rot": [
+      35,
+      45,
+      0
+     ],
+     "animate": [
+      "squash"
+     ],
+     "tube": 0.1,
+     "axes": null,
+     "align": null,
+     "fit": null,
+     "centre": true,
+     "fixedLength": true,
+     "radius": false,
+     "info": false,
+     "flow": null
+    },
+    {
+     "id": "chain",
+     "name": "Chain",
+     "eq": [
+      "n rings round a circle,",
+      "each turned a quarter-turn from the last"
+     ],
+     "note": "",
+     "params": [
+      {
+       "id": "links",
+       "label": "links",
+       "value": 10,
+       "lo": 4,
+       "hi": 24,
+       "step": 2
+      },
+      {
+       "id": "size",
+       "label": "size",
+       "value": 0.68,
+       "lo": 0.56,
+       "hi": 0.9,
+       "step": 0.01
+      }
+     ],
+     "rot": [
+      55,
+      0,
+      0
+     ],
+     "animate": [
+      "size"
+     ],
+     "tube": 0.055,
+     "axes": null,
+     "align": null,
+     "fit": null,
+     "centre": true,
+     "fixedLength": true,
+     "radius": false,
+     "info": false,
+     "flow": null
+    },
+    {
+     "id": "hopf",
+     "name": "Hopf fibration",
+     "eq": [
+      "z₁ = cos(θ/2)·e^(iψ)",
+      "z₂ = sin(θ/2)·e^(i(ψ+φ))",
+      "then project the 3-sphere to space"
+     ],
+     "note": "Circles in four dimensions, seen in three. Every circle is linked exactly once with every other.",
+     "params": [
+      {
+       "id": "fibres",
+       "label": "fibres",
+       "value": 12,
+       "lo": 2,
+       "hi": 30,
+       "step": 1
+      },
+      {
+       "id": "theta",
+       "label": "θ",
+       "value": 1.57,
+       "lo": 0.5,
+       "hi": 2.5,
+       "step": 0.01
+      },
+      {
+       "id": "nest",
+       "label": "shells",
+       "value": 1,
+       "lo": 1,
+       "hi": 3,
+       "step": 1
+      }
+     ],
+     "rot": [
+      20,
+      25,
+      0
+     ],
+     "animate": [
+      "theta"
+     ],
+     "tube": 0.04,
+     "axes": null,
+     "align": null,
+     "fit": null,
+     "centre": true,
+     "fixedLength": true,
+     "radius": false,
+     "info": false,
+     "flow": null
+    },
+    {
+     "id": "seam",
+     "name": "Spherical wave",
+     "eq": [
+      "latitude = A sin(m·φ)",
+      "on a sphere, φ once round"
+     ],
+     "note": "With m = 2 this is the seam of a tennis ball.",
+     "params": [
+      {
+       "id": "m",
+       "label": "m",
+       "value": 4,
+       "lo": 1,
+       "hi": 12,
+       "step": 1
+      },
+      {
+       "id": "amp",
+       "label": "A",
+       "value": 0.62,
+       "lo": 0.1,
+       "hi": 1.35,
+       "step": 0.01
+      }
+     ],
+     "rot": [
+      24,
+      20,
+      0
+     ],
+     "animate": [
+      "amp"
+     ],
+     "tube": 0.1,
+     "axes": null,
+     "align": null,
+     "fit": null,
+     "centre": true,
+     "fixedLength": true,
+     "radius": false,
+     "info": false,
+     "flow": null
+    },
+    {
+     "id": "spiral",
+     "name": "Spherical spiral",
+     "eq": [
+      "y from −1 to 1",
+      "φ = n·π·y on a sphere"
+     ],
+     "note": "",
+     "params": [
+      {
+       "id": "turns",
+       "label": "n",
+       "value": 7,
+       "lo": 2,
+       "hi": 18,
+       "step": 0.5
+      }
+     ],
+     "rot": [
+      20,
+      0,
+      0
+     ],
+     "animate": [
+      "turns"
+     ],
+     "tube": 0.075,
+     "axes": null,
+     "align": null,
+     "fit": null,
+     "centre": true,
+     "fixedLength": true,
+     "radius": true,
+     "info": false,
+     "flow": null
+    },
+    {
+     "id": "fourier",
+     "name": "Fourier loop",
+     "eq": [
+      "x(t) = Σ aₖ cos kt + bₖ sin kt",
+      "with random aₖ, bₖ shrinking as k grows"
+     ],
+     "note": "A random smooth loop. Every seed is a different sculpture.",
+     "params": [
+      {
+       "id": "seed",
+       "label": "seed",
+       "value": 3,
+       "lo": 1,
+       "hi": 300,
+       "step": 1
+      },
+      {
+       "id": "waves",
+       "label": "harmonics",
+       "value": 3,
+       "lo": 2,
+       "hi": 8,
+       "step": 1
+      },
+      {
+       "id": "decay",
+       "label": "decay",
+       "value": 1.5,
+       "lo": 0.6,
+       "hi": 2.5,
+       "step": 0.01
+      }
+     ],
+     "rot": null,
+     "animate": [
+      "decay"
+     ],
+     "tube": 0.085,
+     "axes": null,
+     "align": true,
+     "fit": null,
+     "centre": true,
+     "fixedLength": true,
+     "radius": false,
+     "info": false,
+     "flow": null
+    }
+   ]
+  }
+ ]
+}
