@@ -645,7 +645,7 @@ fn sheetOf(i: i32) -> Sheet {
   sh.a = sphereDir(r1.xy);
   // in ice (rough faces) the sheets stand upright, across the frozen surface, as lake ice cracks
   let upr = smoothstep(0.3, 0.6, iu.crackC.y);
-  if (upr > 0.0) { sh.a = normalize(sh.a - vec3f(0.0, sh.a.y * 0.92 * upr, 0.0)); }
+  if (upr > 0.0) { sh.a = normalize(sh.a - vec3f(0.0, sh.a.y * 0.98 * upr, 0.0)); }
   sh.e1 = across1(sh.a);
   sh.e2 = across2(sh.a);
   sh.r = rs * select(0.16 + 0.32 * r2.z, 0.55 + 0.55 * r2.z, big);
@@ -858,7 +858,12 @@ fn fractures(pos: vec3f, dir: vec3f, s: f32, n: f32) -> Crack {
       // (a thin layer of scatterers: faint seen face on, dense seen edge on)
       let k = iu.crackC.y * prof * (0.35 + 0.65 * streaky);
       if (slab > 0.0) {
-        V = vec3f(0.92 * (1.0 - exp(-0.18 * k * slab / half)));
+        // (how many times the slab's own thickness the ray spends in it: 1 face on. The haze grows with
+        // its cube, so a sheet seen face on or aslant is all but clear, as lake ice is from the side, and
+        // only where it is seen nearly along its length does it draw a white line; from above, looking
+        // down the upright sheets, they are all seen along their length and stand white)
+        let x = slab / (2.0 * half);
+        V = vec3f(0.92 * (1.0 - exp(-0.004 * k * x * x * x)));
       } else {
         V = vec3f(0.9 * (1.0 - exp(-0.05 * k / max(ci, 0.02))));
       }
@@ -1011,6 +1016,19 @@ fn nearest(x: vec3f, seed: u32) -> Near {
 // looked at in a few places along its first stretch, front to back: each place sends back its share of
 // the lights in its band and passes the rest on, so deeper colour shows dimmer through the body above it,
 // and the body behind colour shows less of the colour taken.
+// The light a grain of opal sends back, from what arrives along its mirror direction. Under the lights
+// the colour is the band's times the light's own. Under an environment picture only the light's
+// brightness counts: a garden is mostly green, but a photograph of an opal outdoors shows
+// its reds as vivid as indoors (the eye and the camera take the scene's colour cast for white), so the
+// green round about must not leave only the green domains alight. Looks first.
+fn opalLit(c: vec3f) -> vec3f {
+//#if PICTURE
+  return vec3f(dot(c, vec3f(0.2126, 0.7152, 0.0722)));
+//#else
+  return c;
+//#endif
+}
+
 fn grains(pos: vec3f, dir: vec3f, s: f32) -> Play {
   var out: Play;
   out.light = vec3f(0.0);
@@ -1028,6 +1046,22 @@ fn grains(pos: vec3f, dir: vec3f, s: f32) -> Play {
   // the light inside the body: what it gathers from all round
   var inside = vec3f(0.0);
   if (iu.playF.z > 0.0) { inside = envL(-dir, 1.6); }
+  // How bright the light all round is, at the least, for the domains' own glow. Under the lights the
+  // way each domain faces is enough: the room is lit from many sides. Under an environment picture
+  // most ways see the ground and the walls round about, while the light comes from the sky; an opal
+  // photographed outdoors still glows from every domain, so a domain facing the lawn is lit as if by the
+  // surroundings as a whole (six ways, at the softest level). Looks first.
+  var around = 0.0;
+  var picBoost = 1.0;
+//#if PICTURE
+  {
+    picBoost = 2.5;
+    let wl = vec3f(0.2126, 0.7152, 0.0722);
+    around = (dot(envL(vec3f(1.0, 0.0, 0.0), 1.6), wl) + dot(envL(vec3f(-1.0, 0.0, 0.0), 1.6), wl)
+            + dot(envL(vec3f(0.0, 1.0, 0.0), 1.6), wl) + dot(envL(vec3f(0.0, -1.0, 0.0), 1.6), wl)
+            + dot(envL(vec3f(0.0, 0.0, 1.0), 1.6), wl) + dot(envL(vec3f(0.0, 0.0, -1.0), 1.6), wl)) / 6.0;
+  }
+//#endif
   for (var k = 0; k < PLAY_N; k++) {
     let t = (f32(k) + 0.5) * iu.playB.x;
     if (t > s) { break; }
@@ -1092,7 +1126,7 @@ fn grains(pos: vec3f, dir: vec3f, s: f32) -> Play {
       let lam = iu.playC.x * abs(dot(dir, gw)) * spacing;
       if (lam < 425.0 || lam > 715.0) { continue; }
       let rho = clamp(specW(lam) * iu.white.rgb * (iu.white.w * iu.playB.w), vec3f(0.0), vec3f(1.0)) * share;
-      let got = rho * envL(reflect(dir, gw), iu.playC.y);
+      let got = rho * opalLit(envL(reflect(dir, gw), iu.playC.y));
       let y = dot(got, vec3f(0.2126, 0.7152, 0.0722));
       if (y > bestY) {
         bestY = y;
@@ -1121,7 +1155,7 @@ fn grains(pos: vec3f, dir: vec3f, s: f32) -> Play {
       // (lit by how bright the light round about is, not by its colour: a green garden does not leave only
       // the green domains alight)
       let wl = vec3f(0.2126, 0.7152, 0.0722);
-      glow = rhoD * each * (iu.playF.w * dot(envL(reflect(dir, fromObj(pd)), 0.8), wl) + iu.playF.z * dot(inside, wl));
+      glow = rhoD * each * (iu.playF.w * max(dot(envL(reflect(dir, fromObj(pd)), 0.8), wl), around) * picBoost + iu.playF.z * dot(inside, wl));
     }
     out.light += out.keep * (best + glow) * vis;
     out.keep *= 1.0 - max(bestRho, rhoD) * vis;

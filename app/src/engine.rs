@@ -263,13 +263,15 @@ impl Engine {
         let r = self.state.rig();
         let mut lights = r.lights.clone();
         if crisp { for l in lights.iter_mut() { l.soft *= 0.25; } }
+        // (a studio's lights are the rig's while it is up, so they are made crisp above; its backdrop's
+        // edges are made crisp where it is painted below)
         let mut px = if rig { env::paint_gain(&lights, r.ambient, p.light_gain, w, h) } else { env::paint(&[], [0.0; 3], w, h) };
         if let Some(pic) = &self.picture {
             env::add_glows(&mut px, &pic.glows, p.hdri_gain, hdri::blur_sigma(p.hdri_blur), w, h);
         }
         if !self.painted.as_ref().is_some_and(|k| k.stage.is_empty()) {
             let extra = self.picture.as_ref().map_or([0.0; 3], |pic| crate::stage::picture_on_floor(&pic.sh, p.hdri_gain, &self.state));
-            self.stage.paint(&self.state, &mut px, w, h, extra);
+            self.stage.paint_for(&self.state, &mut px, w, h, extra, crisp);
         }
         px
     }

@@ -452,7 +452,7 @@ fn throughB(m: i32, pos: vec3f, dir: vec3f, s: f32, thr: ptr<function, vec3f>, s
   if (mb.kind[m] > 1.5 && mb.kind[m] < 2.5) {
     cb = m;
     add += *thr * glowAlong(pos, dir, s);
-    *thr *= exp(-(mb.b[m].sss.x + mb.b[m].sssA.rgb) * max(s, 0.0));
+    *thr *= exp(-(mb.b[m].sss.x + mb.b[m].sssA.rgb) * max(s, 0.0)) * throughHue(s);
     *sg2 += HAZE * mb.b[m].sss.x * max(s, 0.0);
   }
 //#endif

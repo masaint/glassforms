@@ -72,6 +72,9 @@ pub struct Backdrop {
     pub glow: [f64; 3],
     pub glow_dir: [f64; 3],
     pub glow_size: f64,
+    /// how many degrees its edges take to fade out, round the sides and overhead (`WRAP_SOFT`; less in
+    /// the copy of the lights a mirror reads, see `Stage::crisp`)
+    pub edge: f64,
 }
 
 impl Backdrop {
@@ -92,6 +95,7 @@ impl Backdrop {
             // (laid out as a light's direction is: 0 = straight behind the shape, 90 = to the right)
             glow_dir: [az.sin() * el.cos(), el.sin(), -az.cos() * el.cos()],
             glow_size: p.back_glow_size.clamp(1.0, 180.0),
+            edge: WRAP_SOFT,
         })
     }
 
@@ -102,17 +106,17 @@ impl Backdrop {
     }
 
     /// Where the backdrop ends: it is whole while the cosine of the angle from straight behind the shape
-    /// is above the first of these, and gone below the second (`WRAP_SOFT` degrees further round).
+    /// is above the first of these, and gone below the second (`edge` degrees further round).
     pub fn wrap_cos(&self) -> (f64, f64) {
         if self.wrap >= 180.0 { return (-2.0, -3.0); }
-        ((self.wrap * DEG).cos(), ((self.wrap + WRAP_SOFT).min(180.0) * DEG).cos().min((self.wrap * DEG).cos() - 1e-6))
+        ((self.wrap * DEG).cos(), ((self.wrap + self.edge).min(180.0) * DEG).cos().min((self.wrap * DEG).cos() - 1e-6))
     }
 
     /// Where the backdrop ends overhead: it is whole while the sine of the angle above the horizon is
-    /// below the first of these, and gone above the second (`WRAP_SOFT` degrees further up).
+    /// below the first of these, and gone above the second (`edge` degrees further up).
     pub fn high_sin(&self) -> (f64, f64) {
         if self.high >= 90.0 { return (2.0, 3.0); }
-        ((self.high * DEG).sin(), ((self.high + WRAP_SOFT).min(90.0) * DEG).sin().max((self.high * DEG).sin() + 1e-6))
+        ((self.high * DEG).sin(), ((self.high + self.edge).min(90.0) * DEG).sin().max((self.high * DEG).sin() + 1e-6))
     }
 
     /// The light arriving from a direction of the room, given as: the sine of how far above the horizon
@@ -227,6 +231,14 @@ impl Stage {
     pub fn of(p: &Settings) -> Stage {
         let backdrop = Backdrop::of(p);
         Stage { show: backdrop.is_some() && p.back_show > 0.5, backdrop, floor: Floor::of(p) }
+    }
+    /// The studio as a polished metal or a coat mirrors it: the backdrop's edges, which fade out over
+    /// `WRAP_SOFT` degrees (soft enough for glass, which sees them bent and spread), fade over a quarter
+    /// of that, as the edge of a real sheet of backdrop paper is sharp in a mirror. The rig's lights are
+    /// made crisp for a mirror the same way.
+    pub fn crisp(mut self) -> Stage {
+        if let Some(b) = &mut self.backdrop { b.edge = 0.25 * WRAP_SOFT; }
+        self
     }
     /// Nothing of the studio is in use: the program draws what it always drew.
     pub fn off(&self) -> bool {

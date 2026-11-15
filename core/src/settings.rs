@@ -244,6 +244,10 @@ settings! {
     /// how much the body scatters forward (the mean cosine of its scattering, 0 = every way alike, up to
     /// 0.95): wax and skin scatter forward
     sss_forward, "sssForward", 0.0;
+    /// how far the light that crosses the body without being scattered away takes on the body's colour,
+    /// deeper the further it goes (0 = not at all; towards 1, as thin wax lit from behind glows amber
+    /// and its edges orange)
+    sss_through, "sssThrough", 0.0;
     /// 1 = with a milky body the picture is exposed for it, as a photographer exposes for the subject: a
     /// white matte surface facing the brightest way comes to white (never darker than set; glass is not
     /// affected, as it shows the lights themselves)

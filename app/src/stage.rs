@@ -363,6 +363,17 @@ impl StageWork {
         self.light = Stage::of(&state.p).paint(px, w, h, &state.lights_to_room(), extra);
     }
 
+    /// The same for the copy of the lights a mirror reads (`crisp`: a metal or a coat will mirror it):
+    /// the backdrop's edges sharp (`Stage::crisp`).
+    pub fn paint_for(&mut self, state: &State, px: &mut [f32], w: usize, h: usize, extra: [f64; 3], crisp: bool) {
+        // (what the floor came to is kept from the studio as painted for everything else)
+        if crisp {
+            Stage::of(&state.p).crisp().paint(px, w, h, &state.lights_to_room(), extra);
+        } else {
+            self.paint(state, px, w, h, extra);
+        }
+    }
+
     /// The same without remembering anything: for a copy of the map made for another purpose.
     pub fn paint_copy(state: &State, px: &mut [f32], w: usize, h: usize) {
         Stage::of(&state.p).paint(px, w, h, &state.lights_to_room(), [0.0; 3]);

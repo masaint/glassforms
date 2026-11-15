@@ -24,7 +24,7 @@ struct MU {
   sssA: vec4f,        // rgb: absorption of the milky body per unit length   w: how far the scattered light takes on
                       // the body's colour at every depth (sssHue)
   sssK: vec4f,        // rgb: scatterings per unit length of each colour (sss.x is green's: they differ when the
-                      // colours scatter differently)
+                      // colours scatter differently)   w: how fast light crossing the body takes on its colour (sssThrough)
   sssC: vec4f,        // rgb: the colour of a thick piece
   glow: vec4f,        // rgb: light given off per unit length   w: how tightly it keeps to the core
   exo: vec4f,         // x: graded index, the change   y: 1 / its depth   z: double refraction (second index minus first)
@@ -646,6 +646,15 @@ fn metalRGB(c: f32, n1: f32, d: f32) -> vec3f {
 // many times, a little each time: what is seen through it is softened, by a spread whose square grows
 // with the number of scatterings on the way (this many square radians for each).
 const HAZE: f32 = 2.0;
+// What is left of the colour of light that crosses a stretch s of the body without being scattered away:
+// it takes on the body's colour, deeper the further it goes, so thin parts and edges lit from behind glow
+// amber in wax. Looks first: the grains a real body's colour comes from also tint what passes them by
+// (docs/materials.md section 14). 1 when the material does not ask for it.
+fn throughHue(s: f32) -> vec3f {
+  if (mu.sssK.w <= 0.0) { return vec3f(1.0); }
+  let c = mu.sssC.rgb / max(max(mu.sssC.r, mu.sssC.g), max(mu.sssC.b, 1e-3));
+  return exp(log(max(c, vec3f(1e-3))) * (mu.sssK.w * sqrt(max(s, 0.0))));
+}
 //#if !WALK
 // The light inside the body: how much there is at each point, from every direction together, by colour.
 // It is worked out beforehand into a small volume (scatter.rs, scatter.wgsl): the lights' own light as
@@ -670,10 +679,15 @@ fn glowAlong(pos: vec3f, dir: vec3f, s_in: f32) -> vec3f {
   let k = min(st.r, min(st.g, st.b));
   let all = 1.0 - exp(-k * s);
   var sum = vec3f(0.0);
+  let deepen = mu.sssK.w > 0.0;
   for (var j = 0; j < GLOW_N; j++) {
     let t = -log(1.0 - (f32(j) + 0.5) / f32(GLOW_N) * all) / k;
     let x = toObj(pos + dir * t) / (2.0 * HB) + 0.5;
-    sum += glowAt(x) * exp(-(st - k) * t);
+    var g = glowAt(x) * exp(-(st - k) * t);
+    // (light crossing the body takes on its colour, deeper the further it goes: the light here has come
+    // at least as far in as the point lies deep, and goes on t more to the eye)
+    if (deepen) { g *= throughHue(t + max(-mapW(pos + dir * t), 0.0)); }
+    sum += g;
   }
   // (a dyed body: the light scattered towards the eye takes on the body's colour already just under the
   // surface, kept as bright as it was; looks first, see docs/materials.md section 14)
@@ -1289,6 +1303,7 @@ fn beyondM(ro_in: vec3f, rd_in: vec3f, ior: f32, sig_in: f32) -> vec3f {
       }
 //#else
       col += thr * glowAlong(q - d2 * s, d2, s);
+      thr *= throughHue(s);
 //#endif
       thr *= ext;
       sig = sqrt(sig * sig + HAZE * mu.sss.x * s);
@@ -1578,7 +1593,7 @@ fn shadeM(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
         // holds along it, scattered towards the eye
         let ext = exp(-(mu.sssK.rgb + mu.sssA.rgb) * max(s, 0.0));
         acc += {{WEIGHT}} * att * glowAlong(q - dir * s, dir, s);
-        att *= ext;
+        att *= ext * throughHue(s);
         haze += HAZE * mu.sss.x * s;
       }
 //#endif
