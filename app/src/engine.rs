@@ -498,8 +498,8 @@ impl Engine {
             }
         }
         // Exposed for a milky body: the lights as a white matte surface gathers them, facing the brightest
-        // way, brought to white (1 before the tone curve: about 230 of 255 after it). Only ever brighter
-        // than set, and at most four times: a rig made for glass is dim for a body that only gathers light.
+        // way, brought to 0.85 before the tone curve (about 225 of 255 after it). Only ever brighter
+        // than set, and at most three times: a rig made for glass is dim for a body that only gathers light.
         self.meter = 1.0;
         // (not where a backdrop or the picture is seen behind the shape: the picture is then exposed for
         // what lies behind, as it is in a studio, and brightening it would wash everything out)
@@ -507,7 +507,10 @@ impl Engine {
         if v.mat.sss && !clay && self.state.p.meter > 0.5 && !seen_behind {
             let matte = env::sh_terms(&self.lighting_sh(), env::SH_MATTE);
             let peak = matte_peak(&matte);
-            if peak > 1e-6 { self.meter = (0.85 / peak).clamp(1.0, 3.0) as f32; }
+            // (the nine terms give the light arriving on the surface; a white matte surface sends back that
+            // over pi towards each way it is seen: measured, a white milky body's brightest point under a
+            // single light comes to peak / pi as a matte one would)
+            if peak > 1e-6 { self.meter = (0.85 * std::f64::consts::PI / peak).clamp(1.0, 3.0) as f32; }
         }
         if self.last_lu != Some(lu) {
             self.renderer.set_light(&lu);

@@ -701,19 +701,48 @@ fn fractures(pos: vec3f, dir: vec3f, s: f32, n: f32) -> Crack {
   // every crossing along the stretch, then taken nearest first
   var ts: array<f32, 64>;
   var ids: array<i32, 64>;
+  var lens: array<f32, 64>;
   var m = 0;
   let t0 = 2e-3 * rs;
+  // In ice a sheet is not a bare crack but a zone a little thick, full of fine cracks and bubbles: a
+  // slab of scatterers. A ray is in it for the slab's thickness seen face on, and far longer seen edge
+  // on, so the sheets show as broad white bands where they are seen along their length.
+  let ice = smoothstep(0.3, 0.6, iu.crackC.y);
+  let half = 0.016 * rs;
   for (var i = 0; i < count; i++) {
     let sh = sheetOf(i);
     let w0 = o - sh.c;
     let wc = w0 - d * dot(w0, d);
     if (dot(wc, wc) > sh.r * sh.r * 1.3) { continue; }
+    if (ice > 0.0 && !sh.fan) {
+      // where the ray is within the slab (taken flat at this scale)
+      let h0 = dot(w0, sh.a);
+      let v = dot(d, sh.a);
+      var ta = t0;
+      var tb = s;
+      if (abs(v) > 1e-6) {
+        let p = (-half - h0) / v;
+        let q = (half - h0) / v;
+        ta = max(min(p, q), t0);
+        tb = min(max(p, q), s);
+      } else if (abs(h0) >= half) {
+        tb = ta;
+      }
+      if (tb > ta && m < 64) {
+        ts[m] = 0.5 * (ta + tb);
+        ids[m] = i;
+        lens[m] = tb - ta;
+        m++;
+      }
+      continue;
+    }
     let rt = sheetRoots(sh, o, d);
     for (var e = 0; e < 2; e++) {
       let tt = rt[e];
       if (tt > t0 && tt <= s && m < 64) {
         ts[m] = tt;
         ids[m] = i;
+        lens[m] = 0.0;
         m++;
       }
     }
@@ -732,6 +761,7 @@ fn fractures(pos: vec3f, dir: vec3f, s: f32, n: f32) -> Crack {
     }
     if (best < 0) { break; }
     ts[best] = 1e10;
+    let slab = lens[best];
     let sh = sheetOf(ids[best]);
     let tt = bt;
     let wl = o + d * tt - sh.c;
@@ -792,7 +822,7 @@ fn fractures(pos: vec3f, dir: vec3f, s: f32, n: f32) -> Crack {
     let wv = vec2f(vnoise2(xf * 3.5, sd + 21u), vnoise2(xf * 3.5, sd + 22u)) - 0.5;
     let tq = xf * 4.0 + 2.0 * vec2f(jag - 0.5, crease - 0.6);
     let tr = ten3(ihash(u32(i32(floor(tq.x))) + ihash(u32(i32(floor(tq.y))) + sd))).xy - 0.5;
-    let tilt = 0.08 * wv + select(0.12, 0.03, sh.kind == 2) * tr;
+    let tilt = 0.08 * wv + select(0.12, 0.07, sh.kind == 2) * tr;
     let pw = wl - sh.a * dot(wl, sh.a);
     let nl = normalize(sh.a - sh.k1 * dot(pw, sh.e1) * sh.e1 - sh.k2 * dot(pw, sh.e2) * sh.e2 + tilt.x * sh.e1 + tilt.y * sh.e2);
     let ci = abs(dot(d, nl));
@@ -825,7 +855,11 @@ fn fractures(pos: vec3f, dir: vec3f, s: f32, n: f32) -> Crack {
       let streaky = smoothstep(0.3, 0.7, fbm2(vec2f(xf.x * 1.2, xf.y * 5.0) + 1.5 * jag, sd + 29u));
       // (a thin layer of scatterers: faint seen face on, dense seen edge on)
       let k = iu.crackC.y * prof * (0.35 + 0.65 * streaky);
-      V = vec3f(0.85 * (1.0 - exp(-0.12 * k / max(ci, 0.03))));
+      if (slab > 0.0) {
+        V = vec3f(0.92 * (1.0 - exp(-0.18 * k * slab / half)));
+      } else {
+        V = vec3f(0.9 * (1.0 - exp(-0.05 * k / max(ci, 0.02))));
+      }
     }
     if (sh.kind == 1) {
       let xs = xf * (sh.r / (0.1 * rs));
@@ -840,7 +874,14 @@ fn fractures(pos: vec3f, dir: vec3f, s: f32, n: f32) -> Crack {
     }
     R *= 1.0 - V;
     // (ice's rough faces scatter what a clean break would mirror)
-    R *= 1.0 - 0.85 * smoothstep(0.3, 0.6, iu.crackC.y);
+    R *= 1.0 - 0.85 * ice;
+    // a thin crack past the critical angle is a mirror only where its faces stand apart; it touches in
+    // patches and seams, so its flash breaks up instead of lying as one flat sheet of the mirrored light
+    let thinGap = 1.0 - smoothstep(1200.0, 3000.0, wide);
+    if (thinGap > 0.0) {
+      let pat = smoothstep(0.38, 0.62, fbm2(xf * 4.5 + 2.7, sd + 33u)) * (0.6 + 0.4 * smoothstep(0.3, 0.7, vnoise2(xf * 13.0, sd + 35u)));
+      R *= mix(1.0, 0.15 + 0.85 * pat, thinGap * (1.0 - smoothstep(0.0, 0.08, ci - sqrt(max(1.0 - 1.0 / (n * n), 0.0)))));
+    }
     let back = fromObj(reflect(d, nl));
     let ext = exp(-u.absorb.xyz * tt);
     // (a veil of countless scatterers is lit from the whole room; looks first: it reads white even where
@@ -1025,7 +1066,7 @@ fn grains(pos: vec3f, dir: vec3f, s: f32) -> Play {
     // (and inside each flake the layers waver, so it lights in part, unevenly)
     let fine = vnoise3(fq * 2.7, seed + 5u);
     let gt = (gh.xy - 0.5) * 2.0 * spread + 0.3 * (fine - 0.5);
-    let flake = select(0.2, 1.0, gh.z < 0.82) * (0.55 + 0.45 * smoothstep(0.0, 0.06, sqrt(gr.d2) - sqrt(gr.d1))) * (0.5 + 0.5 * fine);
+    let flake = select(0.45, 1.0, gh.z < 0.82) * (0.55 + 0.45 * smoothstep(0.0, 0.06, sqrt(gr.d2) - sqrt(gr.d1))) * (0.5 + 0.5 * fine);
     let streak = mix(1.0, smoothstep(0.4, 0.6, sn) * (0.55 + 0.45 * smoothstep(0.3, 0.7, fl)), iu.playF.y) * flake;
     let tilt = 0.2 * bend + gt + iu.playF.y * 0.3 * vec2f(sn - 0.5, fl - 0.5);
     let gd = normalize(pd + tilt.x * e1 + tilt.y * e2);

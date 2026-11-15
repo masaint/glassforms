@@ -31,6 +31,9 @@ struct From {
     /// and the light arriving by way of them have been made
     cast: Vec<u32>,
     cast_made: (u64, u64),
+    /// the box the volumes span, and the lamps (their numbers' bits): see `glow_lamps`
+    hb: u64,
+    lamps: Vec<u64>,
 }
 
 #[derive(Default)]
@@ -78,6 +81,21 @@ impl Engine {
         of
     }
 
+    /// The lamps as the light volume takes them: where each stands in the lights' own frame, its radius,
+    /// and the light it sends (radiance times the area of its disc).
+    fn glow_lamps(&self) -> Vec<[f64; 7]> {
+        self.state
+            .lamps
+            .iter()
+            .map(|l| {
+                let r = l.reach_radius();
+                let a = std::f64::consts::PI * r * r;
+                let rad = l.radiance();
+                [l.pos[0], l.pos[1], l.pos[2], r, rad[0] * a, rad[1] * a, rad[2] * a]
+            })
+            .collect()
+    }
+
     /// What one light volume is to be worked out from. `p`: the body's material; `chan`: the channel of
     /// `vol` that is its distance; `cast`: what the bodies cast on it.
     #[allow(clippy::too_many_arguments)]
@@ -92,6 +110,8 @@ impl Engine {
             lighting: of,
             cast: cast.map_or(Vec::new(), |c| bytemuck::cast_slice::<Shading, u32>(std::slice::from_ref(c)).to_vec()),
             cast_made: if cast.is_some() { self.cast.made() } else { (0, 0) },
+            hb: self.state.scene_hb().to_bits(),
+            lamps: self.glow_lamps().iter().flatten().map(|x| x.to_bits()).collect(),
         };
         (from, medium, res)
     }
@@ -123,6 +143,8 @@ impl Engine {
         let timed = std::env::var_os("GLASSFORMS_GLOW_TIME").is_some();
         if timed { self.gpu.wait(); }
         let t0 = std::time::Instant::now();
+        self.scatter.hb = self.state.scene_hb();
+        self.scatter.lamps = self.glow_lamps();
         self.scatter.solve(&vol, self.shape_no, &self.glow.lighting, &medium, &turn, res, 0, casting.as_ref());
         self.renderer.set_glow(Some(self.scatter.view()));
         if timed {
@@ -156,7 +178,10 @@ impl Engine {
             while self.glow.bodies.len() <= k { self.glow.bodies.push((Scatter::new(&self.gpu), None)); }
             if self.glow.bodies[k].1.as_ref() == Some(&from) { continue; }
             let t0 = std::time::Instant::now();
+            let (hb, lamps) = (self.state.scene_hb(), self.glow_lamps());
             let (sc, kept) = &mut self.glow.bodies[k];
+            sc.hb = hb;
+            sc.lamps = lamps;
             sc.solve(&vol, self.shape_no, &self.glow.lighting, &medium, &turn, res, k, casting.as_ref());
             *kept = Some(from);
             self.renderer.set_glow_body(k, Some(self.glow.bodies[k].0.view()));

@@ -255,7 +255,7 @@ pub fn pattern(p: &Settings) -> Pattern {
 
 /// How brightly an opal's domains show the broad light round about (looks first: in photographs the play
 /// of colour is the brightest thing on the stone under any ordinary light).
-pub const OPAL_BROAD: f64 = 5.0;
+pub const OPAL_BROAD: f64 = 7.0;
 
 /// How much of its band a grain of opal sends back at the middle of the band.
 pub const GRAIN_R: f64 = 0.9;

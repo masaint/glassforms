@@ -222,6 +222,8 @@ struct Wear {
   aniso: f32,     // how far the lines tilt the surface across themselves, all the lines in a pixel together (radians)
   tint: vec3f,    // what the reflection's colour is multiplied by (uneven colour; dirt or tarnish in recesses)
   dust: f32,      // the share of the surface under matte dust
+  scr: f32,       // how much of the pixel lies on a scratch
+  sx: vec3f,      // across that scratch (in the surface)
 }
 // The marks, each already times how used the surface is (material.rs: marks, MU_MARKS).
 fn mEdge() -> f32 { return mu.tab[7].w; }
@@ -232,6 +234,17 @@ fn mPeel() -> f32 { return mu.tab[11].w; }
 fn mSmudge() -> f32 { return mu.tab[12].w; }
 fn mDust() -> f32 { return mu.tab[13].w; }
 
+// Which way a cell's scratch runs: mostly along one of two directions of use (rubbing to and fro, and
+// across that), a little off them; in the surface.
+fn scratchDir(c: vec3i, nq: vec3f) -> vec3f {
+  let two = select(vec3f(1.0, 0.15, 0.3), vec3f(-0.25, 0.3, 1.0), wHash(c + vec3i(12, 7, 3)) > 0.2);
+  var d = normalize(two) + 0.25 * vec3f(wHash(c + vec3i(5, 5, 1)), wHash(c + vec3i(2, 8, 6)), wHash(c + vec3i(9, 2, 7)));
+  d = d - nq * dot(d, nq);
+  let ld = length(d);
+  if (ld < 1e-3) { return vec3f(0.0); }
+  return d / ld;
+}
+
 // One cell's scratch, met at q (shape's frame) on a surface facing nq: a straight segment of random
 // length and direction through a random point of the cell, lying in the surface. Returns how strongly
 // the point lies on it (1 on its middle line, falling off over its width, thinned to its share of the
@@ -239,17 +252,17 @@ fn mDust() -> f32 { return mu.tab[13].w; }
 fn scratchIn(c: vec3i, q: vec3f, nq: vec3f, size: f32, px: f32, keepIt: f32) -> vec2f {
   if (0.5 + 0.5 * wHash(c + vec3i(17, 3, 5)) > keepIt) { return vec2f(0.0); }
   let o = (vec3f(c) + 0.5 + 0.45 * vec3f(wHash(c), wHash(c + vec3i(7, 1, 2)), wHash(c + vec3i(3, 9, 4)))) * size;
-  var d = vec3f(wHash(c + vec3i(5, 5, 1)), wHash(c + vec3i(2, 8, 6)), wHash(c + vec3i(9, 2, 7)));
-  d = d - nq * dot(d, nq);
-  let ld = length(d);
-  if (ld < 1e-3) { return vec2f(0.0); }
-  d /= ld;
-  let half = size * (0.35 + 0.6 * (0.5 + 0.5 * wHash(c + vec3i(4, 4, 4))));
+  var d = scratchDir(c, nq);
+  if (dot(d, d) < 0.5) { return vec2f(0.0); }
+  // (short: most a fraction of the cell, a few longer)
+  let u4 = 0.5 + 0.5 * wHash(c + vec3i(4, 4, 4));
+  let half = size * (0.06 + 0.34 * u4 * u4 * u4);
   let r = q - o;
   let along = dot(r, d);
   if (abs(along) > half) { return vec2f(0.0); }
   let across = cross(nq, d);
-  let off = dot(r, across);
+  // (gently curved: the line bows a little across itself along its length)
+  let off = dot(r, across) - 0.15 * wHash(c + vec3i(8, 3, 2)) * (along * along / max(half, 1e-4));
   let width = 0.0006 + 0.0006 * (0.5 + 0.5 * wHash(c + vec3i(6, 1, 9)));
   let w = max(width, px);
   // (tapered at the ends, as a scratch is)
@@ -272,6 +285,8 @@ fn wearAt(p: vec3f, n: vec3f) -> Wear {
   w.aniso = 0.0;
   w.tint = vec3f(1.0);
   w.dust = 0.0;
+  w.scr = 0.0;
+  w.sx = vec3f(0.0);
   let q = toObj(p);
   let nq = toObj(n);
   // the width of a pixel at p (as mirrorLod reckons it)
@@ -317,7 +332,7 @@ fn wearAt(p: vec3f, n: vec3f) -> Wear {
   // the pixel is a faint widening of the reflection
   if (scrA > 0.0) {
     let keepIt = scrA * (0.25 + 0.75 * exposed) * (1.0 - 0.8 * worn);
-    var tilt = 0.0;
+    var on = 0.0;
     var across = vec3f(0.0);
     for (var s = 0; s < 2; s++) {
       let size = select(0.06, 0.16, s == 1);
@@ -325,16 +340,17 @@ fn wearAt(p: vec3f, n: vec3f) -> Wear {
       for (var j = 0; j < 27; j++) {
         let c = base + vec3i(j % 3 - 1, (j / 3) % 3 - 1, j / 9 - 1) + vec3i(s * 1000);
         let hit = scratchIn(c - vec3i(s * 1000), q, nq, size, px, keepIt);
-        if (hit.x > tilt) {
-          tilt = hit.x;
-          var d = vec3f(wHash(c - vec3i(s * 1000) + vec3i(5, 5, 1)), wHash(c - vec3i(s * 1000) + vec3i(2, 8, 6)), wHash(c - vec3i(s * 1000) + vec3i(9, 2, 7)));
-          d = d - nq * dot(d, nq);
-          across = cross(nq, normalize(d + vec3f(1e-6))) * hit.y;
+        if (hit.x > on) {
+          on = hit.x;
+          across = cross(nq, scratchDir(c - vec3i(s * 1000), nq));
         }
       }
     }
-    w.n = normalize(w.n + fromObj(across) * (0.12 * tilt));
-    w.sig += scrA * keepIt * 0.012;
+    // A scratch's walls face every way across it: it mirrors a fan of directions across itself, so it
+    // shows as a faint bright line wherever that fan takes in a light, and as nothing on an even surface.
+    w.scr = 0.5 * scrA * on;
+    w.sx = fromObj(across);
+    w.sig += scrA * keepIt * 0.006;
   }
   // ---- 4. polishing swirls: rings round a few pad centres, seen as arcs round a sharp highlight
   if (swA > 0.0) {
@@ -441,6 +457,17 @@ fn wearSee(rd_in: vec3f, w: Wear, p: vec3f, c: f32) -> vec3f {
   return (1.0 - w.dust) * wearMirror(rd_in, w, p, c) + dusted;
 }
 fn wearMirror(rd_in: vec3f, w: Wear, p: vec3f, c: f32) -> vec3f {
+  let base = wearLines(rd_in, w, p, c);
+  if (w.scr <= 0.0) { return base; }
+  // the scratch's fan: four looks across it, the brightest of what they see brightens the line
+  var fan = vec3f(0.0);
+  for (var k = 0; k < 4; k++) {
+    let e = (f32(k) - 1.5) * 0.25;
+    fan = max(fan, wearRead(reflect(rd_in, normalize(w.n + w.sx * e)), 2.0, 0.08));
+  }
+  return base + w.scr * max(fan - base, vec3f(0.0));
+}
+fn wearLines(rd_in: vec3f, w: Wear, p: vec3f, c: f32) -> vec3f {
   let lod = mirrorLod(p, w.n, c);
   let mir = reflect(rd_in, w.n);
   if (w.aniso <= 0.0) { return wearRead(mir, lod, w.sig); }

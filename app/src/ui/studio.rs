@@ -12,7 +12,13 @@
 use eframe::egui::{self, Align2, Id, Pos2, Rect, Shape, Ui};
 use gf_core::anim::js_round;
 use gf_core::cast::{optics_of, switch_names};
-use gf_core::stage::{NAMES, STUDIOS};
+use gf_core::stage::{Studio, NAMES, STUDIOS, STUDIOS_MORE};
+
+/// Every studio, in the order the room lists them: those for glass, then those for metals and milky bodies
+/// (their places are `apply_studio`'s numbers).
+fn every() -> Vec<&'static Studio> {
+    STUDIOS.iter().chain(STUDIOS_MORE.iter()).collect()
+}
 use gf_core::state::State;
 
 use super::theme::*;
@@ -140,7 +146,7 @@ pub fn switches(ui: &mut Ui, st: &mut State, px: &mut Panels, layer: usize) {
 /// Is the studio at this place in the list what is set up now: its lights the lights, its settings the
 /// settings (where the camera stands aside)?
 fn studio_is(st: &State, i: usize) -> bool {
-    let s = &STUDIOS[i];
+    let s = every()[i];
     if st.rig().lights != s.lights() || st.rig().ambient != s.ambient { return false; }
     let mut q = st.p.clone();
     s.apply(&mut q);
@@ -189,7 +195,7 @@ fn colour(ui: &mut Ui, st: &mut State, px: &mut Panels, label: &str, names: [&st
 }
 
 pub fn studio_name(st: &State) -> Option<String> {
-    (0..STUDIOS.len()).find(|&i| studio_is(st, i)).map(|i| STUDIOS[i].name.to_owned())
+    (0..every().len()).find(|&i| studio_is(st, i)).map(|i| every()[i].name.to_owned())
 }
 
 /// What is all round the shape, lighting it and perhaps seen behind it: nothing (black), a studio
@@ -211,7 +217,7 @@ pub fn surroundings(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     let now = around(st);
     let says = match now {
         Around::Nothing => "black".to_owned(),
-        Around::Studio => (0..STUDIOS.len()).find(|&i| studio_is(st, i)).map_or("studio backdrop".to_owned(), |i| STUDIOS[i].name.to_owned()),
+        Around::Studio => (0..every().len()).find(|&i| studio_is(st, i)).map_or("studio backdrop".to_owned(), |i| every()[i].name.to_owned()),
         Around::Picture => px.lighting.picture.as_ref().map_or("picture".to_owned(), |p| p.0.clone()),
     };
     if !px.window_group(ui, "room-surround", "surroundings", &says) { return; }
@@ -243,10 +249,11 @@ pub fn surroundings(ui: &mut Ui, st: &mut State, px: &mut Panels) {
         }
         Around::Studio => {
             // the studios, each with its own lights, backdrop, floor and tone
-            let lit = (0..STUDIOS.len()).find(|&i| studio_is(st, i));
-            let items: Vec<Item> = STUDIOS.iter().enumerate().map(|(i, s)| Item::new(s.name, lit == Some(i)).tip(s.about)).collect();
+            let all = every();
+            let lit = (0..all.len()).find(|&i| studio_is(st, i));
+            let items: Vec<Item> = all.iter().enumerate().map(|(i, s)| Item::new(s.name, lit == Some(i)).tip(s.about)).collect();
             let run = filled_run(ui, Id::unique("studios"), &items, egui::vec2(6.0, 2.0), &mono(SIZE));
-            for (s, place) in STUDIOS.iter().zip(&run.places) { px.note(format!("room/studio:{}", s.id), *place); }
+            for (s, place) in all.iter().zip(&run.places) { px.note(format!("room/studio:{}", s.id), *place); }
             if let Some(i) = run.clicked {
                 st.apply_studio(i);
                 px.light = 0;
@@ -370,7 +377,7 @@ mod tests {
     #[test]
     fn a_studio_set_up_is_known_again_and_none_is_none() {
         let mut st = State::new();
-        assert!(no_studio(&st) && (0..STUDIOS.len()).all(|i| !studio_is(&st, i)));
+        assert!(no_studio(&st) && (0..every().len()).all(|i| !studio_is(&st, i)));
         st.apply_studio(1);
         assert!(!no_studio(&st) && studio_is(&st, 1) && !studio_is(&st, 0));
         st.clear_studio();

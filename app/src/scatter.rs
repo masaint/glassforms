@@ -252,7 +252,7 @@ impl Scatter {
             p_level: pipe("scatter: level", &l_level, "cs_level"),
             l_inject, l_refine, l_step, l_finish, l_sum, l_fold, l_level,
             levels: Vec::new(), res: 0, steps: [8, 12, 24, 24, 24], steps_after: 4,
-            blank: blank(gpu), calibrated: None, calibrate: true,
+            blank: blank(gpu), calibrated: None, calibrate: true, hb: HB, lamps: Vec::new(),
         }
     }
 
