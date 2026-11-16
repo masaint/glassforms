@@ -590,6 +590,46 @@ fn run() -> Result<(), String> {
         }
         return Ok(());
     }
+    if let Some(n) = args.flag("session") {
+        // A live session timed frame by frame, as the window runs it: `n` frames of the view being turned
+        // by hand, `n` of the animation playing, then `n` after everything stops (the picture settling,
+        // then idling once it has). Every frame is waited for, so each time is that frame's own.
+        // Prints the 50th, 80th and 95th percentile and the slowest, for each part and for all.
+        let n = n.as_ref().and_then(|v| v.parse().ok()).unwrap_or(240usize);
+        let mut e = headless(&args)?;
+        e.auto = false;
+        let ((w, h), _) = e.renderer.size();
+        let turn = gf_core::math::axis_angle(0.3, 1.0, 0.2, 0.6 / 120.0);
+        let dt = 1.0 / 90.0;
+        // (the first picture, and whatever the scene builds once, before the clock starts)
+        e.render(4);
+        let mut parts: Vec<(&str, Vec<f64>)> = Vec::new();
+        for part in ["turn", "play", "settle"] {
+            if part == "play" { e.state.set_playing(true); }
+            if part == "settle" { e.state.set_playing(false); }
+            let mut ms = Vec::with_capacity(n);
+            for _ in 0..n {
+                let t0 = std::time::Instant::now();
+                if part == "turn" { e.state.turn(&turn); }
+                e.frame(w, h, dt);
+                e.gpu.wait();
+                ms.push(t0.elapsed().as_secs_f64() * 1e3);
+            }
+            parts.push((part, ms));
+        }
+        let pct = |v: &[f64], q: f64| -> f64 {
+            let mut s = v.to_vec();
+            s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            s[((q * (s.len() - 1) as f64).round() as usize).min(s.len() - 1)]
+        };
+        let all: Vec<f64> = parts.iter().flat_map(|(_, v)| v.iter().copied()).collect();
+        let mut out = format!("{{\"scene\":\"{}\",\"preset\":\"{}\",\"w\":{w},\"h\":{h}", e.state.family().id, e.state.preset().id);
+        for (name, v) in parts.iter().map(|(a, b)| (*a, b.as_slice())).chain(std::iter::once(("all", all.as_slice()))) {
+            out += &format!(",\"{name}\":{{\"p50\":{:.2},\"p80\":{:.2},\"p95\":{:.2},\"max\":{:.2}}}", pct(v, 0.5), pct(v, 0.8), pct(v, 0.95), pct(v, 1.0));
+        }
+        println!("{out}}}");
+        return Ok(());
+    }
     if let Some(n) = args.flag("bench-anim") {
         let n = n.as_ref().and_then(|v| v.parse().ok()).unwrap_or(60u32);
         let mut e = headless(&args)?;
