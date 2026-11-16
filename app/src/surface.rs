@@ -203,7 +203,10 @@ pub fn ceramic(state: &State, lit: bool, body: [f64; 3], through: f64, haze: f64
     let wrap = WRAP_MIN + WRAP_THROUGH * through;
     Lit {
         base: [body[0] as f32, body[1] as f32, body[2] as f32, n as f32],
-        k: [(1.0 - through) as f32, 0.0, 0.0, 0.0],
+        // (the share of the light inside that the tracer keeps is light that went deeper before coming
+        // out: the surface's own diffuse light gives way to it by only half as much, which keeps a white
+        // body white at the exposure clay gets under the same lights)
+        k: [(1.0 - 0.5 * through) as f32, 0.0, 0.0, 0.0],
         clay: [0.0; 4],
         lights,
         cer: [1.0, wrap as f32, GLAZE_F0, (0.03 + haze.clamp(0.0, 0.6)) as f32],

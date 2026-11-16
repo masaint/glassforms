@@ -731,7 +731,7 @@ impl crate::state::State {
                 // two was given first
                 if done && i < STUDIOS.len() {
                     let m = crate::material::Variant::of(&self.p);
-                    let want = if m.metal { Some("metal") } else if m.sss { Some("translucent") } else { None };
+                    let want = if m.metal { Some("metal") } else if m.sss && !m.ceramic { Some("translucent") } else { None };
                     if let Some(j) = want.and_then(studio_index) { self.apply_studio(j); }
                 }
                 done
