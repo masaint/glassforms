@@ -22,6 +22,7 @@ NATIVE = os.path.dirname(HERE)
 OUT = os.path.join(NATIVE, 'out', 'perf')
 FLOOR = 1000.0 / 90.0
 SLOWER = 1.05
+SLOWER_MS = 0.3   # and by more than this: on a 2 ms scene 5% is noise
 GARDEN = 'hdri=' + os.path.join(NATIVE, 'hdri', 'suburban_garden_4k.exr').replace('\\', '/')
 LAMP = ['rig=', 'ambient=0,0,0', 'backdrop=0', 'floor=1', 'elev=25', 'cast=2',
         'lamp1=panel,1.4,1.8,0.6,0.6,0.4,1,1,1,25', 'lamp1.rx=90']
@@ -70,9 +71,9 @@ def main(argv):
         b = base.get(name, {}).get('all', {}).get('p80')
         if b:
             note = f'  ({(p80 / b - 1) * 100:+.1f}% vs baseline)'
-            if p80 > b * SLOWER:
+            if p80 > b * SLOWER and p80 - b > SLOWER_MS:
                 verdict += ' / SLOWER'
-        if p80 > FLOOR or (b and p80 > b * SLOWER):
+        if p80 > FLOOR or (b and p80 > b * SLOWER and p80 - b > SLOWER_MS):
             failed.append(name)
         parts = '  '.join(f'{k} p80 {res[k]["p80"]:.2f}' for k in ('turn', 'play', 'settle'))
         print(f'{name:14s} all p80 {p80:6.2f} ms  p95 {res["all"]["p95"]:6.2f}  max {res["all"]["max"]:7.2f}  [{parts}]  {verdict}{note}', flush=True)
