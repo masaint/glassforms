@@ -107,7 +107,7 @@ fn tracer_bodies() {
         parts.push(M { inner: i, ..d });
         parts.push(M { inner: i, biref: true, sss: true, ..d });
     }
-    let all = gf_core::inner::Parts { grad: true, crack: true, crack_depth: true, crack_rough: true, play: true, glitter: true, silk: true, piezo: true };
+    let all = gf_core::inner::Parts { grad: true, crack: true, frac: true, crack_depth: true, crack_rough: true, play: true, glitter: true, silk: true, piezo: true };
     parts.push(M { metal: true, rough: true, film: true, hollow: true, sss: true, spectrum: true, grin: true, biref: true, inner: all, ..d });
     for (bodies, with) in (2..=4u8).flat_map(|b| parts.iter().map(move |p| (b, *p))) {
         let mat = M { bodies, ..with };
