@@ -18,6 +18,7 @@ pub mod mesh_bake;
 pub mod render;
 pub mod scatter;
 pub mod stage;
+pub mod surface;
 pub mod lamps;
 pub mod ui;
 pub mod video;

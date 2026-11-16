@@ -29,6 +29,9 @@ const SHEEN: [f64; 3] = [1.0, 0.8, 0.5];
 /// lighting is taken towards grey for it.
 const CLAY_LIGHT: f64 = 0.30;
 const CLAY_GREY: f64 = 0.45;
+/// Clay lit by the surface pass with lamps and no light at infinity: the share of its even light kept
+/// (see `Engine::clay_split`).
+const CLAY_LAMPS_FILL: f64 = 0.25;
 /// How far the clay's light and dark are drawn apart (see trace_light.wgsl).
 const CLAY_CONTRAST: f32 = 1.2;
 /// The most a clay surface facing the brightest way may come to before the tone map. Above this it
@@ -60,6 +63,23 @@ fn matte_peak(matte: &[[f32; 4]; 9]) -> f64 {
         peak = peak.max(lum(env::sh_eval(matte, [r * turn.cos(), r * turn.sin(), z])));
     }
     peak
+}
+
+/// How the whole lighting's nine terms are made the clay's: its light keeps the lighting's direction and
+/// some of its colour, but not its level (the average over all the ways a surface can face is always
+/// CLAY_LIGHT). None when there is no light at all (the clay is then lit evenly from everywhere).
+fn clay_norm(sh: &Sh9) -> Option<f64> {
+    let level = (0.2126 * sh[0][0] + 0.7152 * sh[0][1] + 0.0722 * sh[0][2]) * 0.282095;
+    (level >= 1e-6).then(|| CLAY_LIGHT / level)
+}
+/// One colour made the clay's (greyed by CLAY_GREY, scaled by k): the same for every term, so a part of
+/// the lighting made the clay's adds up with the rest.
+fn clay_one(c: [f64; 3], k: f64) -> [f64; 3] {
+    let grey = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    c.map(|x| (x + (grey - x) * CLAY_GREY) * k)
+}
+fn clay_apply(sh: &Sh9, k: f64) -> Sh9 {
+    sh.map(|t| clay_one(t, k))
 }
 
 fn clay_level(matte: &[[f32; 4]; 9]) -> f32 {
@@ -149,6 +169,8 @@ pub struct Engine {
     lights_lit: bool,
     /// the family's lights as nine smooth terms (worked out only when clay needs them)
     rig_sh: Option<Sh9>,
+    /// the same of the lights alone (for clay lit by the surface pass: `clay_split`), kept likewise
+    lights_sh: Option<Sh9>,
     /// what the tracer was last told of the lamps (lamps.rs)
     last_lamps: Option<crate::lamps::LampsU>,
     /// what turns a panorama into what the tracer reads: made the first time it is needed, by
@@ -218,7 +240,7 @@ impl Engine {
         let lights_tex = renderer.env_target(env::ENV_W as u32, env::ENV_H as u32);
         let lights_view = lights_tex.create_view(&wgpu::TextureViewDescriptor::default());
         let mut e = Self {
-            baker: Baker::new(&gpu), layers: LayerWork::new(&gpu), models: crate::mesh_bake::Models::new(auto), bubbler: Bubbler::new(&gpu), stage: crate::stage::StageWork::new(auto), bubbles_in: None, body_bubbles_in: None, scatter: Scatter::new(&gpu), glow: glow::Kept::default(), shape_no: 0, thickness: None, fit_now: 1.0, soft_ok: false, meter: 1.0, fine_crisp: false, fine_room: false, bodies_always: false, body_thick: None, gpu, state, renderer, cast, lights_tex, lights_view, painted: None, painted_px: Vec::new(), lights_lit: true, rig_sh: None, last_lamps: None,
+            baker: Baker::new(&gpu), layers: LayerWork::new(&gpu), models: crate::mesh_bake::Models::new(auto), bubbler: Bubbler::new(&gpu), stage: crate::stage::StageWork::new(auto), bubbles_in: None, body_bubbles_in: None, scatter: Scatter::new(&gpu), glow: glow::Kept::default(), shape_no: 0, thickness: None, fit_now: 1.0, soft_ok: false, meter: 1.0, fine_crisp: false, fine_room: false, bodies_always: false, body_thick: None, gpu, state, renderer, cast, lights_tex, lights_view, painted: None, painted_px: Vec::new(), lights_lit: true, rig_sh: None, lights_sh: None, last_lamps: None,
             maker: Arc::new(OnceLock::new()), picture: None, picture_no: 0, glass: None, glass_from: None, hdri_seen: None, loading: None, next: None, building: false, hdri_error: None, hdri_wait: auto,
             show_wanted: Cell::new(false), show: None, shown: None, lighting_no: 0, last_lu: None,
             dirty: true, cut: true, last_tu: None, last_look: None,
@@ -307,6 +329,7 @@ impl Engine {
         if self.painted.as_ref() == Some(&key) { return false; }
         self.painted = Some(key);
         self.rig_sh = None;
+        self.lights_sh = None;
         let (w, h) = (env::ENV_W, env::ENV_H);
         let r = self.state.rig();
         let mut px = if rig { env::paint_gain(&r.lights, r.ambient, p.light_gain, w, h) } else { env::paint(&[], [0.0; 3], w, h) };
@@ -359,6 +382,16 @@ impl Engine {
     /// The whole lighting as nine smooth terms, for clay: the family's lights as they are lit, and
     /// the environment picture.
     fn lighting_sh(&mut self) -> Sh9 {
+        let sh = self.lighting_sh_raw();
+        clay_norm(&sh).map_or_else(|| {
+            let mut even = [[0.0; 3]; 9];
+            even[0] = [CLAY_LIGHT / 0.282095; 3];
+            even
+        }, |k| clay_apply(&sh, k))
+    }
+
+    /// The whole lighting as nine terms, as it is (before `lighting_sh` makes it the clay's).
+    fn lighting_sh_raw(&mut self) -> Sh9 {
         let p = &self.state.p;
         let mut sh = [[0.0; 3]; 9];
         if self.picture.is_none() || p.hdri_lights > 0.5 {
@@ -372,21 +405,38 @@ impl Engine {
             sh = self.rig_sh.unwrap();
         }
         if let Some(pic) = &self.picture { env::sh_add(&mut sh, &pic.sh, p.hdri_gain); }
-        // Clay is for seeing the form, whatever the lights are set to for the glass: its light keeps the
-        // lighting's direction and some of its colour, but not its level (the average over all the ways a
-        // surface can face is always CLAY_LIGHT), and with no light at all it is lit evenly from everywhere.
-        let lum = |c: &[f64; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
-        let level = lum(&sh[0]) * 0.282095;
-        if level < 1e-6 {
-            sh = [[0.0; 3]; 9];
-            sh[0] = [CLAY_LIGHT / 0.282095; 3];
-            return sh;
-        }
-        for term in sh.iter_mut() {
-            let grey = lum(term);
-            for c in term.iter_mut() { *c = (*c + (grey - *c) * CLAY_GREY) * CLAY_LIGHT / level; }
-        }
         sh
+    }
+
+    /// Clay lit by the surface pass: the room's nine terms (the lighting less the lights, made the
+    /// clay's by the same factor as the whole lighting is), and the lights as the pass takes them, in
+    /// the same units.
+    fn clay_split(&mut self) -> (Sh9, crate::surface::Lit) {
+        let whole = self.lighting_sh_raw();
+        let p = &self.state.p;
+        let lit = self.picture.is_none() || p.hdri_lights > 0.5;
+        let k = clay_norm(&whole);
+        let mut room = whole;
+        if lit {
+            // (painting the lights and summing them takes milliseconds: done when they change, not every frame)
+            let alone = *self.lights_sh.get_or_insert_with(|| crate::surface::lights_sh(&self.state, p.light_gain));
+            env::sh_add(&mut room, &alone, -1.0);
+        }
+        let gain = p.light_gain;
+        let (lights, n) = match k {
+            Some(k) if lit => crate::surface::lights_of(&self.state.rig().lights, |c| clay_one(c.map(|x| x * gain), k)),
+            _ => ([bytemuck::Zeroable::zeroed(); crate::surface::MAX_LIGHTS], 0),
+        };
+        let room = match k {
+            Some(k) => clay_apply(&room, k),
+            // No light at infinity at all: clay is then lit evenly from everywhere, so that its form shows
+            // in any lighting. With lamps standing in the scene that even light would fill their shadows
+            // to nothing; a quarter of it stays, standing in for their light coming back off the floor
+            // and the walls.
+            None if !self.state.lamps.is_empty() => self.lighting_sh().map(|t| t.map(|c| c * CLAY_LAMPS_FILL)),
+            None => self.lighting_sh(),
+        };
+        (room, crate::surface::Lit { base: [CLAY[0], CLAY[1], CLAY[2], n as f32], k: [1.0, 0.0, 0.0, 0.0], clay: [0.0; 4], lights })
     }
 
     /// Keep the lighting the tracer reads in step with the state: the environment picture, the lights'
@@ -460,6 +510,7 @@ impl Engine {
             near,
             // (the box only grows for layers that are combined: one plain layer is where it is built)
             grown: !self.state.plain() && self.state.box_k() > 1.0,
+            surface: crate::surface::wanted(&mat, clay),
         };
         // 3. is that tracer built? If not it is being built: carry on as things were
         // (and with the lens that is on: the plain one, or the first ray traced through the camera's own arithmetic)
@@ -501,6 +552,7 @@ impl Engine {
         }
         let p = &self.state.p;
         let mut lu: LightU = bytemuck::Zeroable::zeroed();
+        let mut surface = None;
         if v != Variant::default() {
             if let Some(pic) = &self.picture {
                 // behind the shape the picture is shown as it is, or, where one pixel takes in several
@@ -517,12 +569,22 @@ impl Engine {
                 lu.clay = CLAY;
                 let sh = self.lighting_sh();
                 let mut matte = env::sh_terms(&sh, env::SH_MATTE);
+                // (lit by the surface pass: the clay gathers the room here, and the lights there, both
+                // turned down as the whole would be)
+                let split = (v.surface == crate::surface::Kind::Clay).then(|| self.clay_split());
                 // (turned down, the light and its average together: the shader compares the two)
                 let level = clay_level(&matte);
                 if level < 1.0 {
                     for term in matte.iter_mut() { for c in term.iter_mut() { *c *= level; } }
                 }
                 lu.clay2 = [CLAY_LIGHT as f32 * level, CLAY_CONTRAST, 0.0, 0.0];
+                if let Some((room, mut lit)) = split {
+                    matte = env::sh_terms(&room, env::SH_MATTE);
+                    for term in matte.iter_mut() { for c in term.iter_mut() { *c *= level; } }
+                    for l in lit.lights.iter_mut() { for c in l.rgb.iter_mut().take(3) { *c *= level; } }
+                    lit.clay = [lu.clay2[0], CLAY_CONTRAST, 0.0, 0.0];
+                    surface = Some(lit);
+                }
                 lu.nine[..9].copy_from_slice(&matte);
                 lu.nine[9..].copy_from_slice(&env::sh_terms(&sh, SHEEN));
             }
@@ -547,6 +609,12 @@ impl Engine {
             // single light comes to peak / pi as a matte one would)
             if peak > 1e-6 { self.meter = (0.7 * std::f64::consts::PI / peak).clamp(1.0, 3.0) as f32; }
         }
+        if v.surface == crate::surface::Kind::Milky {
+            let q = &self.state.p;
+            let lit = self.picture.is_none() || q.hdri_lights > 0.5;
+            surface = Some(crate::surface::milky(&self.state, lit, [q.body_r, q.body_g, q.body_b]));
+        }
+        self.renderer.set_surface(surface);
         if self.last_lu != Some(lu) {
             self.renderer.set_light(&lu);
             self.last_lu = Some(lu);

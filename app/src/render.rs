@@ -113,6 +113,9 @@ pub struct Variant {
     /// the stage is larger than ever (layers placed far out: core/src/layers.rs `box_k`): the tracer reads
     /// the box its volume spans from its numbers (`TraceU::pad[2]`), so one text serves every size
     pub grown: bool,
+    /// an opaque or milky body lit by the surface pass after the tracer (surface.rs): what the tracer
+    /// gathers itself changes with it (none: as it always was)
+    pub surface: crate::surface::Kind,
 }
 
 /// How a tracer marches (this differs by family).
@@ -171,11 +174,16 @@ fn tracer_from(template: &str, m: &March, v: Variant, profile: bool) -> String {
         .replace("{{GRAZE}}", mat.graze);
     // a grown stage: the volume spans a larger box, and the ball that holds the scene is larger
     let src = if v.grown { grown(&src) } else { src };
+    // (lit by the surface pass: the clay gathers only the room, and leaves the lamps to the pass)
+    let src = crate::surface::weave(&src, &v);
     // the lamps, and then what the bodies cast, are put in last (never into the default tracer)
     let src = if v.near { crate::lamps::weave(&src) } else { src };
-    let src = if v.cast { crate::cast::weave(&src).unwrap_or(src) } else { src };
-    // (and with both, the lamps' shadows)
-    let src = if v.cast && v.near { crate::lamps::weave_shadows(&src) } else { src };
+    let woven = if v.cast { crate::cast::weave(&src) } else { None };
+    let cast_in = woven.is_some();
+    let src = woven.unwrap_or(src);
+    // (and with both, the lamps' shadows: only where casting went in, which it does not for clay lit by
+    // the surface pass, whose shadows the pass draws)
+    let src = if cast_in && v.near { crate::lamps::weave_shadows(&src) } else { src };
     // a rough clear body's tracer also writes, beside the picture, how far what is seen through the
     // surface is to be blurred afterwards (frost.rs)
     let src = if rough_split(&v, profile) { frost::with_aux(&src) } else { src };
@@ -329,6 +337,7 @@ struct Targets {
     h: u32,
     tw: u32,
     th: u32,
+    trace_tex: wgpu::Texture,
     trace_view: wgpu::TextureView,
     accum: [wgpu::Texture; 2],
     accum_view: [wgpu::TextureView; 2],
@@ -446,6 +455,8 @@ pub struct Renderer {
     /// the lens's glare (glare.rs), and whether the last frame drew it (rather than the bloom pyramid)
     glare: crate::glare::Glare,
     glared: bool,
+    /// direct light with shadows on opaque and milky bodies, after the tracer (surface.rs)
+    surface: crate::surface::Surface,
 }
 
 /// The tone map of post.wgsl's final pass, done here in 64-bit arithmetic for a 16-bit still: the picture
@@ -624,6 +635,7 @@ impl Renderer {
             dof: Dof::new(gpu), focused: false, cam: Default::default(), glare: crate::glare::Glare::new(gpu), glared: false,
             frost: Frost::new(gpu),
             dn: Denoise::new(gpu), shown: 0,
+            surface: crate::surface::Surface::new(gpu),
         }
     }
 
@@ -839,6 +851,11 @@ impl Renderer {
 
     /// What the tracer and the antialiasing are told of the studio: the room, the backdrop, the floor.
     /// Tell the tracer where the lamps stand and what they are (read only by a tracer built with lamps).
+    /// What the surface pass lights with (None: it is not run).
+    pub fn set_surface(&mut self, lit: Option<crate::surface::Lit>) {
+        self.surface.set(lit);
+    }
+
     pub fn set_lamps(&mut self, lu: &crate::lamps::LampsU) {
         self.gpu.queue.write_buffer(&self.u_lamps, 0, bytemuck::bytes_of(lu));
     }
@@ -912,6 +929,8 @@ impl Renderer {
     }
 
     fn bind_tracer(&mut self) {
+        // (the surface pass reads the same volume: its group is made again when next drawn)
+        self.surface.unbind();
         let Some((env, vol)) = &self.scene else { return };
         self.g_trace = Some(self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("trace"),
@@ -958,7 +977,8 @@ impl Renderer {
         }
         let gpu = &self.gpu;
         let view = |t: &wgpu::Texture| t.create_view(&wgpu::TextureViewDescriptor::default());
-        let trace_view = view(&gpu.target("trace", tw, th, HDR, &[]));
+        let trace_tex = gpu.target("trace", tw, th, HDR, &[]);
+        let trace_view = view(&trace_tex);
         let accum = [gpu.target("picture a", tw, th, ACC, &[]), gpu.target("picture b", tw, th, ACC, &[])];
         let accum_view = [view(&accum[0]), view(&accum[1])];
         // the focus stage reads either picture and writes one of its own, which the bloom and the screen
@@ -1041,7 +1061,7 @@ impl Renderer {
             let v = view(&tex);
             (tex, v, final_groups(&self.u_final_deep, &views[0]), final_groups(&self.u_final_deep, &glare_view))
         });
-        self.t = Some(Targets { w, h, tw, th, trace_view, accum, accum_view, g_accum, g_accum_rough, g_down0, mips, g_final, g_final_glare, final_tex, final_view, deep });
+        self.t = Some(Targets { w, h, tw, th, trace_tex, trace_view, accum, accum_view, g_accum, g_accum_rough, g_down0, mips, g_final, g_final_glare, final_tex, final_view, deep });
         self.acc_idx = 0;
         self.shown = 0;
         self.accum_n = 0;
@@ -1115,11 +1135,12 @@ impl Renderer {
         let second = self.g_cast.as_ref().filter(|_| self.variant.cast);
         // (a denoised tracer writes the light it found inside the body to one more target)
         let dn = if self.variant.denoise && !self.profile { self.dn.frame_view(&self.lin).cloned() } else { None };
+        let mut frosted = false;
         match self.frost.aux().filter(|_| rough) {
             Some(aux) => {
                 let views: Vec<&wgpu::TextureView> = [&t.trace_view, aux[0], aux[1]].into_iter().chain(dn.as_ref()).collect();
                 frost::draw(&mut enc, &views, &self.trace_pipes[&self.trace_key], g_trace, second);
-                self.frost.encode(&mut enc, u.tan_fov);
+                frosted = true;
             }
             None if dn.is_some() => {
                 frost::draw(&mut enc, &[&t.trace_view, dn.as_ref().expect("just asked")], &self.trace_pipes[&self.trace_key], g_trace, second);
@@ -1132,6 +1153,15 @@ impl Renderer {
                 rp.draw(0..3, 0..1);
             }
         }
+        // direct light with shadows on an opaque or milky body, onto the traced frame before anything reads
+        // it (not through another lens than the plain one: the pass finds the surface along a plain ray)
+        if self.surface.on() && !self.cam.active && !self.profile {
+            if let Some((_, vol)) = &self.scene {
+                let hb = self.variant.grown.then(|| f32::from_bits(u.pad[2] as u32));
+                self.surface.encode(&self.gpu, &mut enc, &t.trace_tex, &t.trace_view, vol, &self.lin, &self.u_lamps, &u, hb, self.variant.near);
+            }
+        }
+        if frosted { self.frost.encode(&mut enc, u.tan_fov); }
         {
             let mut rp = pass(&mut enc, &t.accum_view[1 - self.acc_idx], None, true);
             // (through any lens but the plain one, the surface is followed by the camera's own arithmetic)
