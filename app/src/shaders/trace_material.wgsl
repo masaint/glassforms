@@ -483,6 +483,55 @@ fn wearLines(rd_in: vec3f, w: Wear, p: vec3f, c: f32) -> vec3f {
   }
   return c6 / 6.0;
 }
+
+// ---- a brushed metal (r4 metal): anisotropic GGX across the polishing lines -----------------------------
+// Brushing cuts fine grooves along the lines: the surface's slopes are spread across them (b) far more
+// than along them, so a light's reflection is drawn out into a streak across the lines, with GGX's long
+// glow around it, and line by line the finish differs (some rubbed finer than others), which shows as
+// streaks along the lines wherever the highlight lies. Not averaged over a few fixed looks (they show as
+// ghost copies once the spread is wide): one facet of that spread per frame, from a sequence that fills
+// the square evenly frame by frame, and the reflection off it is followed like any other (to the next
+// surface of the shape, or to the lights): so the shape hides the lights from it where it should, and the
+// frames add up to the whole lobe.
+//#if !BODIES
+const BR_ACROSS: f32 = 0.15;     // the slopes' spread across the lines (GGX alpha) at brush 1
+const BR_ALONG: f32 = 0.006;     // and along them
+fn brushRnd(fc: vec2f, b: i32) -> vec2f {
+  // (each pixel's own start, from a hash: interleaved gradient noise here leaves a cross-hatch while
+  // few frames are kept)
+  let i = vec3i(vec2i(fc), 31 + b);
+  let o = 0.5 + 0.5 * vec2f(wHash(i), wHash(i + vec3i(0, 0, 977)));
+  return fract(o + vec2f(0.7548777, 0.5698403) * f32(u.frame % 4096));
+}
+// The facet this frame's reflection leaves by, about w.n; `wide`: a spread both ways already there (a
+// rough metal's own, radians of slope), part of which the lines take across themselves.
+// sg: 1, or -1 for the facet opposite (the pair is read together: half the grain for one more look)
+// Returns the facet (xyz) and how far its reflection is read softened (w, radians): more the farther out
+// in the tail the facet lies, where the lobe is thin and one look stands for a wide piece of it.
+fn brushN(w: Wear, p: vec3f, rd: vec3f, fc: vec2f, b: i32, wide: f32, sg: f32) -> vec4f {
+  let br = min(mu.more.w, 1.5);
+  let q = toObj(p);
+  // (line by line, and in a few broader bands, the grooves are deeper or shallower)
+  // (lines finer than a pixel are not drawn, their mean is: as wearAt does)
+  let px = length(p - vec3f(0.0, 0.0, u.dist)) * 2.0 * u.tan_fov / u.res.y;
+  let fine = 1.0 - smoothstep(0.3, 1.0, px * 150.0);
+  let streak = max(0.6 + 0.4 * fine * wNoise(vec3f(q.x * 3.0, q.y * 150.0, q.z * 3.0)) + 0.3 * wNoise(vec3f(q.x * 1.5 + 5.0, q.y * 31.0, q.z * 1.5 + 1.0)), 0.15);
+  let ax = br * BR_ACROSS * streak + wide * (1.0 + 1.5 * br) * (0.7 + 0.3 * streak);
+  let ay = BR_ALONG + 0.5 * w.sig + wide * (1.0 - 0.6 * min(br, 1.0));
+  let r = brushRnd(fc, b);
+  // GGX's slopes: radius sqrt(u / (1 - u)) (the farthest few hundredths of its tail left out: fireflies)
+  let u1 = min(r.x, 0.86);
+  let s = sqrt(u1 / (1.0 - u1));
+  let ph = 6.2831853 * r.y;
+  let s2 = sg * s;
+  let t = cross(w.n, w.b);
+  let m = normalize(w.n + w.b * (ax * s2 * cos(ph)) + t * (ay * s2 * sin(ph)));
+  // (a facet that would send the light into the surface is taken as the mean one)
+  let soft = 0.35 * ax * s;
+  if (dot(reflect(rd, m), w.n) <= 0.02) { return vec4f(w.n, soft); }
+  return vec4f(m, soft);
+}
+//#endif
 //#endif
 
 //#if RANDOM
@@ -777,7 +826,8 @@ fn shadeM(ro: vec3f, rd_in: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f 
     let cosi = clamp(-dot(rd, n), 0.0, 1.0);
     let mir = reflect(rd, n);
 //#if WEAR
-    let wr = wearAt(p, n);
+    var wr = wearAt(p, n);
+    let brushed = wr.aniso > 0.0;
 //#endif
 //#if GLOW
     col += thr * mu.glow.rgb * 0.25;        // a glowing metal simply shines of itself
@@ -812,27 +862,53 @@ fn shadeM(ro: vec3f, rd_in: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f 
     // it is narrow (share fo); the rest of it sees the lights, less what the shape itself hides of them.
     fv = frMetalV(fv, frBend(p, n, fp, rd));
 //#if WEAR
-    // (the wear spreads the lobe further; the polishing lines draw it out across themselves: four looks)
+    // (the wear spreads the lobe further; the polishing lines draw it out across themselves: brushN, one
+    // facet per frame, the rest of the lobe read softened about that facet's reflection and hidden by the
+    // shape along it)
     fv = frCap(fv + wr.sig * wr.sig);
-    var lit0 = vec3f(0.0);
-    if (wr.aniso > 0.0) {
-      for (var k = 0; k < 4; k++) { lit0 += 0.25 * frMetalLit(dir, frMid(rd, normalize(wr.n + wr.b * ((f32(k) - 1.5) * 0.75 * wr.aniso))), fv, b); }
-    } else {
-      lit0 = frMetalLit(dir, frMid(rd, wr.n), fv, b);
+    var mid = frMid(rd, wr.n);
+    var mid2 = mid;
+    if (brushed) {
+      let sr = sqrt(fv);
+      let m4 = brushN(wr, p, rd, fc, b, 0.3 * sr, 1.0);
+      let m = m4.xyz;
+      let m2 = brushN(wr, p, rd, fc, b, 0.3 * sr, -1.0).xyz;
+      fv = 0.18 * fv + m4.w * m4.w;
+      mid = frMid(rd, m);
+      mid2 = frMid(rd, m2);
+      let d0 = reflect(rd, m);
+      dir = d0 - 2.0 * min(dot(d0, n), 0.0) * n;
     }
-    lit0 *= wr.keep * wr.tint;
+    let lit0 = 0.5 * (frMetalLit(dir, mid, fv, b) + frMetalLit(dir, mid2, fv, b)) * (wr.keep * wr.tint);
+    let fo = frFollow(fv);
+    let hid = frMetalHid(p, n, mid, fv, lit0, R);
 //#else
     let lit0 = frMetalLit(dir, frMid(rd, n), fv, b);
-//#endif
     let fo = frFollow(fv);
     let hid = frMetalHid(p, n, frMid(rd, n), fv, lit0, R);
+//#endif
     let lit = mix(hid, lit0, fo);
 //#else
 //#if FILM
     let lit = mirrorEnv(mir, mirrorLod(p, n, cosi));
 //#else
 //#if WEAR
-    let lit = wearSee(rd, wr, p, cosi) * (wr.keep * wr.tint);
+    var lit2 = vec3f(0.0);
+    if (brushed) {
+      wr.aniso = 0.0;
+      // (each facet's reflection read a little softened: the frames converge without grain)
+      let sb = 0.3 * min(mu.more.w, 1.5) * BR_ACROSS;
+      let s0 = wr.sig * wr.sig + sb * sb;
+      let f1 = brushN(wr, p, rd, fc, b, 0.0, 1.0);
+      let f2 = brushN(wr, p, rd, fc, b, 0.0, -1.0);
+      wr.sig = sqrt(s0 + f1.w * f1.w);
+      wr.n = f2.xyz;
+      lit2 = wearSee(rd, wr, p, cosi);
+      wr.n = f1.xyz;
+      dir = reflect(rd, wr.n);
+    }
+    var lit = wearSee(rd, wr, p, cosi) * (wr.keep * wr.tint);
+    if (brushed) { lit = 0.5 * (lit + lit2 * (wr.keep * wr.tint)); }
 //#else
     let lit = sharpEnv(mir, p, n, cosi);
 //#endif
