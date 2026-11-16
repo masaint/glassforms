@@ -132,6 +132,8 @@ pub struct Engine {
     meter: f32,
     /// the fine lights' map was last painted with crisp edges (for a metal or a coat)
     fine_crisp: bool,
+    /// ... and has the studio room painted into it (room.rs)
+    fine_room: bool,
     /// make the bodies' volume even while no body has a material of its own (for checks that read it)
     pub bodies_always: bool,
     /// how thick each body is, measured from the bodies' volume (None: not measured since it was built)
@@ -216,7 +218,7 @@ impl Engine {
         let lights_tex = renderer.env_target(env::ENV_W as u32, env::ENV_H as u32);
         let lights_view = lights_tex.create_view(&wgpu::TextureViewDescriptor::default());
         let mut e = Self {
-            baker: Baker::new(&gpu), layers: LayerWork::new(&gpu), models: crate::mesh_bake::Models::new(auto), bubbler: Bubbler::new(&gpu), stage: crate::stage::StageWork::new(auto), bubbles_in: None, body_bubbles_in: None, scatter: Scatter::new(&gpu), glow: glow::Kept::default(), shape_no: 0, thickness: None, fit_now: 1.0, soft_ok: false, meter: 1.0, fine_crisp: false, bodies_always: false, body_thick: None, gpu, state, renderer, cast, lights_tex, lights_view, painted: None, painted_px: Vec::new(), lights_lit: true, rig_sh: None, last_lamps: None,
+            baker: Baker::new(&gpu), layers: LayerWork::new(&gpu), models: crate::mesh_bake::Models::new(auto), bubbler: Bubbler::new(&gpu), stage: crate::stage::StageWork::new(auto), bubbles_in: None, body_bubbles_in: None, scatter: Scatter::new(&gpu), glow: glow::Kept::default(), shape_no: 0, thickness: None, fit_now: 1.0, soft_ok: false, meter: 1.0, fine_crisp: false, fine_room: false, bodies_always: false, body_thick: None, gpu, state, renderer, cast, lights_tex, lights_view, painted: None, painted_px: Vec::new(), lights_lit: true, rig_sh: None, last_lamps: None,
             maker: Arc::new(OnceLock::new()), picture: None, picture_no: 0, glass: None, glass_from: None, hdri_seen: None, loading: None, next: None, building: false, hdri_error: None, hdri_wait: auto,
             show_wanted: Cell::new(false), show: None, shown: None, lighting_no: 0, last_lu: None,
             dirty: true, cut: true, last_tu: None, last_look: None,
@@ -255,8 +257,12 @@ impl Engine {
     /// which suits glass (which sees them through itself, bent and spread); a mirror shows them as they
     /// are, and a real soft box has a crisp edge. So for a mirror their fading edge is made a quarter as
     /// wide. Glass reads its own map, painted as ever.
-    fn paint_fine(&mut self, crisp: bool) -> Vec<f32> {
+    ///
+    /// `room`: the studio room (room.rs) is painted under the lights, for a polished or milky body to
+    /// reflect when there is no picture (see `fine_wanted`).
+    fn paint_fine(&mut self, crisp: bool, room: bool) -> Vec<f32> {
         self.fine_crisp = crisp;
+        self.fine_room = room;
         let p = &self.state.p;
         let rig = self.picture.is_none() || p.hdri_lights > 0.5;
         let (w, h) = (FINE * env::ENV_W, FINE * env::ENV_H);
@@ -269,11 +275,23 @@ impl Engine {
         if let Some(pic) = &self.picture {
             env::add_glows(&mut px, &pic.glows, p.hdri_gain, hdri::blur_sigma(p.hdri_blur), w, h);
         }
+        // (under the studio's backdrop and floor, which are painted over it where the studio has them)
+        if room && rig { gf_core::room::paint(&mut px, w, h, &r.lights, &self.state.lights_to_room(), p.light_gain); }
         if !self.painted.as_ref().is_some_and(|k| k.stage.is_empty()) {
             let extra = self.picture.as_ref().map_or([0.0; 3], |pic| crate::stage::picture_on_floor(&pic.sh, p.hdri_gain, &self.state));
             self.stage.paint_for(&self.state, &mut px, w, h, extra, crisp);
         }
         px
+    }
+
+    /// How the copy of the lights a material reads is to be painted: crisp (a metal or a coat will
+    /// mirror it), and with the studio room in it. The room is for what is not glass: a metal, a milky
+    /// body, a glaze on clay, with no environment picture (a picture is a room already) and `envRoom` on.
+    /// Glass, frosted or coated, keeps the lights as they are.
+    fn fine_wanted(&self, v: &material::Variant) -> (bool, bool) {
+        let p = &self.state.p;
+        let opaque = v.metal || v.sss || (p.clay > 0.5 && v.coat);
+        (v.metal || v.coat, opaque && self.picture.is_none() && p.env_room > 0.5)
     }
 
     fn paint_lights(&mut self) -> bool {
@@ -568,9 +586,10 @@ impl Engine {
             self.state.want = Some(Detail::Full);
         }
         if v.bodies > 0 {
-            if self.soft_ok && self.fine_crisp != (v.metal || v.coat) { self.soft_ok = false; }
+            let want = self.fine_wanted(&v);
+            if self.soft_ok && (self.fine_crisp, self.fine_room) != want { self.soft_ok = false; }
             if (v.rough || v.sss || v.wear || v.metal || v.coat || v.inner.soft_lights()) && !self.soft_ok && !self.painted_px.is_empty() {
-                let fine = self.paint_fine(v.metal || v.coat);
+                let fine = self.paint_fine(want.0, want.1);
                 self.renderer.soften_lights(&fine, (FINE * env::ENV_W) as u32, (FINE * env::ENV_H) as u32);
                 self.soft_ok = true;
                 changed = true;
@@ -606,9 +625,10 @@ impl Engine {
         if v.plain() { return changed; }
         // rough and milky materials read softened copies of the lights' map: made when first wanted, and
         // again when the map is painted anew
-        if self.soft_ok && self.fine_crisp != (v.metal || v.coat) { self.soft_ok = false; }
+        let want = self.fine_wanted(&v);
+        if self.soft_ok && (self.fine_crisp, self.fine_room) != want { self.soft_ok = false; }
         if (v.rough || v.sss || v.wear || v.metal || v.coat || v.inner.soft_lights()) && !self.soft_ok && !self.painted_px.is_empty() {
-            let fine = self.paint_fine(v.metal || v.coat);
+            let fine = self.paint_fine(want.0, want.1);
                 self.renderer.soften_lights(&fine, (FINE * env::ENV_W) as u32, (FINE * env::ENV_H) as u32);
             self.soft_ok = true;
             changed = true;

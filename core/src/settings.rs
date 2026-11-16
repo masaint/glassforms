@@ -116,6 +116,9 @@ settings! {
     hdri_show, "hdriShow", 0.0;
     /// 1 = the family's lights stay lit together with the environment picture
     hdri_lights, "hdriLights", 0.0;
+    /// 1 = with no environment picture, a metal, a glaze or a milky body reflects a dim studio room made
+    /// by the program (room.rs) round the lights, instead of the lights on black; plain glass never does
+    env_room, "envRoom", 1.0;
     /// The camera in a photographer's terms (camera.rs). The lens's focal length in millimetres: 0 = not
     /// said, the lens is given by `fov`. Once said, `fov` is rewritten from it.
     focal, "focal", 0.0;

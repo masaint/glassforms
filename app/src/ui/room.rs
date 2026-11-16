@@ -237,6 +237,19 @@ fn lights(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     // all of it brighter or dimmer together
     gap(ui, 6.0);
     knob::knob_row(ui, st, &State::engine_knob("lightGain"), px);
+
+    // with no picture, what a metal or a milky body mirrors round the lights: a dim studio room, or black
+    if st.hdri.is_none() {
+        gap(ui, 6.0);
+        let on = st.p.env_room > 0.5;
+        let run = named_run(ui, Id::unique("room in reflections"), "reflected", &[
+            Item::new("lights only", !on).tip("a metal or a milky body mirrors the lights on black"),
+            Item::new("studio room", on).tip("a metal or a milky body mirrors a dim studio room round the lights (walls, a window, stands); glass is not changed"),
+        ]);
+        px.note("room/envroom", run.rect);
+        for (place, name) in run.places.iter().zip(["room/envroom:off", "room/envroom:on"]) { px.note(name, *place); }
+        if let Some(i) = run.clicked { st.p.env_room = i as f64; }
+    }
 }
 
 /// Turning the whole lighting, lights and picture alike: the ball, the three angles, circling by itself,

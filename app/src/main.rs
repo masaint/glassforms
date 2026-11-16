@@ -43,6 +43,8 @@
 //!   hdriShow=1                  show it behind the shape as well
 //!   hdriLights=1                keep the family's lights lit with it
 //! The lights' turning (lights, lyaw, lpitch, lroll, lspin) turns the picture with them.
+//!   envRoom=0                   with no picture, a metal or milky body mirrors the lights on black instead of
+//!                               the dim studio room the program makes round them (core/src/room.rs)
 //!   clay=1                      draw the shape as matte clay instead of glass
 //! The camera in a photographer's terms (the old names fov, aperture, fnear, ffar mean what they did;
 //! of a lens said both ways the later one counts):
