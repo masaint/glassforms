@@ -171,6 +171,9 @@ pub struct Engine {
     rig_sh: Option<Sh9>,
     /// the same of the lights alone (for clay lit by the surface pass: `clay_split`), kept likewise
     lights_sh: Option<Sh9>,
+    /// the room's nine terms for a ceramic (the lighting with the studio room, less the lights), made
+    /// when the lighting changes
+    room_sh: Option<Sh9>,
     /// what the tracer was last told of the lamps (lamps.rs)
     last_lamps: Option<crate::lamps::LampsU>,
     /// what turns a panorama into what the tracer reads: made the first time it is needed, by
@@ -240,7 +243,7 @@ impl Engine {
         let lights_tex = renderer.env_target(env::ENV_W as u32, env::ENV_H as u32);
         let lights_view = lights_tex.create_view(&wgpu::TextureViewDescriptor::default());
         let mut e = Self {
-            baker: Baker::new(&gpu), layers: LayerWork::new(&gpu), models: crate::mesh_bake::Models::new(auto), bubbler: Bubbler::new(&gpu), stage: crate::stage::StageWork::new(auto), bubbles_in: None, body_bubbles_in: None, scatter: Scatter::new(&gpu), glow: glow::Kept::default(), shape_no: 0, thickness: None, fit_now: 1.0, soft_ok: false, meter: 1.0, fine_crisp: false, fine_room: false, bodies_always: false, body_thick: None, gpu, state, renderer, cast, lights_tex, lights_view, painted: None, painted_px: Vec::new(), lights_lit: true, rig_sh: None, lights_sh: None, last_lamps: None,
+            baker: Baker::new(&gpu), layers: LayerWork::new(&gpu), models: crate::mesh_bake::Models::new(auto), bubbler: Bubbler::new(&gpu), stage: crate::stage::StageWork::new(auto), bubbles_in: None, body_bubbles_in: None, scatter: Scatter::new(&gpu), glow: glow::Kept::default(), shape_no: 0, thickness: None, fit_now: 1.0, soft_ok: false, meter: 1.0, fine_crisp: false, fine_room: false, bodies_always: false, body_thick: None, gpu, state, renderer, cast, lights_tex, lights_view, painted: None, painted_px: Vec::new(), lights_lit: true, rig_sh: None, lights_sh: None, room_sh: None, last_lamps: None,
             maker: Arc::new(OnceLock::new()), picture: None, picture_no: 0, glass: None, glass_from: None, hdri_seen: None, loading: None, next: None, building: false, hdri_error: None, hdri_wait: auto,
             show_wanted: Cell::new(false), show: None, shown: None, lighting_no: 0, last_lu: None,
             dirty: true, cut: true, last_tu: None, last_look: None,
@@ -330,6 +333,7 @@ impl Engine {
         self.painted = Some(key);
         self.rig_sh = None;
         self.lights_sh = None;
+        self.room_sh = None;
         let (w, h) = (env::ENV_W, env::ENV_H);
         let r = self.state.rig();
         let mut px = if rig { env::paint_gain(&r.lights, r.ambient, p.light_gain, w, h) } else { env::paint(&[], [0.0; 3], w, h) };
@@ -408,6 +412,30 @@ impl Engine {
         sh
     }
 
+    /// A ceramic's room: the lighting's nine terms as its glaze sees the lighting (with the studio room
+    /// painted in, as `paint_fine` paints it for a milky body), less the lights, which the surface pass
+    /// gives with their shadows. Unnormalised, in the units of the lights' map.
+    fn ceramic_room(&mut self) -> Sh9 {
+        if let Some(sh) = self.room_sh { return sh; }
+        let p = &self.state.p;
+        let rig = self.picture.is_none() || p.hdri_lights > 0.5;
+        let (w, h) = (env::ENV_W, env::ENV_H);
+        let r = self.state.rig();
+        let mut map = if rig { env::paint_gain(&r.lights, r.ambient, p.light_gain, w, h) } else { env::paint(&[], [0.0; 3], w, h) };
+        if rig && self.picture.is_none() && p.env_room > 0.5 { gf_core::room::paint(&mut map, w, h, &r.lights, &self.state.lights_to_room(), p.light_gain); }
+        crate::stage::StageWork::paint_copy(&self.state, &mut map, w, h);
+        let mut sh = env::sh_of_map(&map, w, h, 4, env::paint_dir);
+        if rig {
+            let gain = p.light_gain;
+            let alone = *self.lights_sh.get_or_insert_with(|| crate::surface::lights_sh(&self.state, gain));
+            env::sh_add(&mut sh, &alone, -1.0);
+        }
+        let p = &self.state.p;
+        if let Some(pic) = &self.picture { env::sh_add(&mut sh, &pic.sh, p.hdri_gain); }
+        self.room_sh = Some(sh);
+        sh
+    }
+
     /// Clay lit by the surface pass: the room's nine terms (the lighting less the lights, made the
     /// clay's by the same factor as the whole lighting is), and the lights as the pass takes them, in
     /// the same units.
@@ -436,7 +464,7 @@ impl Engine {
             None if !self.state.lamps.is_empty() => self.lighting_sh().map(|t| t.map(|c| c * CLAY_LAMPS_FILL)),
             None => self.lighting_sh(),
         };
-        (room, crate::surface::Lit { base: [CLAY[0], CLAY[1], CLAY[2], n as f32], k: [1.0, 0.0, 0.0, 0.0], clay: [0.0; 4], lights })
+        (room, crate::surface::Lit { base: [CLAY[0], CLAY[1], CLAY[2], n as f32], k: [1.0, 0.0, 0.0, 0.0], clay: [0.0; 4], lights, cer: [0.0; 4], nine: [[0.0; 4]; 9] })
     }
 
     /// Keep the lighting the tracer reads in step with the state: the environment picture, the lights'
@@ -601,7 +629,9 @@ impl Engine {
         let lum = |r: f64, g: f64, b: f64| 0.2126 * r + 0.7152 * g + 0.0722 * b;
         let back = q.back_gain * lum(q.back_top_r, q.back_top_g, q.back_top_b).max(lum(q.back_mid_r, q.back_mid_g, q.back_mid_b)).max(lum(q.back_low_r, q.back_low_g, q.back_low_b));
         let seen_behind = (q.backdrop > 0.5 && back > 0.15) || (self.picture.is_some() && q.hdri_show > 0.5);
-        if v.mat.sss && !clay && self.state.p.meter > 0.5 && !seen_behind {
+        // (a ceramic is lit at its surface by the surface pass and is not exposed for: it is a white
+        // surface like any other, and the lighting is as set)
+        if v.mat.sss && !v.mat.ceramic && !clay && self.state.p.meter > 0.5 && !seen_behind {
             let matte = env::sh_terms(&self.lighting_sh(), env::SH_MATTE);
             let peak = matte_peak(&matte);
             // (the nine terms give the light arriving on the surface; a white matte surface sends back that
@@ -613,6 +643,12 @@ impl Engine {
             let q = &self.state.p;
             let lit = self.picture.is_none() || q.hdri_lights > 0.5;
             surface = Some(crate::surface::milky(&self.state, lit, [q.body_r, q.body_g, q.body_b]));
+        }
+        if v.surface == crate::surface::Kind::Ceramic {
+            let room = self.ceramic_room();
+            let q = &self.state.p;
+            let lit = self.picture.is_none() || q.hdri_lights > 0.5;
+            surface = Some(crate::surface::ceramic(&self.state, lit, [q.body_r, q.body_g, q.body_b], q.ceramic_through, q.glaze_haze, &room));
         }
         self.renderer.set_surface(surface);
         if self.last_lu != Some(lu) {

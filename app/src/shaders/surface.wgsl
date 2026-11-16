@@ -34,6 +34,10 @@ struct SU {
                             // z: how far the ambient occlusion dims it   w: 1 = lamps stand in the scene
   clay: vec4f,              // x: the light clay gathers on average   y: how far differences from it are drawn out
   lights: array<SLight, 12>,
+  cer: vec4f,               // a ceramic: x 1 = on   y: how far its diffuse light wraps past the terminator
+                            // z: its glaze's reflectance head on   w: the cone its reflections are hidden by
+  nine: array<vec4f, 9>,    // a ceramic: the room's light without the lights (nine terms, as a white matte
+                            // surface gathers it, over pi), in the lights' own frame
 }
 @group(0) @binding(0) var<uniform> s: SU;
 @group(0) @binding(1) var frameTex: texture_2d<f32>;
@@ -200,8 +204,9 @@ fn atInfinity(p: vec3f, n: vec3f) -> Direct {
     let na = dot(ne, L.a.xyz);
     let nu = dot(ne, L.u.xyz);
     let nv = dot(ne, L.v.xyz);
-    // (wholly behind the surface: every corner of the rectangle faces away)
-    if (na + abs(nu) * tw + abs(nv) * th <= 0.0) { continue; }
+    // (wholly behind the surface: every corner of the rectangle faces away, by more than a ceramic's wrap)
+    let wrap = s.cer.y;
+    if (na + abs(nu) * tw + abs(nv) * th + wrap * sqrt(1.0 + tw * tw + th * th) <= 0.0) { continue; }
     var open = 0.0;
     for (var gy = 0; gy < 4; gy++) {
       let y = (f32(gy) * 0.5 - 0.75) * th;
@@ -211,7 +216,9 @@ fn atInfinity(p: vec3f, n: vec3f) -> Direct {
         let sx = 1.0 - smoothstep(0.0, 1.0, (abs(x) / tw - (1.0 - soft)) / soft);
         let q = 1.0 + x * x + y * y;
         // (cosine = (na + x nu + y nv) / sqrt(q); solid angle per unit of the plane = 1 / q^1.5)
-        open += max(na + x * nu + y * nv, 0.0) * sx * sy / (q * q);
+        // (a ceramic's light wraps a little past the terminator, as light scattered just under its
+        // surface does: (cosine + wrap) / (1 + wrap))
+        open += max(na + x * nu + y * nv + wrap * sqrt(q), 0.0) * sx * sy / (q * q * (1.0 + wrap));
       }
     }
     open *= tw * th * 0.25;
@@ -362,6 +369,8 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let lit = direct.lit * 0.31830989 + lampLight.lit;
   let open = direct.open * 0.31830989 + lampLight.open;
 
+  if (s.cer.x > 0.5) { return ceramic(p, n, rd, direct, lampLight, cover); }
+
   // the frame's own light: dimmed by the folds of the surface, and (a milky body) by the share of the
   // direct light that is hidden here
   var keepK = 1.0;
@@ -386,6 +395,39 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   // (for looking: the frame's own light alone, or the direct light alone)
   if (s.k0.w > 1.5) { return vec4f(0.0, 0.0, 0.0, keepK); }
   let add = s.base.rgb * (infLit * addK + lampLight.lit) * (s.k.x * cover);
+  if (s.k0.w > 0.5) { return vec4f(add, 0.0); }
+  return vec4f(add, keepK);
+}
+
+// The ceramic's nine terms of the room along d (the lights' own frame): what a white matte surface facing
+// d gathers, over pi.
+fn nineAt(d: vec3f) -> vec3f {
+  let v = s.nine[0].rgb
+        + s.nine[1].rgb * d.y + s.nine[2].rgb * d.z + s.nine[3].rgb * d.x
+        + s.nine[4].rgb * (d.x * d.y) + s.nine[5].rgb * (d.y * d.z) + s.nine[6].rgb * (3.0 * d.z * d.z - 1.0)
+        + s.nine[7].rgb * (d.x * d.z) + s.nine[8].rgb * (d.x * d.x - d.y * d.y);
+  return max(v, vec3f(0.0));
+}
+
+// A ceramic (porcelain, milk glass, stoneware, bisque). The frame holds what the tracer gave it: the
+// glaze's reflection of the lights and the room (unhidden), and a small share of the light inside the
+// body (thin edges, light from behind). Here the body is lit at its surface: the lights' direct light,
+// shadowed and wrapped a little past the terminator, the lamps', and the room's light darkened by the
+// folds; all of it through the glaze (what the glaze reflects does not reach the body). The glaze's
+// reflections are hidden where the shape stands in the way along the mirrored direction (one march a
+// pixel, a cone as wide as the glaze's haze).
+fn ceramic(p: vec3f, n: vec3f, rd: vec3f, direct: Direct, lampLight: Direct, cover: f32) -> vec4f {
+  let ao = occlusion(p, n);
+  let ne = n.x * s.env0.xyz + n.y * s.env1.xyz + n.z * s.env2.xyz;
+  let c = clamp(-dot(rd, n), 0.0, 1.0);
+  let F = s.cer.z + (1.0 - s.cer.z) * pow(1.0 - c, 5.0);
+  let light = direct.lit * 0.31830989 + lampLight.lit + nineAt(ne) * ao;
+  let add = s.base.rgb * light * ((1.0 - F) * s.k.x * cover);
+  let r = reflect(rd, n);
+  let vis = shadowTo(p, n, r, s.cer.w, 1e9, walk(rnd()));
+  // (the room's reflection is also dimmed a little by the folds, which the march's cone does not see)
+  let keepK = mix(1.0, vis * mix(1.0, ao, 0.5), cover);
+  if (s.k0.w > 1.5) { return vec4f(0.0, 0.0, 0.0, keepK); }
   if (s.k0.w > 0.5) { return vec4f(add, 0.0); }
   return vec4f(add, keepK);
 }

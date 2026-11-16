@@ -48,6 +48,8 @@ pub enum Kind {
     None,
     Clay,
     Milky,
+    /// a milky body made a ceramic (`ceramic`): lit at its surface here, under its glaze
+    Ceramic,
 }
 
 /// What the tracer state calls for: clay (of one scene, whatever lies on it), or a milky body of the
@@ -55,7 +57,7 @@ pub enum Kind {
 pub fn wanted(mat: &gf_core::material::Variant, clay: bool) -> Kind {
     if off() { return Kind::None; }
     if clay { return Kind::Clay; }
-    if mat.bodies == 0 && mat.sss && !mat.metal && !mat.hollow { return Kind::Milky; }
+    if mat.bodies == 0 && mat.sss && !mat.metal && !mat.hollow { return if mat.ceramic { Kind::Ceramic } else { Kind::Milky }; }
     Kind::None
 }
 
@@ -106,6 +108,8 @@ pub struct SurfU {
     pub k: [f32; 4],
     pub clay: [f32; 4],
     pub lights: [SLight; MAX_LIGHTS],
+    pub cer: [f32; 4],
+    pub nine: [[f32; 4]; 9],
 }
 
 /// What the engine tells the pass about the material and the lights (the view is added each frame).
@@ -117,6 +121,11 @@ pub struct Lit {
     /// tracer's clay did before, now on the room and the direct light together); zero for other materials
     pub clay: [f32; 4],
     pub lights: [SLight; MAX_LIGHTS],
+    /// a ceramic: x 1 = on, y wrap past the terminator, z the glaze's reflectance head on, w the cone its
+    /// reflections are hidden by (zero for other materials)
+    pub cer: [f32; 4],
+    /// a ceramic: the room's light without the lights, nine terms as `env::sh_terms(.., SH_MATTE)` gives
+    pub nine: [[f32; 4]; 9],
 }
 
 /// The lights of a rig as the shader takes them: the direction to each one's middle and the two across
@@ -173,7 +182,33 @@ pub fn lights_sh(state: &State, gain: f64) -> Sh9 {
 pub fn milky(state: &State, lit: bool, body: [f64; 3]) -> Lit {
     let gain = state.p.light_gain;
     let (lights, n) = if lit { lights_of(&state.rig().lights, |c| c.map(|x| x * gain)) } else { ([SLight::zeroed(); MAX_LIGHTS], 0) };
-    Lit { base: [body[0] as f32, body[1] as f32, body[2] as f32, n as f32], k: [MILKY_DIRECT, MILKY_SHADOW, MILKY_FOLDS, 0.0], clay: [0.0; 4], lights }
+    Lit { base: [body[0] as f32, body[1] as f32, body[2] as f32, n as f32], k: [MILKY_DIRECT, MILKY_SHADOW, MILKY_FOLDS, 0.0], clay: [0.0; 4], lights, cer: [0.0; 4], nine: [[0.0; 4]; 9] }
+}
+
+/// A glaze's reflectance head on (index about 1.5).
+const GLAZE_F0: f32 = 0.04;
+/// How far a ceramic's diffuse light wraps past the terminator: a little for an opaque body, more the
+/// more of its inner light shows (light scattered under the surface carries round the edge of a shadow).
+const WRAP_MIN: f64 = 0.06;
+const WRAP_THROUGH: f64 = 0.35;
+
+/// The rig's lights for a ceramic body, as they are (made `gain` times as bright, the units its light
+/// volume and the room's nine terms are in), its body's colour, the share of its inner light the tracer
+/// keeps (the rest is the body's surface light, given here), the glaze's haze, and the room's nine terms
+/// (`room`, the lighting less the lights).
+pub fn ceramic(state: &State, lit: bool, body: [f64; 3], through: f64, haze: f64, room: &Sh9) -> Lit {
+    let gain = state.p.light_gain;
+    let (lights, n) = if lit { lights_of(&state.rig().lights, |c| c.map(|x| x * gain)) } else { ([SLight::zeroed(); MAX_LIGHTS], 0) };
+    let through = through.clamp(0.0, 1.0);
+    let wrap = WRAP_MIN + WRAP_THROUGH * through;
+    Lit {
+        base: [body[0] as f32, body[1] as f32, body[2] as f32, n as f32],
+        k: [(1.0 - through) as f32, 0.0, 0.0, 0.0],
+        clay: [0.0; 4],
+        lights,
+        cer: [1.0, wrap as f32, GLAZE_F0, (0.03 + haze.clamp(0.0, 0.6)) as f32],
+        nine: env::sh_terms(room, env::SH_MATTE),
+    }
 }
 
 pub struct Surface {
@@ -264,6 +299,8 @@ impl Surface {
             k: [lit.k[0], lit.k[1], lit.k[2], if near { 1.0 } else { 0.0 }],
             clay: lit.clay,
             lights: lit.lights,
+            cer: lit.cer,
+            nine: lit.nine,
         };
         gpu.queue.write_buffer(&self.u, 0, bytemuck::bytes_of(&su));
         enc.copy_texture_to_texture(

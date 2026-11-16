@@ -209,6 +209,9 @@ pub struct Variant {
     pub wear: bool,
     /// lamps stand in the scene: a tracer of the material kind is wanted even for plain glass (lamps.rs)
     pub near: bool,
+    /// a ceramic (`ceramic`): a milky body lit at its surface by the surface pass (the tracer is the
+    /// milky one; only the share of its light inside differs, by numbers)
+    pub ceramic: bool,
 }
 
 impl Variant {
@@ -242,6 +245,7 @@ impl Variant {
             inner: crate::inner::Parts::of(p, !metal && !hollow && !walk && (biref || p.grin == 0.0)),
             wear: p.brush > 0.0 || p.mottle > 0.0 || (p.age > 0.0 && marks(p).iter().any(|v| *v > 0.0)),
             near: false,
+            ceramic: sss && !walk && p.ceramic > 0.5,
         };
         // (light that wanders is followed once, whatever its colour; and nothing bends in a thin wall)
         Self { mono: !v.plain() && !metal && (p.disp == 0.0 || walk || hollow), ..v }
@@ -678,8 +682,17 @@ pub fn uniforms(p: &Settings, scale: f64) -> [f32; MU_FLOATS] {
     let mk = marks(p);
     for (i, at) in MU_MARKS.iter().enumerate() { u[*at] = (mk[i] * p.age.max(0.0)) as f32; }
     for (i, at) in MU_CAVITY.iter().enumerate() { u[*at] = [p.cavity_r, p.cavity_g, p.cavity_b][i].clamp(0.0, 1.0) as f32; }
+    // a ceramic: the glaze's haze, and 1 + the share of the light inside its body that is kept (0: not a
+    // ceramic, all of it kept) (trace_material.wgsl: shadeM, wearAt)
+    let cer = p.sss > 0.0 && p.sss_walk < 0.5 && p.metal < 0.5 && p.hollow < 0.5 && p.ceramic > 0.5;
+    u[MU_CERAMIC] = if cer { p.glaze_haze.clamp(0.0, 0.6) as f32 } else { 0.0 };
+    u[MU_CERAMIC + 4] = if cer { 1.0 + p.ceramic_through.clamp(0.0, 1.0) as f32 } else { 0.0 };
     u
 }
+
+/// Where a ceramic's glaze haze rides (mu.tab[30].w); 1 + the share of its body's inner light kept rides
+/// four numbers on (mu.tab[31].w).
+pub const MU_CERAMIC: usize = 43 * 4 + 3;
 
 /// The surface's marks in the order the tracer reads them: edge wear, cavity, scratches, swirls, peel,
 /// smudges, dust (each 0 to 1).
@@ -814,7 +827,7 @@ pub const RESET: &[(&str, f64)] = &[
     ("density", 1.0), ("fit", 0.0), ("spectrum", 0.0), ("rough", 0.0), ("roughRef", 0.0),
     ("film", 0.0), ("filmIor", 1.33), ("filmVar", 0.0), ("filmScale", 1.0), ("filmFlow", 0.0), ("filmDrain", 0.0), ("filmSky", 0.5),
     ("coat", 0.0), ("coatIor", 1.5), ("metal", 0.0), ("hollow", 0.0), ("bodyR", 1.0), ("bodyG", 1.0), ("bodyB", 1.0),
-    ("sss", 0.0), ("sssDepth", 0.2), ("sssWalk", 0.0), ("sssSpread", 0.0), ("sssHue", 0.0), ("sssForward", 0.0), ("sssThrough", 0.0), ("sharp", 1.0), ("age", 1.0), ("edgeWear", 0.0), ("cavity", 0.0), ("cavityR", 0.35), ("cavityG", 0.27), ("cavityB", 0.2), ("scratches", 0.0), ("swirls", 0.0), ("peel", 0.0), ("smudges", 0.0), ("dust", 0.0), ("brush", 0.0), ("mottle", 0.0),
+    ("sss", 0.0), ("sssDepth", 0.2), ("sssWalk", 0.0), ("sssSpread", 0.0), ("sssHue", 0.0), ("sssForward", 0.0), ("sssThrough", 0.0), ("ceramic", 0.0), ("ceramicThrough", 0.15), ("glazeHaze", 0.0), ("sharp", 1.0), ("age", 1.0), ("edgeWear", 0.0), ("cavity", 0.0), ("cavityR", 0.35), ("cavityG", 0.27), ("cavityB", 0.2), ("scratches", 0.0), ("swirls", 0.0), ("peel", 0.0), ("smudges", 0.0), ("dust", 0.0), ("brush", 0.0), ("mottle", 0.0),
     ("bubbles", 0.0), ("bubbleSize", 0.03), ("bubbleEven", 0.5), ("bubbleShape", 0.0), ("bubbleSeed", 1.0),
     ("glow", 0.0), ("glowR", 1.0), ("glowG", 0.32), ("glowB", 0.08), ("glowCore", 0.5),
     ("grin", 0.0), ("grinDepth", 0.02), ("biref", 0.0), ("birefAz", 0.0), ("birefEl", 90.0),
@@ -916,7 +929,7 @@ pub static NAMED: &[Named] = &[
     named!("beetle", "beetle shell", "surface", "A dark body under a film of high index: green that turns to blue and violet towards the outline. (One film stands in for the many thin layers of a real beetle's shell.)", [("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.02), ("bodyR", 0.02), ("bodyG", 0.03), ("bodyB", 0.02), ("film", 330.0), ("filmIor", 2.0), ("filmVar", 0.05), ("filmScale", 0.6), ("filmSky", 0.9), ("coat", 0.0)], absorb CLEAR),
     named!("carnival", "carnival glass", "surface", "Iridescent sprayed glass: a varying film over amber.", [("film", 520.0), ("filmIor", 2.0), ("filmVar", 0.35), ("filmScale", 2.4), ("spectrum", sp(12)), ("density", 0.6)]),
     // ---- translucent
-    named!("milk", "milk glass", "translucent", "White opal glass: light goes in and wanders out again; thin edges let some through.", [("sss", 1.0), ("sssDepth", 0.12), ("bodyR", 0.995), ("bodyG", 0.995), ("bodyB", 0.99), ("disp", 0.0), ("sssSpread", 0.6), ("peel", 0.2), ("smudges", 0.2), ("dust", 0.12)], absorb CLEAR),
+    named!("milk", "milk glass", "translucent", "White opal glass: a pale body lit at its surface under its own glossy skin, translucent where it is thin and when lit from behind.", [("sss", 1.0), ("sssDepth", 0.12), ("bodyR", 0.95), ("bodyG", 0.95), ("bodyB", 0.94), ("disp", 0.0), ("sssSpread", 0.6), ("ceramic", 1.0), ("ceramicThrough", 0.4), ("glazeHaze", 0.004), ("peel", 0.2), ("smudges", 0.2), ("dust", 0.12)], absorb CLEAR),
     named!("opal", "opalescent glass", "translucent", "Half clear, half milky, bluish where light scatters.", [("sss", 0.3), ("sssDepth", 0.5), ("bodyR", 0.78), ("bodyG", 0.88), ("bodyB", 1.0)], absorb [0.02, 0.06, 0.16]),
     named!("jade", "jade", "translucent", "Polished green jade: bright and pale where it is thin, deep green in the bulk, glowing when lit from behind.", [("ior", 1.61), ("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.055), ("bodyR", 0.33), ("bodyG", 0.53), ("bodyB", 0.28), ("rough", 0.0), ("mottle", 0.6), ("sssSpread", 0.35), ("edgeWear", 0.3), ("cavity", 0.3), ("cavityR", 0.45), ("cavityG", 0.45), ("cavityB", 0.4), ("dust", 0.1)], absorb CLEAR),
     named!("wax", "wax", "translucent", "Candle wax: soft, warm, glowing where it is thin.", [("ior", 1.44), ("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.2), ("bodyR", 0.97), ("bodyG", 0.80), ("bodyB", 0.52), ("rough", 0.35), ("mottle", 0.25), ("sssSpread", 0.3), ("smudges", 0.5), ("sssHue", 1.0), ("sssForward", 0.65), ("sssThrough", 1.0)], absorb CLEAR),
@@ -924,7 +937,7 @@ pub static NAMED: &[Named] = &[
     named!("rosequartz", "rose quartz", "translucent", "Cloudy pink quartz.", [("ior", 1.546), ("disp", 0.0171), ("sss", 0.5), ("sssDepth", 0.35), ("bodyR", 0.98), ("bodyG", 0.74), ("bodyB", 0.78)], absorb [0.02, 0.10, 0.07]),
     named!("honey", "honey", "translucent", "Thick, golden and slightly cloudy.", [("ior", 1.49), ("disp", 0.01), ("sss", 0.2), ("sssDepth", 0.6), ("bodyR", 0.98), ("bodyG", 0.72), ("bodyB", 0.22)], absorb [0.10, 0.75, 3.2]),
     // ---- ceramic
-    named!("porcelain", "glazed porcelain", "ceramic", "A dense white body under a clear glaze.", [("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.06), ("bodyR", 0.99), ("bodyG", 0.99), ("bodyB", 0.985), ("rough", 0.5), ("coat", 1.0), ("coatIor", 1.5), ("sssSpread", 0.15), ("peel", 0.5), ("dust", 0.15), ("cavity", 0.2), ("cavityR", 0.5), ("cavityG", 0.48), ("cavityB", 0.45)], absorb CLEAR),
+    named!("porcelain", "glazed porcelain", "ceramic", "A dense white body under a clear glossy glaze, a little translucent where it is thin.", [("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.05), ("bodyR", 0.93), ("bodyG", 0.93), ("bodyB", 0.91), ("coat", 1.0), ("coatIor", 1.52), ("ceramic", 1.0), ("ceramicThrough", 0.15), ("glazeHaze", 0.01), ("sssSpread", 0.15), ("peel", 0.35), ("dust", 0.1), ("cavity", 0.15), ("cavityR", 0.5), ("cavityG", 0.48), ("cavityB", 0.45)], absorb CLEAR),
     named!("celadon", "celadon", "ceramic", "Grey-green glazed stoneware.", [("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.05), ("bodyR", 0.60), ("bodyG", 0.77), ("bodyB", 0.66), ("rough", 0.5), ("coat", 1.0), ("coatIor", 1.5), ("mottle", 0.2), ("peel", 0.5), ("dust", 0.15), ("cavity", 0.2), ("cavityR", 0.5), ("cavityG", 0.48), ("cavityB", 0.45)], absorb CLEAR),
     named!("pearl", "pearl", "ceramic", "A milky body under a clear coat that shimmers with thin-film colour.", [("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.05), ("bodyR", 0.96), ("bodyG", 0.93), ("bodyB", 0.89), ("rough", 0.3), ("coat", 1.0), ("coatIor", 1.53), ("film", 440.0), ("filmIor", 1.68), ("filmVar", 0.22), ("filmScale", 2.5)], absorb CLEAR),
     named!("lacquer", "black lacquer", "ceramic", "A black body under a deep clear coat.", [("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.02), ("bodyR", 0.012), ("bodyG", 0.012), ("bodyB", 0.014), ("rough", 0.6), ("coat", 1.0), ("coatIor", 1.55), ("peel", 0.4), ("swirls", 0.45), ("dust", 0.15), ("smudges", 0.2)], absorb CLEAR),
@@ -979,6 +992,8 @@ pub static NAMED: &[Named] = &[
     named!("catseye", "cat's-eye quartz", "quartz", "Translucent quartz with fine straight fibres: one sharp line of light across the fibres that glides as the stone moves.", [("ior", 1.544), ("disp", 0.0), ("sss", 0.45), ("sssDepth", 0.2), ("bodyR", 0.78), ("bodyG", 0.82), ("bodyB", 0.72), ("silk", 0.8), ("silkSoft", 0.12)], absorb [0.08, 0.05, 0.1]),
     named!("piezoquartz", "quartz under pressure", "quartz", "Rock crystal cracking under strain: a faint warm glow, brightest where the cracks are still running (piezoluminescence). Animate crack growth and the glow together.", [("ior", 1.5460), ("disp", 0.0171), ("cracks", 0.35), ("crackSize", 0.4), ("crackOpen", 0.85), ("crackGrow", 0.7), ("piezo", 0.6), ("piezoColour", 0.5), ("crackSeed", 4.0)], absorb CLEAR),
     named!("twotone", "violet to cyan glass", "coloured glass", "Glass whose tint shades from violet below to cyan above.", [("grad", 1.0), ("gradMode", 0.0), ("gradEl", 90.0), ("gradR", 0.55), ("gradG", 0.85), ("gradB", 1.0), ("gradSoft", 0.6)], absorb [0.29, 0.51, 0.05]),
+    named!("stoneware", "glazed stoneware", "ceramic", "A warm grey-brown stoneware body under a glossy clear glaze: opaque, lit at its surface.", [("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.03), ("bodyR", 0.34), ("bodyG", 0.31), ("bodyB", 0.27), ("coat", 1.0), ("coatIor", 1.53), ("ceramic", 1.0), ("ceramicThrough", 0.03), ("glazeHaze", 0.025), ("mottle", 0.35), ("peel", 0.5), ("dust", 0.1), ("cavity", 0.3), ("cavityR", 0.3), ("cavityG", 0.24), ("cavityB", 0.18)], absorb CLEAR),
+    named!("bisque", "bisque porcelain", "ceramic", "Unglazed porcelain fired once: a matte, chalky white body with only a faint soft sheen.", [("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.04), ("bodyR", 0.92), ("bodyG", 0.91), ("bodyB", 0.88), ("ceramic", 1.0), ("ceramicThrough", 0.1), ("glazeHaze", 0.6), ("dust", 0.15), ("cavity", 0.2), ("cavityR", 0.5), ("cavityG", 0.48), ("cavityB", 0.45)], absorb CLEAR),
 ];
 
 /// The position of a named material by its id.
@@ -1080,6 +1095,9 @@ pub static CONTROLS: &[Control] = &[
     ctl("sssForward", "scatters forward", Slider, 0.0, 0.95, 0.01, true, Lab("inside"), "How much the body scatters light onwards rather than every way, as wax does: light gets further in and through thin parts, taking on more of the body's colour on the way (thin wax lit from behind glows amber)."),
     ctl("sssThrough", "colour through it", Slider, 0.0, 1.0, 0.01, true, Lab("inside"), "How far the light that comes straight through the body takes on its colour, deeper the further it travels: towards 1 thin parts and edges lit from behind glow in the body's colour, as a candle glows amber where it is thin."),
     ctl("sssHue", "colour under the skin", Slider, 0.0, 1.0, 0.01, true, Lab("inside"), "How far the light scattered inside takes on the body's colour at every depth, not only deep in it: towards 1 a dyed body glows its colour just under the surface and through thin parts, as wax does."),
+    ctl("ceramic", "ceramic", Switch, 0.0, 1.0, 1.0, false, Lab("inside"), "Treat the milky body as fired ceramic: lit at its surface, with shadows and a soft terminator, under the clear coat as its glaze, and only a little of the light inside it showing at thin edges and when lit from behind. The picture is not exposed for it."),
+    ctl("ceramicThrough", "light through it", Slider, 0.0, 1.0, 0.01, true, Lab("inside"), "How much of the light inside a ceramic's body shows: 0 opaque stoneware, about 0.15 porcelain, more for milk glass."),
+    ctl("glazeHaze", "glaze haze", Slider, 0.0, 0.6, 0.005, true, Lab("surface"), "How far a ceramic's glaze softens what it mirrors: 0 a mirror-bright glaze, a few hundredths a semi-gloss one."),
     ctl("meter", "expose for the body", Switch, 0.0, 1.0, 1.0, false, Lab("inside"), "Expose the picture for a milky body, as a photographer exposes for the subject: a white surface facing the brightest light comes out white. The lights glass is lit by are made to be seen in it, and a body that only gathers them would look grey."),
     ctl("sssDetail", "light detail", Slider, 96.0, 256.0, 32.0, false, Lab("inside"), "How fine the volume is in which a milky body's light is worked out (cells along a side). Finer follows thin pieces better; it is worked out again whenever the lights or the shape move, and costs more the finer it is."),
     ctl("sharp", "sharp reflections", Switch, 0.0, 1.0, 1.0, false, Lab("surface"), "A metal, a milky body or a glaze mirrors an environment picture as sharp as it is, as a photograph shows it; off, it mirrors the picture softened as the glass sees it."),
@@ -1172,7 +1190,9 @@ pub fn applies(name: &str, p: &Settings) -> bool {
         "bodyR" | "bodyG" | "bodyB" => metal || v.sss,
         "sssDepth" | "sssWalk" => v.sss,
         "sssSpread" | "sssHue" | "sssForward" | "sssThrough" => v.sss && !v.walk,
-        "meter" => v.sss,
+        "meter" => v.sss && !v.ceramic,
+        "ceramic" => v.sss && !v.walk,
+        "ceramicThrough" | "glazeHaze" => v.ceramic,
         "sssDetail" => v.sss && !v.walk,
         "filmIor" | "filmVar" | "filmScale" => v.film,
         "filmFlow" => v.film && p.film_var > 0.0,

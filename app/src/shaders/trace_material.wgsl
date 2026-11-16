@@ -280,7 +280,7 @@ fn scratchIn(c: vec3i, q: vec3f, nq: vec3f, size: f32, px: f32, keepIt: f32) -> 
 fn wearAt(p: vec3f, n: vec3f) -> Wear {
   var w: Wear;
   w.n = n;
-  w.sig = 0.0;
+  w.sig = mu.tab[30].w;                     // (a ceramic's glaze haze: 0 for everything else)
   w.keep = 1.0;
   w.b = vec3f(0.0);
   w.aniso = 0.0;
@@ -1402,7 +1402,9 @@ fn shadeM(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
   let envB = wearSee(rd, wr, p, cosi) * (wr.keep * wr.tint);
 //#else
 //#if SSS
-  let envB = sharpEnv(reflect(rd, n), p, n, cosi);
+  // (a ceramic's glaze softens what it mirrors by its haze, mu.tab[30].w)
+  var envB = sharpEnv(reflect(rd, n), p, n, cosi);
+  if (mu.tab[30].w > 0.0) { envB = envL(reflect(rd, n), mu.tab[30].w); }
 //#else
   let envB = env(reflect(rd, n));
 //#endif
@@ -1485,6 +1487,11 @@ fn shadeM(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
   // (an exposure raised for a milky body's own light is not to brighten the mirror on its surface: a
   // polished stone reflects its surroundings faintly, as its index has it)
   acc *= surfaceK();
+//#if SSS
+  // A ceramic (mu.tab[31].w = 1 + the share kept): its body is lit at its surface by the surface pass
+  // (surface.rs); of the light inside it only a share is kept, for thin edges and light from behind.
+  let accTop = acc;
+//#endif
 
 //#if MONO
   // No dispersion: every wavelength bends alike, so one path is followed and stands for them all.
@@ -1840,6 +1847,9 @@ fn shadeM(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
   }
 //#if ROUGH
   frSeen(n, rd, xi, cosi, W);               // (what the stage that blurs the inside of rough glass is told about this surface)
+//#endif
+//#if SSS
+  if (mu.tab[31].w > 0.0) { acc = accTop + (acc - accTop) * (mu.tab[31].w - 1.0); }
 //#endif
   return acc / (wsum * f32(MODES));
 }

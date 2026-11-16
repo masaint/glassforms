@@ -254,6 +254,14 @@ settings! {
     /// deeper the further it goes (0 = not at all; towards 1, as thin wax lit from behind glows amber
     /// and its edges orange)
     sss_through, "sssThrough", 0.0;
+    /// 1 = a ceramic: a mostly opaque body lit at its surface (diffuse light with shadows, the surface
+    /// pass) under the clear coat as a glaze, keeping only `ceramicThrough` of the light inside the body
+    /// (thin edges, light from behind); not exposed for by `meter`
+    ceramic, "ceramic", 0.0;
+    /// the share of the light inside a ceramic's body that is kept (0 = opaque, 1 = all of it, as milky)
+    ceramic_through, "ceramicThrough", 0.15;
+    /// how far a ceramic's glaze softens what it mirrors, radians (0 = a mirror; semi-gloss about 0.05)
+    glaze_haze, "glazeHaze", 0.0;
     /// 1 = with a milky body the picture is exposed for it, as a photographer exposes for the subject: a
     /// white matte surface facing the brightest way comes to white (never darker than set; glass is not
     /// affected, as it shows the lights themselves)
