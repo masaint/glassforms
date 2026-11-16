@@ -11,6 +11,7 @@ pub mod denoise;
 pub mod dof;
 pub mod engine;
 pub mod frost;
+pub mod glare;
 pub mod gpu;
 pub mod hdri;
 pub mod mesh_bake;

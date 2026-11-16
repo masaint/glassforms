@@ -47,6 +47,9 @@ settings! {
     nw, "nw", 3.0;
     exposure, "exposure", 1.0;
     bloom, "bloom", 0.25;
+    /// what the bloom is: 0 = the lens's glare (its diffraction and veil, mixed in so that light is kept:
+    /// app/src/glare.rs), 1 = the old soft pyramid added on top
+    bloom_kind, "bloomKind", 0.0;
     vignette, "vignette", 0.5;
     grain, "grain", 0.004;
     /// how far the old picture may stray from the new frame's neighbourhood (in standard deviations)

@@ -267,6 +267,9 @@ pub struct FinalU {
     pub view: [f32; 4],
     /// the tone curve and the grade (gf_core::stage::Grade::uniforms)
     pub grade: [[f32; 4]; 2],
+    /// rgb: the share of its light the sharp picture keeps (the lens's glare is mixed in; the old bloom
+    /// is added, and keeps 1)
+    pub glare: [f32; 4],
     /// the lens, and its colour fringing and fall-off of light (read only by the final pass built for them)
     pub lens: [[f32; 4]; 4],
     pub fx: [f32; 4],
@@ -294,6 +297,8 @@ pub struct Look {
     pub grade: [[f32; 4]; 2],
     /// the lens, for the passes after the tracer
     pub lens: crate::camera::Lens,
+    /// the lens as its glare needs it, and which bloom is drawn
+    pub glare: crate::glare::GlareLens,
 }
 
 /// What the antialiasing needs to know of the frame before.
@@ -335,10 +340,12 @@ struct Targets {
     g_down0: [wgpu::BindGroup; 3],
     mips: Vec<Mip>,
     g_final: [wgpu::BindGroup; 3],
+    /// the same, reading the lens's glare in place of the bloom pyramid
+    g_final_glare: [wgpu::BindGroup; 3],
     final_tex: wgpu::Texture,
     final_view: wgpu::TextureView,
     /// the screen again in 16-bit floats, with no 8-bit dither, for video with more than 8 bits (when asked for)
-    deep: Option<(wgpu::Texture, wgpu::TextureView, [wgpu::BindGroup; 3])>,
+    deep: Option<(wgpu::Texture, wgpu::TextureView, [wgpu::BindGroup; 3], [wgpu::BindGroup; 3])>,
 }
 
 pub struct Renderer {
@@ -436,6 +443,9 @@ pub struct Renderer {
     shown: usize,
     /// the camera's own pipelines, and whether the tracer in use traces its first ray through any lens
     pub cam: crate::camera::Pipes,
+    /// the lens's glare (glare.rs), and whether the last frame drew it (rather than the bloom pyramid)
+    glare: crate::glare::Glare,
+    glared: bool,
 }
 
 /// The tone map of post.wgsl's final pass, done here in 64-bit arithmetic for a 16-bit still: the picture
@@ -452,7 +462,9 @@ pub fn tone_map16(hdr: &[f32], bloom: &(u32, u32, Vec<f32>), w: u32, h: u32, p: 
         levels += 1;
         if mw < 8 || mh < 8 { break; }
     }
-    let amt = p.bloom / levels as f64;
+    // the lens's glare is mixed in (the sharp picture keeping 1 - E of its light), the old bloom added
+    let glare = crate::glare::GlareLens::of(p);
+    let (amt, keep) = if glare.pyramid() { (p.bloom / levels as f64, [1.0f32; 3]) } else { (1.0, crate::glare::keep(&glare, w, h)) };
     let texel = |x: usize, y: usize, c: usize| b[(y.min(bh - 1) * bw + x.min(bw - 1)) * 4 + c] as f64;
     // the tone curve and the grade as they are set (with nothing set: the ACES curve, as ever)
     let grade = gf_core::stage::Grade::of(p);
@@ -473,7 +485,7 @@ pub fn tone_map16(hdr: &[f32], bloom: &(u32, u32, Vec<f32>), w: u32, h: u32, p: 
                 let bl = (texel(x0, y0, c) * (1.0 - tx) + texel(x0 + 1, y0, c) * tx) * (1.0 - ty) + (texel(x0, y0 + 1, c) * (1.0 - tx) + texel(x0 + 1, y0 + 1, c) * tx) * ty;
                 let at = y * w as usize + x;
                 let (light, kept) = lens.as_ref().map_or((hdr[at * 4 + c], 1.0), |l| (l.0[at * 3 + c], l.1[at] as f64));
-                exposed[c] = (light as f64 + bl * amt) * vig * kept * p.exposure;
+                exposed[c] = (light as f64 * keep[c] as f64 + bl * amt) * vig * kept * p.exposure;
             }
             for lin in grade.apply(exposed) {
                 let enc = if lin < 0.0031308 { 12.92 * lin } else { 1.055 * lin.powf(1.0 / 2.4) - 0.055 };
@@ -609,7 +621,7 @@ impl Renderer {
             u_accum: gpu.uniform_buffer("accumulate", std::mem::size_of::<AccumU>() as u64),
             u_final: gpu.uniform_buffer("final", std::mem::size_of::<FinalU>() as u64),
             g_trace: None, t: None, acc_idx: 0, accum_n: 0, frame_no: 0, jitter_n: 0, was_taa: false, prev: None, last_final: None, profile: false,
-            dof: Dof::new(gpu), focused: false, cam: Default::default(),
+            dof: Dof::new(gpu), focused: false, cam: Default::default(), glare: crate::glare::Glare::new(gpu), glared: false,
             frost: Frost::new(gpu),
             dn: Denoise::new(gpu), shown: 0,
         }
@@ -1008,36 +1020,28 @@ impl Renderer {
         }
         let final_tex = gpu.target("screen", w, h, LDR, &[wgpu::TextureFormat::Rgba8UnormSrgb]);
         let final_view = view(&final_tex);
-        let g_final = [0, 1, 2].map(|i| {
+        self.glare.resize(tw, th, [source(0), source(1), source(2)]);
+        let glare_view = self.glare.view().expect("the glare has just been sized").clone();
+        let final_groups = |u: &wgpu::Buffer, bloom: &wgpu::TextureView| [0, 1, 2].map(|i| {
             gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("final"),
                 layout: &self.l_final,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 4, resource: self.u_final.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: u.as_entire_binding() },
                     tex_entry(5, source(i)),
-                    tex_entry(6, &views[0]),
+                    tex_entry(6, bloom),
                     wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::Sampler(&self.lin) },
                 ],
             })
         });
+        let g_final = final_groups(&self.u_final, &views[0]);
+        let g_final_glare = final_groups(&self.u_final, &glare_view);
         let deep = self.deep.then(|| {
             let tex = gpu.target("screen (deep)", w, h, HDR, &[]);
             let v = view(&tex);
-            let groups = [0, 1, 2].map(|i| {
-                gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("final (deep)"),
-                    layout: &self.l_final,
-                    entries: &[
-                        wgpu::BindGroupEntry { binding: 4, resource: self.u_final_deep.as_entire_binding() },
-                        tex_entry(5, source(i)),
-                        tex_entry(6, &views[0]),
-                        wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::Sampler(&self.lin) },
-                    ],
-                })
-            });
-            (tex, v, groups)
+            (tex, v, final_groups(&self.u_final_deep, &views[0]), final_groups(&self.u_final_deep, &glare_view))
         });
-        self.t = Some(Targets { w, h, tw, th, trace_view, accum, accum_view, g_accum, g_accum_rough, g_down0, mips, g_final, final_tex, final_view, deep });
+        self.t = Some(Targets { w, h, tw, th, trace_view, accum, accum_view, g_accum, g_accum_rough, g_down0, mips, g_final, g_final_glare, final_tex, final_view, deep });
         self.acc_idx = 0;
         self.shown = 0;
         self.accum_n = 0;
@@ -1162,11 +1166,16 @@ impl Renderer {
 
     /// `settled`: the picture did not move for this frame (the focus stage then takes more care).
     fn encode_post(&mut self, enc: &mut wgpu::CommandEncoder, tu: &TraceU, look: &Look, settled: bool) {
+        if self.t.is_none() { return; }
+        // the lens's glare, unless the old bloom is asked for: the share of light the sharp picture keeps
+        let glared = !look.glare.pyramid();
+        let keep = if glared { self.glare.keep_for(&look.glare) } else { [1.0; 3] };
         let Some(t) = self.t.as_ref() else { return };
         let fu = FinalU {
             res: [t.w as f32, t.h as f32],
             exposure: look.exposure,
-            bloom_amt: look.bloom / t.mips.len() as f32,
+            bloom_amt: if glared { 1.0 } else { look.bloom / t.mips.len() as f32 },
+            glare: [keep[0], keep[1], keep[2], 0.0],
             vignette: look.vignette,
             grain: look.grain,
             raw: look.raw,
@@ -1202,14 +1211,18 @@ impl Renderer {
         } else {
             self.shown
         };
+        self.glared = glared;
+        if glared {
+            self.glare.encode(enc, src, &look.glare);
+        }
         // bloom: walk down the chain, then back up adding each level
-        for (i, m) in t.mips.iter().enumerate() {
+        for (i, m) in t.mips.iter().enumerate().filter(|_| !glared) {
             let mut rp = pass(enc, &m.view, None, true);
             rp.set_pipeline(&self.p_down);
             rp.set_bind_group(0, if i == 0 { &t.g_down0[src] } else { &m.down }, &[]);
             rp.draw(0..3, 0..1);
         }
-        for i in (1..t.mips.len()).rev() {
+        for i in (1..t.mips.len()).rev().filter(|_| !glared) {
             let mut rp = pass(enc, &t.mips[i - 1].view, None, false);
             rp.set_pipeline(&self.p_up);
             rp.set_bind_group(0, t.mips[i].up.as_ref().unwrap(), &[]);
@@ -1219,10 +1232,11 @@ impl Renderer {
         {
             let mut rp = pass(enc, &t.final_view, None, true);
             rp.set_pipeline(if lens { self.cam.last(&self.gpu, POST_WGSL, &self.l_final, [LDR, HDR], false) } else { &self.p_final });
-            rp.set_bind_group(0, &t.g_final[src], &[]);
+            rp.set_bind_group(0, if glared { &t.g_final_glare[src] } else { &t.g_final[src] }, &[]);
             rp.draw(0..3, 0..1);
         }
-        if let Some((_, view, groups)) = &t.deep {
+        if let Some((_, view, groups, groups_glare)) = &t.deep {
+            let groups = if glared { groups_glare } else { groups };
             let mut rp = pass(enc, view, None, true);
             rp.set_pipeline(if lens { self.cam.last(&self.gpu, POST_WGSL, &self.l_final, [LDR, HDR], true) } else { &self.p_final_deep });
             rp.set_bind_group(0, &groups[src], &[]);
@@ -1233,7 +1247,7 @@ impl Renderer {
     /// What is on screen with 16 bits a channel and no 8-bit dither: RGBA, top row first. Needs `deep`.
     pub fn read_screen16(&self) -> R<(u32, u32, Vec<u16>)> {
         let t = self.t.as_ref().ok_or("nothing has been drawn yet")?;
-        let (tex, _, _) = t.deep.as_ref().ok_or("the 16-bit screen was not asked for")?;
+        let (tex, _, _, _) = t.deep.as_ref().ok_or("the 16-bit screen was not asked for")?;
         let bytes = self.gpu.read(tex, 0, 0, 0, t.w, t.h, 8)?;
         let halves: &[half::f16] = bytemuck::cast_slice(&bytes);
         Ok((t.w, t.h, halves.iter().map(|v| (v.to_f32().clamp(0.0, 1.0) * 65535.0 + 0.5) as u16).collect()))
@@ -1243,6 +1257,13 @@ impl Renderer {
     pub fn read_bloom(&self) -> R<(u32, u32, Vec<f32>)> {
         let t = self.t.as_ref().ok_or("nothing has been drawn yet")?;
         let m = &t.mips[0];
+        if self.glared {
+            let tex = self.glare.texture().ok_or("the glare has not been sized")?;
+            let (w, h) = (tex.width(), tex.height());
+            let bytes = self.gpu.read(tex, 0, 0, 0, w, h, 8)?;
+            let halves: &[half::f16] = bytemuck::cast_slice(&bytes);
+            return Ok((w, h, halves.iter().map(|v| v.to_f32()).collect()));
+        }
         let bytes = self.gpu.read(&m.tex, 0, 0, 0, m.w, m.h, 8)?;
         let halves: &[half::f16] = bytemuck::cast_slice(&bytes);
         Ok((m.w, m.h, halves.iter().map(|v| v.to_f32()).collect()))

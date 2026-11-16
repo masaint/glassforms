@@ -22,6 +22,7 @@ struct F {
   tone: vec4f,            // x: the tone curve (0 filmic, 1 neutral, 2 soft, 3 none);  y: contrast;  z: saturation;
                           // w: 1 = any of these, or the balance, is not as it always was
   balance: vec4f,         // rgb: what red, green and blue are multiplied by before the curve (white balance)
+  glare: vec4f,           // rgb: the share of its light the sharp picture keeps (1 with the old bloom, which is added)
 }
 
 @group(0) @binding(0) var<uniform> bl: Bl;
@@ -130,7 +131,7 @@ fn fs_final(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let e = t / length(vec3f(q * fu.view.y, 1.0)) - fu.view.x;
   let w = min(0.004 + fwidth(e), 0.03);
 
-  var c = s.rgb + textureSampleLevel(bloomTex, flin, uv, 0.0).rgb * fu.bloom_amt;
+  var c = s.rgb * fu.glare.rgb + textureSampleLevel(bloomTex, flin, uv, 0.0).rgb * fu.bloom_amt;
   let v = uv - 0.5;
   c *= 1.0 - fu.vignette * dot(v, v);
   if (fu.tone.w > 0.5) { c = graded(c * fu.exposure); } else { c = aces(c * fu.exposure); }

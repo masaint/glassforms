@@ -210,7 +210,7 @@ pub fn edge_light(r: f32, s: f32) -> f32 {
 pub fn post(src: &str) -> String {
     let s = append(src, "struct F {", "  lens: Cam,              // the lens (see the end of this text)\n  fx: vec4f,              // x: colour fringing, as the share by which the two ends of the spectrum are drawn larger and smaller   y: how much of its fall-off of light the lens keeps   z: how much its barrel cuts into its opening (cat's-eye)\n");
     let s = swap(&s, "  let e = t / length(vec3f(q * fu.view.y, 1.0)) - fu.view.x;\n", "  let e = lensDepth(q, t);\n");
-    let s = swap(&s, "  var c = s.rgb + textureSampleLevel(bloomTex, flin, uv, 0.0).rgb * fu.bloom_amt;\n", "  var c = lensFringe(s.rgb, q) + textureSampleLevel(bloomTex, flin, uv, 0.0).rgb * fu.bloom_amt;\n");
+    let s = swap(&s, "  var c = s.rgb * fu.glare.rgb + textureSampleLevel(bloomTex, flin, uv, 0.0).rgb * fu.bloom_amt;\n", "  var c = lensFringe(s.rgb, q) * fu.glare.rgb + textureSampleLevel(bloomTex, flin, uv, 0.0).rgb * fu.bloom_amt;\n");
     let s = swap(&s, "  c *= 1.0 - fu.vignette * dot(v, v);\n", "  c *= 1.0 - fu.vignette * dot(v, v);\n  c *= lensLight(q);\n");
     format!("{s}{FINAL_WGSL}{LENS_WGSL}")
 }

@@ -1020,6 +1020,7 @@ impl Engine {
             focus: self.focus(),
             grade: gf_core::stage::Grade::of(p).uniforms(),
             lens: crate::camera::Lens::of(p),
+            glare: crate::glare::GlareLens::of(p),
         }
     }
 
