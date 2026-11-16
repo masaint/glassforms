@@ -888,6 +888,82 @@ impl Cut {
 }
 
 // ---------------------------------------------------------------------------------------------------
+// The stone as the tracer meets it from inside
+
+/// The most planes `inside` gives (the tracer's table of them has this many places).
+pub const MAX_PLANES: usize = 124;
+
+/// What the tracer needs to find, without marching, where a ray inside a stone leaves it: every facet's
+/// plane in the object's own frame, and the band of heights within which the rim's curved wall can be
+/// met. A stone is convex, so a ray inside it leaves through the first plane it reaches, unless the
+/// rim cuts it off first; that can happen only where the ray ends within the rim's band of heights,
+/// because outside the rim the facets' planes only close in further above and below it.
+pub struct Inside {
+    /// (n, h): the half space n·p <= h, n of length 1 pointing out; each plane once
+    pub planes: Vec<[f64; 4]>,
+    /// lowest and highest point of the rim's wall (an empty band, low above high, when there is none)
+    pub band: (f64, f64),
+}
+
+/// The stone of the gem preset `id` at these slider values, swollen by `puff` as the baked field is,
+/// or None if `id` is not a gem or it has too many planes.
+pub fn inside(id: &str, values: &[f64], puff: f64) -> Option<Inside> {
+    let gem = gems().into_iter().find(|g| g.id == id)?;
+    let v: Vec<f64> = gem.params.iter().enumerate().map(|(i, d)| values.get(i).copied().unwrap_or(d.value)).collect();
+    let stone = gem.cut.stone::<f64>(&v);
+    // the field is the stone moved down by its lift (d(p) measures p + lift up) and swollen by puff
+    let mut planes: Vec<[f64; 4]> = Vec::new();
+    for f in &stone.facets {
+        let n = f.plane.n;
+        let p = [n[0], n[1], n[2], f.plane.h - stone.lift * n[1] + puff];
+        if !planes.iter().any(|q| (0..4).all(|c| (q[c] - p[c]).abs() < 1e-7)) { planes.push(p); }
+    }
+    if planes.len() > MAX_PLANES { return None; }
+    let mut band = (f64::INFINITY, f64::NEG_INFINITY);
+    if !matches!(stone.rim, Rim::None) {
+        // round the outline: where the wall stands at each bearing, then the heights the planes leave it
+        for i in 0..720 {
+            let a = i as f64 / 720.0 * 2.0 * PI;
+            let (c, s) = (a.cos(), a.sin());
+            let lo = match stone.rim {
+                // (a squircle's wall in closed form: its distance takes powers, slow to search with)
+                Rim::Squircle { a, b, e } => ((c.abs() / a).powf(e) + (s.abs() / b).powf(e)).powf(-1.0 / e),
+                _ => {
+                    let (mut lo, mut hi) = (0.0, 4.0);
+                    for _ in 0..18 {
+                        let r = 0.5 * (lo + hi);
+                        if stone.rim_dist(r * c, r * s) < 0.0 { lo = r } else { hi = r }
+                    }
+                    lo
+                }
+            };
+            let (x, z) = (lo * c, lo * s);
+            let (mut y0, mut y1) = (f64::NEG_INFINITY, f64::INFINITY);
+            for p in &planes {
+                let rest = p[3] - p[0] * x - p[2] * z;
+                if p[1] > 1e-9 { y1 = y1.min(rest / p[1]) } else if p[1] < -1e-9 { y0 = y0.max(rest / p[1]) } else if rest < 0.0 { y1 = f64::NEG_INFINITY }
+            }
+            if y0 <= y1 { band = (band.0.min(y0), band.1.max(y1)); }
+        }
+        // (the bearings are half a degree apart, the wall found to within 2e-5: a little more either way
+        // covers what falls between)
+        if band.0 <= band.1 { band = (band.0 - puff.abs() - 0.01, band.1 + puff.abs() + 0.01); }
+    }
+    Some(Inside { planes, band })
+}
+
+/// The tracer's numbers for `inside`: how many planes, the rim's band, then the planes.
+pub fn inside_uniforms(s: &Inside) -> Vec<f32> {
+    let mut u = vec![0.0f32; 4 * (1 + MAX_PLANES)];
+    let (lo, hi) = if s.band.0 <= s.band.1 { s.band } else { (1e9, -1e9) };
+    u[..4].copy_from_slice(&[s.planes.len() as f32, lo as f32, hi as f32, 0.0]);
+    for (i, p) in s.planes.iter().enumerate() {
+        for c in 0..4 { u[4 + 4 * i + c] = p[c] as f32; }
+    }
+    u
+}
+
+// ---------------------------------------------------------------------------------------------------
 // The presets
 
 /// A gem preset before it is a `Preset`: kept so that the tests can ask a cut for its planes.

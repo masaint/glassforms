@@ -162,6 +162,24 @@ fn cs(@builtin(global_invocation_id) id: vec3u) {
 }
 ";
 
+/// The walk for a cut stone (gems.rs, whose `raw` is the largest of the stone's facet distances, and of its
+/// rim's): a voxel far from the surface is not walked. Inside, the walk would go straight to the nearest
+/// facet, so its distance is the field's own value there; outside, the field's value is never more than
+/// the true distance, and such a voxel is only ever stepped across by the tracer, never read for where
+/// the surface is or which way it faces (that takes the voxels within three of it). Nine tenths of the
+/// volume or more is far, and a stone bakes several times faster: it is rebuilt every frame while it
+/// animates.
+fn gem_walk() -> String {
+    const LOOP: &str = "  for (var i = 0; i < 8; i++) {";
+    const FAR: &str = "  // far from the surface (more than 0.1, and more than five voxels): no walk
+  let vf = raw(p);
+  let far = abs(vf) > max(0.1, 10.0 * u.hb / u.res);
+  if (far) { v0 = vf; x = p + vec3f(abs(vf), 0.0, 0.0); }
+  for (var i = 0; i < 8 && !far; i++) {";
+    assert_eq!(WALK.matches(LOOP).count(), 1, "the walk's loop is not where the stone's shortcut goes");
+    WALK.replace(LOOP, FAR)
+}
+
 /// `bake_shader` with one more entry point, `cs`, which works out the whole volume in one dispatch and
 /// writes it straight into a 16-bit float 3D texture.
 pub fn bake_shader_compute(p: &Preset) -> String {
@@ -184,8 +202,9 @@ pub fn bake_shader(p: &Preset) -> String {
          struct U {{ hb: f32, res: f32, puff: f32, pad: f32, pr: Pr }}\n\
          @group(0) @binding(0) var<uniform> u: U;\n\
          var<private> pr: Pr;\n\n\
-         {HELPERS}\n{wgsl}\n\n{VERTEX}{WALK}{shell}{WALK_SHELL_TO_CLIP}{clip}{WALK_END}",
+         {HELPERS}\n{wgsl}\n\n{VERTEX}{walk}{shell}{WALK_SHELL_TO_CLIP}{clip}{WALK_END}",
         name = p.name, pr = pr.join(", "),
+        walk = if wgsl.contains("fn gem_fold(") { gem_walk() } else { WALK.to_string() },
     )
 }
 

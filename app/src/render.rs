@@ -19,6 +19,34 @@ const TRACE_LIGHT_WGSL: &str = include_str!("shaders/trace_light.wgsl");
 /// (with everything a rough surface does, which is kept in a file of its own)
 pub const TRACE_MATERIAL_WGSL: &str = concat!(include_str!("shaders/trace_material.wgsl"), include_str!("shaders/film.wgsl"), include_str!("shaders/frost.wgsl"), include_str!("shaders/inner.wgsl"));
 pub const TRACE_BODIES_WGSL: &str = include_str!("shaders/trace_bodies.wgsl");
+const GEM_WGSL: &str = include_str!("shaders/gem.wgsl");
+/// The binding of a cut stone's planes (gem.wgsl), read only by tracers built for a stone.
+pub const GEM_BINDING: u32 = 34;
+/// The lines of trace.wgsl's `shade` that find where a ray inside the glass leaves it, and what replaces
+/// them in a tracer built for a cut stone (gem.wgsl: `gemExit`).
+const GEM_MARCH: &str = "      let s = marchIn(pos, dir);
+      let q = pos + dir * s;
+      var m = nrm(q);
+";
+const GEM_EXIT: &str = "      var m: vec3f;
+      let s = gemExit(pos, dir, &m);
+      let q = pos + dir * s;
+";
+
+/// Can a tracer of this kind find its way out of a cut stone from the stone's planes? Plain glass only,
+/// with nothing woven into how it reads the volume or its normals (lamps note where each normal was
+/// taken; a grown stage moves the volume's box).
+pub fn gem_fits(v: &Variant) -> bool {
+    v.mat == material::Variant::default() && !v.clay && !v.near && !v.grown
+}
+
+/// The tracer's text for a cut stone: `shade`'s march through the glass replaced by `gemExit`. Text in
+/// which those lines are not found is given back as it was.
+pub fn gem_weave(src: &str) -> String {
+    if src.matches(GEM_MARCH).count() != 1 { return src.to_string(); }
+    let decl = GEM_WGSL.replace("{{GEM_MAX}}", &gf_core::presets::gems::MAX_PLANES.to_string()).replace("{{GEM_BINDING}}", &GEM_BINDING.to_string());
+    format!("{}{decl}", src.replace(GEM_MARCH, GEM_EXIT))
+}
 const ACCUM_WGSL: &str = include_str!("shaders/accum.wgsl");
 /// The pass that folds a frame into the picture so far (the denoiser's pass over time is made from it).
 pub const ACCUM_SOURCE: &str = ACCUM_WGSL;
@@ -395,6 +423,10 @@ pub struct Renderer {
     /// what the tracer is told about what lies inside the body (cracks, grains, fibres, a changing tint)
     u_inner: wgpu::Buffer,
     last_inner: Vec<f32>,
+    /// a cut stone's planes (gem.wgsl), and whether the stone shown now has them
+    u_gem: wgpu::Buffer,
+    last_gem: Vec<f32>,
+    gem: bool,
     u_inner_bodies: wgpu::Buffer,
     last_inner_bodies: Vec<f32>,
     /// the share of a rough surface's roughness that is sampled, as the tracer has it now
@@ -538,6 +570,8 @@ impl Renderer {
             // (32: what lies inside the body, read only by tracers built for it; 33: what lies inside each
             // of several bodies, read only by the tracer of several bodies built for it)
             uniform_entry(32, frag, false), uniform_entry(33, frag, false),
+            // (34: a cut stone's planes, read only by tracers built for a stone)
+            uniform_entry(GEM_BINDING, frag, false),
         ]);
         let no_bodies = gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("no bodies"),
@@ -604,6 +638,9 @@ impl Renderer {
             last_bodies: Vec::new(),
             u_inner: gpu.uniform_buffer("trace: inside the body", (gf_core::inner::IU_FLOATS * 4) as u64),
             last_inner: Vec::new(),
+            u_gem: gpu.uniform_buffer("trace: the stone's planes", (4 * (1 + gf_core::presets::gems::MAX_PLANES) * 4) as u64),
+            last_gem: Vec::new(),
+            gem: false,
             u_inner_bodies: gpu.uniform_buffer("trace: inside each body", (material::MAX_BODIES * gf_core::inner::IU_FLOATS * 4) as u64),
             last_inner_bodies: Vec::new(),
             rough_share: -1.0,
@@ -728,6 +765,18 @@ impl Renderer {
         true
     }
 
+    /// The planes of the cut stone shown (`gf_core::presets::gems::inside_uniforms`), or None when the
+    /// shape is not one. Takes effect with the next `set_scene`, which builds the tracer.
+    pub fn set_gem(&mut self, numbers: Option<&[f32]>) {
+        self.gem = numbers.is_some();
+        if let Some(n) = numbers {
+            if self.last_gem != n {
+                self.gpu.queue.write_buffer(&self.u_gem, 0, bytemuck::cast_slice(n));
+                self.last_gem = n.to_vec();
+            }
+        }
+    }
+
     /// The numbers of what lies inside the body (`gf_core::inner::uniforms`). True if they changed.
     pub fn set_inner(&mut self, numbers: &[f32]) -> bool {
         if self.last_inner == numbers { return false; }
@@ -814,7 +863,8 @@ impl Renderer {
     }
     /// The tracer's text for the lens that is wanted.
     fn tracer_text(&self, m: &March, v: Variant) -> String {
-        if self.cam.wanted { tracer_source_lens(m, v, self.profile) } else { tracer_source(m, v, self.profile) }
+        let src = if self.cam.wanted { tracer_source_lens(m, v, self.profile) } else { tracer_source(m, v, self.profile) };
+        if self.gem && gem_fits(&v) { gem_weave(&src) } else { src }
     }
     /// Tracers kept, and frames in the running average (for the window's diagnostic log).
     pub fn kept(&self) -> String {
@@ -872,7 +922,7 @@ impl Renderer {
     }
 
     fn tracer_key(&self, m: &March, v: Variant) -> String {
-        format!("{:.2}|{}|{}|{}|{}|{:?}|{}", m.step_scale, m.steps_out, m.steps_in, m.layers, self.profile, v, self.cam.wanted)
+        format!("{:.2}|{}|{}|{}|{}|{:?}|{}|{}", m.step_scale, m.steps_out, m.steps_in, m.layers, self.profile, v, self.cam.wanted, self.gem && gem_fits(&v))
     }
 
     /// The pipeline for the way of marching and drawing now set: made the first time, kept after.
@@ -958,6 +1008,7 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 13, resource: self.u_bodies.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 32, resource: self.u_inner.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 33, resource: self.u_inner_bodies.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: GEM_BINDING, resource: self.u_gem.as_entire_binding() },
             ],
         }));
     }

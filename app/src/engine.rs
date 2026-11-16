@@ -953,6 +953,17 @@ impl Engine {
         self.last_bake_ms = ms;
         self.last_bake_parts = [(t1 - t0).as_secs_f64() * 1e3, (t2 - t1).as_secs_f64() * 1e3, t2.elapsed().as_secs_f64() * 1e3];
         let (step, out, inn, layers) = (fam.step_scale, fam.steps_out, fam.steps_in, fam.layers);
+        // a cut stone: its planes, from the very numbers the volume was just baked from, let the tracer
+        // find its way out of the stone without marching
+        let gem = match &job.shape {
+            ShapeJob::Field { uniforms } if fam.id == "gems" => {
+                let p = &fam.presets[job.preset];
+                let values: Vec<f64> = uniforms[4..4 + p.params.len().min(gf_core::field::MAX_PARAMS)].iter().map(|&v| v as f64).collect();
+                gf_core::presets::gems::inside(p.id, &values, uniforms[2] as f64).map(|s| gf_core::presets::gems::inside_uniforms(&s))
+            }
+            _ => None,
+        };
+        self.renderer.set_gem(gem.as_deref());
         let vol = self.baker.volume().ok_or("no volume")?;
         self.renderer.set_scene(&self.lights_view, vol, step, out, inn, layers);
         let meta = &mut self.state.shapes[job.family].meta;

@@ -261,3 +261,37 @@ fn the_shaders_expressions_come_to_the_same_planes() {
     assert!(named.contains(&"1.1".to_string()), "the rim's radius is a plain number: {named:?}");
     assert!(text.lines().all(|l| l.contains("pr.") || l.contains("g")), "every step written depends on a slider");
 }
+
+/// What the tracer is given to find a ray's way out of a stone without marching (`gems::inside`): its
+/// planes and the stone's field agree everywhere (the planes alone wherever the rim is not nearer), and
+/// every point of the rim's wall lies within the band of heights given for it.
+#[test]
+fn inside_planes_and_rim_band() {
+    use gf_core::presets::gems::{inside, MAX_PLANES};
+    let mut seed = 12345u64;
+    let mut rnd = move || { seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); (seed >> 11) as f64 / (1u64 << 53) as f64 };
+    for g in gems() {
+        let v = defaults(&g);
+        let s = g.cut.stone::<f64>(&v);
+        let ins = inside(g.id, &v, 0.0).unwrap_or_else(|| panic!("{}: more than {MAX_PLANES} planes", g.id));
+        let (mut rim_pts, mut inside_band) = (0, 0);
+        for _ in 0..200_000 {
+            let p = [rnd() * 2.4 - 1.2, rnd() * 2.4 - 1.2, rnd() * 2.4 - 1.2];
+            let planes = ins.planes.iter().map(|q| q[0] * p[0] + q[1] * p[1] + q[2] * p[2] - q[3]).fold(f64::NEG_INFINITY, f64::max);
+            let rim = s.rim_dist(p[0], p[2]);
+            let d = s.dist(p);
+            assert!((planes.max(rim) - d).abs() < 1e-9, "{}: the planes give {} at {p:?}, the stone {d}", g.id, planes.max(rim));
+            // on the wall: the rim is what bounds the stone here
+            if d.abs() < 0.01 && rim > planes {
+                rim_pts += 1;
+                if p[1] >= ins.band.0 && p[1] <= ins.band.1 { inside_band += 1; }
+            }
+        }
+        assert_eq!(rim_pts, inside_band, "{}: points of the rim's wall outside its band {:?}", g.id, ins.band);
+        // it is worked out afresh for every frame of an animated stone: it must take next to no time
+        // (the quickest of twenty: other tests run beside this one)
+        let ms = (0..20).map(|_| { let t0 = std::time::Instant::now(); inside(g.id, &v, 0.0); t0.elapsed().as_secs_f64() * 1e3 }).fold(f64::INFINITY, f64::min);
+        println!("{}: {} planes, band {:?}, {} wall points, {ms:.3} ms", g.id, ins.planes.len(), ins.band, rim_pts);
+        assert!(ms < 0.5, "{}: working out what the tracer needs took {ms:.2} ms", g.id);
+    }
+}

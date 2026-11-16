@@ -541,6 +541,8 @@ impl Engine {
         }
         self.layers.march = (step, out, inn, pieces);
         self.renderer.set_bodies(self.layers.combiner.bodies_volume().map(|v| (v, self.state.stack.bodies().len() as u32)));
+        // (several pieces are not one cut stone: the tracer marches through them)
+        self.renderer.set_gem(None);
         let vol = self.layers.combiner.volume().ok_or("no volume")?;
         self.renderer.set_scene(&self.lights_view, vol, step, out, inn, pieces);
         self.dirty = true;
