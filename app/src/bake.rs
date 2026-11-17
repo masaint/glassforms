@@ -414,6 +414,25 @@ impl Baker {
         let stride = n.div_ceil(4096).max(1);
         let cn = n.div_ceil(stride);
         let mut cd = vec![0f32; 4096 * 4];
+        // with radii of their own: how far each point's piece reaches from it (a blade's three points, the
+        // whole blade's length and width; `curve::prep_strands`)
+        let ext: Vec<f32> = if c.vary {
+            let mut e: Vec<f32> = (0..n).map(|i| c.pts[i * 4 + 3].max(0.0)).collect();
+            let mut i = 0;
+            while i + 2 < n {
+                if c.pts[i * 4 + 3] < 0.0 {
+                    let d = (0..3).map(|k| (c.pts[i * 4 + 4 + k] - c.pts[i * 4 + k]).powi(2)).sum::<f32>().sqrt();
+                    let r = d + c.pts[i * 4 + 7] - c.pts[i * 4 + 3];
+                    e[i..i + 3].fill(r);
+                    i += 3;
+                } else {
+                    i += 1;
+                }
+            }
+            e
+        } else {
+            Vec::new()
+        };
         for i in 0..cn {
             let s = (i * stride).min(n - 1) * 4;
             cd[i * 4..i * 4 + 3].copy_from_slice(&c.pts[s..s + 3]);
@@ -421,7 +440,7 @@ impl Baker {
             // thickest of them (a point between two cloud points is nearer one of them than a stride)
             if c.vary {
                 let (a, b) = ((i * stride).saturating_sub(stride), ((i + 1) * stride).min(n - 1));
-                cd[i * 4 + 3] = (a..=b).map(|j| c.pts[j * 4 + 3]).fold(0.0f32, f32::max);
+                cd[i * 4 + 3] = (a..=b).map(|j| ext[j]).fold(0.0f32, f32::max);
             }
         }
         if self.cloud.write(&gpu, bytemuck::cast_slice(&cd)) {
@@ -460,7 +479,8 @@ impl Baker {
         for i in 0..n.saturating_sub(1) {
             if c.brk[i] != 0 { continue; }
             let (za, zb) = (p[i * 4 + 2] as f64, p[i * 4 + 6] as f64);
-            let reach = (p[i * 4 + 3] as f64).max(p[i * 4 + 7] as f64) + band;
+            // (a blade: its width, a fifth more for its cup, and its thickness: `curve::prep_strands`)
+            let reach = if p[i * 4 + 3] < 0.0 { 1.2 * p[i * 4 + 7] as f64 - p[i * 4 + 3] as f64 } else { (p[i * 4 + 3] as f64).max(p[i * 4 + 7] as f64) } + band;
             let a = ((((za.min(zb) - reach) / HB + 1.0) * 0.5 * res as f64 - 0.5).ceil() as i32).max(0);
             let b = ((((za.max(zb) + reach) / HB + 1.0) * 0.5 * res as f64 - 0.5).floor() as i32).min(res as i32 - 1);
             k0[i] = a;

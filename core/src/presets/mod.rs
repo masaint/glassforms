@@ -51,6 +51,21 @@ pub struct RawCurve {
     /// A level (y, in the curve's own units) below which nothing of the shape is kept: a tree's foot and
     /// roots are cut flat where they meet the ground. None = nothing cut.
     pub ground: Option<f64>,
+    /// Flat blades (leaves) beside the lines, in the curve's own units.
+    pub blades: Vec<Blade>,
+}
+
+/// A flat leaf: from `base` to `tip` along its midrib; `side` a unit vector across it in its plane; its
+/// widest half-width `width`; `thick` its half-thickness (no thinner than the volume can hold, whatever is
+/// asked); `cup` how far it curls up about its midrib, as a share of its width.
+#[derive(Clone, Debug, Default)]
+pub struct Blade {
+    pub base: [f64; 3],
+    pub tip: [f64; 3],
+    pub side: [f64; 3],
+    pub width: f64,
+    pub thick: f64,
+    pub cup: f64,
 }
 
 /// What a curve function is told: `len` is the length slider, `quick` means a slider is moving.

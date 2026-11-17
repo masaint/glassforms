@@ -91,12 +91,16 @@ struct Seg {
   @location(1) @interpolate(flat) c: vec4f,
   @location(2) @interpolate(flat) origin: vec2f,      // top left of this slice's place on the sheet, in pixels
   @location(3) @interpolate(flat) zc: f32,            // the slice's depth, 0..1
+  @location(4) @interpolate(flat) s: vec4f,           // a blade's third point (see below)
 }
 @vertex
 fn vs_splat(@builtin(vertex_index) vi: u32, @location(0) seg: u32, @location(1) slice: u32) -> Seg {
   let a = pts[seg];
   let c = pts[seg + 1u];
-  let reach = max(a.w, c.w) + b.band;
+  // (a blade's base has its half-thickness, negated, and its tip its half-width: it reaches its width,
+  // a fifth more for its cup, and its thickness)
+  var reach = max(a.w, c.w) + b.band;
+  if (a.w < 0.0) { reach = 1.2 * c.w - a.w + b.band; }
   // the rectangle the segment can reach, kept inside the slice so that it cannot spill onto its neighbours
   let lo = max(min(a.xy, c.xy) - reach, vec2f(-b.hb));
   let hi = min(max(a.xy, c.xy) + reach, vec2f(b.hb));
@@ -110,13 +114,44 @@ fn vs_splat(@builtin(vertex_index) vi: u32, @location(0) seg: u32, @location(1) 
   if (any(lo >= hi)) { o.pos = vec4f(2.0, 2.0, 0.0, 1.0); }    // wholly outside the volume: draw nothing
   o.a = a;
   o.c = c;
+  o.s = vec4f(0.0);
+  if (a.w < 0.0) { o.s = pts[seg + 2u]; }
   o.origin = tile * b.res;
   o.zc = (f32(slice) + 0.5) / b.res;
   return o;
 }
-// distance outside this segment's own surface, and the segment's radius there
+// A blade (a leaf): a flat outline round a midrib from a (the base) to c (the tip), thickened by its
+// half-thickness. In the blade's own frame u runs along the midrib (0..1), v across it, w through it.
+// The outline's half-width at u is c.w * u^0.5 (1 - u) / 0.385: rounded at the base, widest a third of the
+// way, coming to a point at the tip. It is cupped: w is taken from a surface that rises as v^2.
+// Not an exact distance off the outline's edge (the edge's slope is allowed for, to first order), but
+// never more than one: the march stays safe.
+fn blade_dist(p: vec3f, a: vec4f, c: vec4f, s: vec4f) -> f32 {
+  let ax = c.xyz - a.xyz;
+  let L = max(length(ax), 1e-6);
+  let x = ax / L;
+  let y = normalize(s.xyz - a.xyz - x * dot(s.xyz - a.xyz, x));
+  let z = cross(x, y);
+  let q = p - a.xyz;
+  let W = c.w;
+  let u = dot(q, x) / L;
+  let v = dot(q, y);
+  let w = dot(q, z) - s.w * v * v / max(W, 1e-6);
+  let uc = clamp(u, 0.02, 1.0);
+  let k = W / 0.385;
+  let hw = k * sqrt(uc) * (1.0 - uc);
+  let slope = k * (0.5 / sqrt(uc) * (1.0 - uc) - sqrt(uc)) / L;
+  let side = (abs(v) - hw) / sqrt(1.0 + slope * slope);
+  let ends = max(-u, u - 1.0) * L;
+  let d2 = max(side, ends);
+  let e = vec2f(d2, abs(w));
+  return length(max(e, vec2f(0.0))) + min(max(e.x, e.y), 0.0) + a.w;
+}
+
+// distance outside this segment's own surface, and the segment's radius there (a blade: -1)
 fn seg_dist_r(in: Seg) -> vec2f {
   let p = (vec3f((in.pos.xy - in.origin) / b.res, in.zc) * 2.0 - 1.0) * b.hb;
+  if (in.a.w < 0.0) { return vec2f(blade_dist(p, in.a, in.c, in.s), -1.0); }
   let pa = p - in.a.xyz;
   let ba = in.c.xyz - in.a.xyz;
   let h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-12), 0.0, 1.0);
@@ -150,6 +185,8 @@ fn fs_melt(in: Seg) -> @location(0) vec4f {
   // (radii of their own: each segment is weighted for its own radius)
   var amp = b.amp;
   if (b.vary == 1u) { amp = melt_amp(xr.y); }
+  // (a blade is one piece, with no neighbours along it to add to it)
+  if (xr.y < 0.0) { amp = 1.0; }
   // amp makes one straight strand sum to exactly 1 on its own surface (its neighbours along the strand
   // all add to it). The fade to zero sits beyond anywhere a merged surface can be, so it shapes nothing.
   let w = clamp((b.band - x) / (0.35 * b.band), 0.0, 1.0);

@@ -1607,6 +1607,12 @@ pub fn prep_curve(lines: &[&[f64]], o: &PrepOpts) -> Curve {
     Curve { pts, brk, n, rmax, ds, length, amp, pose, vary: false, cut: None }
 }
 
+/// The thinnest a blade is drawn, in steps of the curve either side of its middle (a step is 0.75 of a
+/// voxel). (GF_BLADE_FLOOR overrides it, for finding out what the grid holds.)
+pub fn blade_floor() -> f64 {
+    std::env::var("GF_BLADE_FLOOR").ok().and_then(|v| v.parse::<f64>().ok()).filter(|v| *v > 0.0).unwrap_or(1.5)
+}
+
 /// What `prep_strands` is asked for.
 pub struct StrandOpts {
     /// every radius is multiplied by this (the thickness slider)
@@ -1626,7 +1632,12 @@ pub struct StrandOpts {
 ///
 /// No radius comes out thinner than two steps (one and a half voxels of the volume being built): a
 /// thinner strand would not be held by the grid and would break up into beads.
-pub fn prep_strands(lines: &[&[f64]], radii: &[&[f64]], o: &StrandOpts) -> Curve {
+///
+/// `blades` (leaves) follow the strands as three points each, told apart by a radius below zero: the base
+/// (its radius the blade's half-thickness, negated), the tip (its radius the blade's half-width), and a
+/// point one unit across the blade from the base (its radius the cup). The baker draws them as blades
+/// (`bake_curve.wgsl`). A blade is no thinner than `BLADE_FLOOR` steps either side of its middle.
+pub fn prep_strands(lines: &[&[f64]], radii: &[&[f64]], blades: &[crate::presets::Blade], o: &StrandOpts) -> Curve {
     let pose = match &o.pose { Some(p) => p.clone(), None => placement(lines, &o.place) };
     let (c, sc, ax) = (pose.c, pose.sc, pose.ax);
     let place = |p: &[f64; 3]| -> [f64; 3] {
@@ -1696,6 +1707,20 @@ pub fn prep_strands(lines: &[&[f64]], radii: &[&[f64]], o: &StrandOpts) -> Curve
         }
         emit(fine[fine.len() - 1], fr[fr.len() - 1]);
         *brk.last_mut().unwrap() = 1;
+    }
+    let thin = blade_floor() * o.ds;
+    for b in blades {
+        let (base, tip) = (place(&b.base), place(&b.tip));
+        let side = place(&[b.base[0] + b.side[0], b.base[1] + b.side[1], b.base[2] + b.side[2]]);
+        let side = [(side[0] - base[0]) / sc, (side[1] - base[1]) / sc, (side[2] - base[2]) / sc];
+        let width = b.width * sc;
+        if !(width > 0.0) || apart(&base, &tip) <= 0.0 { continue; }
+        let t = (b.thick * sc * o.thick).max(thin);
+        if width > rmax { rmax = width; }
+        pts.extend_from_slice(&[base[0] as f32, base[1] as f32, base[2] as f32, -t as f32]);
+        pts.extend_from_slice(&[tip[0] as f32, tip[1] as f32, tip[2] as f32, width as f32]);
+        pts.extend_from_slice(&[(base[0] + side[0]) as f32, (base[1] + side[1]) as f32, (base[2] + side[2]) as f32, b.cup as f32]);
+        brk.extend_from_slice(&[0, 1, 1]);
     }
     let n = brk.len();
     // the ground's level as placed (only for a shape that is not turned: a cut is level in the volume)
