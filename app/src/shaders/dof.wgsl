@@ -80,6 +80,7 @@ struct Lv {
 @group(0) @binding(17) var backOut: texture_2d<f32>;    // ... and blurred
 @group(0) @binding(18) var underTex: texture_2d<f32>;   // what is taken to lie under the glass in front of the band
 @group(0) @binding(19) var allTex: texture_2d<f32>;     // the glass at half size: rgb, a = the blur radius of the nearest of it
+@group(0) @binding(20) var farFill: texture_2d<f32>;    // the glass behind the band by itself, at falling sizes: rgb (times its share), a = its share
 
 const NONE: f32 = 30000.0;      // "blur radius" stored where there is no glass
 const SHARP: f32 = 0.5;         // a blur smaller than this is no blur
@@ -295,7 +296,9 @@ fn fs_pre2(@builtin(position) pos: vec4f) -> PullOut {
       }
       all = vec4f(all.rgb + col, min(all.a, r));
       if (r >= -SHARP) { fill += vec4f(col, 1.0); }
-      if (r > SHARP) { ext += vec3f(r, 1.0, 0.0); } else { ext.z += 1.0; }
+      // (glass blurred so little that it is drawn at full size stands in front of the far glass the smaller
+      // copies draw, as sharp glass does: what it hides of that is made up in fs_band)
+      if (r > d.lo) { ext += vec3f(r, 1.0, 0.0); } else { ext.z += 1.0; }
     }
   }
   var o: PullOut;
@@ -306,12 +309,31 @@ fn fs_pre2(@builtin(position) pos: vec4f) -> PullOut {
   return o;
 }
 
+// One more at half size (a pass of its own: the four above are as many bytes as a pass may write): the
+// glass behind the band by itself, which makes up what sharp and near glass hide of it (see fs_band).
+@fragment
+fn fs_farc(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let c = vec2i(pos.xy) * 2;
+  let top = vec2i(d.res) - 1;
+  var farc = vec4f(0.0);
+  for (var j = 0; j < 2; j++) {
+    for (var i = 0; i < 2; i++) {
+      let q = c + vec2i(i, j);
+      if (q.x > top.x || q.y > top.y) { continue; }
+      let r = textureLoad(cocTex, q, 0).r;
+      if (r > d.lo && r < NONE * 0.5) { farc += vec4f(textureLoad(picTex, q, 0).rgb, 1.0); }
+    }
+  }
+  return farc * 0.25;
+}
+
 // ---- 3. three of those pictures at half the size again (and again) --------------------------------------
 
 struct HalveOut {
   @location(0) fill: vec4f,
   @location(1) ext: vec4f,
   @location(2) back: vec4f,
+  @location(3) farc: vec4f,
 }
 
 @fragment
@@ -321,6 +343,7 @@ fn fs_pull(@builtin(position) pos: vec4f) -> HalveOut {
   o.fill = textureSampleLevel(fillTex, lin, uv, 0.0);
   o.ext = textureSampleLevel(extTex, lin, uv, 0.0);
   o.back = textureSampleLevel(backTex, lin, uv, 0.0);
+  o.farc = textureSampleLevel(farFill, lin, uv, 0.0);
   return o;
 }
 
@@ -433,6 +456,58 @@ fn fs_band(@builtin(position) pos: vec4f) -> BandOut {
     }
   }
   let per = 1.0 / f32(n * n);
+  // Sharp or near glass in this texel hides whatever far glass lies behind it. Its blur would have reached
+  // the pixels beside it, and without it the far glass round a sharp outline thins out and darkens (the
+  // dark rim round sharp glass on a blurred floor). It is made up, and gathered like the rest: so the
+  // blur of what is behind never takes in the colour of the glass in front, and never runs short beside
+  // it. What is hidden is taken to be like the nearest far glass beside it, looked for in eight
+  // directions (the floor beside an upright edge is the floor at the same height, with that floor's
+  // colour, not the average of all within reach, which takes in the horizon and more); and as much of
+  // it to be far glass as the nearest of what lies round about is far glass and not an empty picture.
+  if (front > 0.0) {
+    let ml = i32(log2(lv.n));
+    let top = vec2i(textureDimensions(farFill, ml)) - 1;
+    var col = vec4f(0.0);
+    var rad = 0.0;
+    var open = 0.0;
+    for (var k = 0; k < 8; k++) {
+      let a = f32(k) * 0.78539816;
+      let dir = vec2f(cos(a), sin(a));
+      for (var s = 1; s <= 16; s++) {
+        let q = vec2i(floor(vec2f(p) + 0.5 + dir * f32(s)));
+        if (any(q < vec2i(0)) || any(q > top)) { break; }
+        let v = textureLoad(farFill, q, ml);
+        let wt = 1.0 / f32(s);
+        if (v.a > 0.25) {
+          let x = textureLoad(extTex, q, ml).rg;
+          col += vec4f(v.rgb / v.a, 1.0) * wt;
+          rad += x.x / max(x.y, 1e-6) * wt;
+          break;
+        }
+        if (textureLoad(backTex, q, ml).a > 0.25) { open += wt; break; }
+      }
+    }
+    if (col.a > 0.0) {
+      // The blur: from one and the same picture whichever copy asks, where that has any far glass (each
+      // copy draws its share of a blur, and the shares only add up to the whole if every copy takes the
+      // hidden part's blur to be the same); otherwise the nearest's.
+      let uv = (vec2f(p) + 0.5) / lv.size;
+      var ex = vec2f(0.0);
+      var wl = 1.0;
+      for (var l = 0; l < 4; l++) {
+        ex += wl * textureSampleLevel(extTex, lin, uv, FILL_LEVEL + f32(l)).rg;
+        wl *= 0.05;
+      }
+      let c = select(rad / col.a, ex.x / ex.y, ex.y > 1e-6);
+      let w = share(c);
+      if (c > d.lo && w > 0.0) {
+        let h = front * col.a / (col.a + open);
+        let fc = col.rgb / col.a;
+        let e = w * h * (lum(fc) + 1e-5);
+        far += fc * h * w; farm += h * w; farc += c * e; farw += e;
+      }
+    }
+  }
   var o: BandOut;
   o.far = vec4f(0.0);
   o.near = vec4f(0.0);
@@ -440,27 +515,6 @@ fn fs_band(@builtin(position) pos: vec4f) -> BandOut {
     let q = max(floor(farc / farw / lv.scale * 32.0 + 0.5), 1.0);
     let m = per / area(q);
     o.far = vec4f(far * m, pack(q, farm * m));
-  } else if (front > 0.0) {
-    // Sharp or near glass and no far glass in this texel. If far glass lies around it, some of that is
-    // hidden behind this texel, and its blur would have reached the pixels beside it. The texel says so
-    // (a negative number: the radius of the far glass around, and how much of the texel is in the way),
-    // and the gather makes up what is missing.
-    // The radius of the far glass around comes from the finest of the smaller pictures that has any here.
-    let uv = (vec2f(p) + 0.5) / lv.size;
-    let m0 = log2(lv.n);
-    var sum = vec2f(0.0);
-    var wl = 1.0;
-    for (var l = 0; l < 4; l++) {
-      sum += wl * textureSampleLevel(extTex, lin, uv, m0 + f32(l)).rg;
-      wl *= 0.05;
-    }
-    if (sum.y > 0.0) {
-      let c = sum.x / sum.y;
-      if (c > d.lo && share(c) > 0.0) {
-        let q = max(floor(c / lv.scale * 32.0 + 0.5), 1.0);
-        o.far = vec4f(0.0, 0.0, 0.0, -pack(q, front * per / area(q)));
-      }
-    }
   }
   if (nearw > 0.0) {
     let q = max(floor(nearc / nearw / lv.scale * 32.0 + 0.5), 1.0);
@@ -469,6 +523,10 @@ fn fs_band(@builtin(position) pos: vec4f) -> BandOut {
   }
   return o;
 }
+
+// The smaller picture (of the half-size one: 1/4 of it, 1/8 of the picture) whose far blur is taken for
+// the blur of what sharp glass hides (fs_band).
+const FILL_LEVEL: f32 = 2.0;
 
 // ---- 6. gather: every texel takes from each neighbour whose blur reaches it ------------------------------
 

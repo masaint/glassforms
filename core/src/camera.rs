@@ -814,6 +814,26 @@ impl State {
         sync(&mut self.p);
     }
 
+    /// Choose the kind of lens (a place in `Projection::ALL`). A fisheye or a cylindrical lens shows what it
+    /// is only over a wide field: on a long focal length it draws much what an ordinary lens draws (at 50 mm a
+    /// fisheye takes in 27 degrees, and bends nothing that can be seen). Chosen while the lens is long, it
+    /// is given a short one of its kind, and the camera comes in part of the way, so that the subject is
+    /// smaller but still the subject.
+    pub fn lens_kind(&mut self, i: usize) {
+        let was = self.camera();
+        if !self.camera_arg("proj", &i.to_string()) { return; }
+        let short = match self.camera().proj {
+            Projection::Equidistant | Projection::Equisolid | Projection::Stereographic => Some(12.0),
+            Projection::Cylindrical => Some(18.0),
+            _ => None,
+        };
+        let Some(f) = short else { return };
+        if was.focal <= 1.5 * f { return; }
+        set(&mut self.p, "focal", f);
+        self.p.dist = (self.p.dist * (f / was.focal).sqrt()).clamp(2.5f64.min(self.p.dist), 400.0);
+        sync(&mut self.p);
+    }
+
     /// Put one of the named lenses on, keeping the subject the size it is in the picture.
     pub fn lens_preset(&mut self, i: usize) {
         let Some(l) = LENSES.get(i) else { return };

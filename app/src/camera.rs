@@ -217,8 +217,9 @@ pub fn post(src: &str) -> String {
 }
 
 /// How far apart the two ends of the spectrum are drawn at `fringe` = 1: this share of the distance from
-/// the lens's axis, either way. (Four pixels at the corner of a picture 1080 high.)
-pub const FRINGE: f64 = 0.004;
+/// the lens's axis, either way. (Ten pixels at the corner of a picture 1080 high: a strongly fringing
+/// lens. At 0.004, four pixels, the slider's far end could not be told from its near end on most pictures.)
+pub const FRINGE: f64 = 0.01;
 
 /// GLASSFORMS_LENS=1 (read once, when the program starts) has every picture drawn through the camera's
 /// arithmetic, the plain lens too: that is how the checks hold the two texts of each shader to the

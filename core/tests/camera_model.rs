@@ -544,3 +544,21 @@ fn numbers_no_real_lens_has_are_said_not_refused() {
     camera::set(&mut p, "subject", 2.0);
     assert!(Camera::of(&p).readout(1.5).notes.iter().any(|n| n.contains("microscope")));
 }
+
+#[test]
+fn a_fisheye_chosen_on_a_long_lens_is_given_a_short_one() {
+    let mut s = State::with_args(&[], true);
+    let (focal, dist) = (s.camera().focal, s.p.dist);
+    assert!(focal > 40.0);
+    s.lens_kind(Projection::Equidistant.index());
+    let c = s.camera();
+    assert_eq!(c.proj, Projection::Equidistant);
+    assert!((c.focal - 12.0).abs() < 1e-6 && s.p.dist < dist && s.p.dist >= 2.5, "{} {}", c.focal, s.p.dist);
+    // a short lens already: left as it is
+    let mut s = State::with_args(&args(&[("focal", "14")]), true);
+    s.lens_kind(Projection::Equisolid.index());
+    assert!((s.camera().focal - 14.0).abs() < 1e-6);
+    // an ordinary lens chosen again keeps whatever focal length there is
+    s.lens_kind(Projection::Perspective.index());
+    assert!((s.camera().focal - 14.0).abs() < 1e-6);
+}

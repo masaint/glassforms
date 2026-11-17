@@ -175,7 +175,7 @@ struct Level {
     h: u32,
     u: wgpu::Buffer,
     /// the fill, far-radius and backdrop pictures at this size (targets of the pass that halves the size above)
-    pull_views: [wgpu::TextureView; 3],
+    pull_views: [wgpu::TextureView; 4],
     g_pull: Option<wgpu::BindGroup>,
     /// the backdrop at this size, blurred
     back_view: wgpu::TextureView,
@@ -249,6 +249,7 @@ struct Pipes {
     coc: wgpu::RenderPipeline,
     pre: wgpu::RenderPipeline,
     pre2: wgpu::RenderPipeline,
+    farc: wgpu::RenderPipeline,
     pull: wgpu::RenderPipeline,
     tile: wgpu::RenderPipeline,
     reach: wgpu::RenderPipeline,
@@ -269,7 +270,8 @@ impl Pipes {
             coc: pipeline(gpu, "focus: radius", &module, "fs_coc", &layouts.coc, &[F32, r16]),
             pre: pipeline(gpu, "focus: half size", &module, "fs_pre", &layouts.pre, &[F32, F32]),
             pre2: pipeline(gpu, "focus: half size, the rest", &module, "fs_pre2", &layouts.pre, &[F16, F16, F16, F16]),
-            pull: pipeline(gpu, "focus: halve", &module, "fs_pull", &layouts.pull, &[F16, F16, F16]),
+            farc: pipeline(gpu, "focus: half size, the far glass alone", &module, "fs_farc", &layouts.pre, &[F16]),
+            pull: pipeline(gpu, "focus: halve", &module, "fs_pull", &layouts.pull, &[F16, F16, F16, F16]),
             back: pipeline(gpu, "focus: backdrop", &module, "fs_back", &layouts.back, &[F16]),
             under: pipeline(gpu, "focus: under the near glass", &module, "fs_under", &layouts.under, &[F16]),
             tile: pipeline(gpu, "focus: tiles", &module, "fs_tile", &layouts.tile, &[F16]),
@@ -329,10 +331,10 @@ impl Dof {
         let layouts = Layouts {
             coc: gpu.bind_layout("focus: radius", &[un(0), t(2), t(11)]),
             pre: gpu.bind_layout("focus: half size", &[un(0), t(2), t(3)]),
-            pull: gpu.bind_layout("focus: halve", &[un(1), t(7), t(8), sampler_entry(14), t(16)]),
+            pull: gpu.bind_layout("focus: halve", &[un(1), t(7), t(8), sampler_entry(14), t(16), t(20)]),
             tile: gpu.bind_layout("focus: tiles", &[un(0), t(3)]),
             reach: gpu.bind_layout("focus: reach", &[un(0), t(9)]),
-            band: gpu.bind_layout("focus: copy", &[un(0), un(1), t(5), t(6), t(8), t(11), sampler_entry(14)]),
+            band: gpu.bind_layout("focus: copy", &[un(0), un(1), t(5), t(6), t(8), t(11), sampler_entry(14), t(16), t(20)]),
             gather: gpu.bind_layout("focus: gather", &[un(0), un(1), t(5), t(6), t(9), t(10), t(15)]),
             back: gpu.bind_layout("focus: backdrop", &[un(0), un(1), t(10), t(16)]),
             under: gpu.bind_layout("focus: under the near glass", &[un(0), t(7), sampler_entry(14), t(16), t(19)]),
@@ -413,6 +415,7 @@ impl Dof {
         let (ext, ext_all) = self.chain("focus: far radius", hw, hh, n + 2, F16);
         let (back, back_all) = self.chain("focus: backdrop", hw, hh, n + 2, F16);
         let (back_out, back_out_all) = self.chain("focus: backdrop blurred", hw, hh, n + 2, F16);
+        let (far_fill, far_fill_all) = self.chain("focus: far glass by itself", hw, hh, n + 2, F16);
         let (band_far, _) = self.chain("focus: far copies", hw, hh, n, F32);
         let (band_near, _) = self.chain("focus: near copies", hw, hh, n, F32);
         let (out_far, out_far_all) = self.chain("focus: far gathered", hw, hh, n, F16);
@@ -428,13 +431,13 @@ impl Dof {
             let b = m.min(n - 1);
             levels.push(Level {
                 w: lw, h: lh,
-                pull_views: [fill[m].clone(), ext[m].clone(), back[m].clone()],
-                g_pull: (m > 0).then(|| group("focus: halve", &l.pull, &[uni(&u, 1), tex(7, &fill[m - 1]), tex(8, &ext[m - 1]), smp.clone(), tex(16, &back[m - 1])])),
+                pull_views: [fill[m].clone(), ext[m].clone(), back[m].clone(), far_fill[m].clone()],
+                g_pull: (m > 0).then(|| group("focus: halve", &l.pull, &[uni(&u, 1), tex(7, &fill[m - 1]), tex(8, &ext[m - 1]), smp.clone(), tex(16, &back[m - 1]), tex(20, &far_fill[m - 1])])),
                 back_view: back_out[m].clone(),
                 g_back: group("focus: backdrop", &l.back, &[uni(&self.u, 0), uni(&u, 1), tex(10, &self.kern_view), tex(16, &back[m])]),
                 band_views: [band_far[b].clone(), band_near[b].clone()],
                 out_views: [out_far[b].clone(), out_near[b].clone()],
-                g_band: group("focus: copy", &l.band, &[uni(&self.u, 0), uni(&u, 1), tex(5, &pre_views[0]), tex(6, &pre_views[1]), tex(8, &ext_all), tex(11, &self.norm_view), smp.clone()]),
+                g_band: group("focus: copy", &l.band, &[uni(&self.u, 0), uni(&u, 1), tex(5, &pre_views[0]), tex(6, &pre_views[1]), tex(8, &ext_all), tex(11, &self.norm_view), smp.clone(), tex(16, &back_all), tex(20, &far_fill_all)]),
                 g_gather: group("focus: gather", &l.gather, &[uni(&self.u, 0), uni(&u, 1), tex(5, &band_far[b]), tex(6, &band_near[b]), tex(9, &tile_views[1]), tex(10, &self.kern_view), tex(15, &tile_views[2])]),
                 u,
             });
@@ -558,6 +561,7 @@ impl Dof {
         draw(enc, &[&t.pre_views[0], &t.pre_views[1]], &p.pre, &t.g_pre[src]);
         let l0 = &t.levels[0].pull_views;
         draw(enc, &[&l0[0], &l0[1], &l0[2], &t.all_view], &p.pre2, &t.g_pre[src]);
+        draw(enc, &[&l0[3]], &p.farc, &t.g_pre[src]);
         for lv in &t.levels[1..] {
             draw(enc, &lv.pull_views.each_ref(), &p.pull, lv.g_pull.as_ref().unwrap());
         }

@@ -147,7 +147,7 @@ fn lens(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     // the kind of lens, and the sensor (the picture is as tall as the sensor)
     let kinds: Vec<String> = Projection::ALL.iter().map(|p| p.name().to_owned()).collect();
     if let Some(i) = pick(ui, Id::unique(("lens kind", px.place)), "kind", &kinds, st.camera().proj.index()) {
-        st.camera_arg("proj", &i.to_string());
+        st.lens_kind(i);
     }
     let sensor = st.camera().readout(px.aspect).sensor;
     let mut sensors: Vec<String> = SENSORS.iter().map(|s| s.0.to_owned()).collect();
