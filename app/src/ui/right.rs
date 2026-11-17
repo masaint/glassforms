@@ -216,9 +216,16 @@ fn trace_row(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     let now = st.shape().trace;
     match support(st.family(), st.preset()) {
         Support::VolumeOnly(why) => {
-            let r = row(ui, 14.0);
-            text_in(ui, r, Align2::LEFT_CENTER, &format!("traced from volume only: {why}"), mono(SMALL), FAINT);
-            px.note("trace", r);
+            // the same control as for every shape, so it is found in the same place: sdf is there but
+            // cannot be chosen, and why is said under it in full (not cut off)
+            let items = [
+                Item::new("volume", true).tip("the shape baked into a grid of distances, which the tracer reads: as fine as its voxels"),
+                Item::new("sdf", false).tip(format!("not for this shape: {why}")),
+            ];
+            let run = named_run(ui, Id::unique("trace"), "traced from", &items);
+            for (w, place) in ["volume", "sdf"].iter().zip(&run.places) { px.note(format!("trace:{w}"), *place); }
+            gap(ui, 2.0);
+            paragraph(ui, &format!("sdf: {why}"), mono(SMALL), FAINT, LINE, INSET);
         }
         Support::Formula { .. } => {
             let items = [
