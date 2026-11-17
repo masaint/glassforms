@@ -44,6 +44,14 @@ pub const MAX_ACCUM_CLAY: u32 = 96;
 pub const REFINE_BUDGET_MS: f64 = 10.0;
 pub const REFINE_MOST: u32 = 4;
 const REFINE_TIME_EVERY: u32 = 16;
+/// With adaptive refining (adapt.rs) a pass costs less the more of the picture is certain: up to this many
+/// a frame, still within the budget, timed more often (the cost falls as pixels drop out).
+pub const ADAPT_MOST: u32 = 16;
+const ADAPT_TIME_EVERY: u32 = 4;
+const ADAPT_BUDGET_MS: f64 = 8.0;
+
+/// A pass for a share of the pixels is run when the share is at least this (less is not worth a pass).
+const PART_LEAST: f32 = 0.15;
 
 /// How much of the lighting the clay is given (`matte` is what a matte surface gathers, as the
 /// shader's nine terms): all of it, unless the surface facing the brightest way would then burn out.
@@ -238,9 +246,13 @@ pub struct Engine {
     pub time_bakes: bool,
     /// rays a pixel each refining frame traces, and refining frames drawn since the view was last still
     pub refine_n: u32,
+    /// and the share of the pixels a further pass is for, filling what is left of the budget (adaptive)
+    pub refine_part: f32,
     pub refine_count: u32,
     /// the most rays a pixel a refining frame may trace (REFINE_MOST; 1 = one, as before)
     pub refine_most: u32,
+    /// adaptive refining: leave pixels whose mean is certain out of the refining passes (adapt.rs)
+    pub adapt: bool,
 }
 
 fn rows(m: &[f64; 9]) -> [[f32; 4]; 3] {
@@ -259,7 +271,7 @@ impl Engine {
             maker: Arc::new(OnceLock::new()), picture: None, picture_no: 0, glass: None, glass_from: None, hdri_seen: None, loading: None, next: None, building: false, hdri_error: None, hdri_wait: auto,
             show_wanted: Cell::new(false), show: None, shown: None, lighting_no: 0, last_lu: None,
             dirty: true, cut: true, last_tu: None, last_look: None,
-            planes_until: None, planes_shown: false, size_override: None, auto, averaging: false, error: None, last_bake_ms: 0.0, last_bake_parts: [0.0; 3], time_bakes: false, refine_n: 1, refine_count: 0, refine_most: REFINE_MOST,
+            planes_until: None, planes_shown: false, size_override: None, auto, averaging: false, error: None, last_bake_ms: 0.0, last_bake_parts: [0.0; 3], time_bakes: false, refine_n: 1, refine_part: 0.0, refine_count: 0, refine_most: REFINE_MOST, adapt: crate::adapt::enabled(),
         };
         e.paint_lights();
         e
@@ -1311,21 +1323,42 @@ impl Engine {
         if !refining {
             self.refine_count = 0;
             self.refine_n = 1;
+            self.refine_part = 0.0;
             self.draw(false);
+
             return Did { drew: true, again: true };
         }
+        // (adaptive: pixels whose mean is certain are left out of these passes, so a pass costs less and
+        // more of them fit in the budget: ADAPT_MOST in place of REFINE_MOST, scaled alike by refineMost)
+        let adapt = self.adapt;
+        let (most, every) = if adapt { ((self.refine_most.max(1) * ADAPT_MOST / REFINE_MOST).max(1), ADAPT_TIME_EVERY) } else { (REFINE_MOST, REFINE_TIME_EVERY) };
         let left = self.max_accum().saturating_sub(self.renderer.accum_n).max(1);
-        let n = self.refine_n.clamp(1, self.refine_most.max(1)).min(left);
+        let n = self.refine_n.clamp(1, if adapt { most } else { self.refine_most.max(1) }).min(left);
+        // (adaptive: what is left of the budget after the whole passes goes to a pass for that share of
+        // the pixels; each pixel's own count keeps the mean right)
+        let part = if adapt && n < most && n < left { self.refine_part } else { 0.0 };
         // (every so often the frame is timed to its end, and the number of rays set from that)
-        let timed = self.refine_count % REFINE_TIME_EVERY == 0;
+        let timed = self.refine_count % every == 0;
         if timed { self.gpu.wait(); }
+        self.renderer.adapt.on = adapt;
         let t0 = Instant::now();
+        if part >= PART_LEAST {
+            self.renderer.adapt.share = part;
+            self.renderer.frame(&tu, &look, false, false, true);
+            self.renderer.adapt.share = 1.0;
+        }
         for _ in 1..n { self.renderer.frame(&tu, &look, false, false, true); }
         self.draw(false);
+        self.renderer.adapt.on = false;
         if timed {
             self.gpu.wait();
-            let each = t0.elapsed().as_secs_f64() * 1e3 / n as f64;
-            self.refine_n = ((REFINE_BUDGET_MS / each.max(0.05)).floor() as u32).clamp(1, REFINE_MOST);
+            let passes = n as f64 + if part >= PART_LEAST { part as f64 } else { 0.0 };
+            // (adaptive frames aim lower than the budget: a pass's cost moves as pixels drop out and come
+            // back, and the frame must stay under the 11.1 ms floor when it overshoots)
+            let budget = if adapt { ADAPT_BUDGET_MS } else { REFINE_BUDGET_MS };
+            let rate = (budget / (t0.elapsed().as_secs_f64() * 1e3 / passes).max(0.05)).clamp(1.0, most as f64);
+            self.refine_n = rate.floor() as u32;
+            self.refine_part = (rate - rate.floor()) as f32;
         }
         self.refine_count += 1;
         Did { drew: true, again: true }

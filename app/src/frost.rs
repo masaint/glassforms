@@ -53,7 +53,7 @@ pub fn with_aux(src: &str) -> String {
 /// tracer with casting in it reads (what the bodies cast on each other).
 pub fn tracer_pipeline(gpu: &Gpu, layout: &wgpu::BindGroupLayout, cast: Option<&wgpu::BindGroupLayout>, module: &wgpu::ShaderModule) -> wgpu::RenderPipeline {
     let layouts: Vec<&wgpu::BindGroupLayout> = std::iter::once(layout).chain(cast).collect();
-    pipeline(gpu, "trace (rough)", module, "fs", &layouts, &[HDR, AUX, FACE])
+    crate::adapt::tracer_pipeline(gpu, "trace (rough)", module, &layouts, &[HDR, AUX, FACE])
 }
 
 fn pipeline(gpu: &Gpu, label: &str, module: &wgpu::ShaderModule, fs: &str, layouts: &[&wgpu::BindGroupLayout], formats: &[wgpu::TextureFormat]) -> wgpu::RenderPipeline {

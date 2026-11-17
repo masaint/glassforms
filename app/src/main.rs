@@ -77,7 +77,7 @@ use glassforms::engine::Engine;
 use glassforms::gpu::Gpu;
 
 /// Names given as name=value that are not settings of the picture.
-const NOT_SETTINGS: [&str; 33] = ["heroInside", "heroK", "heroClamp", "heroSeq", "heroEvery", "heroTaa", "upscale", "upscaleScale", "refine", "refineMost", "refineRays", "hz", "w", "h", "frames", "anim", "backend", "fps", "samples", "lensRays", "shutter", "codec", "crf", "detail", "play", "seed", "drift", "turn", "rounds", "rebuild", "stride", "inPlace", "noWide"];
+const NOT_SETTINGS: [&str; 38] = ["heroInside", "heroK", "heroClamp", "heroSeq", "heroEvery", "heroTaa", "upscale", "upscaleScale", "refine", "refineMost", "refineRays", "hz", "w", "h", "frames", "anim", "backend", "fps", "samples", "lensRays", "shutter", "codec", "crf", "detail", "play", "seed", "drift", "turn", "rounds", "rebuild", "stride", "inPlace", "noWide", "refineTime", "adapt", "adaptTol", "adaptMin", "adaptShow"];
 
 struct Args {
     flags: Vec<(String, Option<String>)>,
@@ -164,6 +164,11 @@ fn headless(args: &Args) -> Result<Engine, String> {
     if upscale.is_some() { e.renderer.set_upscale(upscale); }
     // heroInside=1|2 heroK=K: K wavelengths inside the glass, always or only while settling (hero.rs)
     e.renderer.hero = glassforms::hero::Hero::asked(args.num("heroInside"), args.num("heroK")).with(args.num("heroClamp"), args.num("heroSeq"), args.num("heroEvery"), args.num("heroTaa"));
+    // adapt=0: no adaptive refining (every pixel traced every pass); adaptTol=: how uncertain a mean may be
+    // and count as certain, in levels of an 8-bit screen; adaptMin=: samples before it may (adapt.rs)
+    if let Some(a) = args.num("adapt") { e.adapt = a >= 0.5; }
+    if let Some(t) = args.num("adaptTol") { e.renderer.adapt.tol = (t / 255.0) as f32; }
+    if let Some(m) = args.num("adaptMin") { e.renderer.adapt.nmin = m.max(2.0) as f32; }
     // (a check that reads the bodies' volume wants it made whatever the bodies are made of)
     e.bodies_always = args.flag("bodies-out").is_some();
     e.layers.stride = args.num("stride").unwrap_or(1.0);
@@ -346,7 +351,8 @@ fn run() -> Result<(), String> {
         // moving view shows); with frames given as well, that view is then rendered afresh and averaged.
         let turn = args.num("turn").map(|n| n.max(0.0) as u32);
         if let Some(n) = turn { e.turned(n); }
-        if args.num("refine").is_some() || args.num("refineRays").is_some() {
+        if args.num("refine").is_some() || args.num("refineRays").is_some() || args.num("refineTime").is_some() {
+
             // refine=N: N frames of the window's own loop with nothing moving (each waited for), as the
             // picture refines on screen; says how long they took and how many rays a pixel they came to
             let ((w, h), _) = e.renderer.size();
@@ -355,10 +361,13 @@ fn run() -> Result<(), String> {
             let n = args.num("refine").unwrap_or(1e9).max(1.0) as u64;
             let rays = args.num("refineRays").unwrap_or(1e9) as u32;
             let period = args.num("hz").filter(|h| *h > 0.0).map(|h| 1.0 / h);
+            // (refineTime=T: until T seconds have gone by)
+            let until = args.num("refineTime").unwrap_or(1e9);
             e.restart();
             let t = Instant::now();
             let mut frames = 0u64;
-            while frames < n && e.renderer.accum_n < rays {
+            while frames < n && e.renderer.accum_n < rays && t.elapsed().as_secs_f64() < until {
+
                 let f0 = Instant::now();
                 e.frame(w, h, 1.0 / 90.0);
                 e.gpu.wait();
@@ -369,6 +378,24 @@ fn run() -> Result<(), String> {
                 frames += 1;
             }
             eprintln!("refine: {} frames in {:.3} s, {} rays a pixel, {} at the end", frames, t.elapsed().as_secs_f64(), e.renderer.accum_n, e.refine_n);
+            // adaptShow=path: a picture of adaptive refining as it ended: red where the pixel is still traced
+            // (its mean not yet certain), green where it is left out; brighter for more samples
+            if let Some(path) = args.text("adaptShow") {
+                if let Some((w, h, stats, err)) = e.renderer.adapt.read(&e.gpu) {
+                    let tol = e.renderer.adapt.tol;
+                    let most = stats.iter().map(|s| s[3]).fold(1.0f32, f32::max);
+                    let mut rgba = Vec::with_capacity(stats.len() * 4);
+                    let mut active = 0usize;
+                    for (s, &er) in stats.iter().zip(&err) {
+                        let k = (40.0 + 215.0 * (s[3] / most).sqrt()) as u8;
+                        if er > tol { active += 1; rgba.extend_from_slice(&[k, 0, 0, 255]); } else { rgba.extend_from_slice(&[0, k, 0, 255]); }
+                    }
+                    let mean = stats.iter().map(|s| s[3] as f64).sum::<f64>() / stats.len() as f64;
+                    eprintln!("adapt: {:.1}% of pixels still traced, {:.1} samples a pixel on average, {} at most", 100.0 * active as f64 / stats.len() as f64, mean, most);
+                    write_png(path, w, h, &rgba)?;
+                }
+            }
+
         } else if turn.is_none() || args.num("frames").is_some() { e.render(frames); }
         if let Some((fx, fy)) = args.text("pick").and_then(|p| p.split_once(',')).and_then(|(a, b)| Some((a.parse::<f64>().ok()?, b.parse::<f64>().ok()?))) {
             // pick=x,y: focus on the glass under that point of the picture (fractions of its width and

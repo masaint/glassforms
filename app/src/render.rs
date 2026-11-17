@@ -267,7 +267,8 @@ fn tracer_pipeline(gpu: &Gpu, layout: &wgpu::BindGroupLayout, cast: Option<&wgpu
     // (a tracer with casting in it reads a second group: what the bodies cast)
     if src.contains("struct FrOut") { return frost::tracer_pipeline(gpu, layout, cast, &module); }
     let layouts: Vec<&wgpu::BindGroupLayout> = std::iter::once(layout).chain(cast).collect();
-    gpu.pipeline(&PipeDesc { label: "trace", module: &module, vs: "vs", fs: "fs", layouts: &layouts, format: HDR, blend: None, strip: false, buffers: &[] })
+    // (every tracer runs only where the stencil of adaptive refining leaves a pixel to be traced: adapt.rs)
+    crate::adapt::tracer_pipeline(gpu, "trace", &module, &layouts, &[HDR])
 }
 
 #[repr(C)]
@@ -524,6 +525,9 @@ pub struct Renderer {
     hero_now: bool,
     /// the antialiasing's pipeline has been made with colour kept apart (hero.rs chroma_taa)
     accum_chroma: bool,
+    /// adaptive refining: each pixel's own count, and the stencil that leaves pixels whose mean is
+    /// certain out of the tracer's passes (adapt.rs)
+    pub adapt: crate::adapt::Adapt,
 }
 
 /// The tone map of post.wgsl's final pass, done here in 64-bit arithmetic for a 16-bit still: the picture
@@ -715,6 +719,7 @@ impl Renderer {
             surface: crate::surface::Surface::new(gpu),
             up: Default::default(),
             hero: Default::default(), hero_now: false, accum_chroma: false,
+            adapt: crate::adapt::Adapt::new(gpu),
         }
     }
 
@@ -1135,8 +1140,20 @@ impl Renderer {
         let view = |t: &wgpu::Texture| t.create_view(&wgpu::TextureViewDescriptor::default());
         let trace_tex = gpu.target("trace", tw, th, HDR, &[]);
         let trace_view = view(&trace_tex);
-        let accum = [gpu.target("picture a", tw, th, ACC, &[]), gpu.target("picture b", tw, th, ACC, &[])];
+        // (written by adaptive refining's fold as well: adapt.rs)
+        let picture = |label| gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d { width: tw, height: th, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: ACC,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::STORAGE_BINDING,
+            view_formats: &[],
+        });
+        let accum = [picture("picture a"), picture("picture b")];
         let accum_view = [view(&accum[0]), view(&accum[1])];
+        self.adapt.resize(gpu, tw, th, [&accum_view[0], &accum_view[1]], &trace_view);
         // the focus stage reads either picture and writes one of its own, which the bloom and the screen
         // read in its place (the third of each of their groups below)
         self.dof.resize(tw, th, [&accum_view[0], &accum_view[1]]);
@@ -1308,23 +1325,25 @@ impl Renderer {
         let second = self.g_cast.as_ref().filter(|_| self.variant.cast);
         // (a denoised tracer writes the light it found inside the body to one more target)
         let dn = if self.variant.denoise && !self.profile { self.dn.frame_view(&self.lin).cloned() } else { None };
+        // Adaptive refining (adapt.rs): a frame that is not folded in by the antialiasing that follows
+        // motion, and whose trace goes straight into the picture, is folded in with each pixel's own count;
+        // while refining, the pixels whose mean is certain are left out of the trace. (The counts start
+        // afresh, from the frames the picture now stands for, unless the last frame was folded in so too.)
+        let folded = !taa && !rough && dn.is_none() && !self.profile;
+        let masked = folded && self.adapt.begin(&self.gpu, &mut enc, (!self.adapt.valid).then_some(self.accum_n), look.exposure);
+        let (stencil, clear) = (self.adapt.stencil(), if masked { crate::adapt::NOT_TRACED } else { wgpu::Color::TRANSPARENT });
+        let pipe = &self.trace_pipes[&self.trace_key];
         let mut frosted = false;
         match self.frost.aux().filter(|_| rough) {
             Some(aux) => {
                 let views: Vec<&wgpu::TextureView> = [&t.trace_view, aux[0], aux[1]].into_iter().chain(dn.as_ref()).collect();
-                frost::draw(&mut enc, &views, &self.trace_pipes[&self.trace_key], g_trace, second);
+                crate::adapt::trace_pass(&mut enc, &views, clear, stencil, masked, pipe, g_trace, second);
                 frosted = true;
             }
             None if dn.is_some() => {
-                frost::draw(&mut enc, &[&t.trace_view, dn.as_ref().expect("just asked")], &self.trace_pipes[&self.trace_key], g_trace, second);
+                crate::adapt::trace_pass(&mut enc, &[&t.trace_view, dn.as_ref().expect("just asked")], clear, stencil, masked, pipe, g_trace, second);
             }
-            None => {
-                let mut rp = pass(&mut enc, &t.trace_view, None, true);
-                rp.set_pipeline(&self.trace_pipes[&self.trace_key]);
-                rp.set_bind_group(0, g_trace, &[]);
-                if let Some(g) = second { rp.set_bind_group(1, g, &[]); }
-                rp.draw(0..3, 0..1);
-            }
+            None => crate::adapt::trace_pass(&mut enc, &[&t.trace_view], clear, stencil, masked, pipe, g_trace, second),
         }
         // direct light with shadows on an opaque or milky body, onto the traced frame before anything reads
         // it (not through another lens than the plain one: the pass finds the surface along a plain ray)
@@ -1335,8 +1354,12 @@ impl Renderer {
             }
         }
         if frosted { self.frost.encode(&mut enc, u.tan_fov); }
-        {
+        if folded {
+            self.adapt.fold(&mut enc, self.acc_idx);
+        } else {
+            self.adapt.valid = false;
             let mut rp = pass(&mut enc, &t.accum_view[1 - self.acc_idx], None, true);
+
             // (through any lens but the plain one, the surface is followed by the camera's own arithmetic)
             rp.set_pipeline(if self.cam.active { self.cam.accum(&self.gpu, ACCUM_WGSL, &self.l_accum, ACC) } else { &self.p_accum });
             rp.set_bind_group(0, if rough { &t.g_accum_rough[self.acc_idx] } else { &t.g_accum[self.acc_idx] }, &[]);
@@ -1353,7 +1376,9 @@ impl Renderer {
         }
         self.prev = Some(now);
         self.acc_idx = 1 - self.acc_idx;
-        self.accum_n += 1;
+        // (a pass for a share of the pixels only is not counted as a frame of the picture)
+        if !(masked && self.adapt.share < 1.0) { self.accum_n += 1; }
+
         self.frame_no += 1;
         if !skip_post { self.encode_post(&mut enc, &u, look, !moving && !cut); }
         self.gpu.queue.submit([enc.finish()]);

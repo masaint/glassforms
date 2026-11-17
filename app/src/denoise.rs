@@ -121,7 +121,7 @@ pub fn with_split(src: &str, whole: bool) -> String {
 /// The pipeline of a tracer that writes its noisy part as well.
 pub fn tracer_pipeline(gpu: &Gpu, layout: &wgpu::BindGroupLayout, cast: Option<&wgpu::BindGroupLayout>, module: &wgpu::ShaderModule) -> wgpu::RenderPipeline {
     let layouts: Vec<&wgpu::BindGroupLayout> = std::iter::once(layout).chain(cast).collect();
-    pipeline(gpu, "trace (denoised)", module, "fs", &layouts, &[wgpu::TextureFormat::Rgba16Float, FRAME])
+    crate::adapt::tracer_pipeline(gpu, "trace (denoised)", module, &layouts, &[wgpu::TextureFormat::Rgba16Float, FRAME])
 }
 
 fn pipeline(gpu: &Gpu, label: &str, module: &wgpu::ShaderModule, fs: &str, layouts: &[&wgpu::BindGroupLayout], formats: &[wgpu::TextureFormat]) -> wgpu::RenderPipeline {
