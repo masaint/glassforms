@@ -16,6 +16,7 @@ pub mod mesh;
 pub mod presets;
 pub mod room;
 pub mod scatter;
+pub mod sculpt;
 pub mod settings;
 pub mod setup;
 pub mod stage;

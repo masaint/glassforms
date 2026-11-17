@@ -340,6 +340,10 @@ impl LayerWork {
     /// A single shape has just been built the plain way: remember what the first layer's volume holds,
     /// so that it need not be built again when a second layer arrives, and let go of everything that
     /// was kept for layers that are no longer there.
+    /// The last build was of one plain layer (its volume is the one the tracer reads).
+    pub fn built_plain_still(&self) -> bool {
+        !self.combined && self.built.len() == 1
+    }
     pub fn built_plain(&mut self, baker: &mut crate::bake::Baker, key: String, res: u32, mode: Detail, melt: Option<f64>) {
         baker.drop_layers(1);
         baker.drop_wide(0);
@@ -470,6 +474,49 @@ impl Engine {
             jobs[i] = Some(job);
             rebuilt.push(i);
         }
+        // The surface studio of each layer: run on a layer just built (its shape kept aside first), or on
+        // one whose studio alone has changed (from the shape kept aside); a layer whose studio was emptied
+        // gets its shape back.
+        self.sculptor.drop_layers(n);
+        for i in 0..n {
+            let Some(b) = self.layers.built[i].as_ref() else { continue };
+            let skey = format!("{}|{}|{}", b.key, b.res, b.exact());
+            let fresh = rebuilt.contains(&i);
+            let s = self.state.layer_sculpt(i).filter(|s| !s.is_empty()).cloned().filter(|_| self.sculptor.available());
+            let vol = self.baker.layer_volume(i).ok_or_else(|| format!("layer {} has no volume", i + 1))?;
+            let applied = self.sculptor.applied.get(i).cloned().unwrap_or_default();
+            match s {
+                Some(s) => {
+                    let phases = self.state.sculpt_phases(i);
+                    let want = format!("{skey}#{}", s.key(&phases, self.sculptor.footprint));
+                    if fresh || (applied.is_empty() && !self.sculptor.has(&skey)) { self.sculptor.keep(i, vol, &skey); }
+                    if fresh || applied != want {
+                        if !self.sculptor.has(&skey) {
+                            // (the shape kept aside has gone: build the layer again next time)
+                            self.layers.built[i] = None;
+                            self.state.want = Some(mode);
+                            continue;
+                        }
+                        self.sculptor.run(i, vol, &skey, &s, &phases, matches!(mode, Detail::Full) || self.time_bakes, !matches!(mode, Detail::Full | Detail::Hq))?;
+                        if !fresh { rebuilt.push(i); }
+                    }
+                }
+                None => {
+                    if !fresh && !applied.is_empty() {
+                        if !self.sculptor.restore(i, vol, &skey) {
+                            self.layers.built[i] = None;
+                            self.state.want = Some(mode);
+                            continue;
+                        }
+                        rebuilt.push(i);
+                    }
+                    self.sculptor.forget(i);
+                }
+            }
+        }
+        // (the shapes kept aside for layers that no longer have a studio, or are gone, are let go)
+        let kept: Vec<String> = (0..n).filter(|&i| self.state.layer_sculpt(i).is_some_and(|s| !s.is_empty())).filter_map(|i| self.layers.built[i].as_ref().map(|b| b.key.clone())).collect();
+        self.sculptor.keep_only(&kept);
         let mut c = self.state.stack.combine();
         // A tube that takes part in a seam wider than its own volume is exact needs its wide volume: built
         // once for the shape as it stands, the first time such a seam is asked for.
@@ -480,7 +527,9 @@ impl Engine {
                 self.baker.drop_wide(i);
                 continue;
             };
-            if self.layers.no_wide || c.reach(i) <= to || b.key.contains("|at") { continue; }
+            // (a sculpted layer's wide volume would be of the shape before the studio: it goes without)
+            let sculpted = self.state.layer_sculpt(i).is_some_and(|s| !s.is_empty());
+            if self.layers.no_wide || sculpted || c.reach(i) <= to || b.key.contains("|at") { continue; }
             let (res, built_as, wide) = (b.res, b.mode, b.wide);
             let wres = wide_res(res);
             if wide != Some(wres) {

@@ -75,7 +75,7 @@ use glassforms::engine::Engine;
 use glassforms::gpu::Gpu;
 
 /// Names given as name=value that are not settings of the picture.
-const NOT_SETTINGS: [&str; 21] = ["w", "h", "frames", "anim", "backend", "fps", "samples", "lensRays", "shutter", "codec", "crf", "detail", "play", "seed", "drift", "turn", "rounds", "rebuild", "stride", "inPlace", "noWide"];
+const NOT_SETTINGS: [&str; 25] = ["refine", "refineMost", "refineRays", "hz", "w", "h", "frames", "anim", "backend", "fps", "samples", "lensRays", "shutter", "codec", "crf", "detail", "play", "seed", "drift", "turn", "rounds", "rebuild", "stride", "inPlace", "noWide"];
 
 struct Args {
     flags: Vec<(String, Option<String>)>,
@@ -154,6 +154,8 @@ fn headless(args: &Args) -> Result<Engine, String> {
         }
     }
     let mut e = Engine::new(gpu, state, true);
+    // refineMost=N: at most N rays a pixel a refining frame (1: one, as before there were more)
+    if let Some(m) = args.num("refineMost") { e.refine_most = m.max(1.0) as u32; }
     // (a check that reads the bodies' volume wants it made whatever the bodies are made of)
     e.bodies_always = args.flag("bodies-out").is_some();
     e.layers.stride = args.num("stride").unwrap_or(1.0);
@@ -319,7 +321,30 @@ fn run() -> Result<(), String> {
         // moving view shows); with frames given as well, that view is then rendered afresh and averaged.
         let turn = args.num("turn").map(|n| n.max(0.0) as u32);
         if let Some(n) = turn { e.turned(n); }
-        if turn.is_none() || args.num("frames").is_some() { e.render(frames); }
+        if args.num("refine").is_some() || args.num("refineRays").is_some() {
+            // refine=N: N frames of the window's own loop with nothing moving (each waited for), as the
+            // picture refines on screen; says how long they took and how many rays a pixel they came to
+            let ((w, h), _) = e.renderer.size();
+            // (refineRays=R: until R rays a pixel instead; hz=60: each frame takes at least a display's
+            // refresh, as the window's frames do with vsync)
+            let n = args.num("refine").unwrap_or(1e9).max(1.0) as u64;
+            let rays = args.num("refineRays").unwrap_or(1e9) as u32;
+            let period = args.num("hz").filter(|h| *h > 0.0).map(|h| 1.0 / h);
+            e.restart();
+            let t = Instant::now();
+            let mut frames = 0u64;
+            while frames < n && e.renderer.accum_n < rays {
+                let f0 = Instant::now();
+                e.frame(w, h, 1.0 / 90.0);
+                e.gpu.wait();
+                if let Some(p) = period {
+                    let took = f0.elapsed().as_secs_f64();
+                    if took < p { std::thread::sleep(std::time::Duration::from_secs_f64(p - took)); }
+                }
+                frames += 1;
+            }
+            eprintln!("refine: {} frames in {:.3} s, {} rays a pixel, {} at the end", frames, t.elapsed().as_secs_f64(), e.renderer.accum_n, e.refine_n);
+        } else if turn.is_none() || args.num("frames").is_some() { e.render(frames); }
         if let Some((fx, fy)) = args.text("pick").and_then(|p| p.split_once(',')).and_then(|(a, b)| Some((a.parse::<f64>().ok()?, b.parse::<f64>().ok()?))) {
             // pick=x,y: focus on the glass under that point of the picture (fractions of its width and
             // height from the top left), as a click in the window does, and render again
@@ -419,6 +444,15 @@ fn run() -> Result<(), String> {
         let plan: Vec<String> = r.plan.items.iter().map(|i| format!("\"{}: {:.2} s -> {:.2} s, {} per loop\"", i.label, i.was, i.now, i.n)).collect();
         println!("{{\"file\":\"{}\",\"frames\":{},\"loop\":{:.4},\"fps\":{},\"size\":[{},{}],\"took\":{:.1},\"bytes\":{},\"lens\":{},\"plan\":[{}]}}",
             r.path.to_string_lossy().replace('\\', "/"), r.frames, r.loop_s, r.fps, r.width, r.height, r.seconds, r.bytes, r.lens, plan.join(","));
+        return Ok(());
+    }
+    if let Some(Some(path)) = args.flag("vol-dump") {
+        // the distance volume itself, for checking it: voxels a side (4 bytes), then every distance as a 16-bit float
+        let e = headless(&args)?;
+        let (res, bits) = e.read_volume()?;
+        let mut out = res.to_le_bytes().to_vec();
+        out.extend_from_slice(bytemuck::cast_slice(&bits));
+        std::fs::write(path, out).map_err(|e| e.to_string())?;
         return Ok(());
     }
     if args.flag("vol-hash").is_some() {
@@ -643,7 +677,29 @@ fn run() -> Result<(), String> {
     glassforms::app::run(args.pairs, args.flags)
 }
 
+/// A panic is written to crash.log beside the program (appended, with the time and a backtrace), as well
+/// as where it always went: a window has nowhere else to leave it.
+fn crash_log() {
+    let before = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let path = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("crash.log")));
+        if let Some(path) = path {
+            let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+            let text = format!("---- panic at unix time {secs} (version {})
+{info}
+{}
+", env!("CARGO_PKG_VERSION"), std::backtrace::Backtrace::force_capture());
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                use std::io::Write;
+                let _ = f.write_all(text.as_bytes());
+            }
+        }
+        before(info);
+    }));
+}
+
 fn main() {
+    crash_log();
     if let Err(e) = run() {
         eprintln!("glassforms: {e}");
         std::process::exit(1);

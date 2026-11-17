@@ -13,10 +13,13 @@
 //!                               picture, video, file (left); detail, animate (right); material-chooser (the
 //!                               named materials); lab-made of, lab-surface, lab-on it, lab-in it and
 //!                               lab-special optics (the layers of the materials lab)
+//!   sculpt:<open|close>         the surface studio
 //!   room:<open|close>           the light room;  lab:<open|close>  the materials lab;  camera:<open|close>  the
 //!                               camera window;  help:<open|close>  the help
 //!   light:<n>                   choose light n (from 1) in the light room
 //!   add-layer                   press the "+" of the layers
+//!   sculpt-set:<json>           give the selected layer this surface studio (JSON as sculpt= takes it)
+//!   remove-layer:<n>            take layer n (from 1) away, as its cross does;  select-layer:<n>  select it
 //!   join:<tag>                  open that combination's row in the joins (join:12, join:123); join:none shuts them
 //!   arg:<name>=<value>          anything the command line takes, set the same way: arg:light2.az=40, arg:rig=default,
 //!                               arg:light8=0,30,10,10,3,3,3, arg:ambient=0.1,0.1,0.1 (see main.rs for the lights' names)
@@ -84,12 +87,20 @@ pub enum Act {
     Fold(String),
     /// the light room, or the help: open (true) or closed
     Room(bool),
+    /// the surface studio open or shut
+    Sculpt(bool),
     Lab(bool),
     Camera(bool),
     Help(bool),
     /// choose a light in the light room (counted from 1)
     Light(usize),
     AddLayer,
+    /// give the selected layer this surface studio (JSON, as `sculpt=` takes it)
+    SculptSet(String),
+    /// take away the layer at this place (from 1), as its cross does
+    RemoveLayer(usize),
+    /// select the layer at this place (from 1)
+    SelectLayer(usize),
     /// open a combination's row in the joins, by its tag ("12"); nothing: shut them all
     Join(String),
     /// a name and a value as the command line takes them
@@ -178,7 +189,7 @@ pub fn parse(text: &str) -> Result<Vec<Act>, String> {
             }
             "p" => { let (k, v) = named(name, arg)?; Act::Setting(k.into(), num(name, v)?) }
             "fold" => Act::Fold(arg.into()),
-            "room" | "lab" | "camera" | "help" => {
+            "room" | "lab" | "camera" | "help" | "sculpt" => {
                 let open = match arg {
                     "open" => true,
                     "close" => false,
@@ -186,6 +197,7 @@ pub fn parse(text: &str) -> Result<Vec<Act>, String> {
                 };
                 match name {
                     "room" => Act::Room(open),
+                    "sculpt" => Act::Sculpt(open),
                     "lab" => Act::Lab(open),
                     "camera" => Act::Camera(open),
                     _ => Act::Help(open),
@@ -196,6 +208,9 @@ pub fn parse(text: &str) -> Result<Vec<Act>, String> {
                 n => Act::Light(n),
             },
             "add-layer" => Act::AddLayer,
+            "sculpt-set" => Act::SculptSet(arg.into()),
+            "remove-layer" => match num::<usize>(name, arg)? { 0 => return Err("remove-layer: layers are counted from 1".into()), n => Act::RemoveLayer(n - 1) },
+            "select-layer" => match num::<usize>(name, arg)? { 0 => return Err("select-layer: layers are counted from 1".into()), n => Act::SelectLayer(n - 1) },
             "join" => Act::Join(if arg == "none" { String::new() } else { arg.into() }),
             "arg" => { let (k, v) = named(name, arg)?; Act::Arg(k.into(), v.into()) }
             "hdri" => Act::Hdri(if arg == "none" { String::new() } else { arg.into() }),

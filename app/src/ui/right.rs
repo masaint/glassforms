@@ -65,6 +65,8 @@ pub fn show(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     sliders(ui, st, px);
     layers::placement(ui, st, px);
     layers::joins(ui, st, px);
+    // the surface studio: what the surface of the selected layer's solid is made into
+    super::sculpt::button(ui, st, px);
     // everything that moves
     animate::show(ui, st, px);
 

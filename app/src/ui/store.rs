@@ -51,6 +51,9 @@ pub struct Store {
     /// the same for the camera window
     pub camera_open: bool,
     pub camera_at: Option<[f32; 2]>,
+    /// the same for the surface studio
+    pub sculpt_open: bool,
+    pub sculpt_at: Option<[f32; 2]>,
     /// how videos are made
     pub video: RenderOpts,
     /// where videos are written; None = the "renders" folder beside the program
@@ -66,7 +69,7 @@ impl Default for Store {
     fn default() -> Self {
         Self {
             arrangement: ARRANGEMENT, closed: FOLDED_AT_FIRST.iter().map(|g| g.to_string()).collect(), window: None, maximized: false,
-            room_open: false, room_at: None, lab_open: false, lab_at: None, camera_open: false, camera_at: None, video: RenderOpts::default(), folder: None, setup_folder: None, still_folder: None, still_16: false,
+            room_open: false, room_at: None, lab_open: false, lab_at: None, camera_open: false, camera_at: None, sculpt_open: false, sculpt_at: None, video: RenderOpts::default(), folder: None, setup_folder: None, still_folder: None, still_16: false,
         }
     }
 }

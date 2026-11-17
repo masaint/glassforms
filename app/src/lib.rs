@@ -17,6 +17,7 @@ pub mod hdri;
 pub mod mesh_bake;
 pub mod render;
 pub mod scatter;
+pub mod sculpt;
 pub mod stage;
 pub mod surface;
 pub mod lamps;

@@ -1,6 +1,6 @@
 """The performance gate: the owner's floor is 90 fps, 80% of the time, at 4K.
 
-    python tools/perf_gate.py [--baseline] [--quick] [--exe path] [--only name]
+    python tools/perf_gate.py [--baseline] [--quick] [--exe path] [--only name] [--arg name=value ...]
 
 For each scene a live session at 3840x2160 is timed frame by frame (`--session`: the view turned by hand,
 the animation playing, then everything stopped and settling), and the 80th percentile of all its frames
@@ -36,9 +36,12 @@ SCENES = [
 ]
 
 
+EXTRA = []
+
+
 def run(exe, args, frames):
     cmd = [sys.executable, os.path.join(HERE, 'gpu_run.py'), '--name', 'perf_gate', '--timing', '--',
-           exe, '--session', str(frames), 'w=3840', 'h=2160'] + args
+           exe, '--session', str(frames), 'w=3840', 'h=2160'] + args + EXTRA
     r = subprocess.run(cmd, capture_output=True, text=True, cwd=NATIVE)
     line = next((l for l in r.stdout.splitlines() if l.startswith('{') and '"all"' in l), None)
     if r.returncode != 0 or line is None:
@@ -51,6 +54,7 @@ def main(argv):
     if '--exe' in argv:
         exe = argv[argv.index('--exe') + 1]
     only = argv[argv.index('--only') + 1] if '--only' in argv else None
+    EXTRA.extend(argv[i + 1] for i, a in enumerate(argv) if a == '--arg')
     frames = 120 if '--quick' in argv else 240
     os.makedirs(OUT, exist_ok=True)
     base_path = os.path.join(OUT, 'baseline.json')

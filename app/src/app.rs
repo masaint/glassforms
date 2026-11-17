@@ -702,6 +702,15 @@ impl App {
                     let dialog = rfd::FileDialog::new().set_title("A model").add_filter("Models (.obj, .stl, .ply, .gltf, .glb)", &gf_core::mesh::read::EXTENSIONS).set_parent(frame);
                     if let Some(path) = in_folder(dialog, &dir).pick_file() { self.load_model(&path, false); }
                 }
+                Request::LoadSculptPicture(_) if self.test.is_some() => {}
+                Request::LoadSculptPicture(i) => {
+                    let dialog = rfd::FileDialog::new().set_title("A picture for the surface").add_filter("PNG pictures", &["png"]).set_parent(frame);
+                    if let Some(path) = dialog.pick_file() {
+                        let st = &mut self.engine.state;
+                        if let Some(l) = st.sculpt_mut().layers.get_mut(i) { l.image = path.display().to_string(); }
+                        st.sculpt_changed(false);
+                    }
+                }
                 Request::LoadPicture => {
                     // it opens where the picture in use is, or in the folder kept for them beside the program
                     let here = self.engine.hdri_details().and_then(|i| i.path.parent().map(Path::to_path_buf)).filter(|d| d.is_dir());
@@ -897,6 +906,8 @@ impl App {
             error: self.engine.hdri_error.clone(),
             loading: self.engine.hdri_loading(),
         };
+        self.px.sculpted = (self.engine.sculptor.last.res > 0).then(|| (self.engine.sculptor.last.res, self.engine.sculptor.last.ms));
+        self.px.sculpt_error = self.engine.sculptor.image_error.clone().or_else(|| (!self.engine.sculptor.available()).then(|| "the surface studio needs a graphics device that can write volumes by compute shader".to_owned()));
         self.px.joined = if self.engine.layers.combined { self.engine.scene_volume().map(|v| (v.res, self.engine.layers.combine_ms)) } else { None };
         self.px.model = self.model_told();
         let cast = &self.engine.cast;
@@ -945,6 +956,7 @@ impl App {
         // the windows that float over both: hidden with the panels, but not closed
         if !(px.hide_left && px.hide_right) {
             room::show(ctx, st, px, self.full);
+            crate::ui::sculpt::show(ctx, st, px, self.full);
             overlay::help(ctx, px, st.families.len(), self.full);
         }
         // something went wrong building the shape: say so over the picture (the shape before stays up).
@@ -1270,6 +1282,7 @@ impl App {
                 if let Some(t) = &mut self.test { t.noted.push(note); }
             }
             Act::Room(open) => self.px.store.room_open = open,
+            Act::Sculpt(open) => self.px.store.sculpt_open = open,
             // (the material and the camera are sections of the left panel now: these open or fold them)
             Act::Lab(open) => {
                 if open == self.px.store.is_closed("material") { self.px.store.fold("material"); }
@@ -1284,6 +1297,19 @@ impl App {
             Act::Light(n) => {
                 if n > st.rig().lights.len() { return Err(format!("light: there are only {} lights", st.rig().lights.len())); }
                 self.px.light = n - 1;
+            }
+            Act::SculptSet(json) => {
+                *st.sculpt_mut() = gf_core::sculpt::Sculpt::from_arg(&json).ok_or_else(|| format!("sculpt-set: \"{json}\" is not a surface studio"))?;
+                st.sculpt_changed(false);
+            }
+            Act::RemoveLayer(i) => {
+                if i >= st.layer_count() || st.layer_count() < 2 { return Err(format!("remove-layer: there is no layer {} to take away", i + 1)); }
+                st.remove_layer(i);
+                self.px.combo_open = None;
+            }
+            Act::SelectLayer(i) => {
+                if i >= st.layer_count() { return Err(format!("select-layer: there is no layer {}", i + 1)); }
+                st.select_layer(i);
             }
             Act::AddLayer => {
                 if st.layer_count() >= gf_core::layers::MAX_LAYERS { return Err("add-layer: there are four layers already".into()); }

@@ -73,6 +73,8 @@ pub struct ShapeState {
     /// the model file the user chose (for the `file` shape of the family of models): a full path, or
     /// one below the program's folder
     pub model: String,
+    /// the surface studio's layers and cleanups (see sculpt.rs): empty unless something was added
+    pub sculpt: crate::sculpt::Sculpt,
     pub meta: Meta,
     orbit: Option<OrbitCache>,
     /// the face-on turn worked out for the still shape, held while it animates
@@ -404,7 +406,7 @@ impl State {
                     melt: arg_num(args, "melt").unwrap_or(f.melt), puff: arg_num(args, "puff").unwrap_or(0.0),
                     travel: arg_num(args, "travel").unwrap_or(0.0), beads: arg_num(args, "beads").unwrap_or(0.0),
                     bead_period: arg_num(args, "beadPeriod").unwrap_or(2.0),
-                    res, anim_res: arg_num(args, "animRes").map(valid_res).unwrap_or_else(|| Self::family_anim_res(f)), model: String::new(), meta: Meta::default(), orbit: None, e: None,
+                    res, anim_res: arg_num(args, "animRes").map(valid_res).unwrap_or_else(|| Self::family_anim_res(f)), model: String::new(), sculpt: arg(args, "sculpt").and_then(crate::sculpt::Sculpt::from_arg).unwrap_or_default(), meta: Meta::default(), orbit: None, e: None,
                 }
             })
             .collect()
@@ -451,7 +453,10 @@ impl State {
         // started again on the new one)
         let was_playing = self.playing;
         if self.playing { self.set_playing(false); }
+        // (the surface studio belongs to the layer: it goes with it to the new family's shape)
+        let sculpt = self.shapes[self.fam].sculpt.clone();
         self.fam = idx.min(self.families.len() - 1);
+        self.shapes[self.fam].sculpt = sculpt;
         if self.stack.sel != 0 {
             // only the first layer's family decides the settings, the view and the lights
             self.cut = true;
@@ -1112,7 +1117,7 @@ impl State {
         (self.family().kind == Kind::Curve && st.beads > 0.0).then_some(st.bead_period)
     }
     pub fn shape_moving(&self) -> bool {
-        self.active().iter().any(|k| k.shape) || !self.beads_all().is_empty()
+        self.active().iter().any(|k| k.shape) || !self.beads_all().is_empty() || !self.sculpt_periods().is_empty()
     }
     /// Everything that moves, with its period, fitted to a loop.
     pub fn loop_plan(&self) -> LoopPlan {
@@ -1121,6 +1126,7 @@ impl State {
         if self.p.spin > 0.0 { items.push(("spin".into(), TAU / (self.p.spin * sp), true)); }
         if self.p.lspin > 0.0 { items.push(("light spin".into(), TAU / (self.p.lspin * sp), true)); }
         for b in self.beads_all() { items.push(("beads".into(), b / sp, false)); }
+        for b in self.sculpt_periods() { items.push(("surface".into(), b / sp, false)); }
         anim::loop_plan(&items, self.p.loop_len)
     }
     pub fn locked(&self) -> bool {
@@ -1218,7 +1224,7 @@ impl State {
         if self.playing {
             self.clock += dt;
             let shape = self.apply_time();
-            if shape || !self.beads_all().is_empty() { self.want = Some(Detail::Anim); }
+            if shape || !self.beads_all().is_empty() || !self.sculpt_periods().is_empty() { self.want = Some(Detail::Anim); }
         }
     }
     /// Show everything as it is at the present clock (after setting the clock by hand).
@@ -1258,7 +1264,7 @@ impl State {
         self.update_r();
         self.lphi = keep.lphi + TAU * keep.turns_lspin * u;
         let shape = self.apply_time();
-        i == 0.0 || shape || !self.beads_all().is_empty()
+        i == 0.0 || shape || !self.beads_all().is_empty() || !self.sculpt_periods().is_empty()
     }
     /// Put everything back the way it was before the render.
     pub fn video_end(&mut self, keep: VideoKeep) {
@@ -1295,6 +1301,8 @@ impl State {
             Detail::Quick => RES_DRAG.min(st.res),
             _ => st.res,
         }) as f64);
+        // (the surface studio works on volumes up to its own largest)
+        let res = if st.sculpt.is_empty() { res } else { res.min(crate::sculpt::RES_MAX) };
         let shape = match &p.shape {
             Shape::Mesh { file } => {
                 st.meta.length = 0.0;

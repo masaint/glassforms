@@ -39,6 +39,11 @@ const CLAY_CONTRAST: f32 = 1.2;
 const CLAY_PEAK: f64 = 0.9;
 /// Frames after which a picture of clay has settled: there is nothing to average but the outlines.
 pub const MAX_ACCUM_CLAY: u32 = 96;
+/// While refining, a frame traces as many rays a pixel as keep it within this many milliseconds, up to
+/// REFINE_MOST; the frame is timed again every REFINE_TIME_EVERY frames.
+pub const REFINE_BUDGET_MS: f64 = 10.0;
+pub const REFINE_MOST: u32 = 4;
+const REFINE_TIME_EVERY: u32 = 16;
 
 /// How much of the lighting the clay is given (`matte` is what a matte surface gathers, as the
 /// shader's nine terms): all of it, unless the surface facing the brightest way would then burn out.
@@ -122,6 +127,8 @@ pub struct Engine {
     pub gpu: Gpu,
     pub state: State,
     pub(crate) baker: Baker,
+    /// the surface studio: reshapes a layer's volume after the baker has built it (see sculpt.rs)
+    pub sculptor: crate::sculpt::Sculptor,
     /// the combining step and what each layer's volume holds (see combine.rs)
     pub layers: LayerWork,
     /// polygon models: the files read, and what turns them into volumes (see mesh_bake.rs)
@@ -229,6 +236,11 @@ pub struct Engine {
     pub last_bake_parts: [f64; 3],
     /// wait for the GPU after every build, so that each is timed to the end
     pub time_bakes: bool,
+    /// rays a pixel each refining frame traces, and refining frames drawn since the view was last still
+    pub refine_n: u32,
+    pub refine_count: u32,
+    /// the most rays a pixel a refining frame may trace (REFINE_MOST; 1 = one, as before)
+    pub refine_most: u32,
 }
 
 fn rows(m: &[f64; 9]) -> [[f32; 4]; 3] {
@@ -243,11 +255,11 @@ impl Engine {
         let lights_tex = renderer.env_target(env::ENV_W as u32, env::ENV_H as u32);
         let lights_view = lights_tex.create_view(&wgpu::TextureViewDescriptor::default());
         let mut e = Self {
-            baker: Baker::new(&gpu), layers: LayerWork::new(&gpu), models: crate::mesh_bake::Models::new(auto), bubbler: Bubbler::new(&gpu), stage: crate::stage::StageWork::new(auto), bubbles_in: None, body_bubbles_in: None, scatter: Scatter::new(&gpu), glow: glow::Kept::default(), shape_no: 0, thickness: None, fit_now: 1.0, soft_ok: false, meter: 1.0, fine_crisp: false, fine_room: false, bodies_always: false, body_thick: None, gpu, state, renderer, cast, lights_tex, lights_view, painted: None, painted_px: Vec::new(), lights_lit: true, rig_sh: None, lights_sh: None, room_sh: None, last_lamps: None,
+            baker: Baker::new(&gpu), sculptor: crate::sculpt::Sculptor::new(&gpu), layers: LayerWork::new(&gpu), models: crate::mesh_bake::Models::new(auto), bubbler: Bubbler::new(&gpu), stage: crate::stage::StageWork::new(auto), bubbles_in: None, body_bubbles_in: None, scatter: Scatter::new(&gpu), glow: glow::Kept::default(), shape_no: 0, thickness: None, fit_now: 1.0, soft_ok: false, meter: 1.0, fine_crisp: false, fine_room: false, bodies_always: false, body_thick: None, gpu, state, renderer, cast, lights_tex, lights_view, painted: None, painted_px: Vec::new(), lights_lit: true, rig_sh: None, lights_sh: None, room_sh: None, last_lamps: None,
             maker: Arc::new(OnceLock::new()), picture: None, picture_no: 0, glass: None, glass_from: None, hdri_seen: None, loading: None, next: None, building: false, hdri_error: None, hdri_wait: auto,
             show_wanted: Cell::new(false), show: None, shown: None, lighting_no: 0, last_lu: None,
             dirty: true, cut: true, last_tu: None, last_look: None,
-            planes_until: None, planes_shown: false, size_override: None, auto, averaging: false, error: None, last_bake_ms: 0.0, last_bake_parts: [0.0; 3], time_bakes: false,
+            planes_until: None, planes_shown: false, size_override: None, auto, averaging: false, error: None, last_bake_ms: 0.0, last_bake_parts: [0.0; 3], time_bakes: false, refine_n: 1, refine_count: 0, refine_most: REFINE_MOST,
         };
         e.paint_lights();
         e
@@ -968,7 +980,27 @@ impl Engine {
     fn build(&mut self, mode: Detail) -> R<()> {
         // (models first: a file's path tidied, its smoothing put on its slider, before anything is built from them)
         self.model_upkeep();
+        self.sculptor.footprint = self.sculpt_footprint();
         if !self.state.plain() { return self.bake_layers(mode); }
+        // The surface studio: when only it has changed (or it evolves while the shape stands still), it
+        // runs again on the shape kept from before, and the shape is not built again.
+        let sculpt = self.state.layer_sculpt(0).filter(|s| !s.is_empty()).cloned().filter(|_| self.sculptor.available());
+        let skey = self.sculpt_key(0, mode);
+        if let Some(s) = &sculpt {
+            let res = self.state.layer_res(0, mode);
+            if self.sculptor.has(&skey) && self.baker.volume().is_some_and(|v| v.res == res) && self.layers.built_plain_still() {
+                let t0 = Instant::now();
+                let phases = self.state.sculpt_phases(0);
+                let timed = matches!(mode, Detail::Full) || self.time_bakes;
+                let vol = self.baker.volume().ok_or("no volume")?;
+                self.sculptor.run(0, vol, &skey, s, &phases, timed, !matches!(mode, Detail::Full | Detail::Hq))?;
+                self.renderer.set_gem(None);
+                self.last_bake_ms = t0.elapsed().as_secs_f64() * 1e3;
+                self.last_bake_parts = [0.0, 0.0, self.last_bake_ms];
+                self.dirty = true;
+                return Ok(());
+            }
+        }
         let t0 = Instant::now();
         let job = self.state.shape_job(mode, None)?;
         let t1 = Instant::now();
@@ -982,6 +1014,18 @@ impl Engine {
             }
             ShapeJob::Mesh(model) => self.models.build(&self.gpu, &mut self.baker, 0, model, job.res, mode)?,
         };
+        // the surface studio, on the shape just built (kept aside first, untouched)
+        if let Some(s) = &sculpt {
+            let vol = self.baker.volume().ok_or("no volume")?;
+            self.sculptor.keep(0, vol, &skey);
+            let phases = self.state.sculpt_phases(0);
+            self.sculptor.run(0, vol, &skey, s, &phases, matches!(mode, Detail::Full) || self.time_bakes, !matches!(mode, Detail::Full | Detail::Hq))?;
+        } else {
+            self.sculptor.forget(0);
+        }
+        self.sculptor.drop_layers(1);
+        let kept: Vec<String> = sculpt.iter().map(|_| self.state.layer_key(0)).collect();
+        self.sculptor.keep_only(&kept);
         // a full build is timed to the end, so the figure shown is honest; while moving nothing waits
         let t2 = Instant::now();
         if matches!(mode, Detail::Full) || self.time_bakes { self.gpu.wait(); }
@@ -999,7 +1043,8 @@ impl Engine {
             }
             _ => None,
         };
-        self.renderer.set_gem(gem.as_deref());
+        // (a sculpted stone is no longer bounded by its planes)
+        self.renderer.set_gem(if sculpt.is_some() { None } else { gem.as_deref() });
         let vol = self.baker.volume().ok_or("no volume")?;
         self.renderer.set_scene(&self.lights_view, vol, step, out, inn, layers);
         let meta = &mut self.state.shapes[job.family].meta;
@@ -1010,6 +1055,23 @@ impl Engine {
         self.layers.built_plain(&mut self.baker, self.state.layer_key(0), job.res, mode, match &job.shape { ShapeJob::Curve { melt, .. } => Some(*melt), _ => None });
         self.dirty = true;
         Ok(())
+    }
+
+    /// One pixel's width at the shape for the view and picture as they are now (for the studio's pre-filter).
+    pub(crate) fn sculpt_footprint(&self) -> f64 {
+        let (_, (_, rows)) = self.renderer.size();
+        let p = &self.state.p;
+        gf_core::sculpt::footprint(p.dist, (p.fov * DEG / 2.0).tan(), rows)
+    }
+    /// Is some layer's studio pre-filtered (so that a new zoom or picture size asks for it to be made again)?
+    fn sculpt_prefiltered(&self) -> bool {
+        (0..self.state.layer_count()).any(|i| self.state.layer_sculpt(i).is_some_and(|s| !s.is_empty() && s.prefilter))
+    }
+
+    /// What a layer's volume is kept aside under for the surface studio: the shape, its size, and whether
+    /// it was built exactly.
+    pub(crate) fn sculpt_key(&self, layer: usize, mode: Detail) -> String {
+        format!("{}|{}|{}", self.state.layer_key(layer), self.state.layer_res(layer, mode), matches!(mode, Detail::Full | Detail::Hq))
     }
 
     /// Build the shape if something has asked for it. An error is kept in `self.error` and the old shape stays.
@@ -1199,6 +1261,11 @@ impl Engine {
         let moved = self.last_tu != Some(tu) || self.last_look.is_some_and(|l| (l.smooth, l.spread, l.debug) != (look.smooth, look.spread, look.debug));
         // (a change of lighting on its way counts as moving: the frame it arrives in must not be slept through)
         let moving = self.state.p.spin > 0.0 || self.state.p.lspin > 0.0 || self.state.playing || self.lighting_pending() || self.models.busy();
+        // the studio's pre-filter worked to another zoom or picture size: once the view is still, it is made
+        // again for this one (only the studio runs; a zoom that keeps within about 40% asks nothing)
+        if !(self.dirty || moved || moving) && self.state.want.is_none() && self.sculptor.available() && self.sculpt_prefiltered() && self.sculpt_footprint() != self.sculptor.footprint {
+            self.state.want = Some(Detail::Full);
+        }
         if !(self.dirty || moved) && self.renderer.accum_n >= self.max_accum() {
             // converged: stop tracing and let the GPU idle; only the screen may need doing again
             if self.last_look != Some(look) {
@@ -1208,7 +1275,31 @@ impl Engine {
             }
             return Did { drew: false, again: flashing || moving };
         }
+        // Refining (nothing moves, the picture is being averaged): several rays a pixel a frame, as many as
+        // keep the frame within the budget. Each is a whole frame of the tracer with its own jitter and
+        // step of the spectral comb, folded into the picture so far like any other (so a still picture's
+        // count of frames is still its count of rays a pixel).
+        let refining = !(self.dirty || moved || moving) && self.renderer.accum_n > 0 && self.state.want.is_none();
+        if !refining {
+            self.refine_count = 0;
+            self.refine_n = 1;
+            self.draw(false);
+            return Did { drew: true, again: true };
+        }
+        let left = self.max_accum().saturating_sub(self.renderer.accum_n).max(1);
+        let n = self.refine_n.clamp(1, self.refine_most.max(1)).min(left);
+        // (every so often the frame is timed to its end, and the number of rays set from that)
+        let timed = self.refine_count % REFINE_TIME_EVERY == 0;
+        if timed { self.gpu.wait(); }
+        let t0 = Instant::now();
+        for _ in 1..n { self.renderer.frame(&tu, &look, false, false, true); }
         self.draw(false);
+        if timed {
+            self.gpu.wait();
+            let each = t0.elapsed().as_secs_f64() * 1e3 / n as f64;
+            self.refine_n = ((REFINE_BUDGET_MS / each.max(0.05)).floor() as u32).clamp(1, REFINE_MOST);
+        }
+        self.refine_count += 1;
         Did { drew: true, again: true }
     }
 

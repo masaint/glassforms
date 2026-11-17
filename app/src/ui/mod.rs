@@ -18,6 +18,8 @@
 //!   studio    the light room's studio (backdrop, floor) and shadows and caustics; a body's own casting switches
 //!   material  what the shape is made of: the material group at the head of the left panel, and the
 //!             materials lab, a floating window with the rest of a material's controls
+//!   sculpt    the surface studio: a floating window with a stack of procedural layers that reshape the
+//!             selected layer's surface, opened from the right panel
 //!   room      the light room: a floating window with everything about the light (surroundings, floor,
 //!             lights, shadows and caustics, turning)
 //!   gizmo     the ball that shows where the lights are
@@ -39,6 +41,7 @@ pub mod overlay;
 pub mod right;
 pub mod room;
 pub mod script;
+pub mod sculpt;
 pub mod store;
 pub mod studio;
 pub mod theme;
@@ -66,6 +69,8 @@ pub enum Request {
     LoadModel,
     /// set the layer at this place in the list down on the floor
     ToFloor(usize),
+    /// choose the picture of the surface studio's layer at this place
+    LoadSculptPicture(usize),
 }
 
 /// What the window knows of the lighting that the state does not say: the engine's doing.
@@ -159,6 +164,11 @@ pub struct Panels {
     /// the layers were last combined into a volume this many voxels a side, in this many milliseconds
     /// (none: one layer, nothing to combine)
     pub joined: Option<(u32, f64)>,
+    /// the surface studio last ran on a volume this many voxels a side, in this many milliseconds; what
+    /// went wrong with it (a picture that could not be read); which of its layers is open
+    pub sculpted: Option<(u32, f64)>,
+    pub sculpt_error: Option<String>,
+    pub sculpt_layer: Option<usize>,
     pub lighting: Lighting,
     pub model: Model,
     pub casting: Casting,
@@ -204,7 +214,7 @@ pub struct Panels {
 impl Panels {
     pub fn new(store: store::Store) -> Self {
         Self {
-            store, hide_left: false, hide_right: false, help_open: false, bright: false, light: 0, handles: handles::Handles::default(), lamp: 0, mat_group: None, lit_mat: None, combo_open: None, meets_open: [false; 2], joined: None, lighting: Lighting::default(), model: Model::default(), casting: Casting::default(), aspect: 16.0 / 9.0, last_fstop: 4.0, perf: String::new(), bench: Bench::Idle, rendering: false, ffmpeg: false,
+            store, hide_left: false, hide_right: false, help_open: false, bright: false, light: 0, handles: handles::Handles::default(), lamp: 0, mat_group: None, lit_mat: None, combo_open: None, meets_open: [false; 2], joined: None, sculpted: None, sculpt_error: None, sculpt_layer: Some(0), lighting: Lighting::default(), model: Model::default(), casting: Casting::default(), aspect: 16.0 / 9.0, last_fstop: 4.0, perf: String::new(), bench: Bench::Idle, rendering: false, ffmpeg: false,
             video_text: String::new(), file_text: String::new(), loop_text: String::new(), requests: Vec::new(), place: "", record: false, rects: BTreeMap::new(),
             left_at: None, right_at: None, lit_shape: None, scroll_to: [None, None], room_h: 600.0, needs: [0.0; 2], right_rest: 0.0,
         }
