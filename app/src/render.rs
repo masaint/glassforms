@@ -450,6 +450,11 @@ pub struct Renderer {
     u_gem: wgpu::Buffer,
     last_gem: Vec<f32>,
     gem: bool,
+    /// the shape's formula, when the tracer reads it instead of the volume (gf_core::sdf): what names it,
+    /// and its text for the tracer
+    sdf: Option<(String, String)>,
+    u_sdf: wgpu::Buffer,
+    last_sdf: Vec<f32>,
     u_inner_bodies: wgpu::Buffer,
     last_inner_bodies: Vec<f32>,
     /// the share of a rough surface's roughness that is sampled, as the tracer has it now
@@ -597,6 +602,8 @@ impl Renderer {
             uniform_entry(32, frag, false), uniform_entry(33, frag, false),
             // (34: a cut stone's planes, read only by tracers built for a stone)
             uniform_entry(GEM_BINDING, frag, false),
+            // (35: the shape's numbers, read only by tracers built to read its formula)
+            uniform_entry(gf_core::sdf::BINDING, frag, false),
         ]);
         let no_bodies = gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("no bodies"),
@@ -665,6 +672,9 @@ impl Renderer {
             last_inner: Vec::new(),
             u_gem: gpu.uniform_buffer("trace: the stone's planes", (4 * (1 + gf_core::presets::gems::MAX_PLANES) * 4) as u64),
             last_gem: Vec::new(),
+            sdf: None,
+            u_sdf: gpu.uniform_buffer("trace: the shape's formula", gf_core::field::UNIFORM_SIZE as u64),
+            last_sdf: Vec::new(),
             gem: false,
             u_inner_bodies: gpu.uniform_buffer("trace: inside each body", (material::MAX_BODIES * gf_core::inner::IU_FLOATS * 4) as u64),
             last_inner_bodies: Vec::new(),
@@ -803,6 +813,26 @@ impl Renderer {
         }
     }
 
+    /// The formula the tracer reads instead of the volume (gf_core::sdf): what names it (a tracer is kept
+    /// under it), its text for the tracer, and its numbers (`gf_core::field::uniforms`); or None to read the
+    /// volume. Takes effect with the next `set_scene`, which builds the tracer.
+    /// (`decl` may be None when the formula named is the one the tracer has already.)
+    pub fn set_sdf(&mut self, formula: Option<(&str, Option<String>, &[f32])>) {
+        match formula {
+            Some((key, decl, numbers)) => {
+                if self.sdf.as_ref().is_none_or(|s| s.0 != key) {
+                    let Some(decl) = decl else { self.sdf = None; return };
+                    self.sdf = Some((key.to_string(), decl));
+                }
+                if self.last_sdf != numbers {
+                    self.gpu.queue.write_buffer(&self.u_sdf, 0, bytemuck::cast_slice(numbers));
+                    self.last_sdf = numbers.to_vec();
+                }
+            }
+            None => self.sdf = None,
+        }
+    }
+
     /// The numbers of what lies inside the body (`gf_core::inner::uniforms`). True if they changed.
     pub fn set_inner(&mut self, numbers: &[f32]) -> bool {
         if self.last_inner == numbers { return false; }
@@ -890,7 +920,19 @@ impl Renderer {
     /// The tracer's text for the lens that is wanted.
     fn tracer_text(&self, m: &March, v: Variant) -> String {
         let src = if self.cam.wanted { tracer_source_lens(m, v, self.profile) } else { tracer_source(m, v, self.profile) };
-        if self.gem && gem_fits(&v) { gem_weave(&src) } else { src }
+        let src = if self.gem && gem_fits(&v) { gem_weave(&src) } else { src };
+        match &self.sdf {
+            Some((_, decl)) if crate::sdf::fits(&v) => crate::sdf::weave(&src, decl),
+            _ => src,
+        }
+    }
+    /// What names the formula the tracer is given, if it is given one.
+    pub fn sdf_key(&self) -> Option<&str> {
+        self.sdf.as_ref().map(|s| s.0.as_str())
+    }
+    /// Is the shape up traced from its formula, with the tracer as it is now?
+    pub fn sdf_traced(&self) -> bool {
+        self.sdf.is_some() && crate::sdf::fits(&self.variant)
     }
     /// Tracers kept, and frames in the running average (for the window's diagnostic log).
     pub fn kept(&self) -> String {
@@ -948,7 +990,8 @@ impl Renderer {
     }
 
     fn tracer_key(&self, m: &March, v: Variant) -> String {
-        format!("{:.2}|{}|{}|{}|{}|{:?}|{}|{}", m.step_scale, m.steps_out, m.steps_in, m.layers, self.profile, v, self.cam.wanted, self.gem && gem_fits(&v))
+        let sdf = self.sdf.as_ref().filter(|_| crate::sdf::fits(&v)).map_or("", |s| s.0.as_str());
+        format!("{:.2}|{}|{}|{}|{}|{:?}|{}|{}|{sdf}", m.step_scale, m.steps_out, m.steps_in, m.layers, self.profile, v, self.cam.wanted, self.gem && gem_fits(&v))
     }
 
     /// The pipeline for the way of marching and drawing now set: made the first time, kept after.
@@ -1062,6 +1105,7 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 32, resource: self.u_inner.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 33, resource: self.u_inner_bodies.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: GEM_BINDING, resource: self.u_gem.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: gf_core::sdf::BINDING, resource: self.u_sdf.as_entire_binding() },
             ],
         }));
     }

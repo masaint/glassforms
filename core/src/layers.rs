@@ -1660,7 +1660,7 @@ impl State {
             family: f.id.to_string(),
             preset: p.id.to_string(),
             values: p.params.iter().zip(&st.vals).map(|(d, v)| (d.id.to_string(), *v)).collect(),
-            shape: ShapeSetup { thick: st.thick, len: st.len, melt: st.melt, puff: st.puff, travel: st.travel, beads: st.beads, bead_period: st.bead_period, res: st.res, anim_res: st.anim_res, model: st.model.clone(), sculpt: (!st.sculpt.is_empty() || !st.sculpt.layers.is_empty()).then(|| st.sculpt.clone()) },
+            shape: ShapeSetup { thick: st.thick, len: st.len, melt: st.melt, puff: st.puff, travel: st.travel, beads: st.beads, bead_period: st.bead_period, res: st.res, anim_res: st.anim_res, model: st.model.clone(), trace: st.trace, sculpt: (!st.sculpt.is_empty() || !st.sculpt.layers.is_empty()).then(|| st.sculpt.clone()) },
         }
     }
     /// What a setup holds about the layers, beyond the first shape. None for one plain layer, so that a
@@ -1699,6 +1699,7 @@ impl State {
         st.res = valid_res(sh.res as f64);
         st.anim_res = valid_res(sh.anim_res as f64);
         st.model = sh.model.clone();
+        st.trace = sh.trace;
         st.sculpt = sh.sculpt.clone().unwrap_or_default();
     }
     /// Put a setup's layers up on top of its first shape (which is already up, alone). Checked beforehand.

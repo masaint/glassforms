@@ -88,7 +88,7 @@ pub fn member_name(id: &str) -> String {
 }
 
 // The helpers every preset may use, as in FIELD_HEAD.
-const HELPERS: &str = "\
+pub(crate) const HELPERS: &str = "\
 fn smin(a: f32, b: f32, k: f32) -> f32 { let h = max(k - abs(a - b), 0.0) / k; return min(a, b) - h*h*k*0.25; }
 fn smax(a: f32, b: f32, k: f32) -> f32 { return -smin(-a, -b, k); }
 fn sdBall(p: vec3f, r: f32) -> f32 { return length(p) - r; }

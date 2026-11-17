@@ -7,6 +7,7 @@ pub mod cast;
 pub mod curve;
 pub mod env;
 pub mod field;
+pub mod sdf;
 pub mod inner;
 pub mod lamps;
 pub mod limits;

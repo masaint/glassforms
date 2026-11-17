@@ -63,6 +63,7 @@ pub fn show(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     let list = shapes(ui, st, px);
     maths(ui, st, px);
     sliders(ui, st, px);
+    trace_row(ui, st, px);
     layers::placement(ui, st, px);
     layers::joins(ui, st, px);
     // the surface studio: what the surface of the selected layer's solid is made into
@@ -205,6 +206,42 @@ fn maths(ui: &mut Ui, st: &State, px: &mut Panels) {
         }
     }
     gap(ui, 8.0);
+}
+
+/// How the shape is traced: from its baked volume, or from its formula (gf_core::sdf). A shape with no
+/// formula says why it has only the volume; one traced from its formula says when the volume is read
+/// after all.
+fn trace_row(ui: &mut Ui, st: &mut State, px: &mut Panels) {
+    use gf_core::sdf::{support, Support, Trace};
+    let now = st.shape().trace;
+    match support(st.family(), st.preset()) {
+        Support::VolumeOnly(why) => {
+            let r = row(ui, 14.0);
+            text_in(ui, r, Align2::LEFT_CENTER, &format!("traced from volume only: {why}"), mono(SMALL), FAINT);
+            px.note("trace", r);
+        }
+        Support::Formula { .. } => {
+            let items = [
+                Item::new("volume", now == Trace::Volume).tip("the shape baked into a grid of distances, which the tracer reads: as fine as its voxels"),
+                Item::new("sdf", now == Trace::Sdf).tip("the tracer works out the shape's formula at every step: exact edges at any zoom, no voxel limit"),
+            ];
+            let run = named_run(ui, Id::unique("trace"), "traced from", &items);
+            for (w, place) in ["volume", "sdf"].iter().zip(&run.places) { px.note(format!("trace:{w}"), *place); }
+            if let Some(i) = run.clicked { st.apply_arg("trace", if i == 0 { "volume" } else { "sdf" }); }
+            if now == Trace::Sdf {
+                // when the volume is read after all
+                let why = if st.layer_count() > 1 { Some("there are several layers") }
+                    else if st.layer_sculpt(0).is_some_and(|s| !s.is_empty()) { Some("the surface studio is on") }
+                    else if gf_core::material::bubbles(&st.p).is_some() { Some("the material has bubbles") }
+                    else { None };
+                if let Some(why) = why {
+                    gap(ui, 2.0);
+                    paragraph(ui, &format!("reads the volume while {why}"), mono(SMALL), FAINT, LINE, INSET);
+                }
+            }
+        }
+    }
+    gap(ui, 4.0);
 }
 
 /// A knob that is a choice between a few named things (a model drawn as it was found, as a solid or as

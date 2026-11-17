@@ -75,6 +75,8 @@ pub struct ShapeState {
     pub model: String,
     /// the surface studio's layers and cleanups (see sculpt.rs): empty unless something was added
     pub sculpt: crate::sculpt::Sculpt,
+    /// traced from its baked volume (as always) or from its formula (gf_core::sdf)
+    pub trace: crate::sdf::Trace,
     pub meta: Meta,
     orbit: Option<OrbitCache>,
     /// the face-on turn worked out for the still shape, held while it animates
@@ -408,7 +410,8 @@ impl State {
                     melt: arg_num(args, "melt").unwrap_or(f.melt), puff: arg_num(args, "puff").unwrap_or(0.0),
                     travel: arg_num(args, "travel").unwrap_or(0.0), beads: arg_num(args, "beads").unwrap_or(0.0),
                     bead_period: arg_num(args, "beadPeriod").unwrap_or(2.0),
-                    res, anim_res: arg_num(args, "animRes").map(valid_res).unwrap_or_else(|| Self::family_anim_res(f)), model: String::new(), sculpt: arg(args, "sculpt").and_then(crate::sculpt::Sculpt::from_arg).unwrap_or_default(), meta: Meta::default(), orbit: None, e: None,
+                    res, anim_res: arg_num(args, "animRes").map(valid_res).unwrap_or_else(|| Self::family_anim_res(f)), model: String::new(), sculpt: arg(args, "sculpt").and_then(crate::sculpt::Sculpt::from_arg).unwrap_or_default(),
+                    trace: arg(args, "trace").and_then(crate::sdf::Trace::parse).unwrap_or_default(), meta: Meta::default(), orbit: None, e: None,
                 }
             })
             .collect()
@@ -1427,6 +1430,14 @@ impl State {
                 self.set_r(&euler(r[0], r[1], r[2]));
                 true
             }
+            "trace" => match crate::sdf::Trace::parse(value) {
+                Some(t) => {
+                    self.shape_mut().trace = t;
+                    self.want = Some(Detail::Full);
+                    true
+                }
+                None => false,
+            },
             "thick" | "len" | "melt" | "puff" | "travel" | "beads" | "beadPeriod" | "res" | "animRes" => match num {
                 Some(v) => {
                     let st = self.shape_mut();

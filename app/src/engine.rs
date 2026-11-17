@@ -1047,6 +1047,21 @@ impl Engine {
         };
         // (a sculpted stone is no longer bounded by its planes)
         self.renderer.set_gem(if sculpt.is_some() { None } else { gem.as_deref() });
+        // traced from its formula, when the shape asks to be and has one (not once the surface studio
+        // has reshaped its volume: the formula no longer says what the shape is)
+        let traced = self.state.layer_shape(0).is_some_and(|s| s.trace == gf_core::sdf::Trace::Sdf) && sculpt.is_none();
+        match &job.shape {
+            ShapeJob::Field { uniforms } if traced => {
+                let p = &fam.presets[job.preset];
+                let key = format!("{}/{}", fam.id, p.id);
+                let decl = if self.renderer.sdf_key() == Some(key.as_str()) { None } else { gf_core::sdf::tracer_decl(fam, p) };
+                // (the size of a voxel some shapes round their edges to is the formula's finer one)
+                let mut numbers = uniforms.to_vec();
+                numbers[1] *= gf_core::sdf::FINER;
+                self.renderer.set_sdf(Some((&key, decl, &numbers)));
+            }
+            _ => self.renderer.set_sdf(None),
+        }
         let vol = self.baker.volume().ok_or("no volume")?;
         self.renderer.set_scene(&self.lights_view, vol, step, out, inn, layers);
         let meta = &mut self.state.shapes[job.family].meta;
