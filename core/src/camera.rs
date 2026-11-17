@@ -246,8 +246,10 @@ pub fn set_text(p: &mut Settings, name: &str, text: &str) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Camera {
     pub proj: Projection,
-    /// the lens sits at (0, 0, dist) and looks down -z at the object's centre
+    /// the lens sits at (eye[0], eye[1], dist) and looks down -z: at the object's centre while `eye` is 0
     pub dist: f64,
+    /// how far the lens stands across and up from the line through the object's centre (a free camera)
+    pub eye: [f64; 2],
     /// Half the picture's height on the sensor, in focal lengths: the tangent of half the field of view of
     /// an ordinary lens. For a panorama, where the picture's height is half a turn whatever the lens: pi / 2.
     pub t: f64,
@@ -289,6 +291,7 @@ impl Camera {
         Camera {
             proj,
             dist: p.dist,
+            eye: [p.eye_x, p.eye_y],
             t: if proj == Projection::Panorama { FRAC_PI_2 } else { (p.fov * DEG / 2.0).tan() },
             shift: p.shift,
             // (a lens that bows lines by d at the corner: radius -> tan(a r) / a = r (1 + a^2 r^2 / 3 ...))
@@ -312,7 +315,13 @@ impl Camera {
     /// Half the height of an orthographic view, in scene units: what a perspective lens at the same
     /// distance shows of the plane through the object's centre.
     pub fn half_height(&self) -> f64 {
-        self.t * self.dist
+        // (a free camera may stand level with the object's centre, or beyond it)
+        self.t * self.dist.abs().max(1e-3)
+    }
+
+    /// Where the lens stands.
+    pub fn at(&self) -> [f64; 3] {
+        [self.eye[0], self.eye[1], self.dist]
     }
 
     /// A radius on the film (half-heights from the lens's axis) to where a lens that kept straight lines
@@ -340,11 +349,11 @@ impl Camera {
         let r = fx.hypot(fy);
         let k = if r > 0.0 { self.warp_out(r) / r } else { 1.0 };
         let (x, y) = (fx * k, fy * k);
-        let at = [0.0, 0.0, self.dist];
+        let at = self.at();
         let t = self.t;
         Some(match self.proj {
             Projection::Perspective => (at, norm([x * t, y * t, -1.0])),
-            Projection::Orthographic => ([x * self.half_height(), y * self.half_height(), self.dist], [0.0, 0.0, -1.0]),
+            Projection::Orthographic => ([x * self.half_height() + at[0], y * self.half_height() + at[1], self.dist], [0.0, 0.0, -1.0]),
             Projection::Equidistant | Projection::Equisolid | Projection::Stereographic => {
                 let rho = x.hypot(y) * t;
                 let th = self.proj.angle(rho)?;
@@ -367,7 +376,7 @@ impl Camera {
     /// The point of the picture at which a point in space appears (across and up from the picture's
     /// middle, in half-heights). None if the lens cannot see it.
     pub fn project(&self, p: [f64; 3]) -> Option<[f64; 2]> {
-        let v = [p[0], p[1], p[2] - self.dist];
+        let v = [p[0] - self.eye[0], p[1] - self.eye[1], p[2] - self.dist];
         let t = self.t;
         let (x, y) = match self.proj {
             Projection::Perspective => {
@@ -400,7 +409,7 @@ impl Camera {
         if self.proj == Projection::Orthographic {
             self.dist - p[2]
         } else {
-            (p[0] * p[0] + p[1] * p[1] + (p[2] - self.dist).powi(2)).sqrt()
+            ((p[0] - self.eye[0]).powi(2) + (p[1] - self.eye[1]).powi(2) + (p[2] - self.dist).powi(2)).sqrt()
         }
     }
 

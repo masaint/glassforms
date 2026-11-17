@@ -167,3 +167,14 @@ fn environment_picture() {
 fn focus() {
     check("dof.wgsl", include_str!("../src/shaders/dof.wgsl"));
 }
+
+/// A tracer built for a stage larger than ever (a layer moved or sized past the usual box): still valid
+/// with the free camera's place in its numbers.
+#[test]
+fn grown_tracer() {
+    let m = March { step_scale: 0.95, steps_out: 220, steps_in: 56, layers: 2 };
+    for clay in [false, true] {
+        let v = Variant { grown: true, clay, ..Default::default() };
+        check(&format!("trace.wgsl grown {v:?}"), &tracer_source(&m, v, false));
+    }
+}

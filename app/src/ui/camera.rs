@@ -230,15 +230,24 @@ fn focus(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     if let Some(i) = choice(ui, Id::unique(("planes", px.place)), "planes", &["hide", "show"], js_round(st.p.planes) as usize) {
         st.p.planes = i as f64;
     }
-    note(ui, "Click the glass to focus there.");
+    note(ui, "Click the glass to focus there (with the select or a handles tool: alt-click).");
 }
 
 /// The view: where the camera stands (how far off, how high, looking down; the picture slid across the
 /// lens; its roll) and how the shape is turned in front of it, with the named views, and one reset for
 /// all of it.
 fn framing(ui: &mut Ui, st: &mut State, px: &mut Panels) {
+    // orbiting the shape, or flying free (the tool bar over the picture has the same two)
+    let run = named_run(ui, Id::unique(("camera moves", px.place)), "moves", &[
+        Item::new("orbit", !px.nav.fly).tip("dragging turns the view round the shape, or round what was framed (V)"),
+        Item::new("fly", px.nav.fly).tip("W A S D move, Q and E down and up, a drag looks round, the wheel sets the speed (V)"),
+    ]);
+    for (place, name) in run.places.iter().zip(["moves:orbit", "moves:fly"]) { px.note(format!("{}{name}", px.whose()), *place); }
+    if let Some(i) = run.clicked { px.nav.set_fly(st, i == 1); }
     let r = st.camera().readout(px.aspect);
-    worded(ui, st, px, "dist", &length_text(r.distance_mm), "from the lens to the middle of the shape");
+    worded(ui, st, px, "dist", &length_text(r.distance_mm), "from the lens to the middle of the shape, along the way it looks");
+    let tip = "where the camera stands beside the line through the middle of the shape, across and up as it sees it (flying and framing move it; 0 looks at the middle)";
+    for name in ["eyeX", "eyeY"] { knob::knob_row_with(ui, st, &engine(name), px, knob::Extra { tip, ..Default::default() }); }
     let elev = Knob { label: "height °".into(), ..engine("elev") };
     knob::knob_row_with(ui, st, &elev, px, knob::Extra { tip: "the camera's height: raised on an arc and looking down at the shape, the room, its lights and the shape tilting together", ..Default::default() });
     let azim = Knob { label: "round °".into(), ..engine("azim") };

@@ -112,7 +112,7 @@ pub fn lamps(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     let r = row(ui, size.y + 4.0);
     let place = Rect::from_min_size(Pos2::new(r.right() - size.x, r.center().y - size.y / 2.0), size);
     px.note("room/lamp-handles", place);
-    if button(ui, place, Id::unique("lamp handles"), word, on_lamp, font).on_hover_text("arrows, squares and rings over the picture to drag this lamp about (G); T: move, turn or size").clicked() {
+    if button(ui, place, Id::unique("lamp handles"), word, on_lamp, font).on_hover_text("arrows, squares and rings over the picture to drag this lamp about (G); T: all at once, move, turn or size").clicked() {
         if on_lamp { px.handles.toggle(); } else {
             px.handles.lamp = Some(i);
             if !px.handles.on { px.handles.toggle(); }

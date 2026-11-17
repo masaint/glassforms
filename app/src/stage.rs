@@ -492,7 +492,7 @@ impl Engine {
         let Some(h) = self.stage.height() else { return 0.0 };
         let p = &self.state.p;
         let m = self.state.room_m();
-        // the room's up as the camera sees it; the camera stands at (0, 0, dist)
+        // the room's up as the camera sees it; the camera stands at (eyeX, eyeY, dist)
         let n = [m[1], m[4], m[7]];
         let ((w, hh), _) = self.renderer.size();
         let aspect = w.max(1) as f64 / hh.max(1) as f64;
@@ -502,7 +502,7 @@ impl Engine {
         let mut best = f64::MAX;
         for (sx, sy) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
             let dir = [(sx * aspect + p.shift[0]) * tf, (sy + p.shift[1]) * tf, -1.0];
-            let t = (h - n[2] * p.dist) / (n[0] * dir[0] + n[1] * dir[1] + n[2] * dir[2]);
+            let t = (h - (n[0] * p.eye_x + n[1] * p.eye_y + n[2] * p.dist)) / (n[0] * dir[0] + n[1] * dir[1] + n[2] * dir[2]);
             if t > 0.0 && t.is_finite() { best = best.min(t); }
         }
         if best == f64::MAX { 0.0 } else { best }

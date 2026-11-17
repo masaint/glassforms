@@ -69,12 +69,13 @@ fn gestures(families: usize) -> [(&'static str, Vec<(String, &'static str)>); 3]
     let s = |t: &str| t.to_owned();
     [
         ("on the picture", vec![
-            (s("drag"), "turn the shape"),
-            (s("right-drag, shift-drag"), "slide the view"),
+            (s("drag"), "turn the view (flying: look round)"),
+            (s("right-drag, shift-drag"), "slide the view (flying, right-drag looks round)"),
             (s("ctrl-drag, middle-drag"), "roll the view"),
-            (s("wheel"), "closer, further away"),
+            (s("wheel"), "closer, further away (flying: how fast)"),
             (s("shift-wheel"), "change the lens"),
-            (s("click"), "focus there (with an aperture)"),
+            (s("click"), "choose the shape or lamp there; on nothing, let go"),
+            (s("alt-click"), "focus there (with an aperture; so does a click with the camera tool)"),
             (s("double click"), "put the view back"),
         ]),
         ("on a slider", vec![
@@ -93,7 +94,12 @@ fn gestures(families: usize) -> [(&'static str, Vec<(String, &'static str)>); 3]
             (s("K"), "the camera"),
             (s("C"), "clay, or the material again"),
             (s("H"), "hide the panels, or show them"),
-            (s("F"), "fullscreen (Esc leaves it)"),
+            (s("G"), "the handles on what is chosen, or not"),
+            (s("T"), "the handles: all at once, move, turn, size"),
+            (s("F"), "frame what is chosen"),
+            (s("V"), "orbit, or fly"),
+            (s("W A S D  Q E"), "flying: forward, left, back, right; down, up (shift fast, ctrl slow)"),
+            (s("F11"), "fullscreen (Esc leaves it)"),
             (s("F1"), "this help (Esc closes it)"),
         ]),
     ]

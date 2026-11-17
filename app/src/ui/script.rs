@@ -34,6 +34,12 @@
 //!   play                        start or stop the animation
 //!   view:<name>                 front, back, left, right, top, under; reset:<view|object|lights>
 //!   key:<name>                  space, p, h, l, m, c, f, r, f1, 1-9, left, right, up, down, escape
+//!   keyhold:<name>=<frames>     hold a key down while that many frames go by (flying: w, a, s, d, q, e)
+//!   press:<control>             click the middle of a control by the name a test knows it by (tool:move,
+//!                               tool:fly, cube:+y, ...: the state written out lists them under "rects")
+//!   hover:<control>             the pointer over a noted control (or handle), without pressing
+//!   dragfrom:<control>=<dx>,<dy>  drag from the middle of one by so many points (handle:x, handle:ring-z,
+//!                               handle:size, handle:centre: the handles over the picture; lamp-at:1 a lamp)
 //!   drag:<dx>,<dy>              drag on the picture; also pan: (right button), roll: (middle), sdrag: (shift), cdrag: (ctrl)
 //!   wheel:<d>  swheel:<d>       the wheel, in the browser's units (100 a notch); with shift
 //!   wheelat:<x>,<y>,<d>         the wheel with the pointer at that place, in points
@@ -118,6 +124,15 @@ pub enum Act {
     View(String),
     Reset(String),
     Key(String),
+    /// a key held down for so many frames
+    KeyHold(String, u32),
+    /// a click on the middle of a noted control
+    Press(String),
+    /// a drag from the middle of a noted control by so many points (the handles over the picture are
+    /// noted as handle:centre, handle:x, handle:ring-y, handle:size ...)
+    DragFrom(String, f32, f32),
+    /// the pointer over the middle of a noted control, without pressing
+    Hover(String),
     Drag(f32, f32, Hold),
     Wheel(f32, bool, Option<(f32, f32)>),
     Type(String),
@@ -224,6 +239,10 @@ pub fn parse(text: &str) -> Result<Vec<Act>, String> {
             "view" => Act::View(arg.into()),
             "reset" => Act::Reset(arg.into()),
             "key" => { key(arg)?; Act::Key(arg.into()) }
+            "keyhold" => { let (k, v) = named(name, arg)?; key(k)?; Act::KeyHold(k.into(), num(name, v)?) }
+            "press" => Act::Press(arg.into()),
+            "hover" => Act::Hover(arg.into()),
+            "dragfrom" => { let (k, v) = named(name, arg)?; let (x, y) = pair(name, v)?; Act::DragFrom(k.into(), x, y) }
             "drag" | "pan" | "roll" | "sdrag" | "cdrag" => {
                 let (dx, dy) = pair(name, arg)?;
                 Act::Drag(dx, dy, match name { "pan" => Hold::Right, "roll" => Hold::Middle, "sdrag" => Hold::Shift, "cdrag" => Hold::Ctrl, _ => Hold::Left })

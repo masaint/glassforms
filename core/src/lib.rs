@@ -21,6 +21,7 @@ pub mod settings;
 pub mod setup;
 pub mod stage;
 pub mod state;
+pub mod view;
 
 /// The volume spans [-HB, HB] on each axis.
 pub const HB: f64 = 1.5;

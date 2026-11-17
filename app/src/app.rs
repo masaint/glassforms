@@ -299,6 +299,8 @@ struct Shown {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Gesture {
     Turn,
+    /// flying: the camera turns where it stands
+    Look,
     Pan,
     Roll,
     /// one of the handles over the picture has been taken hold of
@@ -373,6 +375,8 @@ struct App {
     /// when the engine last drew, and whether it then had nothing more to do
     last: Option<Instant>,
     rested: bool,
+    /// flying: when the camera was last moved by the keys (while they are held)
+    fly_at: Option<Instant>,
     /// frames a second, as last worked out; and the frames drawn since then, and when that was
     fps: f64,
     drawn: (u32, Instant),
@@ -460,7 +464,7 @@ impl App {
         px.ffmpeg = crate::video::ffmpeg().is_some();
         px.record = opts.scripted;
         Ok(App {
-            engine, rs, shown: None, preview: None, px, seeking: opts.size_px, canvas: (0, 0), full: Rect::ZERO, last: None, rested: false, fps: 0.0, drawn: (0, Instant::now()), stat_at: Instant::now(),
+            engine, rs, shown: None, preview: None, px, seeking: opts.size_px, canvas: (0, 0), full: Rect::ZERO, last: None, rested: false, fly_at: None, fps: 0.0, drawn: (0, Instant::now()), stat_at: Instant::now(),
             drag: None, video: None, last_video: None, bench_in: 0, frozen: false, test, inject: Vec::new(), dropped: Vec::new(), model_asked: None, model_said: String::new(), adding: None, model_refused: None, failure, store_path,
             saved: store, changed_at: None, frames: Arc::new(AtomicU64::new(0)), passes: 0, ffmpeg_checked: Instant::now(), opts,
         })
@@ -754,6 +758,9 @@ impl App {
             let kind = if let (Some(part), Some(p)) = (handle, at) {
                 self.px.handles.begin(st, self.full, p, part);
                 Gesture::Handle
+            } else if self.px.nav.fly && !mods.shift && !mods.ctrl && !middle {
+                // (flying, a drag with either button looks round)
+                Gesture::Look
             } else if right || mods.shift { Gesture::Pan } else if middle || mods.ctrl { Gesture::Roll } else { Gesture::Turn };
             self.drag = Some(Drag { kind, moved: 0.0, at: at.unwrap_or(self.full.center()) });
         } else if let Some(d) = &mut self.drag {
@@ -763,29 +770,40 @@ impl App {
                 let (dx, dy) = (delta.x as f64, delta.y as f64);
                 if dx != 0.0 || dy != 0.0 {
                     match d.kind {
-                        Gesture::Turn => st.drag_turn(dx, dy),
+                        Gesture::Turn => {
+                            // (the view turns about its pivot: the camera slides to keep it in its place)
+                            let before = st.view_r();
+                            st.drag_turn(dx, dy);
+                            st.keep_pivot(&before);
+                        }
+                        Gesture::Look => st.fly_look(dx * 0.2, -dy * 0.2),
                         Gesture::Pan => st.drag_pan(dx, dy, self.full.height() as f64),
                         Gesture::Roll => st.drag_roll(dx),
                         Gesture::Handle => self.px.handles.drag(st, self.full, d.at, mods.ctrl, mods.shift),
                     }
                 }
             } else {
-                // let go: a press that hardly moved is a click, which focuses where it landed (while the
-                // handles show, it selects the layer whose shape is there; with Alt held it focuses still)
+                // let go: a press that hardly moved is a click. It selects what is under it (a lamp, a layer's
+                // shape) or lets go of what was chosen if nothing is; with the camera's tool and an aperture,
+                // or with Alt held, it focuses where it landed instead.
                 let (fx, fy) = ((d.at.x / self.full.width()) as f64, (d.at.y / self.full.height()) as f64);
+                let click = matches!(d.kind, Gesture::Turn | Gesture::Look) && d.moved < 4.0;
+                let focus = st.p.aperture > 0.0 && (mods.alt || self.px.handles.tool() == crate::ui::handles::Tool::Camera);
                 if d.kind == Gesture::Handle {
                     self.px.handles.end(st);
-                } else if d.kind == Gesture::Turn && d.moved < 4.0 && self.px.handles.on && !mods.alt {
+                } else if click && focus {
+                    self.engine.pick_focus(fx, fy);
+                } else if click && !mods.alt {
                     // a lamp under the pointer first (it is known exactly), then a layer's shape
                     if let Some(i) = crate::ui::handles::pick_lamp(&self.engine.state, self.full, d.at) {
-                        self.px.handles.lamp = Some(i);
+                        self.px.handles.pick(Some(i));
                         self.px.lamp = i;
                     } else if let Some(i) = crate::ui::handles::pick_layer(&self.engine, fx, fy) {
-                        self.px.handles.lamp = None;
+                        self.px.handles.pick(None);
                         if i != self.engine.state.stack.sel { self.engine.state.select_layer(i); }
+                    } else {
+                        self.px.handles.let_go();
                     }
-                } else if d.kind == Gesture::Turn && d.moved < 4.0 && st.p.aperture > 0.0 {
-                    self.engine.pick_focus(fx, fy);
                 }
                 self.drag = None;
             }
@@ -810,13 +828,40 @@ impl App {
                         egui::MouseWheelUnit::Page => 800.0,
                         egui::MouseWheelUnit::Point => 1.0,
                     };
-                    st.wheel(d, modifiers.shift);
+                    if self.px.nav.fly && !modifiers.shift {
+                        // flying, the wheel sets how fast
+                        let nav = &mut self.px.nav;
+                        nav.speed = (nav.speed * (-d * 0.0018).exp()).clamp(crate::ui::tools::SPEED.0, crate::ui::tools::SPEED.1);
+                        let words = format!("fly speed {:.2} a second", nav.speed);
+                        nav.say(words);
+                    } else {
+                        st.wheel(d, modifiers.shift);
+                    }
                 }
             }
         }
     }
 
-    // space: spin.  P: animate.  H: hide the panels.  L: the light room.  F: fullscreen.  R: reset the view.
+    /// Flying: W A S D, Q and E move the camera while they are held, at the fly speed (shift: four times
+    /// as fast, ctrl: a quarter as fast). Forward and to the side as the camera faces; down and up as the
+    /// room stands.
+    fn fly(&mut self, ctx: &egui::Context) {
+        let now = Instant::now();
+        let dt = self.fly_at.map_or(0.0, |t| (now - t).as_secs_f64()).min(0.05);
+        self.fly_at = None;
+        if !self.px.nav.fly || self.video.is_some() || ctx.egui_wants_keyboard_input() { return; }
+        use egui::Key::*;
+        let (keys, mods) = ctx.input(|i| ([W, S, A, D, Q, E].map(|k| i.key_down(k)), i.modifiers));
+        if !keys.iter().any(|k| *k) { return; }
+        self.fly_at = Some(now);
+        let k = self.px.nav.speed * dt * if mods.shift { 4.0 } else if mods.ctrl { 0.25 } else { 1.0 };
+        let way = |a: bool, b: bool| (a as i32 - b as i32) as f64;
+        self.engine.state.fly_move(way(keys[3], keys[2]) * k, way(keys[5], keys[4]) * k, way(keys[0], keys[1]) * k);
+        ctx.request_repaint();
+    }
+
+    // space: spin.  P: animate.  H: hide the panels.  L: the light room.  F11: fullscreen.  R: reset the view.
+    // F: frame what is chosen.  V: orbit or fly (flying: W A S D Q E move).  G, T, Esc: the tools.
     // C: clay or glass.  F1: the help.  1-9: family.  arrows: step through the shapes.
     fn keys(&mut self, ctx: &egui::Context) {
         if self.video.is_some() || ctx.egui_wants_keyboard_input() || egui::Popup::is_any_open(ctx) { return; }
@@ -843,20 +888,32 @@ impl App {
                 C => st.p.clay = if st.p.clay > 0.5 { 0.0 } else { 1.0 },
                 F1 => self.px.help_open = !self.px.help_open,
                 R => st.reset_view(),
-                F => {
+                F11 => {
                     let full = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!full));
                 }
+                // F: what is chosen to the middle of the picture
+                F => crate::ui::tools::frame(st, &mut self.px),
+                // V: orbit or fly
+                V => { let fly = !self.px.nav.fly; self.px.nav.set_fly(st, fly); }
+                // flying, these keys move the camera (see `fly`) and do nothing else
+                W | A | S | D | Q | E if self.px.nav.fly => {}
                 // G: the handles over the picture; T: what they do (move, turn, size)
-                G => self.px.handles.toggle(),
+                G => {
+                    if self.px.handles.on { self.px.handles.set_tool(crate::ui::handles::Tool::Select); } else { self.px.handles.toggle(); }
+                }
                 T => {
-                    if self.px.handles.on { self.px.handles.mode = self.px.handles.mode.next(); } else { self.px.handles.on = true; }
+                    if self.px.handles.on { self.px.handles.mode = self.px.handles.mode.next(); } else { self.px.handles.toggle(); }
                 }
                 // Esc puts away the nearest thing: a drag of a handle (the layer goes back), the help if it
-                // is open, the handles, otherwise the fullscreen
+                // is open, the handles, what is chosen, otherwise the fullscreen
                 Escape if self.px.handles.cancel(st) => {}
                 Escape if self.px.help_open => self.px.help_open = false,
-                Escape if self.px.handles.on => self.px.handles.toggle(),
+                Escape if self.px.handles.on => self.px.handles.set_tool(crate::ui::handles::Tool::Select),
+                Escape if self.px.handles.picked || self.px.handles.select => {
+                    self.px.handles.let_go();
+                    self.px.handles.set_tool(crate::ui::handles::Tool::Camera);
+                }
                 Escape => {
                     if ctx.input(|i| i.viewport().fullscreen.unwrap_or(false)) {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
@@ -1368,6 +1425,35 @@ impl App {
                 let press = |pressed: bool| egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers: none };
                 steps = vec![Step::Input(vec![press(true)], none), Step::Input(vec![press(false)], none), Step::Frames(1)];
             }
+            Act::KeyHold(name, frames) => {
+                let key = script::key(&name)?;
+                let press = |pressed: bool| egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers: none };
+                steps = vec![Step::Input(vec![press(true)], none), Step::Frames(frames), Step::Input(vec![press(false)], none), Step::Frames(1)];
+            }
+            Act::Press(name) => {
+                let at = self.px.rects.get(&name).map(|r| r.center()).ok_or_else(|| format!("press: no control called \"{name}\" is in sight"))?;
+                steps = vec![
+                    Step::Input(vec![egui::Event::PointerMoved(at)], none),
+                    Step::Input(vec![button(at, PointerButton::Primary, true, none)], none),
+                    Step::Input(vec![button(at, PointerButton::Primary, false, none)], none),
+                    Step::Frames(2),
+                ];
+            }
+            Act::Hover(name) => {
+                let at = self.px.rects.get(&name).map(|r| r.center()).ok_or_else(|| format!("hover: no control called \"{name}\" is in sight"))?;
+                steps = vec![Step::Input(vec![egui::Event::PointerMoved(at)], none), Step::Frames(1)];
+            }
+            Act::DragFrom(name, dx, dy) => {
+                let at = self.px.rects.get(&name).map(|r| r.center()).ok_or_else(|| format!("dragfrom: no control called \"{name}\" is in sight"))?;
+                steps.push(Step::Input(vec![egui::Event::PointerMoved(at)], none));
+                steps.push(Step::Input(vec![button(at, PointerButton::Primary, true, none)], none));
+                for i in 1..=6 {
+                    steps.push(Step::Input(vec![egui::Event::PointerMoved(at + egui::vec2(dx, dy) * (i as f32 / 6.0))], none));
+                }
+                steps.push(Step::Input(vec![button(at + egui::vec2(dx, dy), PointerButton::Primary, false, none)], none));
+                steps.push(Step::Input(Vec::new(), none));
+                steps.push(Step::Frames(1));
+            }
             Act::Drag(dx, dy, how) => {
                 let (which, held) = match how {
                     Hold::Left => (PointerButton::Primary, none),
@@ -1522,6 +1608,9 @@ impl App {
         let (sh, m) = (st.shape(), &st.shape().meta);
         let ((cw, ch), (tw, th)) = self.engine.renderer.size();
         let folder = self.px.store.video_folder();
+        let h = &self.px.handles;
+        let handles_told = json!({ "on": h.on, "mode": h.mode.word(), "lamp": h.lamp, "picked": h.picked, "tool": format!("{:?}", h.tool()).to_lowercase(), "local": h.local, "snap": h.snap });
+        let camera_told = json!({ "fly": self.px.nav.fly, "speed": self.px.nav.speed, "eye": st.eye(), "pivot": st.pivot(), "azim": st.p.azim, "elev": st.p.elev, "roll": st.p.roll });
         let mut told = json!({
             "family": st.family().id,
             "preset": st.preset().id,
@@ -1589,7 +1678,7 @@ impl App {
             })),
             "stillBits": if self.px.store.still_16 { 16 } else { 8 },
             "lamps": st.lamps.iter().map(|l| json!({ "kind": l.kind.id(), "pos": l.pos, "rot": l.rot, "size": l.size, "rgb": l.rgb, "power": l.power, "seen": l.seen })).collect::<Vec<_>>(),
-            "handles": { "on": self.px.handles.on, "mode": self.px.handles.mode.word(), "lamp": self.px.handles.lamp },
+            "handles": handles_told,
             "folders": { "videos": folder.display().to_string(), "setups": self.px.store.setups_folder().display().to_string(), "stills": self.px.store.stills_folder().display().to_string() },
             "rendering": self.video.is_some(),
             "ffmpeg": self.px.ffmpeg,
@@ -1603,6 +1692,7 @@ impl App {
             "windowFormat": format!("{:?}", self.rs.target_format),
             "rects": rects,
         });
+        told["view"] = camera_told;
         // (what follows is added afterwards: one list of everything is more than the macro that makes it will take)
         let r = st.camera().readout(self.px.aspect);
         let camera = json!({ "focal": r.focal, "fstop": r.fstop, "field": [r.field_v, r.field_h], "focusMm": r.focus_mm, "distanceMm": r.distance_mm, "proj": st.camera().proj.id(),
@@ -1772,8 +1862,18 @@ impl eframe::App for App {
         if self.video.is_none() {
             self.gestures(&ctx, &picture);
             self.keys(&ctx);
+            self.fly(&ctx);
         }
         self.panels(&ctx);
+        // the tool bar and the cube of the room's axes, between the panels (in the corners while they are
+        // hidden); where the room between them is too short, the cube gives way first
+        if self.video.is_none() {
+            let lo = self.px.left_at.map_or(self.full.left(), |r| r.right());
+            let hi = self.px.right_at.map_or(self.full.right(), |r| r.left());
+            let room = hi - lo;
+            if room >= crate::ui::tools::BAR_W + 24.0 { crate::ui::tools::bar(&ctx, &mut self.engine.state, &mut self.px, self.full); }
+            if room >= crate::ui::tools::BAR_W + crate::ui::tools::CUBE + 30.0 { crate::ui::tools::cube(&ctx, &mut self.engine.state, &mut self.px, self.full); }
+        }
         self.serve(frame);
 
         // ... and the engine draws what the state now says
@@ -1823,6 +1923,23 @@ impl eframe::App for App {
         if self.video.is_none() {
             let pointer = ctx.input(|i| i.pointer.hover_pos());
             self.px.handles.paint(ui.painter(), &self.engine.state, self.full, pointer);
+            if self.px.record {
+                // (where the handles and the lamps are on the picture, for tests that take hold of them)
+                for (name, at) in self.px.handles.spots.clone() { self.px.note(name, Rect::from_center_size(at, egui::vec2(2.0, 2.0))); }
+                let st = &self.engine.state;
+                let (cam, h) = (st.camera(), self.full.height() as f64 / 2.0);
+                for i in 0..st.lamps.len() {
+                    if let Some(uv) = st.lamp_in_view(i).and_then(|(c, _)| cam.project(c)) {
+                        let at = Pos2::new((self.full.center().x as f64 + uv[0] * h) as f32, (self.full.center().y as f64 - uv[1] * h) as f32);
+                        self.px.note(format!("lamp-at:{}", i + 1), Rect::from_center_size(at, egui::vec2(2.0, 2.0)));
+                    }
+                }
+                let o = cam.project(gf_core::math::apply(&st.view_r(), [0.0; 3]));
+                if let Some(uv) = o {
+                    let at = Pos2::new((self.full.center().x as f64 + uv[0] * h) as f32, (self.full.center().y as f64 - uv[1] * h) as f32);
+                    self.px.note("shape-centre", Rect::from_center_size(at, egui::vec2(2.0, 2.0)));
+                }
+            }
         }
         // over it, at the foot: the quiet line of figures, hidden with the panels
         if !(self.px.hide_left && self.px.hide_right) { overlay::foot(ui, &mut self.px, self.full); }

@@ -730,7 +730,7 @@ impl Engine {
             if v.inner.any() {
                 let p = &self.state.p;
                 let (_, (_, th)) = self.renderer.size();
-                let pixel = p.dist * 2.0 * (p.fov * DEG / 2.0).tan() / th.max(1) as f64;
+                let pixel = self.state.eye_reach().max(0.1) * 2.0 * (p.fov * DEG / 2.0).tan() / th.max(1) as f64;
                 changed |= self.renderer.set_inner_bodies(&material::bodies_inner(&mats, &thick, pixel));
             }
             // each milky body's light, worked out through its own distances
@@ -765,7 +765,7 @@ impl Engine {
         if v.inner.any() {
             let p = &self.state.p;
             let (_, (_, th)) = self.renderer.size();
-            let pixel = p.dist * 2.0 * (p.fov * DEG / 2.0).tan() / th.max(1) as f64;
+            let pixel = self.state.eye_reach().max(0.1) * 2.0 * (p.fov * DEG / 2.0).tan() / th.max(1) as f64;
             let k = if v.spectrum { 0.0 } else { p.density / scale };
             changed |= self.renderer.set_inner(&gf_core::inner::uniforms(p, scale, pixel, [p.absorb[0] * k, p.absorb[1] * k, p.absorb[2] * k]));
         }
@@ -1061,7 +1061,8 @@ impl Engine {
     pub(crate) fn sculpt_footprint(&self) -> f64 {
         let (_, (_, rows)) = self.renderer.size();
         let p = &self.state.p;
-        gf_core::sculpt::footprint(p.dist, (p.fov * DEG / 2.0).tan(), rows)
+        // (how far the lens is from the shape's middle: for a free camera, not only along its axis)
+        gf_core::sculpt::footprint(self.state.eye_reach().max(0.1), (p.fov * DEG / 2.0).tan(), rows)
     }
     /// Is some layer's studio pre-filtered (so that a new zoom or picture size asks for it to be made again)?
     fn sculpt_prefiltered(&self) -> bool {
@@ -1171,6 +1172,7 @@ impl Engine {
             // body's light (`meter`) leaves the mirror on its surface as bright as the exposure set; and the
             // box the scene's volume spans, read by a tracer built for a larger stage than ever)
             pad: [(1.0 / self.meter.max(1e-3)).to_bits() as i32, 0, (self.state.scene_hb() as f32).to_bits() as i32],
+            eye: [p.eye_x as f32, p.eye_y as f32, 0.0, 0.0],
             cam: crate::camera::tracer_cam(p, !self.focus_after()),
         };
         if p.hollow > 0.5 && p.metal < 0.5 {

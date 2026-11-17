@@ -34,6 +34,7 @@ struct U {
   pad0: i32,
   pad1: i32,
   pad2: i32,
+  eye: vec4f,             // xy: where the camera stands across and up from (0, 0, dist): a free camera
 }
 
 @group(0) @binding(0) var<uniform> u: U;
@@ -291,7 +292,7 @@ fn primary(ro: vec3f, rd: vec3f, tGraze: ptr<function, f32>, graze: ptr<function
 // rgb: the light.  a: how far along the pixel's own ray the glass is (0 = it misses).
 fn sampleAt(fc: vec2f, xi: f32, W: i32, lens: vec2f) -> vec4f {
   let uv = (2.0 * fc - u.res) / u.res.y + u.shift;
-  var ro = vec3f(0.0, 0.0, u.dist);
+  var ro = vec3f(u.eye.xy, u.dist);
   var rd = normalize(vec3f(uv * u.tan_fov, -1.0));
   let px = 2.0 * u.tan_fov / u.res.y;
   var tg: f32;

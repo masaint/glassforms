@@ -454,7 +454,7 @@ fn placement_rows(ui: &mut Ui, st: &mut State, px: &mut Panels, i: usize, as_bui
     let hsize = button_size(ui, word, &font, egui::vec2(8.0, 2.0));
     let hplace = Rect::from_min_size(Pos2::new(place.left() - 8.0 - hsize.x, place.top()), hsize);
     px.note("placement:handles", hplace);
-    if button(ui, hplace, Id::unique("placement handles"), word, on_layer, font).on_hover_text("arrows, squares and rings over the picture to drag this layer about (G). T: move, turn or size; Ctrl: in steps; Shift: finely; Esc: put them away. While they show, a click on a shape selects its layer").clicked() {
+    if button(ui, hplace, Id::unique("placement handles"), word, on_layer, font).on_hover_text("arrows, squares and rings over the picture to drag this layer about (G). T: all at once, move, turn or size; Ctrl: in steps; Shift: finely; Esc: put them away. While they show, a click on a shape selects its layer").clicked() {
         if on_layer { px.handles.toggle(); } else {
             px.handles.lamp = None;
             if !px.handles.on { px.handles.toggle(); }

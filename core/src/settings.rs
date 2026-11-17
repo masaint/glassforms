@@ -57,6 +57,17 @@ settings! {
     /// antialiasing while moving: how much of the previous picture is kept each frame (0 = off)
     smooth, "smooth", 0.9;
     dist, "dist", 5.0;
+    /// where the camera stands off the line through the middle of the shape, across and up as the camera
+    /// sees it (0, 0: the camera that always looks at the middle of the shape). The free camera moves these
+    /// and `dist`, and turns by the room's `azim`, `elev` and `roll`
+    eye_x, "eyeX", 0.0;
+    eye_y, "eyeY", 0.0;
+    /// the point the view turns about and comes closer to, in the shape's own frame (its middle until a
+    /// selection is framed), and how large what was framed is (0: the whole shape)
+    pivot_x, "pivotX", 0.0;
+    pivot_y, "pivotY", 0.0;
+    pivot_z, "pivotZ", 0.0;
+    pivot_r, "pivotR", 0.0;
     fov, "fov", 28.0;
     /// internal render scale (1 = native)
     scale, "scale", 1.0;

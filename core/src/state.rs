@@ -210,6 +210,8 @@ pub struct Knob {
 /// name, label, lo, hi, step, can be animated
 const ENGINE_KNOBS: &[(&str, &str, f64, f64, f64, bool)] = &[
     ("dist", "distance", 1.5, 20.0, 0.05, true),
+    ("eyeX", "across", -20.0, 20.0, 0.01, true),
+    ("eyeY", "up", -20.0, 20.0, 0.01, true),
     ("fov", "lens °", 6.0, 80.0, 0.5, true),
     ("roll", "roll °", -180.0, 180.0, 0.5, true),
     ("focal", "focal length mm", 4.0, 400.0, 0.5, true),
@@ -498,6 +500,8 @@ impl State {
             // (the spin as it was set: a family's own speed is only what space starts it at)
             let (spin, spin_mode) = (self.p.spin, self.p.spin_mode);
             self.apply_defaults(&d);
+            // (the family's own distance comes with it: the camera goes back onto the line through the middle)
+            self.reset_eye();
             self.p.spin = spin;
             self.p.spin_mode = spin_mode;
         }
@@ -906,6 +910,7 @@ impl State {
         crate::camera::set(&mut self.p, "fov", num("fov", base.fov));
         self.p.shift = [0.0, 0.0];
         self.p.azim = 0.0;
+        self.reset_eye();
         self.p.roll = num("roll", 0.0);
         self.reset_orientation();
     }
@@ -1067,7 +1072,8 @@ impl State {
     pub fn drag_orbit(&mut self, dx: f64, dy: f64) {
         let k = 0.006 / DEG;
         self.p.azim = ((self.p.azim + dx * k + 540.0) % 360.0) - 180.0;
-        self.p.elev = (self.p.elev + dy * k).clamp(0.0, 89.5);
+        // (a camera that flew below the level, or looks up, is not jerked back onto the arc)
+        self.p.elev = (self.p.elev + dy * k).clamp(0f64.min(self.p.elev), 89.5f64.max(self.p.elev));
     }
     /// `height`: the picture's height in the same units as dx, dy.
     pub fn drag_pan(&mut self, dx: f64, dy: f64, height: f64) {
@@ -1087,7 +1093,8 @@ impl State {
             if self.p.focal > 0.0 { self.p.focal = crate::camera::focal_of(self.p.fov, self.p.sensor); }
             crate::camera::sync(&mut self.p);
         } else {
-            self.p.dist = (self.p.dist * (d * 0.001).exp()).clamp(1.5, 60.0);
+            // (closer to the pivot: the middle of the shape, unless something was framed)
+            self.dolly((d * 0.001).exp());
         }
     }
     /// Focus on glass found `t` away along the ray through the middle of traced pixel (x, y) (y counted

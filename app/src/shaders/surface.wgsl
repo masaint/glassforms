@@ -22,7 +22,8 @@ struct SU {
   cam: vec4f,               // xy: the frame's size in pixels   zw: the sub-pixel jitter of this frame
   cam2: vec4f,              // xy: the view's shift   z: the camera's distance   w: tan(half vertical fov)
   k0: vec4f,                // x: voxels a side of the volume   y: half the volume's box   z: frame number   w: what to show (for looking)
-  k1: vec4f,                // x: rays the tracer sends through each pixel
+  k1: vec4f,                // x: rays the tracer sends through each pixel   yz: where the camera stands across and up
+                            // from (0, 0, distance) (a free camera)
   obj0: vec4f,
   obj1: vec4f,
   obj2: vec4f,
@@ -323,7 +324,7 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let shift = vec2f(ign(fc + 19.19), ign(fc.yx + 47.3));
   let o = fract(shift + s.cam.zw) - 0.5;
   let uv = (2.0 * (fc + o) - res) / res.y + s.cam2.xy;
-  let ro = vec3f(0.0, 0.0, s.cam2.z);
+  let ro = vec3f(s.k1.yz, s.cam2.z);
   let rd = normalize(vec3f(uv * s.cam2.w, -1.0));
   // (the distance is kept as a 16-bit float: settled back onto the smooth surface)
   var t = src.a;

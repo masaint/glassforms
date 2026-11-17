@@ -69,10 +69,13 @@ fn sampleAt(fc: vec2f, xi: f32, W: i32, lens: vec2f) -> vec4f {
   var rd: vec3f;
   // (outside the circle a fisheye draws there is no picture at all)
   if (!camRay(uv, u.cam, &ro, &rd)) { return vec4f(0.0); }
+  // (the lens's arithmetic is done as if it stood on the line through the object's centre; a free camera
+  // stands off it by this much, which only where the rays meet the scene has to know)
+  let eye = vec3f(u.eye.xy, 0.0);
   let px = u.cam.b.w / u.res.y;
   var tg: f32;
   var g: f32;
-  var t = primary(ro, rd, &tg, &g);
+  var t = primary(ro + eye, rd, &tg, &g);
   var depth = max(t, 0.0);
   var gain = 1.0;
   if (u.lens > 0.0) {
@@ -90,9 +93,10 @@ fn sampleAt(fc: vec2f, xi: f32, W: i32, lens: vec2f) -> vec4f {
     let f = ro + rd * reach;
     ro = lensFrom(ro, rd, lens, reach);
     rd = normalize(f - ro);
-    t = primary(ro, rd, &tg, &g);
+    t = primary(ro + eye, rd, &tg, &g);
     if (depth == 0.0) { depth = max(t, 0.0); }
   }
+  ro += eye;
   var col = {{BACKGROUND}};                       // what the camera sees where it misses the object
   if (t > 0.0) {
     col = {{SHADE}};

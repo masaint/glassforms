@@ -83,6 +83,8 @@ pub struct TraceU {
     pub nb: i32,
     pub lens_n: i32,
     pub pad: [i32; 3],
+    /// where the lens stands across and up from the line through the object's centre (a free camera); unused, unused
+    pub eye: [f32; 4],
     /// the lens, for a tracer built to trace its first ray through any lens (camera.wgsl: Cam). The
     /// plain tracer's block ends before it.
     pub cam: [[f32; 4]; 4],
@@ -275,6 +277,8 @@ struct AccumU {
     roomp: [[f32; 4]; 3],
     /// 1 = there is a floor; its height in the room now; and at the previous frame; unused
     floor: [f32; 4],
+    /// where the camera stands across and up from the line through the object's centre: now, then
+    eye: [f32; 4],
     /// the lens now and at the previous frame (read only by the pass built for lenses other than the plain one)
     lens: [[f32; 4]; 4],
     lens_p: [[f32; 4]; 4],
@@ -346,6 +350,7 @@ struct PrevView {
     room: [[f32; 4]; 3],
     floor: f32,
     cam: [f32; 2],
+    eye: [f32; 2],
     shift: [f32; 2],
     lens: [[f32; 4]; 4],
 }
@@ -1168,13 +1173,14 @@ impl Renderer {
         // (a studio's backdrop stands in the room, not in the lights' frame: where one is shown, it is the
         // room that says where a piece of the background was at the previous frame)
         let seen = self.variant.stage;
-        let now = PrevView { obj: u.obj, env: if seen.backdrop { self.stage.room } else { u.env }, room: self.stage.room, floor: self.stage.mid[3], cam: [u.dist, u.tan_fov], shift: u.shift, lens: u.cam };
+        let now = PrevView { obj: u.obj, env: if seen.backdrop { self.stage.room } else { u.env }, room: self.stage.room, floor: self.stage.mid[3], cam: [u.dist, u.tan_fov], eye: [u.eye[0], u.eye[1]], shift: u.shift, lens: u.cam };
         let was = self.prev.unwrap_or(now);
         let au = AccumU {
             res: u.res, cam: now.cam, cam_p: was.cam, shift: now.shift, shift_p: was.shift, w: weight as f32, moving: if taa { 1.0 } else { 0.0 },
             obj: now.obj, objp: was.obj, debug: look.debug, spread: look.spread, sky: if self.variant.backdrop || seen.backdrop { 1.0 } else { 0.0 }, pad: 0.0,
             env: now.env, envp: was.env,
             room: now.room, roomp: was.room, floor: [if seen.floor { 1.0 } else { 0.0 }, now.floor, was.floor, 0.0],
+            eye: [now.eye[0], now.eye[1], was.eye[0], was.eye[1]],
             lens: now.lens, lens_p: was.lens,
         };
         self.gpu.queue.write_buffer(&self.u_accum, 0, bytemuck::bytes_of(&au));

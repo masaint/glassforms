@@ -9,7 +9,12 @@
 //! shown until asked for (G, or the placement's "handles" button); T steps through move, turn and size;
 //! Esc puts them away, or during a drag puts the layer back where the drag began.
 //!   on a handle   Ctrl: in steps (0.05 of a unit, 15 degrees, sizes by 0.05); Shift: finely (a tenth)
-//!   a click       while the handles show, a click on a shape selects its layer (Alt+click focuses)
+//!   a click       a click on a shape selects its layer, on a lamp the lamp, on nothing lets go (Alt+click
+//!                 focuses); what is chosen is marked with corners round it (paint only)
+//!
+//! The tool bar over the picture (tools.rs) chooses among them: select (no handles), move, turn, size, or
+//! the camera (no handles; a click focuses while the lens has an aperture). The handles' axes are the
+//! scene's (world) or the chosen thing's own (local); snapping may be left on.
 
 use eframe::egui::{Color32, Painter, Pos2, Rect, Shape, Stroke, Vec2};
 use gf_core::camera::Camera;
@@ -19,7 +24,9 @@ use gf_core::state::State;
 /// What the handles do.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Mode {
+    /// everything at once: arrows, rings, the middle, the rings round it, the ball inside
     #[default]
+    All,
     Move,
     Turn,
     Size,
@@ -27,13 +34,15 @@ pub enum Mode {
 impl Mode {
     pub fn next(self) -> Mode {
         match self {
+            Mode::All => Mode::Move,
             Mode::Move => Mode::Turn,
             Mode::Turn => Mode::Size,
-            Mode::Size => Mode::Move,
+            Mode::Size => Mode::All,
         }
     }
     pub fn word(self) -> &'static str {
         match self {
+            Mode::All => "all",
             Mode::Move => "move",
             Mode::Turn => "turn",
             Mode::Size => "size",
@@ -54,6 +63,12 @@ pub enum Part {
     Ring(usize),
     /// the ring round everything: the size
     Scale,
+    /// the pale ring: a turn about the line of sight
+    Spin,
+    /// the faint ball inside the rings: a turn any way, as a ball rolled under the hand
+    Ball,
+    /// the small square near the end of the thing's own axis: its size along that axis (lamps)
+    Stretch(usize),
 }
 
 /// What the handles act on: a layer (the selected one) or a lamp.
@@ -82,16 +97,38 @@ pub struct Grab {
     rad: f32,
 }
 
+/// What the tool bar has chosen.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tool {
+    Select,
+    All,
+    Move,
+    Turn,
+    Size,
+    Camera,
+}
+
 /// The handles' state, kept by the window.
 #[derive(Default)]
 pub struct Handles {
+    /// the handles show (the tool is move, turn or size: `mode` says which)
     pub on: bool,
     pub mode: Mode,
+    /// the tool is select (when the handles do not show)
+    pub select: bool,
+    /// something is chosen: the selected layer, or `lamp`. Nothing is marked or handled while not
+    pub picked: bool,
+    /// the handles' axes are the chosen thing's own, not the scene's
+    pub local: bool,
+    /// the handles move in steps without Ctrl being held
+    pub snap: bool,
     pub grab: Option<Grab>,
     pub hover: Option<Part>,
     /// they act on this lamp (chosen in the light room, or picked on the picture), otherwise on the
     /// selected layer
     pub lamp: Option<usize>,
+    /// where each part of them was last painted (for tests that take hold of them)
+    pub spots: Vec<(&'static str, Pos2)>,
 }
 
 const AXIS_INK: [Color32; 3] = [Color32::from_rgb(235, 90, 85), Color32::from_rgb(110, 205, 95), Color32::from_rgb(95, 145, 240)];
@@ -99,6 +136,14 @@ const HOT: Color32 = Color32::from_rgb(255, 214, 90);
 /// how long the arrows look, in points, and how near the pointer must come to a handle to take it
 const ARROW_PT: f64 = 90.0;
 const REACH_PT: f32 = 7.0;
+/// an arrow's whole shaft is a handle: this near to it takes it
+const SHAFT_PT: f32 = 8.0;
+/// the combined handles: where their arrows end (a share of the rings' radius), the pale ring and the size
+/// ring (multiples of the arrows' length on the screen), and the size ring's colour
+const ALL_ARROW: f64 = 0.74;
+const SPIN_R: f64 = 1.14;
+const SIZE_R: f64 = 1.30;
+const SIZE_INK: Color32 = Color32::from_rgb(240, 160, 60);
 
 /// The camera and where the selected layer stands, as the picture shows them.
 struct View {
@@ -107,8 +152,12 @@ struct View {
     m: Mat3,
     /// the layer's middle, in the camera's frame
     c: [f64; 3],
-    /// the scene's three axes, in the camera's frame
+    /// the handles' three axes, in the camera's frame, and in the frame the thing is placed in (the scene's
+    /// own axes, or the thing's own turned ones)
     axes: [[f64; 3]; 3],
+    dirs: [[f64; 3]; 3],
+    /// the thing's own axes, in the camera's frame (for sizes along them)
+    own: [[f64; 3]; 3],
     /// a length in the scene that looks ARROW_PT points long where the layer stands
     len: f64,
     rect: Rect,
@@ -121,16 +170,20 @@ fn dot(a: [f64; 3], b: [f64; 3]) -> f64 { a[0] * b[0] + a[1] * b[1] + a[2] * b[2
 fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] { [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]] }
 
 impl View {
-    fn of(st: &State, rect: Rect, target: Target) -> Option<View> {
+    fn of(st: &State, rect: Rect, target: Target, local: bool) -> Option<View> {
         let cam = st.camera();
         // a layer stands in the object's frame, a lamp in the lights' frame
-        let (m, pos) = match target {
-            Target::Layer(i) => (st.view_r(), st.stack.layers.get(i)?.place.pos),
-            Target::Lamp(i) => (st.light_m(), st.lamps.get(i)?.pos),
+        let (m, pos, rot) = match target {
+            Target::Layer(i) => { let p = st.stack.layers.get(i)?.place; (st.view_r(), p.pos, p.rot) }
+            Target::Lamp(i) => { let l = st.lamps.get(i)?; (st.light_m(), l.pos, l.rot) }
         };
         let c = apply(&m, pos);
-        let axes = [apply(&m, [1.0, 0.0, 0.0]), apply(&m, [0.0, 1.0, 0.0]), apply(&m, [0.0, 0.0, 1.0])];
-        let mut v = View { cam, m, c, axes, len: 0.4, rect };
+        let own = if local { euler(rot[0], rot[1], rot[2]) } else { [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0] };
+        let dirs = [apply(&own, [1.0, 0.0, 0.0]), apply(&own, [0.0, 1.0, 0.0]), apply(&own, [0.0, 0.0, 1.0])];
+        let axes = dirs.map(|d| apply(&m, d));
+        let turned = euler(rot[0], rot[1], rot[2]);
+        let own = [0, 1, 2].map(|k| { let mut e = [0.0; 3]; e[k] = 1.0; apply(&m, apply(&turned, e)) });
+        let mut v = View { cam, m, c, axes, dirs, own, len: 0.4, rect };
         // how long a step across the picture looks where the layer stands
         let step = 1e-3 * (v.cam.along(c).max(0.1));
         if let (Some(a), Some(b)) = (v.screen(c), v.screen(add(c, [step, 0.0, 0.0]))) {
@@ -168,7 +221,15 @@ impl View {
         (self.axes[(k + 1) % 3], self.axes[(k + 2) % 3])
     }
     fn arrow(&self, k: usize) -> Vec<Vec<Pos2>> {
-        self.polyline((0..=12).map(|i| add(self.c, scale(self.axes[k], self.len * (0.18 + 0.82 * i as f64 / 12.0)))))
+        self.arrow_to(k, 1.0)
+    }
+    /// The arrow along axis k, ending at this share of its usual length.
+    fn arrow_to(&self, k: usize, f: f64) -> Vec<Vec<Pos2>> {
+        self.polyline((0..=12).map(|i| add(self.c, scale(self.axes[k], self.len * (0.18 + (f - 0.18) * i as f64 / 12.0)))))
+    }
+    /// Where the size square of the thing's own axis k stands.
+    fn stretch_at(&self, k: usize) -> Option<Pos2> {
+        self.screen(add(self.c, scale(self.own[k], self.len * 0.9)))
     }
     fn square(&self, k: usize) -> Option<Vec<Pos2>> {
         let (a, b) = self.across(k);
@@ -195,6 +256,14 @@ impl View {
     }
     fn scale_radius(&self) -> f32 {
         (ARROW_PT * 1.25) as f32
+    }
+    /// How far the rings reach from the middle on the screen (their radius, near enough).
+    fn ring_radius(&self) -> f32 {
+        let Some(c) = self.screen(self.c) else { return ARROW_PT as f32 };
+        let to = self.toward_camera(self.c);
+        // a direction across the line of sight
+        let side = { let a = cross(to, [0.0, 1.0, 0.0]); let l = dot(a, a).sqrt(); if l > 1e-6 { scale(a, 1.0 / l) } else { [1.0, 0.0, 0.0] } };
+        self.screen(add(self.c, scale(side, self.len))).map_or(ARROW_PT as f32, |q| (q - c).length())
     }
 }
 
@@ -262,24 +331,85 @@ fn exists(st: &State, t: Target) -> bool {
     }
 }
 
+/// Which of the numbers a size square along the thing's own axis k changes: a tube's length along its
+/// x and its radius across; a panel's half width and half height. None: a layer (it has one size), a ball.
+fn stretch_slot(st: &State, t: Target, k: usize) -> Option<usize> {
+    let Target::Lamp(i) = t else { return None };
+    match (st.lamps.get(i)?.kind, k) {
+        (gf_core::lamps::LampKind::Tube, 0) => Some(7),
+        (gf_core::lamps::LampKind::Tube, _) => Some(6),
+        (gf_core::lamps::LampKind::Panel, 0) => Some(6),
+        (gf_core::lamps::LampKind::Panel, 1) => Some(7),
+        _ => None,
+    }
+}
+fn part_axis(p: Part) -> usize {
+    match p { Part::Axis(k) | Part::Plane(k) | Part::Ring(k) | Part::Stretch(k) => k, _ => 0 }
+}
+
 impl Handles {
     /// What the handles act on, if they show.
     pub fn target(&self, st: &State) -> Option<Target> {
         if !self.on { return None; }
+        self.chosen(st)
+    }
+    /// What is chosen, whether or not the handles show.
+    pub fn chosen(&self, st: &State) -> Option<Target> {
+        if !self.picked { return None; }
         if let Some(i) = self.lamp.filter(|i| *i < st.lamps.len()) { return Some(Target::Lamp(i)); }
         (st.stack.sel < st.layer_count()).then_some(Target::Layer(st.stack.sel))
     }
 
-    /// Show or hide them (G).
+    /// Show or hide them (G). Shown, they are on whatever is selected.
     pub fn toggle(&mut self) {
         self.on = !self.on;
+        self.grab = None;
+        if self.on {
+            self.picked = true;
+            self.select = false;
+        }
+    }
+
+    /// The tool in use.
+    pub fn tool(&self) -> Tool {
+        match (self.on, self.mode) {
+            (true, Mode::All) => Tool::All,
+            (true, Mode::Move) => Tool::Move,
+            (true, Mode::Turn) => Tool::Turn,
+            (true, Mode::Size) => Tool::Size,
+            _ if self.select => Tool::Select,
+            _ => Tool::Camera,
+        }
+    }
+    /// Take up a tool. One with handles puts them on what is selected.
+    pub fn set_tool(&mut self, t: Tool) {
+        self.grab = None;
+        match t {
+            Tool::All | Tool::Move | Tool::Turn | Tool::Size => {
+                self.mode = match t { Tool::All => Mode::All, Tool::Move => Mode::Move, Tool::Turn => Mode::Turn, _ => Mode::Size };
+                self.on = true;
+                self.picked = true;
+                self.select = false;
+            }
+            Tool::Select => (self.on, self.select) = (false, true),
+            Tool::Camera => (self.on, self.select) = (false, false),
+        }
+    }
+    /// Choose a layer (None) or a lamp, as a click on it does.
+    pub fn pick(&mut self, lamp: Option<usize>) {
+        self.lamp = lamp;
+        self.picked = true;
+    }
+    /// Let go of what is chosen, as a click on nothing does.
+    pub fn let_go(&mut self) {
+        self.picked = false;
         self.grab = None;
     }
 
     /// The part of the handles under the pointer, if any.
     pub fn hit(&self, st: &State, rect: Rect, at: Pos2) -> Option<Part> {
         let target = self.target(st)?;
-        let v = View::of(st, rect, target)?;
+        let v = View::of(st, rect, target, self.local)?;
         let c = v.screen(v.c)?;
         let mut best: Option<(f32, Part)> = None;
         let mut take = |d: f32, part: Part| {
@@ -300,6 +430,23 @@ impl Handles {
                 }
             }
             Mode::Size => take(((at - c).length() - v.scale_radius()).abs(), Part::Scale),
+            Mode::All => {
+                let rr = v.ring_radius();
+                let r = (at - c).length();
+                take(r - 4.0, Part::Centre);
+                for k in 0..3 {
+                    // (the whole shaft takes the drag, and a little more than the other handles' reach)
+                    let d = dist_to_runs(at, &v.arrow_to(k, ALL_ARROW));
+                    if d <= SHAFT_PT { take(d.min(REACH_PT - 0.25), Part::Axis(k)); }
+                    let pts: Vec<Pos2> = v.ring(k).into_iter().map(|(p, _)| p).collect();
+                    take(dist_to_runs(at, &[pts]), Part::Ring(k));
+                    if let (Some(q), Some(_)) = (v.stretch_at(k), stretch_slot(st, target, k)) { take((at - q).length() - 3.0, Part::Stretch(k)); }
+                }
+                take((r - rr * SPIN_R as f32).abs(), Part::Spin);
+                take((r - rr * SIZE_R as f32).abs(), Part::Scale);
+                // inside the rings and on none of them: the ball
+                if best.is_none() && r < rr - 4.0 { best = Some((REACH_PT, Part::Ball)); }
+            }
         }
         best.map(|(_, p)| p)
     }
@@ -307,8 +454,13 @@ impl Handles {
     /// Take hold of a part at the pointer.
     pub fn begin(&mut self, st: &State, rect: Rect, at: Pos2, part: Part) {
         let Some(target) = self.target(st) else { return };
-        let Some(v) = View::of(st, rect, target) else { return };
-        let mut g = Grab { part, target, start: values(st, target), at0: at, hit0: v.c, s0: 0.0, tan: Vec2::X, rad: 40.0 };
+        let Some(v) = View::of(st, rect, target, self.local) else { return };
+        let mut g = Grab { part, target, start: values(st, target), at0: at, hit0: v.c, s0: 0.0, tan: Vec2::X, rad: v.ring_radius().max(20.0) };
+        if let (Part::Stretch(k), Some(c), Some(q)) = (part, v.screen(v.c), v.stretch_at(part_axis(part))) {
+            // the way the thing's own axis runs on the screen
+            let _ = k;
+            if (q - c).length() > 1e-3 { g.tan = (q - c).normalized(); }
+        }
         if let Part::Ring(k) = part {
             // the point of the ring nearest the pointer, and the way it runs there on the screen
             let (a, b) = v.across(k);
@@ -334,7 +486,7 @@ impl Handles {
                 Part::Axis(k) => g.s0 = along_line(o, d, v.c, v.axes[k]).unwrap_or(0.0),
                 Part::Plane(k) | Part::Ring(k) => g.hit0 = meet_plane(o, d, v.c, v.axes[k]).unwrap_or(v.c),
                 Part::Centre => g.hit0 = meet_plane(o, d, v.c, v.toward_camera(v.c)).unwrap_or(v.c),
-                Part::Scale => {}
+                Part::Scale | Part::Spin | Part::Ball | Part::Stretch(_) => {}
             }
         }
         self.grab = Some(g);
@@ -343,10 +495,12 @@ impl Handles {
     /// The pointer has moved to `at` during a drag: change the placement. `snap`: in steps; `fine`: a
     /// tenth as far.
     pub fn drag(&mut self, st: &mut State, rect: Rect, at: Pos2, snap: bool, fine: bool) {
+        // (with snapping left on, Ctrl lets the handle go freely)
+        let snap = snap != self.snap;
         let Some(g) = self.grab.clone() else { return };
         if !exists(st, g.target) { self.grab = None; return; }
         // the frame as it was at the press: the middle moves under the drag, the constraint does not
-        let Some(mut v) = View::of(st, rect, g.target) else { return };
+        let Some(mut v) = View::of(st, rect, g.target, self.local) else { return };
         v.c = apply(&v.m, [g.start[0], g.start[1], g.start[2]]);
         let Some((o, d)) = v.ray(at) else { return };
         let k_fine = if fine { 0.1 } else { 1.0 };
@@ -354,7 +508,7 @@ impl Handles {
         match g.part {
             Part::Axis(k) => {
                 let Some(s) = along_line(o, d, v.c, v.axes[k]) else { return };
-                out[k] = g.start[k] + (s - g.s0) * k_fine;
+                for i in 0..3 { out[i] = g.start[i] + v.dirs[k][i] * (s - g.s0) * k_fine; }
             }
             Part::Plane(_) | Part::Centre => {
                 let n = match g.part { Part::Plane(k) => v.axes[k], _ => v.toward_camera(v.c) };
@@ -372,14 +526,48 @@ impl Handles {
                 let angle = ((at - g.at0).dot(g.tan) / g.rad) as f64;
                 let mut deg = angle / DEG * k_fine;
                 if snap { deg = (deg / 15.0).round() * 15.0; }
-                // a turn about the scene's axis, laid onto the turn the layer had
-                let mut ax = [0.0; 3];
-                ax[k] = 1.0;
+                // a turn about the handle's axis (the scene's, or the layer's own as it was at the press), laid
+                // onto the turn the layer had
+                let ax = if self.local { apply(&euler(g.start[3], g.start[4], g.start[5]), { let mut a = [0.0; 3]; a[k] = 1.0; a }) } else { v.dirs[k] };
                 let r = mul(&axis_angle(ax[0], ax[1], ax[2], deg * DEG), &euler(g.start[3], g.start[4], g.start[5]));
                 let t = euler_of(&r);
                 out[3] = t[0];
                 out[4] = t[1];
                 out[5] = t[2];
+            }
+            Part::Spin | Part::Ball => {
+                let Some(c) = v.screen(v.c) else { return };
+                // the turn in the camera's frame: about the line of sight by how far the pointer has gone
+                // round the middle; or rolled like a ball by the drag, a radian for the rings' radius
+                let (axis, mut angle) = if g.part == Part::Spin {
+                    let (a0, a1) = ((g.at0 - c).angle(), (at - c).angle());
+                    let mut da = (a1 - a0) as f64;
+                    while da > std::f64::consts::PI { da -= std::f64::consts::TAU; }
+                    while da < -std::f64::consts::PI { da += std::f64::consts::TAU; }
+                    // (the screen counts its angles clockwise; a turn towards the camera, anticlockwise)
+                    (v.toward_camera(v.c), -da)
+                } else {
+                    let d = at - g.at0;
+                    let l = d.length() as f64;
+                    if l < 1e-3 { return; }
+                    ([d.y as f64 / l, d.x as f64 / l, 0.0], l / g.rad as f64)
+                };
+                angle *= k_fine;
+                if snap { angle = (angle / DEG / 15.0).round() * 15.0 * DEG; }
+                let turn = mul(&transpose(&v.m), &mul(&axis_angle(axis[0], axis[1], axis[2], angle), &v.m));
+                let t = euler_of(&mul(&turn, &euler(g.start[3], g.start[4], g.start[5])));
+                out[3] = t[0];
+                out[4] = t[1];
+                out[5] = t[2];
+            }
+            Part::Stretch(k) => {
+                let Some(c) = v.screen(v.c) else { return };
+                let (s0, s1) = ((g.at0 - c).dot(g.tan).max(4.0) as f64, (at - c).dot(g.tan) as f64);
+                let f = (1.0 + (s1 / s0 - 1.0) * k_fine).max(0.02);
+                if let Some(i) = stretch_slot(st, g.target, k) {
+                    out[i] = g.start[i] * f;
+                    if snap { out[i] = (out[i] / 0.05).round().max(1.0) * 0.05; }
+                }
             }
             Part::Scale => {
                 let Some(c) = v.screen(v.c) else { return };
@@ -429,16 +617,154 @@ impl Handles {
         }
     }
 
-    /// Paint the handles over the picture.
+    /// Corners round what is chosen, where the ball it fits in shows on the screen, and its name over
+    /// them: paint only, quiet enough not to be mistaken for part of the picture.
+    fn mark(&self, p: &Painter, st: &State, rect: Rect) {
+        let Some(t) = self.chosen(st) else { return };
+        let Some((c, r, name)) = (match t {
+            Target::Layer(i) => {
+                let pl = st.stack.layers[i].place;
+                Some((apply(&st.view_r(), pl.pos), gf_core::FIT * pl.size.abs().max(1e-3), if st.layer_count() > 1 { format!("{} · {}", i + 1, st.layer_title(i)) } else { st.layer_title(i) }))
+            }
+            Target::Lamp(i) => st.lamp_in_view(i).map(|(c, _)| {
+                let l = &st.lamps[i];
+                (c, l.size[0].max(l.size[1]).max(0.05) * 1.15, format!("lamp {}", i + 1))
+            }),
+        }) else { return };
+        let v = View { cam: st.camera(), m: st.view_r(), c, axes: [[0.0; 3]; 3], dirs: [[0.0; 3]; 3], own: [[0.0; 3]; 3], len: 0.4, rect };
+        // the ball's outline, near enough: three great circles round it
+        let (mut lo, mut hi, mut seen, mut all) = (Pos2::new(f32::MAX, f32::MAX), Pos2::new(f32::MIN, f32::MIN), 0, 0);
+        for k in 0..3 {
+            for i in 0..32 {
+                let a = i as f64 / 32.0 * std::f64::consts::TAU;
+                let mut d = [0.0; 3];
+                d[(k + 1) % 3] = a.cos() * r;
+                d[(k + 2) % 3] = a.sin() * r;
+                all += 1;
+                if let Some(q) = v.screen(add(c, d)) {
+                    seen += 1;
+                    lo = lo.min(q);
+                    hi = hi.max(q);
+                }
+            }
+        }
+        if seen * 2 < all { return; }
+        let b = Rect::from_min_max(lo, hi).expand(4.0);
+        if !b.intersects(rect) || b.width() > 4.0 * rect.width() { return; }
+        let arm = (b.width().min(b.height()) * 0.18).clamp(5.0, 16.0);
+        let ink = Color32::from_white_alpha(150);
+        let shade = Stroke::new(3.0, Color32::from_black_alpha(70));
+        for (corner, dx, dy) in [(b.left_top(), 1.0, 1.0), (b.right_top(), -1.0, 1.0), (b.left_bottom(), 1.0, -1.0), (b.right_bottom(), -1.0, -1.0)] {
+            let pts = vec![corner + eframe::egui::vec2(dx * arm, 0.0), corner, corner + eframe::egui::vec2(0.0, dy * arm)];
+            p.add(Shape::line(pts.clone(), shade));
+            p.add(Shape::line(pts, Stroke::new(1.2, ink)));
+        }
+        let font = eframe::egui::FontId::monospace(10.0);
+        let at = Pos2::new(b.left().max(rect.left() + 4.0), (b.top() - 3.0).max(rect.top() + 12.0));
+        p.text(at + eframe::egui::vec2(1.0, 1.0), eframe::egui::Align2::LEFT_BOTTOM, &name, font.clone(), Color32::from_black_alpha(120));
+        p.text(at, eframe::egui::Align2::LEFT_BOTTOM, &name, font, Color32::from_white_alpha(150));
+    }
+
+    /// Paint the handles over the picture, and the mark round what is chosen.
     pub fn paint(&mut self, p: &Painter, st: &State, rect: Rect, pointer: Option<Pos2>) {
-        let Some(target) = self.target(st) else { return };
-        let Some(v) = View::of(st, rect, target) else { return };
+        self.mark(p, st, rect);
+        self.spots.clear();
+        let Some(target) = self.target(st) else { self.hover = None; return };
+        let Some(v) = View::of(st, rect, target, self.local) else { return };
         let Some(c) = v.screen(v.c) else { return };
+        // (a point well inside each part, for tests)
+        self.spots.push(("handle:centre", c));
+        self.spots.push(("handle:size", c + Vec2::new(v.scale_radius(), 0.0)));
+        for k in 0..3 {
+            if let Some(q) = v.arrow(k).first().and_then(|r| r.get(r.len() * 2 / 3).copied()) { self.spots.push((["handle:x", "handle:y", "handle:z"][k], q)); }
+            // (half way between two other axes, on the near side: where no other ring crosses)
+            let (a, b) = v.across(k);
+            let to_cam = v.toward_camera(v.c);
+            let spot = [45.0f64, 135.0, 225.0, 315.0].iter().filter_map(|deg| {
+                let t = deg.to_radians();
+                let off = add(scale(a, t.cos() * v.len), scale(b, t.sin() * v.len));
+                if dot(off, to_cam) < 0.0 { return None; }
+                v.screen(add(v.c, off))
+            }).max_by(|p, q| (*p - c).length().total_cmp(&(*q - c).length()));
+            if let Some(q) = spot { self.spots.push((["handle:ring-x", "handle:ring-y", "handle:ring-z"][k], q)); }
+        }
+        {
+            let rr = v.ring_radius();
+            self.spots.push(("handle:spin", c + Vec2::new(0.0, -rr * SPIN_R as f32)));
+            self.spots.push(("handle:sizering", c + Vec2::new(0.0, rr * SIZE_R as f32)));
+            // (inside the rings, clear of the arrows: between two of them, a third of the way out)
+            let ball = (0..12).map(|i| { let a = i as f32 / 12.0 * std::f32::consts::TAU; c + Vec2::new(a.cos(), a.sin()) * rr * 0.45 })
+                .max_by(|p, q| {
+                    let clear = |at: &Pos2| (0..3).map(|k| dist_to_runs(*at, &v.arrow_to(k, ALL_ARROW))).fold(f32::MAX, f32::min);
+                    clear(p).total_cmp(&clear(q))
+                });
+            if let Some(b) = ball { self.spots.push(("handle:ball", b)); }
+            for k in 0..3 {
+                if let Some(q) = v.arrow_to(k, ALL_ARROW).first().and_then(|r| r.get(r.len() / 2).copied()) { self.spots.push((["handle:all-x", "handle:all-y", "handle:all-z"][k], q)); }
+                if let (Some(q), Some(_)) = (v.stretch_at(k), stretch_slot(st, target, k)) { self.spots.push((["handle:stretch-x", "handle:stretch-y", "handle:stretch-z"][k], q)); }
+            }
+        }
         let lit = self.grab.as_ref().map(|g| g.part).or_else(|| pointer.and_then(|at| self.hit(st, rect, at)));
         self.hover = lit;
         let ink = |part: Part, base: Color32| if lit == Some(part) { HOT } else { base };
         let shadow = Stroke::new(4.0, Color32::from_black_alpha(90));
+        let thin = Stroke::new(3.0, Color32::from_black_alpha(70));
+        // a ring about axis k, its far half faint
+        let ring = |k: usize, width: f32| {
+            let col = ink(Part::Ring(k), AXIS_INK[k]);
+            let pts = v.ring(k);
+            for front in [false, true] {
+                let mut run: Vec<Pos2> = Vec::new();
+                let flush = |run: &mut Vec<Pos2>| {
+                    if run.len() > 1 {
+                        let s = if front { Stroke::new(width, col) } else { Stroke::new(1.0, col.gamma_multiply(0.3)) };
+                        if front { p.add(Shape::line(run.clone(), thin)); }
+                        p.add(Shape::line(std::mem::take(run), s));
+                    }
+                    run.clear();
+                };
+                for (q, near) in &pts {
+                    if *near != front { flush(&mut run); continue; }
+                    run.push(*q);
+                }
+                flush(&mut run);
+            }
+        };
+        // an arrow along axis k, to this share of its length
+        let arrow = |k: usize, f: f64, width: f32, head: f32| {
+            let col = ink(Part::Axis(k), AXIS_INK[k]);
+            for run in v.arrow_to(k, f) {
+                p.add(Shape::line(run.clone(), thin));
+                p.add(Shape::line(run.clone(), Stroke::new(if lit == Some(Part::Axis(k)) { width + 1.0 } else { width }, col)));
+                let (a, b) = (run[run.len() - 2], run[run.len() - 1]);
+                let dir = (b - a).normalized();
+                let side = eframe::egui::vec2(-dir.y, dir.x);
+                p.add(Shape::convex_polygon(vec![b + dir * head, b + side * head * 0.5, b - side * head * 0.5], col, Stroke::NONE));
+            }
+        };
         match self.mode {
+            Mode::All => {
+                let rr = v.ring_radius();
+                // the ball: barely there, a little more when the pointer is on it
+                p.circle_filled(c, rr, Color32::from_white_alpha(if lit == Some(Part::Ball) { 22 } else { 9 }));
+                p.circle_stroke(c, rr, Stroke::new(1.0, Color32::from_white_alpha(if lit == Some(Part::Ball) { 90 } else { 30 })));
+                for k in 0..3 { ring(k, 1.6); }
+                let spin = ink(Part::Spin, Color32::from_white_alpha(120));
+                p.circle_stroke(c, rr * SPIN_R as f32, thin);
+                p.circle_stroke(c, rr * SPIN_R as f32, Stroke::new(if lit == Some(Part::Spin) { 2.2 } else { 1.4 }, spin));
+                let size = ink(Part::Scale, SIZE_INK);
+                p.circle_stroke(c, rr * SIZE_R as f32, thin);
+                p.circle_stroke(c, rr * SIZE_R as f32, Stroke::new(if lit == Some(Part::Scale) { 2.4 } else { 1.6 }, size));
+                for k in 0..3 { arrow(k, ALL_ARROW, 1.8, 8.0); }
+                for k in 0..3 {
+                    if let (Some(q), Some(_)) = (v.stretch_at(k), stretch_slot(st, target, k)) {
+                        let col = ink(Part::Stretch(k), AXIS_INK[k]);
+                        p.rect(Rect::from_center_size(q, Vec2::splat(7.0)), 1.0, col, Stroke::new(1.0, Color32::from_black_alpha(120)), eframe::egui::StrokeKind::Outside);
+                    }
+                }
+                p.circle_filled(c, 6.0, Color32::from_black_alpha(110));
+                p.circle_filled(c, 4.5, ink(Part::Centre, Color32::from_rgb(110, 225, 230)));
+            }
             Mode::Move => {
                 for k in 0..3 {
                     if let Some(sq) = v.square(k) {
@@ -446,43 +772,12 @@ impl Handles {
                         p.add(Shape::convex_polygon(sq, col.gamma_multiply(0.35), Stroke::new(1.0, col)));
                     }
                 }
-                for k in 0..3 {
-                    let col = ink(Part::Axis(k), AXIS_INK[k]);
-                    for run in v.arrow(k) {
-                        p.add(Shape::line(run.clone(), shadow));
-                        p.add(Shape::line(run.clone(), Stroke::new(2.0, col)));
-                        // the head, pointing the way the end of the line runs
-                        let (a, b) = (run[run.len() - 2], run[run.len() - 1]);
-                        let dir = (b - a).normalized();
-                        let side = eframe::egui::vec2(-dir.y, dir.x);
-                        p.add(Shape::convex_polygon(vec![b + dir * 9.0, b + side * 4.5, b - side * 4.5], col, Stroke::NONE));
-                    }
-                }
+                for k in 0..3 { arrow(k, 1.0, 2.0, 9.0); }
                 p.circle_filled(c, 5.5, Color32::from_black_alpha(110));
                 p.circle_filled(c, 4.0, ink(Part::Centre, Color32::from_gray(235)));
             }
             Mode::Turn => {
-                for k in 0..3 {
-                    let col = ink(Part::Ring(k), AXIS_INK[k]);
-                    let pts = v.ring(k);
-                    // the half of the ring on the far side of the layer faintly, the near half strongly
-                    for front in [false, true] {
-                        let mut run: Vec<Pos2> = Vec::new();
-                        let flush = |run: &mut Vec<Pos2>| {
-                            if run.len() > 1 {
-                                let s = if front { Stroke::new(2.0, col) } else { Stroke::new(1.0, col.gamma_multiply(0.35)) };
-                                if front { p.add(Shape::line(run.clone(), shadow)); }
-                                p.add(Shape::line(std::mem::take(run), s));
-                            }
-                            run.clear();
-                        };
-                        for (q, near) in &pts {
-                            if *near != front { flush(&mut run); continue; }
-                            run.push(*q);
-                        }
-                        flush(&mut run);
-                    }
-                }
+                for k in 0..3 { ring(k, 2.0); }
                 p.circle_filled(c, 3.0, Color32::from_gray(235));
             }
             Mode::Size => {
@@ -494,7 +789,19 @@ impl Handles {
         }
         // a word to say what they do, under the middle
         let font = eframe::egui::FontId::monospace(10.0);
-        p.text(c + eframe::egui::vec2(0.0, 14.0), eframe::egui::Align2::CENTER_TOP, format!("{} · T", self.mode.word()), font, Color32::from_white_alpha(170));
+        // (the combined handles say what the one under the pointer does instead)
+        let word = match (self.mode, lit) {
+            (Mode::All, Some(Part::Axis(k))) => format!("move along {}", ["x", "y", "z"][k]),
+            (Mode::All, Some(Part::Ring(k))) => format!("turn about {}", ["x", "y", "z"][k]),
+            (Mode::All, Some(Part::Centre)) => "move across the picture".into(),
+            (Mode::All, Some(Part::Spin)) => "turn about the line of sight".into(),
+            (Mode::All, Some(Part::Ball)) => "turn any way".into(),
+            (Mode::All, Some(Part::Scale)) => "size".into(),
+            (Mode::All, Some(Part::Stretch(k))) => format!("size along its own {}", ["x", "y", "z"][k]),
+            (Mode::All, _) => String::new(),
+            (m, _) => format!("{} · T", m.word()),
+        };
+        if !word.is_empty() { p.text(c + eframe::egui::vec2(0.0, 14.0), eframe::egui::Align2::CENTER_TOP, word, font, Color32::from_white_alpha(170)); }
     }
 }
 

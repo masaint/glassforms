@@ -90,18 +90,19 @@ pub fn plain_first_ray(template: &str) -> String {
 pub fn accum(src: &str) -> String {
     let s = append(src, "struct A {", "  lens: Cam,              // the lens now ...\n  lens_p: Cam,            // ... and at the previous frame\n");
     let s = swap(&s,
-        "    let p = vec3f(0.0, 0.0, a.cam.x) + normalize(vec3f(uv * a.cam.y, -1.0)) * d;
+        "    let p = vec3f(a.eye.xy, a.cam.x) + normalize(vec3f(uv * a.cam.y, -1.0)) * d;
     let o = p.x * a.obj0.xyz + p.y * a.obj1.xyz + p.z * a.obj2.xyz;                    // world -> object now
-    let v = vec3f(dot(a.objp0.xyz, o), dot(a.objp1.xyz, o), dot(a.objp2.xyz, o)) - vec3f(0.0, 0.0, a.cam_p.x);
+    let v = vec3f(dot(a.objp0.xyz, o), dot(a.objp1.xyz, o), dot(a.objp2.xyz, o)) - vec3f(a.eye.zw, a.cam_p.x);
     at = ((v.xy / (-v.z * a.cam_p.y) - a.shift_p) * a.res.y + a.res) * 0.5;
     expect = length(v);
 ",
         "    var ro: vec3f;
     var rd: vec3f;
     _ = camRay(uv, a.lens, &ro, &rd);
-    let p = ro + rd * d;
+    let p = ro + vec3f(a.eye.xy, 0.0) + rd * d;                                        // (a free camera stands off the axis)
     let o = p.x * a.obj0.xyz + p.y * a.obj1.xyz + p.z * a.obj2.xyz;                    // world -> object now
-    let v = vec3f(dot(a.objp0.xyz, o), dot(a.objp1.xyz, o), dot(a.objp2.xyz, o));       // where that point was then
+    // where that point was then, beside the axis the lens then stood on
+    let v = vec3f(dot(a.objp0.xyz, o), dot(a.objp1.xyz, o), dot(a.objp2.xyz, o)) - vec3f(a.eye.zw, 0.0);
     let f = camFilm(v, a.lens_p);
     // (if the lens could not see it then, there is no old picture of it: a place off the screen says so)
     at = select(vec2f(-1.0), ((f.xy - a.shift_p) * a.res.y + a.res) * 0.5, f.z > 0.5);

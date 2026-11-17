@@ -52,6 +52,7 @@ struct A {
   roomp2: vec4f,
   floor: vec4f,           // x: 1 = there is a floor, level in the room;  y: its height in the room now;
                           // z: its height at the previous frame
+  eye: vec4f,             // where the camera stands across and up from (0, 0, distance): xy now, zw at the previous frame
 }
 
 @group(0) @binding(0) var<uniform> a: A;
@@ -134,9 +135,9 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   var expect = 0.0;                  // and how far from the camera it was then
   if (d > 0.0) {
     let uv = (2.0 * fc - a.res) / a.res.y + a.shift;
-    let p = vec3f(0.0, 0.0, a.cam.x) + normalize(vec3f(uv * a.cam.y, -1.0)) * d;
+    let p = vec3f(a.eye.xy, a.cam.x) + normalize(vec3f(uv * a.cam.y, -1.0)) * d;
     let o = p.x * a.obj0.xyz + p.y * a.obj1.xyz + p.z * a.obj2.xyz;                    // world -> object now
-    let v = vec3f(dot(a.objp0.xyz, o), dot(a.objp1.xyz, o), dot(a.objp2.xyz, o)) - vec3f(0.0, 0.0, a.cam_p.x);
+    let v = vec3f(dot(a.objp0.xyz, o), dot(a.objp1.xyz, o), dot(a.objp2.xyz, o)) - vec3f(a.eye.zw, a.cam_p.x);
     at = ((v.xy / (-v.z * a.cam_p.y) - a.shift_p) * a.res.y + a.res) * 0.5;
     expect = length(v);
   } else if (a.sky > 0.5) {
@@ -152,7 +153,7 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   var onFloor = false;               // this pixel shows the floor
   var nearest = 0.0;                 // and the nearest the floor comes within the pixel
   if (a.floor.x > 0.5 && cur.a > 0.0) {
-    let eye = vec3f(0.0, 0.0, a.cam.x);
+    let eye = vec3f(a.eye.xy, a.cam.x);
     let n = vec3f(a.room0.y, a.room1.y, a.room2.y);            // the floor's normal as the camera sees it
     let drop = a.floor.y - dot(n, eye);                         // how far the floor lies from the camera, along that normal
     // Where rays through the four corners of the pixel meet the floor. The pixel's own ray went through
@@ -181,7 +182,7 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         let p = eye + dir * tf;
         var q = p.x * a.room0.xyz + p.y * a.room1.xyz + p.z * a.room2.xyz;    // what the camera sees -> the room
         q.y = a.floor.z;                                                      // the same spot, at the height the floor had then
-        let v = vec3f(dot(a.roomp0.xyz, q), dot(a.roomp1.xyz, q), dot(a.roomp2.xyz, q)) - vec3f(0.0, 0.0, a.cam_p.x);
+        let v = vec3f(dot(a.roomp0.xyz, q), dot(a.roomp1.xyz, q), dot(a.roomp2.xyz, q)) - vec3f(a.eye.zw, a.cam_p.x);
         at = select(vec2f(-1.0), ((v.xy / (-v.z * a.cam_p.y) - a.shift_p) * a.res.y + a.res) * 0.5, v.z < -1e-4);
       }
     }

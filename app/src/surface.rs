@@ -295,7 +295,7 @@ impl Surface {
             cam: [tu.res[0], tu.res[1], tu.jitter[0], tu.jitter[1]],
             cam2: [tu.shift[0], tu.shift[1], tu.dist, tu.tan_fov],
             k0: [tu.vres, grown_hb.unwrap_or(gf_core::HB as f32), (tu.frame % 65536) as f32, show()],
-            k1: [tu.ns.clamp(1, 32) as f32, 0.0, 0.0, 0.0],
+            k1: [tu.ns.clamp(1, 32) as f32, tu.eye[0], tu.eye[1], 0.0],
             obj: tu.obj,
             env: tu.env,
             base: lit.base,
