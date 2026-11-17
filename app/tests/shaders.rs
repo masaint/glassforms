@@ -231,11 +231,21 @@ fn hero_inside() {
     let m = March { step_scale: 0.95, steps_out: 220, steps_in: 56, layers: 2 };
     for v in variants() {
         for src in [tracer_source(&m, v, false), glassforms::render::gem_weave(&tracer_source(&m, v, false))] {
-            for k in [1, 2] {
-                let woven = glassforms::hero::weave(&src, k).unwrap_or_else(|| panic!("{v:?}: not woven"));
-                assert!(woven.contains(&format!("const HERO_K: i32 = {k};")), "{v:?}");
-                check(&format!("trace.wgsl hero {k} {v:?}"), &woven);
+            for k in [1u8, 2] {
+                for (clamp, seq) in [(0u8, 0u8), (1, 1), (2, 2), (2, 1), (3, 3), (4, 3)] {
+                    let h = glassforms::hero::Hero { mode: 1, k, clamp, seq, every: 6, taa: 0 };
+                    let woven = glassforms::hero::weave(&src, &h).unwrap_or_else(|| panic!("{v:?}: not woven"));
+                    assert!(woven.contains(&format!("const HERO_K: i32 = {k};")), "{v:?}");
+                    check(&format!("trace.wgsl hero {h:?} {v:?}"), &woven);
+                }
             }
         }
     }
+}
+
+/// The antialiasing with colour kept apart from brightness (hero.rs chroma_taa) is woven and valid.
+#[test]
+fn hero_chroma_taa() {
+    let src = glassforms::hero::chroma_taa(include_str!("../src/shaders/accum.wgsl")).expect("woven");
+    check("accum.wgsl colour apart", &src);
 }

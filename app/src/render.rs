@@ -522,6 +522,8 @@ pub struct Renderer {
     /// one wavelength inside the glass (hero.rs): as asked for, and whether the tracer in use has it
     pub hero: crate::hero::Hero,
     hero_now: bool,
+    /// the antialiasing's pipeline has been made with colour kept apart (hero.rs chroma_taa)
+    accum_chroma: bool,
 }
 
 /// The tone map of post.wgsl's final pass, done here in 64-bit arithmetic for a 16-bit still: the picture
@@ -712,7 +714,7 @@ impl Renderer {
             dn: Denoise::new(gpu), shown: 0,
             surface: crate::surface::Surface::new(gpu),
             up: Default::default(),
-            hero: Default::default(), hero_now: false,
+            hero: Default::default(), hero_now: false, accum_chroma: false,
         }
     }
 
@@ -925,7 +927,7 @@ impl Renderer {
     fn tracer_text(&self, m: &March, v: Variant) -> String {
         let src = if self.cam.wanted { tracer_source_lens(m, v, self.profile) } else { tracer_source(m, v, self.profile) };
         let src = if self.gem && gem_fits(&v) { gem_weave(&src) } else { src };
-        let src = if self.hero_now { crate::hero::weave(&src, self.hero.k).unwrap_or(src) } else { src };
+        let src = if self.hero_now { crate::hero::weave(&src, &self.hero).unwrap_or(src) } else { src };
         match &self.sdf {
             Some((_, decl)) if crate::sdf::fits(&v) => crate::sdf::weave(&src, decl),
             _ => src,
@@ -996,7 +998,7 @@ impl Renderer {
 
     fn tracer_key(&self, m: &March, v: Variant) -> String {
         let sdf = self.sdf.as_ref().filter(|_| crate::sdf::fits(&v)).map_or("", |s| s.0.as_str());
-        let hero = if self.hero_now { self.hero.k } else { 0 };
+        let hero = if self.hero_now { self.hero.key() } else { "0".into() };
         format!("{:.2}|{}|{}|{}|{}|{:?}|{}|{}|{sdf}|{hero}", m.step_scale, m.steps_out, m.steps_in, m.layers, self.profile, v, self.cam.wanted, self.gem && gem_fits(&v))
     }
 
@@ -1240,6 +1242,13 @@ impl Renderer {
     pub fn frame(&mut self, tu: &TraceU, look: &Look, moving: bool, cut: bool, skip_post: bool) {
         // one wavelength inside the glass, for this kind of frame (hero.rs): the tracer with it or without
         let hero = self.hero.for_frame(moving && !cut && look.smooth > 0.0);
+        if self.hero.taa > 0 && !self.accum_chroma {
+            if let Some(src) = crate::hero::chroma_taa(ACCUM_WGSL) {
+                let module = self.gpu.shader("accumulate (colour apart)", &src, false);
+                self.p_accum = self.gpu.pipeline(&PipeDesc { label: "accumulate", module: &module, vs: "vs", fs: "fs", layouts: &[&self.l_accum], format: ACC, blend: None, strip: false, buffers: &[] });
+            }
+            self.accum_chroma = true;
+        }
         if hero != self.hero_now {
             self.hero_now = hero;
             self.build_tracer();
