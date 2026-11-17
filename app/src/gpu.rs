@@ -37,6 +37,8 @@ pub fn wanted_limits(adapter: &wgpu::Adapter) -> wgpu::Limits {
     l.max_texture_dimension_3d = have.max_texture_dimension_3d.min(2048);
     l.max_buffer_size = have.max_buffer_size.min(1 << 30);
     l.max_storage_buffer_binding_size = have.max_storage_buffer_binding_size.min(1 << 30);
+    // (a tree's grid parts are nine more textures for the tracer to read: gf_core::csg)
+    l.max_sampled_textures_per_shader_stage = have.max_sampled_textures_per_shader_stage.min(32).max(l.max_sampled_textures_per_shader_stage);
     l
 }
 

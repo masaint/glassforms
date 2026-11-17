@@ -13,6 +13,8 @@ use super::theme::*;
 use super::widgets::*;
 use super::{knob, Panels};
 
+/// How far a note stands in from the panel's edge (as right.rs's).
+const INSET: f32 = 9.0;
 /// How far a row stands in for each group level.
 const INDENT: f32 = 12.0;
 
@@ -95,7 +97,25 @@ fn parts(ui: &mut Ui, st: &mut State, px: &mut Panels) {
             add(st, px);
         }
     }
+    // the grid parts' video memory, and the cap on them
+    if n > 0 {
+        let (bytes, own) = st.csg_grid_bytes();
+        let (_, _, left) = st.csg_tree_counted();
+        if own > 0 || left > 0 {
+            gap(ui, 3.0);
+            let mut say = format!("grid parts: {own}, {} of video memory", mib(bytes));
+            if left > 0 {
+                say += &format!(". {left} left out: at most {} grid parts and {} at once", gf_core::csg::MAX_GRIDS, mib(gf_core::csg::GRID_BUDGET));
+            }
+            paragraph(ui, &say, mono(SMALL), if left > 0 { HINT } else { FAINT }, LINE, INSET);
+        }
+    }
     gap(ui, 4.0);
+}
+
+/// Bytes as the panel says them.
+fn mib(bytes: u64) -> String {
+    if bytes >= 1 << 30 { format!("{:.1} gb", bytes as f64 / (1u64 << 30) as f64) } else { format!("{} mb", (bytes as f64 / (1u64 << 20) as f64).round()) }
 }
 
 /// A new part: of the shape up's kind with its sliders, when it is a formula, or a ball; a little off the
@@ -144,24 +164,55 @@ fn selected(ui: &mut Ui, st: &mut State, px: &mut Panels, i: usize) {
     let run = named_run(ui, Id::unique(("csg level", i)), "group level", &items);
     if let Some(l) = run.clicked { st.csg.parts[i].level = l as u8; st.want = Some(Detail::Full); }
 
-    // its shape: any shape with a formula
+    // its shape: any shape of any family (one with no formula is a grid part: baked into a volume of its
+    // own); "your file" when the shape up is a model read from a file, which the part then reads too
     let now = title(st, &st.csg.parts[i]);
+    let up_model = st.is_model().then(|| st.shape().model.clone()).filter(|m| !m.trim().is_empty());
     let mut pick = None;
     egui::ComboBox::from_id_salt(("csg shape", i)).width(ui.available_width() - 8.0).selected_text(now.trim_start_matches(['+', '−', '∩', ' '])).show_ui(ui, |ui| {
         for (fi, f) in st.families.iter().enumerate() {
             for (pi, p) in f.presets.iter().enumerate() {
-                if !matches!(support(f, p), Support::Formula { .. }) { continue; }
+                let file = matches!(p.shape, gf_core::presets::Shape::Mesh { file } if file.is_empty());
+                if file && up_model.is_none() { continue; }
                 let on = st.csg.parts[i].family == f.id && st.csg.parts[i].preset == p.id;
-                if ui.selectable_label(on, format!("{} · {}", f.name.to_lowercase(), p.name.to_lowercase())).clicked() { pick = Some((fi, pi)); }
+                let grid = if matches!(support(f, p), Support::Formula { .. }) { "" } else { " (grid)" };
+                if ui.selectable_label(on, format!("{} · {}{grid}", f.name.to_lowercase(), p.name.to_lowercase())).clicked() { pick = Some((fi, pi, file)); }
             }
         }
     });
-    if let Some((fi, pi)) = pick {
+    if let Some((fi, pi, file)) = pick {
         let part = &mut st.csg.parts[i];
         part.family = st.families[fi].id.to_string();
         part.preset = st.families[fi].presets[pi].id.to_string();
         part.values.clear();
+        part.model = if file { up_model.unwrap_or_default() } else { String::new() };
         st.want = Some(Detail::Full);
+    }
+    // a grid part: its volume's voxels a side (and memory), and a tube's thickness, melt and length
+    let grid = st.families.iter().find(|f| f.id == st.csg.parts[i].family)
+        .and_then(|f| f.presets.iter().find(|p| p.id == st.csg.parts[i].preset).map(|p| (f, p)))
+        .filter(|(f, p)| !matches!(support(f, p), Support::Formula { .. }))
+        .map(|(f, p)| (f.kind == gf_core::presets::Kind::Curve, f.melt, p.fixed_length));
+    {
+        if let Some((curve, melt0, fixed)) = grid {
+            let res = st.csg.parts[i].grid_res();
+            let label = format!("detail, {}", mib(gf_core::csg::grid_bytes(res)));
+            if let Some(v) = moved(st, &knob::plain_row(ui, Id::unique(("csg res", i)), &label, res as f64, gf_core::csg::GRID_RES_MIN as f64, gf_core::csg::GRID_RES_MAX as f64, 32.0)) {
+                st.csg.parts[i].res = ((v / 32.0).round() * 32.0) as u32;
+            }
+            if curve {
+                let part = &st.csg.parts[i];
+                let rows = [("thickness", part.thick.unwrap_or(1.0), 0.4, 3.0, 0.02), ("melt", part.melt.unwrap_or(melt0), 0.0, 0.03, 0.0005), ("length", part.len.unwrap_or(1.0), 0.1, 3.0, 0.02)];
+                for (k, (label, v, lo, hi, step)) in rows.into_iter().enumerate() {
+                    if k == 2 && fixed { continue; }
+                    if let Some(v) = moved(st, &knob::plain_row(ui, Id::unique(("csg tube", i, k)), label, v, lo, hi, step)) {
+                        let part = &mut st.csg.parts[i];
+                        match k { 0 => part.thick = Some(v), 1 => part.melt = Some(v), _ => part.len = Some(v) }
+                    }
+                }
+            }
+            paragraph(ui, "a grid part: baked into a volume of its own, as fine as its voxels; the surface studio works on the shape up only", mono(SMALL), FAINT, LINE, INSET);
+        }
     }
     // its sliders
     let defs: Vec<(String, String, f64, f64, f64, f64)> = st.families.iter().find(|f| f.id == st.csg.parts[i].family)

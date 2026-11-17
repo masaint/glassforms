@@ -217,18 +217,21 @@ fn trace_row(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     use gf_core::sdf::{support, Support, Trace};
     let now = st.shape().trace;
     match support(st.family(), st.preset()) {
-        Support::VolumeOnly(why) => {
-            // the same control as for every shape, so it is found in the same place: sdf is there but
-            // cannot be chosen, and why is said under it in full (not cut off)
+        Support::VolumeOnly(_) => {
+            // a shape with no formula (curves, a model) is the tree's first part as a grid part: its own
+            // volume, read by the tracer in its own frame, joined to the parts below by any operation
             let items = [
-                Item::new("volume", true).tip("the shape baked into a grid of distances, which the tracer reads: as fine as its voxels"),
-                Item::new("csg", false).tip(format!("not for this shape: {why}")),
+                Item::new("volume", now == Trace::Volume).tip("the shape baked into a grid of distances, which the tracer reads: as fine as its voxels; parts below are joined to it as a union"),
+                Item::new("csg", now == Trace::Csg).tip("the shape as the first part of the tree below, read from its own volume (it has no formula): the parts below join it by union, subtract or intersect, with smooth seams"),
             ];
-            // drawn greyed and not clickable, so it does not look like a button that does nothing
-            let run = ui.add_enabled_ui(false, |ui| named_run(ui, Id::unique("trace"), "traced from", &items)).inner;
+            let run = named_run(ui, Id::unique("trace"), "traced from", &items);
             for (w, place) in ["volume", "csg"].iter().zip(&run.places) { px.note(format!("trace:{w}"), *place); }
-            gap(ui, 2.0);
-            paragraph(ui, &format!("csg is only for shapes with a formula: {why} (parts can still be added beside it)"), mono(SMALL), FAINT, LINE, INSET);
+            if let Some(i) = run.clicked { st.apply_arg("trace", if i == 0 { "volume" } else { "csg" }); }
+            if now == Trace::Csg {
+                gap(ui, 2.0);
+                let why = if st.layer_count() > 1 { "reads the volume while there are several layers" } else { "a grid part: read from its own volume, as fine as its voxels" };
+                paragraph(ui, why, mono(SMALL), FAINT, LINE, INSET);
+            }
         }
         Support::Formula { .. } => {
             let items = [
@@ -240,13 +243,13 @@ fn trace_row(ui: &mut Ui, st: &mut State, px: &mut Panels) {
             if let Some(i) = run.clicked { st.apply_arg("trace", if i == 0 { "volume" } else { "csg" }); }
             if now == Trace::Csg {
                 // when the volume is read after all
-                let why = if st.layer_count() > 1 { Some("there are several layers") }
-                    else if st.layer_sculpt(0).is_some_and(|s| !s.is_empty()) { Some("the surface studio is on") }
-                    else if gf_core::material::bubbles(&st.p).is_some() { Some("the material has bubbles") }
+                let why = if st.layer_count() > 1 { Some("reads the volume while there are several layers") }
+                    else if st.layer_sculpt(0).is_some_and(|s| !s.is_empty()) { Some("a grid part while the surface studio is on: read from the volume the studio has shaped") }
+                    else if gf_core::material::bubbles(&st.p).is_some() { Some("reads the volume while the material has bubbles") }
                     else { None };
                 if let Some(why) = why {
                     gap(ui, 2.0);
-                    paragraph(ui, &format!("reads the volume while {why}"), mono(SMALL), FAINT, LINE, INSET);
+                    paragraph(ui, why, mono(SMALL), FAINT, LINE, INSET);
                 }
             }
         }

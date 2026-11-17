@@ -548,15 +548,17 @@ fn run() -> Result<(), String> {
         let mode = match args.text("detail") { Some("anim") => Detail::Anim, Some("quick") => Detail::Quick, Some("hq") => Detail::Hq, _ => Detail::Full };
         e.bake(mode)?;
         let mut sum = [0.0f64; 3];
+        let mut csg_ms = 0.0;
         for i in 0..n {
             // nudge the clock so that an animated shape really changes between builds
             e.state.clock = i as f64 / 60.0;
             if mode == Detail::Anim { e.state.apply_clock(false); e.state.want = None; }
             e.bake(mode)?;
             for k in 0..3 { sum[k] += e.last_bake_parts[k] / n as f64; }
+            csg_ms += e.csg.last_ms / n as f64;
         }
         let m = &e.state.shape().meta;
-        println!("{{\"scene\":\"{}\",\"preset\":\"{}\",\"volume\":{},\"segments\":{},\"splats\":{},\"workOutMs\":{:.2},\"handOverMs\":{:.2},\"gpuMs\":{:.2},\"totalMs\":{:.2}{}{}}}",
+        println!("{{\"scene\":\"{}\",\"preset\":\"{}\",\"volume\":{},\"segments\":{},\"splats\":{},\"workOutMs\":{:.2},\"handOverMs\":{:.2},\"gpuMs\":{:.2},\"totalMs\":{:.2},\"csgMs\":{csg_ms:.2}{}{}}}",
             e.state.family().id, e.state.preset().id, m.res, m.segments, m.splats, sum[0], sum[1], sum[2], sum[0] + sum[1] + sum[2], e.layers_json(), e.models_json());
         return Ok(());
     }

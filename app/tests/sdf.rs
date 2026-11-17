@@ -112,7 +112,7 @@ fn every_formula_is_a_part() {
     for &k in &all {
         let name = format!("{}/{}", fams[k.0].id, fams[k.0].presets[k.1].id);
         let src = glassforms::sdf::weave(&plain, &gf_core::csg::wgsl(&fams, &[k], gf_core::sdf::BINDING, false));
-        assert!(src.contains("let c = csgDist(p);") && src.contains("csgNormal(po)") && src.contains("for (var sdfS = 0u;"), "{name}");
+        assert!(src.contains("let c = csgDist(p);") && src.contains("csgNormal(po, near)") && src.contains("for (var sdfS = 0u;"), "{name}");
         check(&format!("{name} (tree)"), &src);
         check(&format!("{name} (merge)"), &glassforms::csg::merge_source(&gf_core::csg::wgsl(&fams, &[k], 0, true)));
         check(&format!("{name} (extents)"), &glassforms::csg::extent_source(&gf_core::csg::wgsl(&fams, &[k], 0, false)));
@@ -194,4 +194,152 @@ fn undo_puts_a_moved_part_back() {
     assert_eq!(st.csg.sel, Some(0));
     assert!(h.redo(&mut st));
     assert_eq!(st.csg.parts[0].place.pos, [0.6, 0.2, -0.1]);
+}
+
+// ---- every shape as a part: grid parts (shapes with no formula, each read from a volume of its own)
+
+/// A tree holding grid parts beside formula parts: in the tracer (in other ways of drawing too), in the
+/// pass that measures it into a volume and in the one that measures the boxes; read as a tree of plain
+/// unions and not.
+#[test]
+fn grid_parts_weave_into_the_tree() {
+    let fams = gf_core::presets::families();
+    let mut kinds: Vec<(usize, usize)> = formulas(&fams).into_iter().step_by(19).collect();
+    kinds.push(gf_core::csg::GRID_KIND);
+    let m = March { step_scale: 0.9, steps_out: 220, steps_in: 56, layers: 2 };
+    for plain in [false, true] {
+        let decl = gf_core::csg::wgsl_tree(&fams, &kinds, gf_core::sdf::BINDING, false, plain);
+        assert!(decl.contains("fn csgGridAt(") && decl.contains(&format!("@binding({})", gf_core::csg::GRID_BINDING_TRACER)), "plain {plain}");
+        let src = glassforms::sdf::weave(&tracer_source(&m, Variant::default(), false), &decl);
+        assert!(src.contains("csgNormal(po, near)"));
+        check(&format!("grid tree, plain {plain}"), &src);
+        check(&format!("grid tree (merge), plain {plain}"), &glassforms::csg::merge_source(&gf_core::csg::wgsl_tree(&fams, &kinds, 0, true, plain)));
+        check(&format!("grid tree (extents), plain {plain}"), &glassforms::csg::extent_source(&gf_core::csg::wgsl_tree(&fams, &kinds, 0, false, plain)));
+        for v in [Variant { light: LightFrom::Picture, backdrop: true, ..Default::default() }, Variant { clay: true, ..Default::default() }] {
+            check(&format!("grid tree {v:?}, plain {plain}"), &glassforms::sdf::weave(&tracer_source(&m, v, false), &decl));
+            check(&format!("grid tree {v:?} (lens), plain {plain}"), &glassforms::sdf::weave(&tracer_source_lens(&m, v, false), &decl));
+        }
+    }
+    // a tree of formulas alone holds no grid reading
+    assert!(!gf_core::csg::wgsl(&fams, &kinds[..kinds.len() - 1], gf_core::sdf::BINDING, false).contains("csgGridAt"));
+}
+
+/// The shape up with no formula, traced as "csg", is the tree's first part as a grid part reading its own
+/// volume; parts with no formula are grid parts of their own, each given a volume in turn, up to the cap.
+#[test]
+fn every_shape_is_a_part_of_the_tree() {
+    use gf_core::csg::GridFrom;
+    let mut st = gf_core::state::State::new();
+    let att = st.families.iter().position(|f| f.id == "attractors").unwrap();
+    st.set_scene(att);
+    assert!(st.apply_arg("trace", "csg"));
+    assert!(st.apply_arg("csg", "studio/sphere@0.3,0,0@0,0,0@0.5@subtract@0.05; knots/trefoil@0,0,0@0,0,0@0.8@intersect@0@0@256; models/teapot@0,0.4,0@0,0,0@0.5"));
+    let (tree, joined) = st.csg_tree();
+    assert!(!joined);
+    assert_eq!(tree.len(), 4);
+    assert_eq!(tree[0].grid.as_ref().map(|g| (g.slot, g.from)), Some((0, GridFrom::Up)));
+    assert!(tree[1].grid.is_none());
+    assert_eq!(tree[2].grid.as_ref().map(|g| (g.slot, g.res, g.from)), Some((1, 256, GridFrom::Part(1))));
+    assert_eq!(tree[3].grid.as_ref().map(|g| (g.slot, g.from)), Some((2, GridFrom::Part(2))));
+    assert!(!gf_core::csg::plain(&tree));
+    // the memory the parts' own volumes take
+    let (bytes, own) = st.csg_grid_bytes();
+    assert_eq!(own, 2);
+    assert_eq!(bytes, gf_core::csg::grid_bytes(256) + gf_core::csg::grid_bytes(gf_core::csg::GRID_RES));
+    // a formula reshaped by the surface studio is a grid part too (its studio-shaped volume)
+    let studio = st.families.iter().position(|f| f.id == "studio").unwrap();
+    st.set_scene(studio);
+    assert!(st.apply_arg("trace", "csg"));
+    assert!(st.csg_tree().0[0].grid.is_none());
+    // past the cap: at most MAX_GRIDS grid parts, the rest left out
+    let many: Vec<String> = (0..10).map(|i| format!("knots/trefoil@{},0,0@0,0,0@0.2", -1.0 + 0.2 * i as f64)).collect();
+    assert!(st.apply_arg("csg", &many.join(";")));
+    let (tree, _, left) = st.csg_tree_counted();
+    assert_eq!(tree.iter().filter(|p| p.grid.is_some()).count(), gf_core::csg::MAX_GRIDS);
+    assert_eq!(left, 10 - gf_core::csg::MAX_GRIDS);
+    // and past the memory: eight of the finest are more than the budget allows
+    let fine: Vec<String> = (0..8).map(|i| format!("knots/trefoil@{},0,0@0,0,0@0.2@union@0@0@768", -1.0 + 0.2 * i as f64)).collect();
+    assert!(st.apply_arg("csg", &fine.join(";")));
+    let (tree, _, left) = st.csg_tree_counted();
+    let used: u64 = tree.iter().filter_map(|p| p.grid.as_ref()).map(|g| gf_core::csg::grid_bytes(g.res)).sum();
+    assert!(left > 0 && used <= gf_core::csg::GRID_BUDGET, "{left} {used}");
+}
+
+/// A part's job: a curve part is a curve built as the shape up would be, a model part a model, and the
+/// shape up is left as it was.
+#[test]
+fn a_grid_part_is_built_as_its_shape_would_be() {
+    let mut st = gf_core::state::State::new();
+    let studio = st.families.iter().position(|f| f.id == "studio").unwrap();
+    st.set_scene(studio);
+    let before = serde_json::to_string(&st.setup()).unwrap();
+    let knot = gf_core::csg::Part { family: "knots".into(), preset: "trefoil".into(), thick: Some(1.5), ..Default::default() };
+    let job = st.part_job(&knot, 256).unwrap();
+    assert!(matches!(job.shape, gf_core::state::ShapeJob::Curve { .. }) && job.res == 256);
+    let teapot = gf_core::csg::Part { family: "models".into(), preset: "teapot".into(), ..Default::default() };
+    assert!(matches!(st.part_job(&teapot, 384).unwrap().shape, gf_core::state::ShapeJob::Mesh(_)));
+    assert_eq!(serde_json::to_string(&st.setup()).unwrap(), before);
+    // what a grid part is made from: its tube's thickness is, its placement is not
+    let mut moved = knot.clone();
+    moved.place.pos = [0.4, 0.0, 0.0];
+    assert_eq!(moved.grid_sig(), knot.grid_sig());
+    let thicker = gf_core::csg::Part { thick: Some(2.0), ..knot.clone() };
+    assert_ne!(thicker.grid_sig(), knot.grid_sig());
+}
+
+/// Setups keep grid parts (their shape, sliders, voxels, tube and placement); setups from before read as
+/// they did.
+#[test]
+fn setups_keep_grid_parts() {
+    let mut st = gf_core::state::State::new();
+    let att = st.families.iter().position(|f| f.id == "attractors").unwrap();
+    st.set_scene(att);
+    assert!(st.apply_arg("trace", "csg"));
+    assert!(st.apply_arg("csg", "knots/trefoil@0.2,0,0@0,30,0@0.6@subtract@0.04@0@320; models/teapot@0,0.4,0@0,0,0@0.5"));
+    st.csg.parts[0].thick = Some(1.4);
+    st.csg.parts[0].values.insert("p".into(), 3.0);
+    let text = serde_json::to_string(&st.setup()).unwrap();
+    assert!(text.contains("\"res\":320") && text.contains("\"thick\":1.4") && text.contains("\"trace\":\"csg\""), "{text}");
+    let mut other = gf_core::state::State::new();
+    other.apply_setup(&serde_json::from_str(&text).unwrap()).unwrap();
+    assert_eq!(other.csg.parts, st.csg.parts);
+    assert_eq!(other.shape().trace, gf_core::sdf::Trace::Csg);
+    // a formula part leaves the grid's members out, so a setup of formula parts is the file it was
+    let mut plain = gf_core::state::State::new();
+    let alg = plain.families.iter().position(|f| f.id == "algebraic").unwrap();
+    plain.set_scene(alg);
+    assert!(plain.apply_arg("csg", "studio/sphere@0.5,0,0"));
+    let t = serde_json::to_string(&plain.setup().csg).unwrap();
+    assert!(["\"res\"", "thick", "melt", "len", "model"].iter().all(|w| !t.contains(w)), "{t}");
+    // and an old setup's part (no such members) reads with the defaults
+    let old: gf_core::csg::Part = serde_json::from_str(r#"{"family":"studio","preset":"sphere","values":{},"puff":0.0,"place":{"pos":[0,0,0],"rot":[0,0,0],"size":1.0},"op":"union","smooth":0.0,"level":0}"#).unwrap();
+    assert_eq!(old, gf_core::csg::Part::default());
+}
+
+/// Undo puts a grid part back: moved, turned, its detail and its tube changed.
+#[test]
+fn undo_puts_a_grid_part_back() {
+    let mut st = gf_core::state::State::new();
+    let att = st.families.iter().position(|f| f.id == "attractors").unwrap();
+    st.set_scene(att);
+    assert!(st.apply_arg("trace", "csg"));
+    assert!(st.apply_arg("csg", "knots/trefoil@0.3,0,0@0,0,0@0.5@subtract@0.05"));
+    st.csg.sel = Some(0);
+    let mut h = gf_core::history::History::default();
+    h.settle(&mut st);
+    st.csg.parts[0].place.pos = [0.5, 0.1, 0.0];
+    st.csg.parts[0].place.rot = [0.0, 45.0, 0.0];
+    h.settle(&mut st);
+    st.csg.parts[0].res = 512;
+    st.csg.parts[0].thick = Some(2.0);
+    h.settle(&mut st);
+    assert!(h.undo(&mut st));
+    assert_eq!((st.csg.parts[0].res, st.csg.parts[0].thick), (0, None));
+    assert_eq!(st.csg.parts[0].place.pos, [0.5, 0.1, 0.0]);
+    assert!(h.undo(&mut st));
+    assert_eq!(st.csg.parts[0].place.pos, [0.3, 0.0, 0.0]);
+    assert_eq!(st.csg.parts[0].place.rot, [0.0; 3]);
+    assert_eq!(st.csg.sel, Some(0));
+    assert!(h.redo(&mut st) && h.redo(&mut st));
+    assert_eq!((st.csg.parts[0].res, st.csg.parts[0].thick), (512, Some(2.0)));
 }

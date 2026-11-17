@@ -118,21 +118,35 @@ pub fn weave_tree(src: &str, decl: &str) -> String {
   let vn = mapNVolume(p);
   return select(vn, c, c < vn + SDF_NEAR * (2.0 * HB / u.vres));
 }
-// is the surface near p (object frame) the tree's, not the volume object's?
-fn csgTreeHere(p: vec3f) -> bool {
-  return csgU.info.w < 0.5 || csgDist(p) < mapNVolume(p) + SDF_NEAR * (2.0 * HB / u.vres);
-}
 const SDF_NEAR: f32 = 1.5;
 ";
+    // (the tree is read at p and at the four taps of its normal in one loop: put into the shader once
+    // wherever a normal is taken. Where the volume's own normal stands instead (beside a volume object whose
+    // surface is the nearer there, or where a grid part alone decides the surface: the volume holds its
+    // distances there), four smooth readings of the volume a voxel apart, also in a loop.)
     let nrm = "  let po = toObj(p);
-  if (csgTreeHere(po)) {
-    let n = csgNormal(po);
-    return normalize(n.x * vec3f(u.obj0.x, u.obj1.x, u.obj2.x) + n.y * vec3f(u.obj0.y, u.obj1.y, u.obj2.y) + n.z * vec3f(u.obj0.z, u.obj1.z, u.obj2.z));
+  var near = 1e9;
+  if (csgU.info.w > 0.5) { near = mapNVolume(po) + SDF_NEAR * (2.0 * HB / u.vres); }
+  var n = csgNormal(po, near);
+  if (all(n == vec3f(0.0))) {
+    let e = 2.0 * HB / u.vres;
+    for (var t = 0u; t < 4u + u32(csgU.info2.y); t++) {
+      let o = csgTap(t);
+      n += o * mapNVolume(po + e * o);
+    }
   }
-  let e = vec2f(1.0, -1.0) * (2.0 * HB / u.vres);
-  return normalize(e.xyy * mapNW(p + e.xyy) + e.yyx * mapNW(p + e.yyx) + e.yxy * mapNW(p + e.yxy) + e.xxx * mapNW(p + e.xxx));
+  return normalize(n.x * vec3f(u.obj0.x, u.obj1.x, u.obj2.x) + n.y * vec3f(u.obj0.y, u.obj1.y, u.obj2.y) + n.z * vec3f(u.obj0.z, u.obj1.z, u.obj2.z));
 ";
     let src = settle_loops(src).replace("u32(sdfU.pad)", "u32(csgU.info2.y)");
+    // (measuring only: GLASSFORMS_CSG_EXP=volnormal / volsettle take the tree out of the normal or the settling)
+    let exp = std::env::var("GLASSFORMS_CSG_EXP").unwrap_or_default();
+    let mapn = if exp.contains("volsettle") { "fn mapN(p: vec3f) -> f32 { return mapNVolume(p); }\nconst SDF_NEAR: f32 = 1.5;\n" } else { mapn };
+    let nrm = if exp.contains("volnormal") { "  let po = toObj(p);
+  var n = vec3f(0.0);
+  let e = 2.0 * HB / u.vres;
+  for (var t = 0u; t < 4u + u32(csgU.info2.y); t++) { let o = csgTap(t); n += o * mapNVolume(po + e * o); }
+  return normalize(n.x * vec3f(u.obj0.x, u.obj1.x, u.obj2.x) + n.y * vec3f(u.obj0.y, u.obj1.y, u.obj2.y) + n.z * vec3f(u.obj0.z, u.obj1.z, u.obj2.z));
+" } else { nrm };
     src.replace(MAPN_HEAD, &format!("{decl}\n{mapn}fn mapNVolume(p: vec3f) -> f32 {{\n"))
         .replace(NRM_STEP, nrm)
         .replace(GEM_UNEVEN, "*mOut = gemWorld(nk);")

@@ -32,12 +32,14 @@ pub const MAX_PARTS: usize = 64;
 pub const MAX_LEVEL: u8 = 3;
 /// Floats of the uniform block: a head of four, then 36 a part.
 pub const PART_FLOATS: usize = 36;
-pub const UNIFORM_FLOATS: usize = 8 + PART_FLOATS * MAX_PARTS + CELLS * CELLS * CELLS * 2;
-/// The volume is cut into this many cells a side, and each cell lists the parts (as two words of bits)
-/// that can matter in it: a step evaluates those alone.
-pub const CELLS: usize = 8;
+pub const UNIFORM_FLOATS: usize = 8 + PART_FLOATS * MAX_PARTS;
+/// The volume is cut into this many cells a side, and each cell lists the parts that can matter in it
+/// (`numbers`): a step evaluates those alone. With them, how near to the cell the nearest part left out of
+/// it may come: the distance a step is told is held within that.
+pub const CELLS: usize = 16;
 /// A part is listed in every cell within this of its box (and its seam's radius); the distance a step is
-/// told is held within it either way, so that no part left out is ever stepped past.
+/// told is held within it, or within how far the parts left out are, so that no part left out is ever
+/// stepped past.
 pub const CELL_PAD: f64 = 0.1;
 /// How far a part may reach from its middle, in its own units: every shape is fitted within the tracer's
 /// ball of 1.47 (a little more is allowed for its inflate slider and a wall about it). Its box is this
@@ -74,6 +76,9 @@ impl Op {
 
 /// One part of the tree, as a setup keeps it: which shape, its sliders by name (a missing one is the
 /// slider's starting value), how much it is inflated, where it sits, how it joins what is above it.
+/// A shape with no formula (drawn from curves, or a model file) is a grid part: it is baked into a volume
+/// of its own, `res` voxels a side, and the tracer reads that (its tube's thickness, melt and length, and a
+/// model's file, are kept with it; each is left out of a setup while unused).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Part {
@@ -90,11 +95,63 @@ pub struct Part {
     pub smooth_rel: bool,
     /// how deep in groups: a part one level deeper than the one before it opens a group
     pub level: u8,
+    /// a grid part's voxels a side (0: `GRID_RES`)
+    #[serde(skip_serializing_if = "is_zero")]
+    pub res: u32,
+    /// a grid part's tube: thickness, melt, length (None: the family's own)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thick: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub melt: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub len: Option<f64>,
+    /// the model file of a part that is "your file" (the models' `file` shape)
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub model: String,
 }
+fn is_zero(v: &u32) -> bool { *v == 0 }
 impl Default for Part {
     fn default() -> Self {
-        Self { family: "studio".into(), preset: "sphere".into(), values: BTreeMap::new(), puff: 0.0, place: Placement::default(), op: Op::Union, smooth: 0.0, smooth_rel: false, level: 0 }
+        Self { family: "studio".into(), preset: "sphere".into(), values: BTreeMap::new(), puff: 0.0, place: Placement::default(), op: Op::Union, smooth: 0.0, smooth_rel: false, level: 0, res: 0, thick: None, melt: None, len: None, model: String::new() }
     }
+}
+
+/// Voxels a side of a grid part's volume, unless the part says otherwise; and the least and most it may say.
+pub const GRID_RES: u32 = 384;
+pub const GRID_RES_MIN: u32 = 128;
+pub const GRID_RES_MAX: u32 = 768;
+/// The most grid parts a tree holds at once (each is a volume, and a texture the tracer reads), and the
+/// most video memory their own volumes may take together. Grid parts past either are left out of the tree
+/// (the panel says so). The shape up as a grid part reads its own volume: it takes no memory of its own.
+pub const MAX_GRIDS: usize = 8;
+pub const GRID_BUDGET: u64 = 2 << 30;
+/// The kind every grid part is (in `kinds`): one reading of a volume serves them all.
+pub const GRID_KIND: (usize, usize) = (usize::MAX, 0);
+/// Where a tracer finds the grid parts' volumes (eight textures and a sampler), and where the passes that
+/// measure the tree do.
+pub const GRID_BINDING_TRACER: u32 = 50;
+pub const GRID_BINDING_PASS: u32 = 10;
+
+/// Bytes of a grid part's volume of `res` voxels a side (16-bit floats).
+pub fn grid_bytes(res: u32) -> u64 {
+    (res as u64).pow(3) * 2
+}
+
+/// A grid part's volume: which of the tracer's eight it is, its voxels a side, where it comes from, and
+/// what it was made from (the same text, the same volume).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Grid {
+    pub slot: usize,
+    pub res: u32,
+    pub from: GridFrom,
+    pub sig: String,
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GridFrom {
+    /// the shape up's own volume (as built, and as the surface studio has shaped it)
+    Up,
+    /// baked for part i of `Csg::parts`
+    Part(usize),
 }
 
 /// A part with its shape found: indices into the families, its sliders in the preset's order.
@@ -109,6 +166,22 @@ pub struct Resolved {
     pub smooth: f64,
     pub smooth_rel: bool,
     pub level: u8,
+    /// read from a volume of its own, not from a formula
+    pub grid: Option<Grid>,
+}
+
+impl Resolved {
+    /// The kind of part it is (`kinds`).
+    pub fn kind(&self) -> (usize, usize) {
+        if self.grid.is_some() { GRID_KIND } else { (self.fam, self.preset) }
+    }
+    /// What it is (its shape, sliders and inflation): the box measured for it is kept under this.
+    pub fn sig(&self) -> String {
+        match &self.grid {
+            Some(g) => format!("grid|{}|{}|{}", g.sig, g.res, self.puff),
+            None => format!("{}/{}|{:?}|{}", self.fam, self.preset, self.vals, self.puff),
+        }
+    }
 }
 
 impl Part {
@@ -120,14 +193,27 @@ impl Part {
             puff, place, ..Default::default()
         }
     }
-    /// Its shape found among the families; None if there is no such shape, or it has no formula.
+    /// Its shape found among the families; None if there is no such shape. A shape with no formula is a
+    /// grid part (its slot is given by the tree).
     pub fn resolve(&self, fams: &[Family]) -> Option<Resolved> {
         let fam = fams.iter().position(|f| f.id == self.family)?;
         let preset = fams[fam].presets.iter().position(|p| p.id == self.preset)?;
         let p = &fams[fam].presets[preset];
-        if !matches!(support(&fams[fam], p), Support::Formula { .. }) { return None; }
         let vals = p.params.iter().map(|d| self.values.get(d.id).copied().unwrap_or(d.value)).collect();
-        Some(Resolved { fam, preset, vals, puff: self.puff, place: self.place, op: self.op, smooth: self.smooth.max(0.0), smooth_rel: self.smooth_rel, level: self.level.min(MAX_LEVEL) })
+        let grid = (!matches!(support(&fams[fam], p), Support::Formula { .. })).then(|| Grid { slot: 0, res: self.grid_res(), from: GridFrom::Part(0), sig: self.grid_sig() });
+        Some(Resolved { fam, preset, vals, puff: self.puff, place: self.place, op: self.op, smooth: self.smooth.max(0.0), smooth_rel: self.smooth_rel, level: self.level.min(MAX_LEVEL), grid })
+    }
+    /// A grid part's voxels a side.
+    pub fn grid_res(&self) -> u32 {
+        let r = if self.res == 0 { GRID_RES } else { self.res.clamp(GRID_RES_MIN, GRID_RES_MAX) };
+        r / 8 * 8
+    }
+    /// Everything a grid part's volume is made from, as text (its placement and inflation are not: the
+    /// tracer applies them).
+    pub fn grid_sig(&self) -> String {
+        let bits = |v: Option<f64>| v.map_or("-".to_string(), |v| format!("{:x}", v.to_bits()));
+        let vals: Vec<String> = self.values.iter().map(|(k, v)| format!("{k}={:x}", v.to_bits())).collect();
+        format!("{}/{}|{}|{}|{}|{}|{}", self.family, self.preset, vals.join(","), bits(self.thick), bits(self.melt), bits(self.len), self.model)
     }
 }
 
@@ -148,7 +234,7 @@ pub struct Csg {
     pub coarse: bool,
 }
 
-/// The parts as text for a command line: `family/preset@x,y,z@rx,ry,rz@size@op@smooth@level` joined by
+/// The parts as text for a command line: `family/preset@x,y,z@rx,ry,rz@size@op@smooth@level@res` joined by
 /// `;` (everything after the shape may be left off). For checks and benchmarks.
 pub fn parse_arg(text: &str) -> Option<Vec<Part>> {
     let mut out = Vec::new();
@@ -166,6 +252,8 @@ pub fn parse_arg(text: &str) -> Option<Vec<Part>> {
         if let Some(s) = f.next() { part.op = Op::from_id(s)?; }
         if let Some(s) = f.next() { part.smooth = s.parse().ok()?; }
         if let Some(s) = f.next() { part.level = s.parse().ok()?; }
+        // (a grid part's voxels a side)
+        if let Some(s) = f.next() { part.res = s.parse().ok()?; }
         out.push(part);
     }
     Some(out)
@@ -176,14 +264,14 @@ pub fn parse_arg(text: &str) -> Option<Vec<Part>> {
 pub fn kinds(parts: &[Resolved]) -> Vec<(usize, usize)> {
     let mut k: Vec<(usize, usize)> = Vec::new();
     for p in parts {
-        if !k.contains(&(p.fam, p.preset)) { k.push((p.fam, p.preset)); }
+        if !k.contains(&p.kind()) { k.push(p.kind()); }
     }
     k
 }
 
 /// The name a tracer for these kinds is kept under.
 pub fn key(fams: &[Family], kinds: &[(usize, usize)]) -> String {
-    let names: Vec<String> = kinds.iter().map(|&(f, p)| format!("{}/{}", fams[f].id, fams[f].presets[p].id)).collect();
+    let names: Vec<String> = kinds.iter().map(|&(f, p)| if (f, p) == GRID_KIND { "grid".to_string() } else { format!("{}/{}", fams[f].id, fams[f].presets[p].id) }).collect();
     format!("csg:{}", names.join(","))
 }
 
@@ -274,19 +362,126 @@ fn kind_text(i: usize, fam: &Family, p: &Preset, walked: bool) -> String {
     pr_struct + &prefix_names(&t, &helpers, "csg_")
 }
 
+/// Where the grid parts' volumes are bound beside the numbers' block at `binding` (the tracer's, or a
+/// pass's).
+pub fn grid_binding(binding: u32) -> u32 {
+    if binding == crate::sdf::BINDING { GRID_BINDING_TRACER } else { GRID_BINDING_PASS }
+}
+
+/// The reading of the grid parts: each part's volume (one of eight: `k.w` says which, `e.w` its voxels a
+/// side) spans the bake's box, [-HB, HB] in the part's own frame. Read (the tracer) by the same smooth
+/// cubic reading the volume tracer's `mapN` uses, eight trilinear lookups (in a loop whose length the
+/// compiler cannot see, so that it goes into the shader once); walked (the passes that measure the tree)
+/// by one trilinear lookup. Beyond the box, the way to the box (the part lies within it), or the reading
+/// at the box less that way, whichever is more: never more than the distance.
+fn grid_text(binding: u32, walked: bool) -> String {
+    let b = grid_binding(binding);
+    let mut t = String::from("\n// ---- grid parts: shapes with no formula, each baked into a volume of its own\n");
+    for s in 0..MAX_GRIDS { t += &format!("@group(0) @binding({}) var csgG{s}: texture_3d<f32>;\n", b + s as u32); }
+    t += &format!("@group(0) @binding({}) var csgGSmp: sampler;\n", b + MAX_GRIDS as u32);
+    let cases: String = (0..MAX_GRIDS).map(|s| format!("    case {s}: {{ return textureSampleLevel(csgG{s}, csgGSmp, t, 0.0).r; }}\n")).collect();
+    t += &format!("fn csgGridVol(s: i32, t: vec3f) -> f32 {{
+  switch (s) {{
+{cases}    default: {{ return 1.0; }}
+  }}
+}}
+");
+    // (walked, or not `smooth`: one trilinear lookup)
+    let read = if walked {
+        "  let v = csgGridVol(s, c / (2.0 * hb) + 0.5);\n".to_string()
+    } else {
+        "  var v = 1.0;
+  if (!fine) {
+    v = csgGridVol(s, c / (2.0 * hb) + 0.5);
+  } else {
+  let res = csgU.parts[i].e.w;
+  let cc = (c / (2.0 * hb) + 0.5) * res - 0.5;
+  let fi = floor(cc);
+  let f = cc - fi;
+  let f2 = f * f;
+  let f3 = f2 * f;
+  let w0 = (1.0 - 3.0 * f + 3.0 * f2 - f3) / 6.0;
+  let w1 = (4.0 - 6.0 * f2 + 3.0 * f3) / 6.0;
+  let w3 = f3 / 6.0;
+  let w2 = 1.0 - w0 - w1 - w3;
+  let g0 = w0 + w1;
+  let g1 = w2 + w3;
+  let a = (fi - 0.5 + w1 / g0) / res;
+  let bb = (fi + 1.5 + w3 / g1) / res;
+  // (which volume is chosen once, and its eight lookups read it straight)
+  switch (s) {
+".to_string() + &(0..MAX_GRIDS).map(|s| format!("    case {s}: {{ v = csgCubic{s}(a, bb, g0, g1); }}\n")).collect::<String>() + "    default: {}
+  }
+  }
+"
+    };
+    if !walked {
+        // the smooth reading of each volume: eight trilinear lookups placed between its voxels, in a loop the
+        // compiler cannot see the length of
+        for s in 0..MAX_GRIDS {
+            t += &format!("fn csgCubic{s}(a: vec3f, b: vec3f, g0: vec3f, g1: vec3f) -> f32 {{
+  var v = 0.0;
+  for (var n = 0u; n < 8u + u32(csgU.info2.y); n++) {{
+    let hi = vec3<bool>((n & 1u) != 0u, (n & 2u) != 0u, (n & 4u) != 0u);
+    let w = select(g0, g1, hi);
+    v += w.x * w.y * w.z * textureSampleLevel(csgG{s}, csgGSmp, select(a, b, hi), 0.0).r;
+  }}
+  return v;
+}}
+");
+        }
+    }
+    t += &format!("// part i's volume at q (its own frame), in its own units: by the smooth reading (`fine`), or by one
+// trilinear lookup
+fn csgGridAt(i: i32, q: vec3f, fine: bool) -> f32 {{
+  let s = i32(csgU.parts[i].k.w);
+  let hb = csgU.info.y;
+  let c = clamp(q, vec3f(-hb), vec3f(hb));
+  let out = length(q - c);
+{read}  return select(v, max(out, v - out), out > 0.0);
+}}
+");
+    t
+}
+
 /// The text a tracer (and the bake's pass) holds for a tree of these kinds: the numbers' block at
 /// `binding`, every kind's text, `csgPartAt(i, q)`, `csgDist(p)` and `csgNormal(p)`: as the tracer reads
 /// them, or (`walked`) as the bake measures the tree, each part walked to its surface.
 pub fn wgsl(fams: &[Family], kinds: &[(usize, usize)], binding: u32, walked: bool) -> String {
+    wgsl_tree(fams, kinds, binding, walked, false)
+}
+
+/// Is every part a plain union, at the top level (`plain`)? Such a tree is read by a leaner text: no groups
+/// to keep, no other operation to join by (fewer registers the whole tracer must hold), its cells' lists
+/// nearest first.
+pub fn plain(parts: &[Resolved]) -> bool {
+    parts.iter().take(MAX_PARTS).enumerate().all(|(i, p)| i == 0 || (p.op == Op::Union && p.level == 0))
+}
+
+/// The name a tracer for these kinds is kept under, read as a tree of plain unions or not.
+pub fn key_tree(fams: &[Family], kinds: &[(usize, usize)], plain: bool) -> String {
+    let k = key(fams, kinds);
+    if plain { k + "|plain" } else { k }
+}
+
+/// The same text, for a tree of plain unions when `plain` (see `plain`), which reads only such a tree.
+pub fn wgsl_tree(fams: &[Family], kinds: &[(usize, usize)], binding: u32, walked: bool, plain: bool) -> String {
     let mut t = format!("
 // ---- constructive solid geometry on formulas (gf_core::csg)
 // a part: the way back from the scene to its own frame (three rows), the box that holds it (b: its middle,
 // e: its half sizes, in its own frame), m = (size, inflate, operation, seam radius), k = (kind, groups closed before it, 1 if it opens one, -), its sliders
 struct CsgPart {{ inv0: vec4f, inv1: vec4f, inv2: vec4f, b: vec4f, m: vec4f, k: vec4f, v0: vec4f, v1: vec4f, e: vec4f }}
 // info: (how many parts, half-width of the volume, the formula's voxels a side, 1 = joined to a volume object)
-// info2: (the distance a step is held within, always 0 (see csgTap), -, -); cells: two words of bits a cell, two cells a vec4
-struct CsgU {{ info: vec4f, info2: vec4f, parts: array<CsgPart, {MAX_PARTS}>, cells: array<vec4u, {cells}> }}
+// info2: (the pad, always 0 (see csgTap), the widest seam, 1 = every part a plain union: the lists are nearest first)
+struct CsgU {{ info: vec4f, info2: vec4f, parts: array<CsgPart, {MAX_PARTS}> }}
 @group(0) @binding({binding}) var<uniform> csgU: CsgU;
+// The cells' lists (`lists`): for each cell four words (where its list starts, how long it is, how near the
+// parts it leaves out come, -), then the lists: a part's number in the low half of each word, in the high
+// half how near to the cell it may come (in 4096ths, never more than it does).
+@group(0) @binding({lists}) var<storage, read> csgL: array<u32>;
+// The parts again, read from here (a storage block: pixels side by side often read different parts, which a
+// uniform block serves one after another)
+@group(0) @binding({table}) var<storage, read> csgP: array<CsgPart>;
 const SDF_NE: f32 = {NORMAL_E};
 const CSG_CELLS: f32 = {CELLS}.0;
 // the corners of a tetrahedron, the four directions a slope is read in (info2.y is always 0: the loops that
@@ -295,17 +490,23 @@ fn csgTap(i: u32) -> vec3f {{
   return vec3f(select(-1.0, 1.0, i == 0u || i == 3u), select(-1.0, 1.0, i >= 2u), select(-1.0, 1.0, i == 1u || i == 3u));
 }}
 {helpers}
-", cells = CELLS * CELLS * CELLS / 2, helpers = prefix_names(HELPERS.trim_end(), &top_names(HELPERS), "csg_"));
-    for (i, &(f, p)) in kinds.iter().enumerate() { t += &kind_text(i, &fams[f], &fams[f].presets[p], walked); }
+", lists = grid_binding(binding) + MAX_GRIDS as u32 + 1, table = grid_binding(binding) + MAX_GRIDS as u32 + 2, helpers = prefix_names(HELPERS.trim_end(), &top_names(HELPERS), "csg_"));
+    for (i, &(f, p)) in kinds.iter().enumerate() {
+        if (f, p) == GRID_KIND { t += &grid_text(binding, walked); } else { t += &kind_text(i, &fams[f], &fams[f].presets[p], walked); }
+    }
     // one evaluation of part i at q (its own frame), as read or as walked
-    let case: String = kinds.iter().enumerate().map(|(i, _)| format!("    case {i}: {{ k{i}_use_(i); d = k{i}_dist(q, P.m.y); }}\n")).collect();
+    let case: String = kinds.iter().enumerate().map(|(i, &k)| if k == GRID_KIND {
+        format!("    case {i}: {{ d = clamp(csgGridAt(i, q, fine) - P.m.y, -1.0, 1.0); }}\n")
+    } else {
+        format!("    case {i}: {{ k{i}_use_(i); d = k{i}_dist(q, P.m.y); }}\n")
+    }).collect();
     t += &format!("
 fn csgLocal(i: i32, p: vec3f) -> vec3f {{
   let h = vec4f(p, 1.0);
   return vec3f(dot(csgU.parts[i].inv0, h), dot(csgU.parts[i].inv1, h), dot(csgU.parts[i].inv2, h));
 }}
 // part i's distance at q, a point of its own frame, in its own units
-fn csgPartAt(i: i32, q: vec3f) -> f32 {{
+fn csgPartAt(i: i32, q: vec3f, fine: bool) -> f32 {{
   let P = csgU.parts[i];
   var d = 1.0;
   switch (i32(P.k.x)) {{
@@ -340,81 +541,136 @@ fn csgJoin(d: f32, wd: f32, di: f32, wi: f32, op: i32, k: f32) -> vec2f {{
 // it opens one. Only the parts listed in p's cell are visited (a part is left out of a cell only when it
 // is too far to matter there, and never when it opens or closes a group or intersects); of those, one whose
 // box is too far to change the result is not evaluated (the box's distance stands in, which the join
-// then leaves without effect: never a box's distance where a seam could blend it in). The result is held within the distance beyond which parts were left out.
+// then leaves without effect: never a box's distance where a seam could blend it in). The result is held
+// within how near the parts left out of the cell come. A tree of plain unions lists each cell's parts
+// nearest first, each with how near to the cell it may come: once that is further than the result so far
+// and the widest seam, so is every part after it, and the rest are passed by.
 // Every join is the one call in the inner loop or the one at the end of a part, so that the text stays
 // small wherever it is put in.
-fn csgDistW(p: vec3f) -> vec2f {{
-  let cell = vec3i(clamp(floor((p / (2.0 * csgU.info.y) + 0.5) * CSG_CELLS), vec3f(0.0), vec3f(CSG_CELLS - 1.0)));
-  let ci = cell.x + {cells_i} * (cell.y + {cells_i} * cell.z);
-  let pair = csgU.cells[ci / 2];
-  let mask = select(pair.xy, pair.zw, (ci & 1) == 1);
+// `only` >= 0: that part alone, as if it were the whole tree (its normal is read so: one text serves both).
+fn csgDistW(p: vec3f, only: i32) -> vec2f {{
+  let solo = only >= 0;
+  let cell = vec3u(clamp(floor((p / (2.0 * csgU.info.y) + 0.5) * CSG_CELLS), vec3f(0.0), vec3f(CSG_CELLS - 1.0)));
+  let ci = 4u * (cell.x + {cells_i}u * (cell.y + {cells_i}u * cell.z));
+  let start = csgL[ci];
+  let count = select(csgL[ci + 1u], 1u, solo);
+  let far = select(bitcast<f32>(csgL[ci + 2u]), 1.0, solo);
+  let sorted = csgU.info2.w > 0.5 && !solo;
   var d = vec2f(4.0, 0.0);
   var lv = 0;
   var s0 = vec4f(0.0);
   var s1 = vec4f(0.0);
   var s2 = vec4f(0.0);
-  for (var w = 0; w < 3; w++) {{
-    var bits = 0u;
-    if (w == 0) {{ bits = mask.x; }} else if (w == 1) {{ bits = mask.y; }}
-    loop {{
-      // the next part listed (or, past the last word, none: every group still open is closed)
-      var i = -1;
-      var closes = lv;
-      if (bits != 0u) {{
-        i = i32(firstTrailingBit(bits)) + 32 * w;
-        bits &= bits - 1u;
-        closes = i32(csgU.parts[i].k.y);
-      }} else if (w < 2) {{
-        break;
-      }}
-      for (var c = 0; c < closes; c++) {{
-        d = csgJoin(s0.x, s0.w, d.x, d.y, i32(s0.y), s0.z);
-        s0 = s1;
-        s1 = s2;
-      }}
-      lv -= closes;
-      if (i < 0) {{ break; }}
-      let m = csgU.parts[i].m;
-      var first = false;
-      if (csgU.parts[i].k.z > 0.5) {{ s2 = s1; s1 = s0; s0 = vec4f(d.x, m.z, m.w, d.y); lv += 1; first = true; }}
-      let op = i32(m.z);
-      let q = csgLocal(i, p);
-      let b = csgBox(i, q) * m.x;
-      var di = b;
-      if (first || op == 2 || (op == 0 && b <= d.x + m.w) || (op == 1 && b <= m.w - d.x)) {{ di = csgPartAt(i, q) * m.x; }}
-      let mine = vec2f(di, f32(i + 1));
-      d = select(csgJoin(d.x, d.y, di, f32(i + 1), op, m.w), mine, first);
+  for (var n = 0u; n <= count; n++) {{
+    // the next part listed (or, past the last, none: every group still open is closed)
+    var i = -1;
+    var closes = lv;
+    if (n < count) {{
+      let en = select(csgL[start + n], u32(only), solo);
+      if (sorted && f32(en >> 16u) * (1.0 / 4096.0) > d.x + csgU.info2.z) {{ break; }}
+      i = i32(en & 0xffffu);
+      closes = select(i32(csgU.parts[i].k.y), 0, solo);
+    }}
+    for (var c = 0; c < closes; c++) {{
+      d = csgJoin(s0.x, s0.w, d.x, d.y, i32(s0.y), s0.z);
+      s0 = s1;
+      s1 = s2;
+    }}
+    lv -= closes;
+    if (i < 0) {{ break; }}
+    let m = csgU.parts[i].m;
+    var first = solo;
+    if (!solo && csgU.parts[i].k.z > 0.5) {{ s2 = s1; s1 = s0; s0 = vec4f(d.x, m.z, m.w, d.y); lv += 1; first = true; }}
+    let op = i32(m.z);
+    let q = csgLocal(i, p);
+    let b = csgBox(i, q) * m.x;
+    var di = b;
+    if (first || op == 2 || (op == 0 && b <= d.x + m.w) || (op == 1 && b <= m.w - d.x)) {{ di = csgPartAt(i, q, only != -1) * m.x; }}
+    let mine = vec2f(di, f32(i + 1));
+    d = select(csgJoin(d.x, d.y, di, f32(i + 1), op, m.w), mine, first);
+  }}
+  return vec2f(clamp(d.x, -far, far), d.y);
+}}
+fn csgDist(p: vec3f) -> f32 {{ return csgDistW(p, -1).x; }}
+// The outward normal of the tree at p, where the tree reads r = csgDistW(p, -1). Where one part decides the
+// surface (no seam blends there), it is that part's own: that part alone read at the corners of a
+// tetrahedron in its own frame (each corner taken back to the scene by its turn and size), turned into the
+// scene's (four readings of one part instead of four of the whole tree). Elsewhere, the tree's. The first
+// reading (the tree at p: which part decides there) and the four go through the one reading in the loop, so
+// that the tree's text is put in here once. Beside a volume object: vec3f(0) where the tree reads `near` or
+// more at p (the object's surface is the nearer there).
+fn csgNormal(p: vec3f, near: f32) -> vec3f {{
+  var i = -1;
+  var w = 0.0;
+  var dpm = mat3x3f(vec3f(0.0), vec3f(0.0), vec3f(0.0));
+  var g = vec3f(0.0);
+  for (var t = 0u; t < 5u + u32(csgU.info2.y); t++) {{
+    let o = select(csgTap(t - 1u), vec3f(0.0), t == 0u);
+    let v = csgDistW(p + dpm * o, select(i, -2, t > 0u && i < 0));
+    if (t > 0u) {{
+      g += o * v.x;
+      continue;
+    }}
+    if (v.x >= near) {{ return vec3f(0.0); }}
+    w = v.y;
+    i = i32(abs(w)) - 1;
+{grid_winner}
+    dpm = mat3x3f(SDF_NE, 0.0, 0.0, 0.0, SDF_NE, 0.0, 0.0, 0.0, SDF_NE);
+    if (i >= 0) {{
+{ne}      // (the rows of the way back are the turn's columns over the size: their length is 1 / size)
+      let P = csgU.parts[i];
+      let s2 = ne / dot(P.inv0.xyz, P.inv0.xyz);
+      dpm = mat3x3f(P.inv0.xyz * s2, P.inv1.xyz * s2, P.inv2.xyz * s2);
     }}
   }}
-  let pad = csgU.info2.x;
-  return vec2f(clamp(d.x, -pad, pad), d.y);
-}}
-fn csgDist(p: vec3f) -> f32 {{ return csgDistW(p).x; }}
-// The outward normal of the tree at p. Where one part decides the surface (no seam blends there), it is
-// that part's own: its distance read at the corners of a tetrahedron in its own frame, turned into the
-// scene's (four readings of one part instead of four of the whole tree). Elsewhere, the tree's.
-fn csgNormal(p: vec3f) -> vec3f {{
-  let r = csgDistW(p);
-  let i = i32(abs(r.y)) - 1;
-  var g = vec3f(0.0);
   if (i >= 0) {{
-    let q = csgLocal(i, p);
-    for (var t = 0u; t < 4u + u32(csgU.info2.y); t++) {{
-      let o = csgTap(t);
-      g += o * csgPartAt(i, q + SDF_NE * o);
-    }}
     // (the part's frame to the scene's: the transpose of the way back, whose rows are inv0..2)
     let P = csgU.parts[i];
-    return sign(r.y) * normalize(g.x * P.inv0.xyz + g.y * P.inv1.xyz + g.z * P.inv2.xyz);
-  }}
-  for (var t = 0u; t < 4u + u32(csgU.info2.y); t++) {{
-    let o = csgTap(t);
-    g += o * csgDist(p + SDF_NE * o);
+    return sign(w) * normalize(g.x * P.inv0.xyz + g.y * P.inv1.xyz + g.z * P.inv2.xyz);
   }}
   return normalize(g);
 }}
-", cells_i = CELLS);
-    t
+", cells_i = CELLS, grid_winner = if kinds.contains(&GRID_KIND) {
+        // (a grid part alone deciding the surface: the volume the tree is measured into holds its distances
+        // there, read from its grid; its normal is that volume's, as the volume tracer reads one)
+        "    if (i >= 0 && csgU.parts[i].e.w > 0.0) {{ return vec3f(0.0); }}\n".replace("{{", "{").replace("}}", "}")
+    } else {
+        String::new()
+    }, ne = if kinds.contains(&GRID_KIND) {
+        // (a grid part's slope is read over one of its own voxels, as the volume tracer reads a volume's)
+        "      let ne = select(SDF_NE, 2.0 * csgU.info.y / max(csgU.parts[i].e.w, 1.0), csgU.parts[i].e.w > 0.0);\n"
+    } else {
+        "      let ne = SDF_NE;\n"
+    });
+    if plain {
+        // A tree of plain unions: its cells' lists are nearest first, and nothing is put aside for groups.
+        let (a, b) = (t.find("fn csgDistW(").expect("written above"), t.find("fn csgDist(p: vec3f)").expect("written above"));
+        t.replace_range(a..b, &format!("fn csgDistW(p: vec3f, only: i32) -> vec2f {{
+  let solo = only >= 0;
+  let cell = vec3u(clamp(floor((p / (2.0 * csgU.info.y) + 0.5) * CSG_CELLS), vec3f(0.0), vec3f(CSG_CELLS - 1.0)));
+  let ci = 4u * (cell.x + {c}u * (cell.y + {c}u * cell.z));
+  let start = csgL[ci];
+  let count = select(csgL[ci + 1u], 1u, solo);
+  let far = select(bitcast<f32>(csgL[ci + 2u]), 1.0, solo);
+  var d = vec2f(4.0, 0.0);
+  for (var n = 0u; n < count; n++) {{
+    let en = select(csgL[start + n], u32(only), solo);
+    // (nearest first: once one may come no nearer than the result so far and the widest seam, nor may the rest)
+    if (!solo && f32(en >> 16u) * (1.0 / 4096.0) > d.x + csgU.info2.z) {{ break; }}
+    let i = i32(en & 0xffffu);
+    let m = csgU.parts[i].m;
+    let q = csgLocal(i, p);
+    if (solo || csgBox(i, q) * m.x <= d.x + m.w) {{
+      let di = csgPartAt(i, q, only != -1) * m.x;
+      d = select(csgJoin(d.x, d.y, di, f32(i + 1), 0, m.w), vec2f(di, f32(i + 1)), solo);
+    }}
+  }}
+  return vec2f(clamp(d.x, -far, far), d.y);
+}}
+", c = CELLS));
+    }
+    // (every reading of a part is from the storage table)
+    t.replace("csgU.parts[", "csgP[")
 }
 
 /// The numbers of the tree (the block `wgsl` declares). `res`: the volume's voxels a side; `joined`: the
@@ -422,6 +678,39 @@ fn csgNormal(p: vec3f) -> vec3f {{
 /// `extents`: each part's measured box (missing ones: the cube it may reach to). `object`: where the whole
 /// shape stands (every part's placement is taken within it).
 pub fn uniforms(fams: &[Family], parts: &[Resolved], kinds: &[(usize, usize)], res: u32, joined: bool, extents: &[Extent], object: &Placement) -> Vec<f32> {
+    numbers_with(fams, parts, kinds, res, joined, extents, object, false).0
+}
+
+/// What the cells' lists are made from (where the parts stand, their boxes, how they join): the same, the
+/// same lists (so that they need not be worked out again while only a slider moves).
+pub fn lists_key(parts: &[Resolved], extents: &[Extent], object: &Placement) -> Vec<u64> {
+    let mut k: Vec<u64> = Vec::with_capacity(parts.len() * 20 + 8);
+    let mut put = |v: f64| k.push(v.to_bits());
+    for v in object.pos.iter().chain(&object.rot).chain([&object.size]) { put(*v); }
+    for (i, p) in parts.iter().take(MAX_PARTS).enumerate() {
+        for v in p.place.pos.iter().chain(&p.place.rot).chain([&p.place.size, &p.puff, &p.smooth]) { put(*v); }
+        put(p.op.code() as f64 + 4.0 * p.level as f64 + if p.smooth_rel { 64.0 } else { 0.0 });
+        for v in extents.get(i).copied().unwrap_or([0.0; 6]) { put(v as f64); }
+    }
+    k
+}
+
+/// The tree's numbers and its cells' lists (see `numbers_with`).
+pub fn numbers(fams: &[Family], parts: &[Resolved], kinds: &[(usize, usize)], res: u32, joined: bool, extents: &[Extent], object: &Placement) -> (Vec<f32>, Vec<u32>) {
+    numbers_with(fams, parts, kinds, res, joined, extents, object, true)
+}
+
+/// The tree's numbers (`uniforms`) and its cells' lists (the storage block `wgsl` declares as `csgL`).
+///
+/// Each cell lists the parts that can matter in it: those that may come within the pad of it (judged twice,
+/// by the part's box turned into the scene, and by the cell taken into the part's own frame, where a long
+/// part turned askew is held tightly), and every part that opens or closes a group or intersects. With each,
+/// how near to the cell it may come (the larger of the two judgements: never more than it does). A tree of
+/// plain unions lists them nearest first (the tracer then stops at the first too far to matter); any other in
+/// order, as the tree joins them. And for the cell, how near the parts it leaves out come, less the widest
+/// seam: a step is told no more than that.
+#[allow(clippy::too_many_arguments)]
+pub fn numbers_with(fams: &[Family], parts: &[Resolved], kinds: &[(usize, usize)], res: u32, joined: bool, extents: &[Extent], object: &Placement, want_lists: bool) -> (Vec<f32>, Vec<u32>) {
     let mut u = vec![0.0f32; UNIFORM_FLOATS];
     let n = parts.len().min(MAX_PARTS);
     u[0] = n as f32;
@@ -434,10 +723,14 @@ pub fn uniforms(fams: &[Family], parts: &[Resolved], kinds: &[(usize, usize)], r
     let most_k = (0..n).map(seam).fold(0.0f64, f64::max);
     let pad = CELL_PAD + most_k;
     u[4] = pad as f32;
-    // which parts each cell lists: those whose box (turned and placed, in the scene) comes within the pad of
-    // the cell, and every part that opens or closes a group or intersects
+    u[6] = most_k as f32;
+    let plain = parts.iter().take(n).enumerate().all(|(i, p)| i == 0 || (p.op == Op::Union && p.level == 0));
+    u[7] = if plain { 1.0 } else { 0.0 };
     let cell = 2.0 * crate::HB / CELLS as f64;
-    let mut masks = vec![0u64; CELLS * CELLS * CELLS];
+    let cells = CELLS * CELLS * CELLS;
+    // each part's box: in its own frame, and turned into the scene (the box of its turned box)
+    struct PartBox { e: [f64; 6], lo: [f64; 3], hi: [f64; 3], structural: bool }
+    let mut boxes: Vec<PartBox> = Vec::with_capacity(n);
     let mut prev = 0u8;
     for (i, p) in parts.iter().take(n).enumerate() {
         let r = PART_REACH + p.puff.abs();
@@ -450,27 +743,61 @@ pub fn uniforms(fams: &[Family], parts: &[Resolved], kinds: &[(usize, usize)], r
             let corner = [e[if c & 1 == 0 { 0 } else { 3 }], e[if c & 2 == 0 { 1 } else { 4 }], e[if c & 4 == 0 { 2 } else { 5 }]];
             let w = placed[i].apply(corner);
             for k in 0..3 {
-                let x = w[k];
-                lo[k] = lo[k].min(x - pad);
-                hi[k] = hi[k].max(x + pad);
+                lo[k] = lo[k].min(w[k]);
+                hi[k] = hi[k].max(w[k]);
             }
         }
-        let span = |k: usize| -> (usize, usize) {
-            let a = ((lo[k] + crate::HB) / cell).floor().clamp(0.0, CELLS as f64 - 1.0) as usize;
-            let b = ((hi[k] + crate::HB) / cell).floor().clamp(0.0, CELLS as f64 - 1.0) as usize;
-            (a, b)
-        };
-        let ((x0, x1), (y0, y1), (z0, z1)) = (span(0), span(1), span(2));
-        for (ci, m) in masks.iter_mut().enumerate() {
-            let (x, y, z) = (ci % CELLS, (ci / CELLS) % CELLS, ci / (CELLS * CELLS));
-            if structural || (x0..=x1).contains(&x) && (y0..=y1).contains(&y) && (z0..=z1).contains(&z) { *m |= 1u64 << i; }
+        boxes.push(PartBox { e, lo, hi, structural });
+    }
+    let gap3 = |alo: &[f64; 3], ahi: &[f64; 3], blo: &[f64], bhi: &[f64]| -> f64 {
+        let mut s = 0.0;
+        for k in 0..3 {
+            let g = (blo[k] - ahi[k]).max(alo[k] - bhi[k]).max(0.0);
+            s += g * g;
         }
+        s.sqrt()
+    };
+    let mut heads = vec![0u32; 4 * cells];
+    let mut entries: Vec<u32> = Vec::with_capacity(cells * 4);
+    let half = 0.5 * cell;
+    let mut list: Vec<(f64, usize)> = Vec::with_capacity(n);
+    for ci in 0..if want_lists { cells } else { 0 } {
+        let (x, y, z) = (ci % CELLS, (ci / CELLS) % CELLS, ci / (CELLS * CELLS));
+        let clo = [x as f64 * cell - crate::HB, y as f64 * cell - crate::HB, z as f64 * cell - crate::HB];
+        let chi = [clo[0] + cell, clo[1] + cell, clo[2] + cell];
+        let mid = [clo[0] + half, clo[1] + half, clo[2] + half];
+        list.clear();
+        let mut far = 1.0f64;
+        for (i, b) in boxes.iter().enumerate() {
+            let mut near = gap3(&clo, &chi, &b.lo, &b.hi);
+            if near <= pad {
+                // the cell in the part's own frame: its middle taken there, and the box that holds it turned
+                let inv = &placed[i].inverse;
+                let mut lm = [0.0; 3];
+                let mut lh = [0.0; 3];
+                for r in 0..3 {
+                    lm[r] = inv[r * 4] * mid[0] + inv[r * 4 + 1] * mid[1] + inv[r * 4 + 2] * mid[2] + inv[r * 4 + 3];
+                    lh[r] = half * (inv[r * 4].abs() + inv[r * 4 + 1].abs() + inv[r * 4 + 2].abs());
+                }
+                let llo = [lm[0] - lh[0], lm[1] - lh[1], lm[2] - lh[2]];
+                let lhi = [lm[0] + lh[0], lm[1] + lh[1], lm[2] + lh[2]];
+                near = near.max(gap3(&llo, &lhi, &b.e[0..3], &b.e[3..6]) * placed[i].size);
+            }
+            if b.structural || near <= pad {
+                list.push((near, i));
+            } else {
+                far = far.min(near - most_k);
+            }
+        }
+        if plain { list.sort_by(|a, b| a.0.total_cmp(&b.0)); }
+        heads[4 * ci] = (4 * cells + entries.len()) as u32;
+        heads[4 * ci + 1] = list.len() as u32;
+        heads[4 * ci + 2] = (far.max(CELL_PAD) as f32).to_bits();
+        // (how near, in 4096ths, rounded down: never more than it is)
+        entries.extend(list.iter().map(|&(near, i)| (((near * 4096.0).floor().clamp(0.0, 65535.0) as u32) << 16) | i as u32));
     }
-    let base = 8 + PART_FLOATS * MAX_PARTS;
-    for (ci, m) in masks.iter().enumerate() {
-        u[base + 2 * ci] = f32::from_bits(*m as u32);
-        u[base + 2 * ci + 1] = f32::from_bits((*m >> 32) as u32);
-    }
+    heads.extend(entries);
+    let lists = heads;
     let mut prev = 0u8;
     for (i, p) in parts.iter().take(n).enumerate() {
         let o = 8 + i * PART_FLOATS;
@@ -487,7 +814,12 @@ pub fn uniforms(fams: &[Family], parts: &[Resolved], kinds: &[(usize, usize)], r
         // (the first part has nothing above it to join: it is what the others join)
         u[o + 18] = if i == 0 { Op::Union.code() } else { p.op.code() };
         u[o + 19] = seam(i) as f32;
-        u[o + 20] = kinds.iter().position(|&k| k == (p.fam, p.preset)).unwrap_or(0) as f32;
+        u[o + 20] = kinds.iter().position(|&k| k == p.kind()).unwrap_or(0) as f32;
+        // a grid part: which volume, and its voxels a side (0 for a formula: its normal is read finely)
+        if let Some(g) = &p.grid {
+            u[o + 23] = g.slot as f32;
+            u[o + 35] = g.res as f32;
+        }
         // groups: how many close before this part, whether it opens one (levels deeper by one at most)
         let level = if i == 0 { 0 } else { p.level.min(prev + 1) };
         u[o + 21] = prev.saturating_sub(level) as f32;
@@ -496,7 +828,7 @@ pub fn uniforms(fams: &[Family], parts: &[Resolved], kinds: &[(usize, usize)], r
         let pre = &fams[p.fam].presets[p.preset];
         for (j, v) in p.vals.iter().take(MAX_PARAMS.min(pre.params.len())).enumerate() { u[o + 24 + j] = *v as f32; }
     }
-    u
+    (u, lists)
 }
 
 /// A part as it stands in the scene: within the object, at its own placement.
@@ -571,10 +903,46 @@ mod tests {
     }
 
     #[test]
-    fn only_formulas_are_parts() {
+    fn every_shape_is_a_part() {
         let fams = crate::presets::families();
-        assert!(Part { family: "attractors".into(), preset: "thomas".into(), ..Default::default() }.resolve(&fams).is_none());
-        assert!(Part::default().resolve(&fams).is_some());
+        // a formula is read from its formula; anything else (curves, models) from a volume of its own
+        let thomas = Part { family: "attractors".into(), preset: "thomas".into(), ..Default::default() }.resolve(&fams).unwrap();
+        assert!(thomas.grid.is_some() && thomas.kind() == GRID_KIND);
+        assert!(Part::default().resolve(&fams).unwrap().grid.is_none());
+        for f in &fams {
+            for p in &f.presets {
+                assert!(Part { family: f.id.into(), preset: p.id.into(), ..Default::default() }.resolve(&fams).is_some(), "{}/{}", f.id, p.id);
+            }
+        }
+        // a grid part's voxels a side: its own, within the least and most
+        assert_eq!(Part { res: 50, ..Default::default() }.grid_res(), GRID_RES_MIN);
+        assert_eq!(Part { res: 4000, ..Default::default() }.grid_res(), GRID_RES_MAX);
+        assert_eq!(Part::default().grid_res(), GRID_RES);
+    }
+
+    #[test]
+    fn plain_unions_are_read_nearest_first() {
+        let fams = crate::presets::families();
+        let parts: Vec<Resolved> = grid_of(20, "studio", "capsule").iter().map(|p| p.resolve(&fams).unwrap()).collect();
+        assert!(plain(&parts));
+        let kinds = kinds(&parts);
+        let (_, lists) = numbers(&fams, &parts, &kinds, 768, false, &[], &Placement::default());
+        let cells = CELLS * CELLS * CELLS;
+        let mut listed = 0;
+        for c in 0..cells {
+            let (start, count) = (lists[4 * c] as usize, lists[4 * c + 1] as usize);
+            let near: Vec<u32> = lists[start..start + count].iter().map(|e| e >> 16).collect();
+            assert!(near.windows(2).all(|w| w[0] <= w[1]), "cell {c} is not nearest first");
+            // (and every part left out is further than the pad)
+            assert!(f32::from_bits(lists[4 * c + 2]) >= CELL_PAD as f32 - 1e-6);
+            listed += count;
+        }
+        // (a cell lists only the parts near it: far fewer than every part in every cell)
+        assert!(listed < cells * parts.len() / 4, "{listed}");
+        // anything but unions keeps the tree's order
+        let mut mixed = parts.clone();
+        mixed[3].op = Op::Subtract;
+        assert!(!plain(&mixed));
     }
 }
 
@@ -583,20 +951,82 @@ impl crate::state::State {
     /// traced as "csg" and is a formula the surface studio has not reshaped), and whether they are joined
     /// to a volume object (the shape up, when it is not one of them). Empty while there are several layers.
     pub fn csg_tree(&self) -> (Vec<Resolved>, bool) {
-        if !self.plain() { return (Vec::new(), false); }
-        let mut out = Vec::new();
-        let up = self.layer_shape(0).filter(|st| {
-            st.trace == crate::sdf::Trace::Csg
-                && !self.layer_sculpt(0).is_some_and(|s| !s.is_empty())
-                && matches!(support(self.layer_family(0), self.layer_preset(0)), Support::Formula { .. })
-        });
-        if let Some(st) = up {
-            out.push(Resolved { fam: self.layer_fam(0), preset: st.preset, vals: st.vals.clone(), puff: st.puff, place: Placement::default(), op: Op::Union, smooth: 0.0, smooth_rel: false, level: 0 });
-        }
-        out.extend(self.csg.parts.iter().filter_map(|p| p.resolve(&self.families)));
-        out.truncate(MAX_PARTS);
-        let joined = up.is_none();
+        let (out, joined, _) = self.csg_tree_counted();
         (out, joined)
+    }
+
+    /// The same, and how many grid parts were left out of it (past `MAX_GRIDS`, or past `GRID_BUDGET`).
+    /// The shape up is a part when it is traced as "csg": from its formula; or, when it has none (curves, a
+    /// model) or the surface studio has reshaped it, as a grid part reading its own volume (the studio's
+    /// work included). Grid parts are given their volumes in order.
+    pub fn csg_tree_counted(&self) -> (Vec<Resolved>, bool, usize) {
+        if !self.plain() { return (Vec::new(), false, 0); }
+        let mut out = Vec::new();
+        let up = self.layer_shape(0).filter(|st| st.trace == crate::sdf::Trace::Csg);
+        if let Some(st) = up {
+            let sculpt = self.layer_sculpt(0).filter(|s| !s.is_empty());
+            let formula = matches!(support(self.layer_family(0), self.layer_preset(0)), Support::Formula { .. }) && sculpt.is_none();
+            let grid = (!formula).then(|| Grid {
+                slot: 0, res: st.res, from: GridFrom::Up,
+                sig: format!("up|{}|{}", self.layer_key(0), sculpt.map(|s| serde_json::to_string(s).unwrap_or_default()).unwrap_or_default()),
+            });
+            out.push(Resolved { fam: self.layer_fam(0), preset: st.preset, vals: st.vals.clone(), puff: if grid.is_some() { 0.0 } else { st.puff }, place: Placement::default(), op: Op::Union, smooth: 0.0, smooth_rel: false, level: 0, grid });
+        }
+        for (i, p) in self.csg.parts.iter().enumerate() {
+            if let Some(mut r) = p.resolve(&self.families) {
+                if let Some(g) = &mut r.grid { g.from = GridFrom::Part(i); }
+                out.push(r);
+            }
+        }
+        out.truncate(MAX_PARTS);
+        // each grid part its volume, in order, while there are volumes and memory for them
+        let (mut slot, mut bytes, mut left) = (0usize, 0u64, 0usize);
+        out.retain_mut(|p| {
+            let Some(g) = &mut p.grid else { return true };
+            let cost = if g.from == GridFrom::Up { 0 } else { grid_bytes(g.res) };
+            if slot >= MAX_GRIDS || bytes + cost > GRID_BUDGET {
+                left += 1;
+                return false;
+            }
+            g.slot = slot;
+            slot += 1;
+            bytes += cost;
+            true
+        });
+        let joined = up.is_none();
+        (out, joined, left)
+    }
+
+    /// The video memory the tree's grid parts take for volumes of their own, and how many there are.
+    pub fn csg_grid_bytes(&self) -> (u64, usize) {
+        let (tree, _, _) = self.csg_tree_counted();
+        let own: Vec<&Grid> = tree.iter().filter_map(|p| p.grid.as_ref()).filter(|g| g.from != GridFrom::Up).collect();
+        (own.iter().map(|g| grid_bytes(g.res)).sum(), own.len())
+    }
+
+    /// What the GPU has to build for a grid part's shape, `res` voxels a side: the job its family would
+    /// give for it were it the shape up (its sliders, its tube's, its model file), worked out on a shape
+    /// of its own so that the shape up is left as it was.
+    pub fn part_job(&mut self, part: &Part, res: u32) -> Result<crate::state::Job, String> {
+        let fam = self.families.iter().position(|f| f.id == part.family).ok_or_else(|| format!("no family called \"{}\"", part.family))?;
+        let preset = self.families[fam].presets.iter().position(|p| p.id == part.preset).ok_or_else(|| format!("no shape called \"{}\"", part.preset))?;
+        let mut st = crate::state::State::fresh_shapes(std::slice::from_ref(&self.families[fam]), &[]).pop().expect("one family, one shape");
+        let p = &self.families[fam].presets[preset];
+        st.preset = preset;
+        st.vals = p.params.iter().map(|d| part.values.get(d.id).copied().unwrap_or(d.value)).collect();
+        if let Some(v) = part.thick { st.thick = crate::limits::hold(v, crate::limits::THICK); }
+        if let Some(v) = part.melt { st.melt = crate::limits::hold(v, crate::limits::MELT); }
+        if let Some(v) = part.len { st.len = crate::limits::hold(v, crate::limits::LEN); }
+        st.model = part.model.clone();
+        st.res = res;
+        st.anim_res = res;
+        let was_fam = self.fam;
+        std::mem::swap(&mut self.shapes[fam], &mut st);
+        self.fam = fam;
+        let job = self.shape_job(crate::state::Detail::Full, Some(res));
+        self.fam = was_fam;
+        std::mem::swap(&mut self.shapes[fam], &mut st);
+        job
     }
 }
 

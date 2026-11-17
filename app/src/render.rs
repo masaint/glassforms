@@ -367,6 +367,8 @@ fn tracer_pipeline(gpu: &Gpu, layout: &wgpu::BindGroupLayout, cast: Option<&wgpu
     TRACER_BUILDS[0].fetch_add((t1 - t0).as_nanos() as u64, Relaxed);
     TRACER_BUILDS[1].fetch_add(t1.elapsed().as_nanos() as u64, Relaxed);
     TRACER_BUILDS[2].fetch_add(1, Relaxed);
+    // (measuring only: GLASSFORMS_LOG_COMPILE=1 says how long each tracer took to make)
+    if std::env::var_os("GLASSFORMS_LOG_COMPILE").is_some() { eprintln!("[compile] tracer {} bytes: module {:.0} ms, pipeline {:.0} ms", src.len(), (t1 - t0).as_secs_f64() * 1e3, t1.elapsed().as_secs_f64() * 1e3); }
     pipe
 }
 
@@ -574,6 +576,12 @@ pub struct Renderer {
     swapped: bool,
     u_sdf: wgpu::Buffer,
     last_sdf: Vec<f32>,
+    /// a tree's grid parts' volumes by slot, and what stands in for a slot with none (csg.rs)
+    grids: Vec<Option<wgpu::TextureView>>,
+    grid_stand_in: crate::csg::GridStandIn,
+    /// a tree's cells' lists (csg.rs; a small stand-in until there is a tree)
+    csg_lists: wgpu::Buffer,
+    csg_table: wgpu::Buffer,
     u_inner_bodies: wgpu::Buffer,
     last_inner_bodies: Vec<f32>,
     /// the share of a rough surface's roughness that is sampled, as the tracer has it now
@@ -721,7 +729,20 @@ fn halton(mut i: u32, b: u32) -> f64 {
     r
 }
 
+/// Can the tracer read a tree's grid parts (nine more textures and a sampler than it reads otherwise)?
+pub fn grids_fit(gpu: &Gpu) -> bool {
+    gpu.device.limits().max_sampled_textures_per_shader_stage >= 24
+}
+
 impl Renderer {
+    /// The volumes of a tree's grid parts, by slot (gf_core::csg): read by the tracer from the next
+    /// `set_scene` on (which binds them).
+    pub fn set_grids(&mut self, views: &[Option<wgpu::TextureView>], lists: &wgpu::Buffer, table: &wgpu::Buffer) {
+        self.grids = views.to_vec();
+        self.csg_lists = lists.clone();
+        self.csg_table = table.clone();
+    }
+
     pub fn new(gpu: &Gpu) -> Self {
         let frag = wgpu::ShaderStages::FRAGMENT;
         let d2 = wgpu::TextureViewDimension::D2;
@@ -746,7 +767,11 @@ impl Renderer {
             uniform_entry(GEM_BINDING, frag, false),
             // (35: the shape's numbers, read only by tracers built to read its formula)
             uniform_entry(gf_core::sdf::BINDING, frag, false),
-        ]);
+        ].into_iter().chain(
+            // (50 to 58: the volumes of a tree's grid parts and their sampler, read only by tracers built for
+            // a tree with grid parts; only where the device lets a shader read that many textures)
+            crate::csg::tree_entries(gf_core::csg::GRID_BINDING_TRACER, frag, grids_fit(gpu))
+        ).collect::<Vec<_>>());
         let no_bodies = gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("no bodies"),
             size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
@@ -855,6 +880,8 @@ impl Renderer {
             up: Default::default(),
             hero: Default::default(), hero_cur: None, hero_move: None, split_keys: Default::default(), recon: None, accum_chroma: false,
             adapt: crate::adapt::Adapt::new(gpu),
+            grids: Vec::new(), grid_stand_in: crate::csg::GridStandIn::new(gpu), csg_lists: gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("no csg lists"), size: 64, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false }),
+            csg_table: gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("no csg parts"), size: (gf_core::csg::PART_FLOATS * 4) as u64, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false }),
         }
     }
 
@@ -1359,7 +1386,9 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 33, resource: self.u_inner_bodies.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: GEM_BINDING, resource: self.u_gem.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: gf_core::sdf::BINDING, resource: self.u_sdf.as_entire_binding() },
-            ],
+            ].into_iter().chain(
+                self.grid_stand_in.entries(gf_core::csg::GRID_BINDING_TRACER, &self.grids, &self.csg_lists, &self.csg_table, grids_fit(&self.gpu))
+            ).collect::<Vec<_>>(),
         }));
     }
 

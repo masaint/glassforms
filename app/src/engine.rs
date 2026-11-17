@@ -1106,8 +1106,16 @@ impl Engine {
         let t0 = Instant::now();
         let job = self.state.shape_job(mode, None)?;
         let t1 = Instant::now();
+        // The shape up as a formula part of a tree with nothing beside it: its own volume would never be read
+        // (the volume the tree is measured into stands for it), so it is not built.
+        let unbuilt = {
+            let (early, joined) = self.state.csg_tree();
+            let lone = early.len() == 1 && !joined && self.state.csg.place.is_identity();
+            sculpt.is_none() && self.csg.available() && !joined && !lone && early.first().is_some_and(|p| p.grid.is_none()) && matches!(job.shape, ShapeJob::Field { .. })
+        };
         let fam = &self.state.families[job.family];
         let stats = match &job.shape {
+            _ if unbuilt => crate::bake::BakeStats::default(),
             ShapeJob::Curve { curve, melt } => self.baker.curve(curve, job.res, *melt)?,
             ShapeJob::Field { uniforms } => {
                 let p = &fam.presets[job.preset];
@@ -1171,33 +1179,73 @@ impl Engine {
         // The tree of formula parts (csg.rs): the shape up when it is traced as "csg", the parts added, the
         // object that places them. One shape alone, unmoved, is read by its own text (sdf.rs); anything
         // more by the tree's, from the volume the tree is measured into.
-        let (parts, joined) = self.state.csg_tree();
-        let alone = parts.len() == 1 && !joined && self.state.csg.place.is_identity();
+        let (mut parts, joined) = self.state.csg_tree();
+        // (one part alone, unmoved: a formula is traced by its own text; the shape up as a grid part alone
+        // is its own volume, traced as always)
+        let lone = parts.len() == 1 && !joined && self.state.csg.place.is_identity();
+        let alone = lone && parts[0].grid.is_none();
         let traced = alone;
         self.csg.active = false;
-        if !parts.is_empty() && !alone {
+        let mut tree = !parts.is_empty() && !lone;
+        let t_csg = Instant::now();
+        if tree {
             self.renderer.set_gem(None);
+            // the grid parts' volumes (baked now where what they are made from has changed)
+            let grids = self.csg_grids(&mut parts, mode);
+            tree = !parts.is_empty();
+            self.renderer.set_grids(&grids, &self.csg.lists, &self.csg.table);
+            if !tree { self.renderer.set_sdf(None); }
             let fams = &self.state.families;
             let kinds = gf_core::csg::kinds(&parts);
-            let key = gf_core::csg::key(fams, &kinds);
+            // (a tree of plain unions is read by a leaner text: a tracer of its own)
+            let plain = gf_core::csg::plain(&parts);
+            let key = gf_core::csg::key_tree(fams, &kinds, plain);
             let object = self.state.csg.place;
             // each part's box, measured once for what it is (while things move, nothing is measured)
-            let unboxed = gf_core::csg::uniforms(fams, &parts, &kinds, job.res, joined, &[], &object);
-            let sigs: Vec<String> = parts.iter().map(|p| format!("{}/{}|{:?}|{}", p.fam, p.preset, p.vals, p.puff)).collect();
-            let extents = self.csg.ext.measure(&key, || gf_core::csg::wgsl(fams, &kinds, 0, false), &unboxed, &sigs, matches!(mode, Detail::Anim));
-            let numbers = gf_core::csg::uniforms(fams, &parts, &kinds, job.res, joined, &extents, &object);
+            let sigs: Vec<String> = parts.iter().map(|p| p.sig()).collect();
+            let extents = if tree && !self.csg.ext.knows(&sigs, matches!(mode, Detail::Anim)) {
+                let (unboxed, lists) = gf_core::csg::numbers(fams, &parts, &kinds, job.res, joined, &[], &object);
+                self.csg.set_lists(&lists);
+                self.csg.set_table(&unboxed);
+                self.csg.lists_key = Vec::new();
+                self.csg.ext.measure(&key, || gf_core::csg::wgsl_tree(fams, &kinds, 0, false, plain), &unboxed, &sigs, matches!(mode, Detail::Anim), &grids, &self.csg.stand_in, &self.csg.lists, &self.csg.table)
+            } else {
+                self.csg.ext.known(&sigs)
+            };
+            // (the cells' lists are worked out again only when where the parts stand, or their boxes, change)
+            let lk = gf_core::csg::lists_key(&parts, &extents, &object);
+            if std::env::var_os("GLASSFORMS_LOG_CSG").is_some() && lk != self.csg.lists_key {
+                for (i, e) in extents.iter().enumerate() { eprintln!("[csg] part {i} {} box {e:?}", parts[i].sig()); }
+            }
+            let numbers = if lk == self.csg.lists_key {
+                gf_core::csg::uniforms(fams, &parts, &kinds, job.res, joined, &extents, &object)
+            } else {
+                let (numbers, lists) = gf_core::csg::numbers(fams, &parts, &kinds, job.res, joined, &extents, &object);
+                self.csg.set_lists(&lists);
+                self.csg.lists_key = lk;
+                numbers
+            };
+            self.csg.set_table(&numbers);
             // (traced coarsely: from the volume the parts are measured into, alone)
-            if self.state.csg.coarse {
+            // (and so is a tree with grid parts on a device whose tracer cannot read their volumes)
+            let readable = !kinds.contains(&gf_core::csg::GRID_KIND) || crate::render::grids_fit(&self.gpu);
+            if !tree || self.state.csg.coarse || !readable {
                 self.renderer.set_sdf(None);
             } else {
-                let decl = (self.renderer.sdf_key() != Some(key.as_str())).then(|| gf_core::csg::wgsl(fams, &kinds, gf_core::sdf::BINDING, false));
+                let decl = (self.renderer.sdf_key() != Some(key.as_str())).then(|| gf_core::csg::wgsl_tree(fams, &kinds, gf_core::sdf::BINDING, false, plain));
                 self.renderer.set_sdf(Some((&key, decl, &numbers)));
             }
-            let src = self.baker.volume().ok_or("no volume")?;
-            self.csg.merge(src, &key, || gf_core::csg::wgsl(fams, &kinds, 0, true), &numbers);
+            if tree {
+                let src = if unbuilt { None } else { Some(self.baker.volume().ok_or("no volume")?) };
+                self.csg.merge(src, job.res, &key, || gf_core::csg::wgsl_tree(fams, &kinds, 0, true, plain), &numbers, &grids);
+            }
+            // (timed to the end when builds are timed)
+            if self.time_bakes { self.gpu.wait(); }
+            self.csg.last_ms = t_csg.elapsed().as_secs_f64() * 1e3;
         }
+        let fam = &self.state.families[job.family];
         match &job.shape {
-            _ if !parts.is_empty() && !alone => {}
+            _ if tree => {}
             ShapeJob::Field { uniforms } if traced => {
                 let p = &fam.presets[job.preset];
                 let key = format!("{}/{}", fam.id, p.id);
@@ -1220,7 +1268,9 @@ impl Engine {
         meta.ms = ms;
         meta.segments = stats.segments;
         meta.splats = stats.splats;
-        self.layers.built_plain(&mut self.baker, self.state.layer_key(0), job.res, mode, match &job.shape { ShapeJob::Curve { melt, .. } => Some(*melt), _ => None });
+        // (a shape up not built is not built: the layers' build must not take its volume as it)
+        let built_key = if unbuilt { format!("{}|not built", self.state.layer_key(0)) } else { self.state.layer_key(0) };
+        self.layers.built_plain(&mut self.baker, built_key, job.res, mode, match &job.shape { ShapeJob::Curve { melt, .. } => Some(*melt), _ => None });
         self.dirty = true;
         Ok(())
     }

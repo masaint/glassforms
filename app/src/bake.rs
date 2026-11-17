@@ -279,6 +279,18 @@ impl Baker {
         }
         self.layer = layer;
     }
+    /// The layer being built.
+    pub fn layer(&self) -> usize {
+        self.layer
+    }
+    /// Take the volume holding a layer's shape away from it (a grid part of the tree keeps it: csg.rs).
+    pub fn take_volume(&mut self, layer: usize) -> Option<Volume> {
+        let k = self.kept.get_mut(layer)?;
+        if k.cur >= k.vols.len() { return None; }
+        let v = k.vols.remove(k.cur);
+        k.cur = k.vols.len().saturating_sub(1);
+        Some(v)
+    }
     /// Let go of the volumes of the layers from this one on (they have been taken away).
     pub fn drop_layers(&mut self, from: usize) {
         self.kept.truncate(from.max(1));
