@@ -136,7 +136,21 @@ pub struct Handles {
 }
 
 const AXIS_INK: [Color32; 3] = [Color32::from_rgb(235, 90, 85), Color32::from_rgb(110, 205, 95), Color32::from_rgb(95, 145, 240)];
-const HOT: Color32 = Color32::from_rgb(255, 214, 90);
+/// A handle under the pointer is brightened in its own hue (towards white), so that it keeps its axis's
+/// colour and is not mistaken for the orange size ring.
+fn lit(c: Color32) -> Color32 {
+    let up = |v: u8| (v as f32 + (255.0 - v as f32) * 0.5).round() as u8;
+    Color32::from_rgba_unmultiplied(up(c.r()), up(c.g()), up(c.b()), c.a())
+}
+
+/// Words over the picture on a small dark pill, as the hint under the tool bar has, so that they read over
+/// bright glass and over the handles' own lines.
+fn pill_text(p: &Painter, at: Pos2, anchor: eframe::egui::Align2, text: &str, font: eframe::egui::FontId, ink: Color32) {
+    let g = p.layout_no_wrap(text.to_owned(), font, ink);
+    let r = anchor.anchor_size(at, g.size());
+    p.rect_filled(r.expand2(Vec2::new(5.0, 2.0)), 5, Color32::from_black_alpha(150));
+    p.galley(r.min, g, ink);
+}
 /// how long the arrows look, in points, and how near the pointer must come to a handle to take it
 const ARROW_PT: f64 = 90.0;
 const REACH_PT: f32 = 7.0;
@@ -379,6 +393,12 @@ impl Handles {
         if st.csg.whole && !st.csg.parts.is_empty() && st.plain() { return Some(Target::Whole); }
         // (with no object there is nothing to move)
         (st.stack.sel < st.object_count()).then_some(Target::Layer(st.stack.sel))
+    }
+
+    /// As the window opens: the "all" tool taken up (docs/view_tools.md), with nothing chosen yet, so that
+    /// nothing is drawn over the first picture until a shape is clicked.
+    pub fn starting() -> Self {
+        Self { on: true, mode: Mode::All, ..Self::default() }
     }
 
     /// Show or hide them (G). Shown, they are on whatever is selected.
@@ -703,8 +723,7 @@ impl Handles {
         }
         let font = eframe::egui::FontId::monospace(10.0);
         let at = Pos2::new(b.left().max(rect.left() + 4.0), (b.top() - 3.0).max(rect.top() + 12.0));
-        p.text(at + eframe::egui::vec2(1.0, 1.0), eframe::egui::Align2::LEFT_BOTTOM, &name, font.clone(), Color32::from_black_alpha(120));
-        p.text(at, eframe::egui::Align2::LEFT_BOTTOM, &name, font, Color32::from_white_alpha(150));
+        pill_text(p, at + eframe::egui::vec2(5.0, -2.0), eframe::egui::Align2::LEFT_BOTTOM, &name, font, Color32::from_white_alpha(190));
     }
 
     /// Paint the handles over the picture, and the mark round what is chosen.
@@ -748,7 +767,7 @@ impl Handles {
         }
         let lit = self.grab.as_ref().map(|g| g.part).or_else(|| pointer.and_then(|at| self.hit(st, rect, at)));
         self.hover = lit;
-        let ink = |part: Part, base: Color32| if lit == Some(part) { HOT } else { base };
+        let ink = |part: Part, base: Color32| if lit == Some(part) { self::lit(base) } else { base };
         let shadow = Stroke::new(4.0, Color32::from_black_alpha(90));
         let thin = Stroke::new(3.0, Color32::from_black_alpha(70));
         // a ring about axis k, its far half faint
@@ -843,7 +862,7 @@ impl Handles {
             (Mode::All, _) => String::new(),
             (m, _) => format!("{} · T", m.word()),
         };
-        if !word.is_empty() { p.text(c + eframe::egui::vec2(0.0, 14.0), eframe::egui::Align2::CENTER_TOP, word, font, Color32::from_white_alpha(170)); }
+        if !word.is_empty() { pill_text(p, c + eframe::egui::vec2(0.0, 16.0), eframe::egui::Align2::CENTER_TOP, &word, font, Color32::from_white_alpha(200)); }
     }
 }
 

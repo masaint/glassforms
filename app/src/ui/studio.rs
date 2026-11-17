@@ -195,7 +195,7 @@ fn colour(ui: &mut Ui, st: &mut State, px: &mut Panels, label: &str, names: [&st
 }
 
 pub fn studio_name(st: &State) -> Option<String> {
-    (0..every().len()).find(|&i| studio_is(st, i)).map(|i| every()[i].name.to_owned())
+    (0..every().len()).find(|&i| studio_is(st, i)).map(|i| every()[i].name.to_lowercase())
 }
 
 /// What is all round the shape, lighting it and perhaps seen behind it: nothing (black), a studio
@@ -251,7 +251,9 @@ pub fn surroundings(ui: &mut Ui, st: &mut State, px: &mut Panels) {
             // the studios, each with its own lights, backdrop, floor and tone
             let all = every();
             let lit = (0..all.len()).find(|&i| studio_is(st, i));
-            let items: Vec<Item> = all.iter().enumerate().map(|(i, s)| Item::new(s.name, lit == Some(i)).tip(s.about)).collect();
+            // (named in lowercase, as every other word in the window is)
+            let names: Vec<String> = all.iter().map(|s| s.name.to_lowercase()).collect();
+            let items: Vec<Item> = all.iter().zip(&names).enumerate().map(|(i, (s, name))| Item::new(name, lit == Some(i)).tip(s.about)).collect();
             let run = filled_run(ui, Id::unique("studios"), &items, egui::vec2(6.0, 2.0), &mono(SIZE));
             for (s, place) in all.iter().zip(&run.places) { px.note(format!("room/studio:{}", s.id), *place); }
             if let Some(i) = run.clicked {
@@ -350,8 +352,11 @@ pub fn floor(ui: &mut Ui, st: &mut State, px: &mut Panels) {
         text_in(ui, Rect::from_min_max(Pos2::new(r.left() + label_width(ui) + COL_GAP, r.top()), Pos2::new(r.right() - COL_WAVE - COL_GAP, r.bottom())), Align2::RIGHT_CENTER, &format!("stands {h:+.3} from the middle"), mono(10.0), DIM);
     }
     knob::knob_row_with(ui, st, &gf_core::state::Knob { label: "as backdrop".into(), ..State::engine_knob("floorMatch") }, px, knob::Extra { tip: "1: the backdrop's sweep carried on underfoot, one surface with it; 0: the light that falls on it", ..Default::default() });
-    colour(ui, st, px, "floor tint", ["floorR", "floorG", "floorB"], 1.0);
-    for name in ["floorGain", "floorFade", "floorGloss"] { knob::knob_row(ui, st, &State::engine_knob(name), px); }
+    colour(ui, st, px, "tint", ["floorR", "floorG", "floorB"], 1.0);
+    // (the group says it is the floor's: its rows need not say it again)
+    for (name, label) in [("floorGain", "brightness ×"), ("floorFade", "reach"), ("floorGloss", "gloss")] {
+        knob::knob_row(ui, st, &gf_core::state::Knob { label: label.into(), ..State::engine_knob(name) }, px);
+    }
     if st.p.get("floorGloss").unwrap_or(0.0) > 0.0 {
         switch(ui, st, px, "floorMirror", "mirror shape", ["off", "on"], ["a glossy floor mirrors the room", "the shape itself is mirrored in the floor too (costs a second shading where it shows)"]);
     }

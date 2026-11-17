@@ -3,9 +3,10 @@
 //! the lens (named lenses, the focal length with the field it takes in, the kind of lens, the sensor);
 //! the focus (everything sharp, or the lens opened: the subject's real size, the f-stop, where it is
 //! focused, how deep a range is held sharp, what that comes to, how the blur is made); where the camera
-//! stands (distance, height, the picture slid across, roll); the exposure with the tone curve and, folded,
-//! the grade; and folded at the foot, the lens's character (distortion, fringing, fall-off, vignette, the
-//! shape of what is out of focus, tilt, bloom and grain).
+//! stands (distance, height, the picture slid across, roll, the scene's turn); the exposure with the tone
+//! curve and, folded, the grade; the motion. Folded under the lens, its character (distortion, fringing,
+//! fall-off, vignette); folded under the focus while the lens is open, what is out of focus looks like
+//! (the opening's shape, highlights, cat's-eye, anamorphic) and tilt and swing.
 //!
 //! Everything here is a setting by name; the numbers a photographer reads (field of view, the distances
 //! sharp, magnification) come from `gf_core::camera`, so this file only lays them out. The view (where the
@@ -85,6 +86,7 @@ pub fn section(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     set_label_width(ui, COL_LABEL_WIDE);
     px.heading(ui, "cam-lens", "lens");
     lens(ui, st, px);
+    character(ui, st, px);
     px.heading(ui, "cam-focus", "focus");
     focus(ui, st, px);
     px.heading(ui, "cam-view", "view");
@@ -93,7 +95,6 @@ pub fn section(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     exposure(ui, st, px);
     px.heading(ui, "cam-motion", "motion");
     motion(ui, st, px);
-    character(ui, st, px);
     set_label_width(ui, names);
     // (where the whole camera is, for tests)
     px.note("camera", Rect::from_min_max(Pos2::new(ui.cursor().left(), top), Pos2::new(ui.cursor().left() + ui.available_width(), ui.cursor().top())));
@@ -231,19 +232,51 @@ fn focus(ui: &mut Ui, st: &mut State, px: &mut Panels) {
         st.p.planes = i as f64;
     }
     note(ui, "Click the glass to focus there (with the select or a handles tool: alt-click).");
+    out_of_focus(ui, st, px);
+}
+
+/// What is out of focus looks like, and how the plane of focus leans: the shape of the lens's opening,
+/// its turn, the highlights, cat's-eye, anamorphic, tilt and swing. Folded under the focus; there only
+/// while the lens is open (with everything sharp none of it shows).
+fn out_of_focus(ui: &mut Ui, st: &mut State, px: &mut Panels) {
+    let p = &st.p;
+    let v = |n: &str| p.get(n).unwrap_or(0.0);
+    let mut on: Vec<String> = Vec::new();
+    if v("blades") > 2.5 { on.push(format!("{} blades", js_round(v("blades")))); }
+    if v("squeeze") > 1.0 { on.push("anamorphic".into()); }
+    if v("tiltX") != 0.0 || v("tiltY") != 0.0 { on.push("tilted".into()); }
+    let says = if on.is_empty() { "round".to_owned() } else { on.join(" · ") };
+    let proj = st.camera().proj;
+    px.sub(ui, "camera-bokeh", "bokeh and tilt", &says, |ui, px| {
+        // the shape of what is out of focus
+        let shapes: Vec<(u32, String)> = std::iter::once((0, "round".to_owned())).chain((3..=8).map(|n| (n, format!("{n} blades")))).collect();
+        if let Some(n) = pick_value(ui, "lens shape", "lens shape", &shapes, &(js_round(st.p.blades) as u32)) {
+            st.p.blades = n as f64;
+        }
+        ui.scope(|ui| {
+            // a round opening looks the same however it is turned
+            if st.p.blades < 2.5 { ui.disable(); }
+            knob::knob_row(ui, st, &called("bokehRot", "blade turn"), px);
+        });
+        knob::knob_row_with(ui, st, &called("bokeh", "highlights"), px, knob::Extra { tip: "out-of-focus highlights: left a soft core, right a bright rim", ..Default::default() });
+        knob::knob_row(ui, st, &engine("catseye"), px);
+        knob::knob_row_with(ui, st, &called("squeeze", "anamorphic"), px, knob::Extra { tip: "an anamorphic lens: out-of-focus highlights this many times taller than wide", ..Default::default() });
+        ui.scope(|ui| {
+            // a plane of focus can only lean where there is a plane in front of the lens
+            if proj.radial() { ui.disable(); }
+            knob::knob_row_with(ui, st, &called("tiltX", "tilt °"), px, knob::Extra { tip: "the plane of focus leant back, about the picture's horizontal", ..Default::default() });
+            knob::knob_row_with(ui, st, &called("tiltY", "swing °"), px, knob::Extra { tip: "the plane of focus swung, about the picture's vertical", ..Default::default() });
+        });
+    });
 }
 
 /// The view: where the camera stands (how far off, how high, looking down; the picture slid across the
 /// lens; its roll) and how the shape is turned in front of it, with the named views, and one reset for
 /// all of it.
 fn framing(ui: &mut Ui, st: &mut State, px: &mut Panels) {
-    // orbiting the shape, or flying free (the tool bar over the picture has the same two)
-    let run = named_run(ui, Id::unique(("camera moves", px.place)), "moves", &[
-        Item::new("orbit", !px.nav.fly).tip("dragging turns the view round the shape, or round what was framed (V)"),
-        Item::new("fly", px.nav.fly).tip("W A S D move, Q and E down and up, a drag looks round, the wheel sets the speed (V)"),
-    ]);
-    for (place, name) in run.places.iter().zip(["moves:orbit", "moves:fly"]) { px.note(format!("{}{name}", px.whose()), *place); }
-    if let Some(i) = run.clicked { px.nav.set_fly(st, i == 1); }
+    // (orbiting or flying is chosen on the camera's bar over the picture, or with V; looking from a side,
+    // with the cube beside it: one home each)
+    paragraph(ui, if px.nav.fly { "flying: V, or the camera's bar over the picture, to orbit" } else { "orbiting: V, or the camera's bar over the picture, to fly" }, mono(10.0), HINT, LINE, 0.0);
     let r = st.camera().readout(px.aspect);
     worded(ui, st, px, "dist", &length_text(r.distance_mm), "from the lens to the middle of the shape, along the way it looks");
     let tip = "where the camera stands beside the line through the middle of the shape, across and up as it sees it (flying and framing move it; 0 looks at the middle)";
@@ -255,17 +288,14 @@ fn framing(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     let tip = "the picture slid across the lens's image, in half-heights of the picture: with a long lens this is how a close-up is framed";
     for name in ["shiftX", "shiftY"] { knob::knob_row_with(ui, st, &engine(name), px, knob::Extra { tip, ..Default::default() }); }
     knob::knob_row(ui, st, &engine("roll"), px);
-    // how the shape is turned in front of the camera (dragging the picture turns it too)
+    // how the scene is turned in the room in front of the camera (dragging the picture turns it too); the
+    // room, its floor and the lights fixed to it stay. (To look from a side, the cube: it moves the camera.)
+    let tip = "the scene turned in the room, in front of the camera, as dragging the picture turns it: the room's floor, backdrop and the lights fixed to it stay where they are. To look from a side instead, click an end of the cube over the picture";
     for kn in State::orient_knobs() {
-        let label = format!("view {}", kn.label);
-        knob::knob_row(ui, st, &Knob { label, ..kn }, px);
+        let label = format!("scene {}", kn.label);
+        knob::knob_row_with(ui, st, &Knob { label, ..kn }, px, knob::Extra { tip, ..Default::default() });
     }
     gap(ui, 3.0);
-    let views = [("front", 0.0, 0.0), ("back", 0.0, 180.0), ("left", 0.0, 90.0), ("right", 0.0, -90.0), ("top", 90.0, 0.0), ("under", -90.0, 0.0)];
-    let items: Vec<Item> = views.iter().map(|v| Item::new(v.0, false).tip(format!("the shape seen from the {}", v.0))).collect();
-    let run = filled_run(ui, Id::unique(("views", px.place)), &items, egui::vec2(5.0, 2.0), &mono(SIZE));
-    for (v, place) in views.iter().zip(&run.places) { px.note(format!("{}view:{}", px.whose(), v.0), *place); }
-    if let Some(i) = run.clicked { st.set_r(&gf_core::math::euler(views[i].1, views[i].2, 0.0)); }
     let (resp, at) = wide_button(ui, Id::unique(("reset view", px.place)), "reset view", false);
     px.note(format!("{}reset view", px.whose()), at);
     if resp.on_hover_text("the camera and the shape's turn back the way this shape first appears · key R, or a double click").clicked() {
@@ -324,7 +354,9 @@ fn exposure(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     let says = if graded(st) { "changed" } else { "as shot" };
     px.sub(ui, "camera-grade", "grade", says, |ui, px| {
         {
-            for name in ["wbTemp", "wbTint", "contrast", "saturation", "grain"] { knob::knob_row(ui, st, &engine(name), px); }
+            knob::knob_row(ui, st, &engine("wbTemp"), px);
+            knob::knob_row_with(ui, st, &called("wbTint", "green–magenta"), px, knob::Extra { tip: "the grade's tint: towards green or towards magenta (the material's tint and the lights' colours are their own)", ..Default::default() });
+            for name in ["contrast", "saturation", "grain"] { knob::knob_row(ui, st, &engine(name), px); }
             let font = mono(SIZE);
             let size = button_size(ui, "reset", &font, egui::vec2(8.0, 2.0));
             let r = row(ui, size.y + 2.0);
@@ -341,7 +373,7 @@ fn exposure(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     });
 }
 
-/// What of the lens's character is on, in a few words.
+/// What of the lens's character is on, in a few words (what it holds, while nothing is).
 fn character_says(st: &State) -> String {
     let p = &st.p;
     let v = |n: &str| p.get(n).unwrap_or(0.0);
@@ -349,13 +381,12 @@ fn character_says(st: &State) -> String {
     if v("distort") != 0.0 { on.push(if v("distort") > 0.0 { "barrel" } else { "pincushion" }); }
     if v("fringe") > 0.0 { on.push("fringing"); }
     if v("falloff") > 0.0 { on.push("fall-off"); }
-    if v("blades") > 2.5 { on.push("blades"); }
-    if v("squeeze") > 1.0 { on.push("anamorphic"); }
-    if v("tiltX") != 0.0 || v("tiltY") != 0.0 { on.push("tilt"); }
-    if on.is_empty() { "plain".to_owned() } else { on.join(" · ") }
+    if v("vignette") > 0.0 { on.push("vignette"); }
+    if on.is_empty() { "no distortion, fringing, vignette".to_owned() } else { on.join(" · ") }
 }
 
-/// The lens's character, folded: what a real lens does to the picture besides focusing it.
+/// The lens's character, folded right under the lens: what a real lens does to the picture besides
+/// focusing it (distortion, fringing, fall-off, vignette).
 fn character(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     let says = character_says(st);
     let proj = st.camera().proj;
@@ -371,25 +402,6 @@ fn character(ui: &mut Ui, st: &mut State, px: &mut Panels) {
             knob::knob_row_with(ui, st, &engine("falloff"), px, knob::Extra { tip: "how much of its own darkening of the corners the lens keeps", ..Default::default() });
         });
         knob::knob_row(ui, st, &engine("vignette"), px);
-        // the shape of what is out of focus
-        let shapes: Vec<(u32, String)> = std::iter::once((0, "round".to_owned())).chain((3..=8).map(|n| (n, format!("{n} blades")))).collect();
-        if let Some(n) = pick_value(ui, "lens shape", "lens shape", &shapes, &(js_round(st.p.blades) as u32)) {
-            st.p.blades = n as f64;
-        }
-        ui.scope(|ui| {
-            // a round opening looks the same however it is turned
-            if st.p.blades < 2.5 { ui.disable(); }
-            knob::knob_row(ui, st, &called("bokehRot", "blade turn"), px);
-        });
-        knob::knob_row_with(ui, st, &called("bokeh", "highlights"), px, knob::Extra { tip: "out-of-focus highlights: left a soft core, right a bright rim", ..Default::default() });
-        knob::knob_row(ui, st, &engine("catseye"), px);
-        knob::knob_row_with(ui, st, &called("squeeze", "anamorphic"), px, knob::Extra { tip: "an anamorphic lens: out-of-focus highlights this many times taller than wide", ..Default::default() });
-        ui.scope(|ui| {
-            // a plane of focus can only lean where there is a plane in front of the lens
-            if proj.radial() { ui.disable(); }
-            knob::knob_row_with(ui, st, &called("tiltX", "tilt °"), px, knob::Extra { tip: "the plane of focus leant back, about the picture's horizontal", ..Default::default() });
-            knob::knob_row_with(ui, st, &called("tiltY", "swing °"), px, knob::Extra { tip: "the plane of focus swung, about the picture's vertical", ..Default::default() });
-        });
     });
 }
 

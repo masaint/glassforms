@@ -9,7 +9,7 @@ use gf_core::state::{Knob, State};
 
 use super::theme::*;
 use super::widgets::*;
-use super::{camera, knob, material, right, room, studio, Panels, Request};
+use super::{camera, knob, material, right, room, studio, Bench, Panels, Request};
 use crate::video::Codec;
 
 /// The sizes a video can be made at: what is stored, and what the menu says.
@@ -56,6 +56,7 @@ pub fn show(ui: &mut Ui, st: &mut State, px: &mut Panels) {
             spectral(ui, st, px);
             let samples: Vec<(u32, String)> = vec![(8, "8 (draft)".into()), (16, "16".into()), (32, "32".into()), (64, "64".into()), (128, "128 (slow)".into())];
             if let Some(v) = pick_value(ui, "video samples", "video samples", &samples, &st.render.samples) { st.render.samples = v; }
+            benchmark(ui, px);
             gap(ui, 3.0);
             right::detail_rows(ui, st, px);
         }
@@ -78,16 +79,35 @@ pub fn show(ui: &mut Ui, st: &mut State, px: &mut Panels) {
 /// The light section: all of the light is in the light room, so here is only the section's line, saying
 /// what lights the shape and whether anything casts, and the button that opens the room.
 fn light(ui: &mut Ui, st: &mut State, px: &mut Panels) {
-    let around = if st.hdri.is_some() { "picture".to_owned() } else { studio::studio_name(st).unwrap_or_else(|| if st.p.get("backdrop") == Some(1.0) { "backdrop".into() } else { "lights".into() }) };
-    let lights = if room::lights_lit(st) { format!(" · {} lights", st.rig().lights.len()) } else { String::new() };
+    // (what lights it: a picture, a studio, a backdrop, or the lights alone; then how many lights)
+    let around = if st.hdri.is_some() { Some("picture".to_owned()) } else { studio::studio_name(st).map(|n| n.to_lowercase()).or_else(|| (st.p.get("backdrop") == Some(1.0)).then(|| "backdrop".into())) };
+    let n = st.rig().lights.len();
+    let lights = if room::lights_lit(st) { Some(format!("{n} light{}", if n == 1 { "" } else { "s" })) } else { None };
     let cast = ["", " · shadows", " · all cast"][(js_round(st.p.cast).max(0.0) as usize).min(2)];
-    let at = section(ui, "light", &format!("{around}{lights}{cast}"));
+    let says = around.into_iter().chain(lights).collect::<Vec<_>>().join(" · ");
+    let at = section(ui, "light", &format!("{says}{cast}"));
     px.note("group:light", at);
     let (resp, at) = wide_button(ui, Id::unique("light room"), "light room…", px.store.room_open);
     px.note("room button", at);
     if resp.on_hover_text("all of the light: the studio and what is round the shape, the floor, every light, an environment picture, shadows and caustics, how the lighting is turned · key L").clicked() {
         px.store.room_open = !px.store.room_open;
     }
+}
+
+/// How fast this view can be drawn when nothing waits for the display: the renderer's speed, so it is
+/// quality's.
+fn benchmark(ui: &mut Ui, px: &mut Panels) {
+    gap(ui, 3.0);
+    let caption = match &px.bench {
+        Bench::Idle => "benchmark (no vsync)",
+        Bench::Asked => "running...",
+        Bench::Done(result) => result.as_str(),
+    };
+    let (resp, at) = wide_button(ui, Id::unique("benchmark"), caption, false);
+    if resp.on_hover_text("times 60 frames of this view turning, drawn as fast as they will go").clicked() && px.bench != Bench::Asked {
+        px.requests.push(Request::Benchmark);
+    }
+    px.note("benchmark", at);
 }
 
 /// The denoiser, for the whole picture: off, what is traced by chance (true scattering, roughness by
@@ -106,7 +126,7 @@ fn denoise(ui: &mut Ui, st: &mut State, px: &mut Panels) {
 /// The spectral speed-up while settling (hero.rs): one wavelength inside clear dispersive glass a frame.
 fn spectral(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     let now = usize::from(st.p.get("heroSettle").unwrap_or(1.0) > 0.5);
-    let names: Vec<String> = ["every wavelength", "faster while settling"].iter().map(|n| n.to_string()).collect();
+    let names: Vec<String> = ["every wavelength", "fast to settle"].iter().map(|n| n.to_string()).collect();
     let at = ui.cursor().min;
     if let Some(i) = pick(ui, Id::unique("heroSettle"), "spectrum", &names, now) { st.p.set("heroSettle", i as f64); }
     let r = egui::Rect::from_min_max(at, egui::pos2(at.x + ui.available_width(), ui.cursor().top()));

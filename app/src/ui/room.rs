@@ -25,9 +25,13 @@ const REACH: f32 = 13.0;
 /// Show the light room if it is open. `full`: the inside of the program's window.
 pub fn show(ctx: &egui::Context, st: &mut State, px: &mut Panels, full: Rect) {
     if !px.store.room_open { return; }
-    // it first appears beside the left panel, where it covers neither panel
-    let first = px.store.room_at.map_or(Pos2::new(EDGE + LEFT_W + 36.0, EDGE), |p| Pos2::new(p[0], p[1]));
-    let max_h = (full.height() - 2.0 * EDGE - 44.0).max(80.0);
+    // it first appears beside the left panel, under the camera's bar and the cube, covering neither panel
+    // nor the tools over the picture (beside the materials lab, if that is open where it would be)
+    let below = super::tools::below_left(full);
+    let x = px.left_at.map_or(full.left() + EDGE, |r| r.right() + 10.0);
+    let x = if px.store.lab_open && px.store.lab_at.is_none_or(|p| (p[0] - x).abs() < 8.0) { x + LAB_W + 34.0 } else { x };
+    let first = px.store.room_at.map_or(Pos2::new(x, below), |p| Pos2::new(p[0], p[1]));
+    let max_h = (full.bottom() - first.y.max(EDGE) - EDGE - 44.0).max(80.0);
     let out = floating(ctx, "light room", "light room", FLOAT_W, first, max_h, |ui| {
         if px.rendering { ui.disable(); }
         set_label_width(ui, COL_LABEL);

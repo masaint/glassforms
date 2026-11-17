@@ -32,9 +32,10 @@ pub fn button(ui: &mut Ui, st: &mut State, px: &mut Panels) {
 /// Show the studio if it is open. `full`: the inside of the program's window.
 pub fn show(ctx: &egui::Context, st: &mut State, px: &mut Panels, full: Rect) {
     if !px.store.sculpt_open { return; }
-    // it first appears to the left of the right panel
-    let first = px.store.sculpt_at.map_or(Pos2::new(full.right() - EDGE - RIGHT_W - 56.0 - W, EDGE), |p| Pos2::new(p[0], p[1]));
-    let max_h = (full.height() - 2.0 * EDGE - 44.0).max(80.0);
+    // it first appears against the right panel, under the object bar, covering neither
+    let below = super::tools::below_right(full);
+    let first = px.store.sculpt_at.map_or(Pos2::new(px.right_at.map_or(full.right() - EDGE, |r| r.left() - 10.0) - W - 24.0, below), |p| Pos2::new(p[0], p[1]));
+    let max_h = (full.bottom() - first.y.max(EDGE) - EDGE - 44.0).max(80.0);
     let title = if st.layer_count() > 1 { format!("surface studio · {}", st.layer_title(st.stack.sel)) } else { "surface studio".to_owned() };
     let out = floating(ctx, "surface studio", &title, W, first, max_h, |ui| {
         if px.rendering { ui.disable(); }
@@ -85,10 +86,10 @@ fn sizes_row(ui: &mut Ui, id: Id, relative: bool, size: f64) -> Option<bool> {
 fn head(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     gap(ui, 4.0);
     let on = st.sculpt().on;
-    let items = [Item::new("on", on).tip("the studio reshapes the surface"), Item::new("off", !on).tip("the shape as it is, the studio's layers kept")];
+    let items = [Item::new("off", !on).tip("the shape as it is, the studio's layers kept"), Item::new("on", on).tip("the studio reshapes the surface")];
     let run = named_run(ui, Id::unique("sculpt on"), "studio", &items);
     if let Some(i) = run.clicked {
-        st.sculpt_mut().on = i == 0;
+        st.sculpt_mut().on = i == 1;
         changed(st);
     }
     let says = match px.sculpted {
@@ -334,9 +335,9 @@ fn cleanup(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     after(st, &m, |s, v| s.wall = v);
     let m = knob::value_row(ui, px, "sculpt:crumbs", "drop crumbs", s.crumbs, 0.0, 0.3 * k, 0.005);
     after(st, &m, |s, v| s.crumbs = v);
-    let items = [Item::new("on", s.prefilter).tip("detail finer than about two pixels at this view is left out, so it cannot turn into speckle; made again when the zoom or the picture size changes by about 40%"), Item::new("off", !s.prefilter).tip("every detail is made, however small it is on the screen")];
+    let items = [Item::new("off", !s.prefilter).tip("every detail is made, however small it is on the screen"), Item::new("on", s.prefilter).tip("detail finer than about two pixels at this view is left out, so it cannot turn into speckle; made again when the zoom or the picture size changes by about 40%")];
     if let Some(k) = named_run(ui, Id::unique("sculpt prefilter"), "pixel filter", &items).clicked {
-        st.sculpt_mut().prefilter = k == 0;
+        st.sculpt_mut().prefilter = k == 1;
         changed(st);
     }
     note(ui, "round edges: every edge rounded to this radius. thinnest wall: anything thinner goes. drop crumbs: pieces left loose, smaller than this across, are taken away (the largest piece always stays).");

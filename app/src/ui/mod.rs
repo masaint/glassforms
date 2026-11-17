@@ -16,16 +16,17 @@
 //!             setup, quality with the shape's detail, video)
 //!   camera    the camera group of the left panel: lens, focus, where it stands, exposure, the lens's character
 //!   studio    the light room's studio (backdrop, floor) and shadows and caustics; a body's own casting switches
-//!   material  what the shape is made of: the material group at the head of the left panel, and the
-//!             materials lab, a floating window with the rest of a material's controls
+//!   material  what the shape is made of: the material section at the head of the left panel (which
+//!             material, its recipe, clay), and the materials lab, a floating window with every control of it
 //!   sculpt    the surface studio: a floating window with a stack of procedural layers that reshape the
 //!             selected layer's surface, opened from the right panel
 //!   room      the light room: a floating window with everything about the light (surroundings, floor,
 //!             lights, shadows and caustics, turning)
 //!   gizmo     the ball that shows where the lights are
 //!   handles   arrows and rings over the picture that move, turn and size the selected layer
-//!   tools     the tool bar over the picture (select, move, turn, size, orbit or fly, frame) and the cube
-//!             of the room's axes
+//!   tools     the bars over the picture: the camera's (orbit or fly, frame, the camera slots) with the cube
+//!             of the room's axes beside the left panel; the object tools (select, all, move, turn, size)
+//!             beside the right
 //!   overlay   the line of figures at the foot of the window, and the help with its "?"
 //!   store     what is remembered between runs
 //!   script    driving the window without a mouse, for tests
@@ -227,14 +228,18 @@ pub struct Panels {
     /// how tall the right panel's contents were last frame apart from its list of shapes, which gets the
     /// height that is left
     pub right_rest: f32,
+    /// the inside of the program's window, this frame
+    pub full: Rect,
+    /// a control marked costly is in view in the materials lab (its legend is shown only then)
+    pub costly_shown: bool,
 }
 
 impl Panels {
     pub fn new(store: store::Store) -> Self {
         Self {
-            store, hide_left: false, hide_right: false, help_open: false, bright: false, light: 0, handles: handles::Handles::default(), nav: tools::Nav::default(), lamp: 0, mat_group: None, lit_mat: None, combo_open: None, meets_open: [false; 2], joined: None, sculpted: None, sculpt_size: 0.0, sculpt_error: None, sculpt_layer: Some(0), lighting: Lighting::default(), model: Model::default(), casting: Casting::default(), aspect: 16.0 / 9.0, last_fstop: 4.0, perf: String::new(), bench: Bench::Idle, rendering: false, ffmpeg: false,
+            store, hide_left: false, hide_right: false, help_open: false, bright: false, light: 0, handles: handles::Handles::starting(), nav: tools::Nav::default(), lamp: 0, mat_group: None, lit_mat: None, combo_open: None, meets_open: [false; 2], joined: None, sculpted: None, sculpt_size: 0.0, sculpt_error: None, sculpt_layer: Some(0), lighting: Lighting::default(), model: Model::default(), casting: Casting::default(), aspect: 16.0 / 9.0, last_fstop: 4.0, perf: String::new(), bench: Bench::Idle, rendering: false, ffmpeg: false,
             video_text: String::new(), file_text: String::new(), loop_text: String::new(), requests: Vec::new(), place: "", record: false, rects: BTreeMap::new(),
-            left_at: None, right_at: None, lit_shape: None, tab: None, tab_seen: (0, 1, false), browse_fam: 0, scroll_to: [None, None], room_h: 600.0, needs: [0.0; 2], right_rest: 0.0,
+            left_at: None, right_at: None, lit_shape: None, tab: None, tab_seen: (0, 1, false), browse_fam: 0, scroll_to: [None, None], room_h: 600.0, needs: [0.0; 2], right_rest: 0.0, full: Rect::ZERO, costly_shown: false,
         }
     }
 
@@ -243,12 +248,12 @@ impl Panels {
         if self.record { self.rects.insert(name.into(), rect); }
     }
 
-    /// What a test knows a control by is prefixed with this when it is drawn in the light room or in the
-    /// materials lab (the same control may also be in a panel).
+    /// What a test knows a control by is prefixed with this when it is drawn in the light room (the same
+    /// control may also be in a panel).
     pub fn whose(&self) -> &'static str {
         match self.place {
             "room" => "room/",
-            "lab" => "lab/",
+            // (the materials lab holds the only copy of the material's controls: they keep their plain names)
             "cam" => "cam/",
             _ => "",
         }
@@ -315,4 +320,35 @@ pub const SUB_INSET: f32 = 10.0;
 /// Digits shown after the point for a slider with this step.
 pub fn digits_of(step: f64) -> usize {
     if step < 0.001 { 4 } else if step < 0.01 { 3 } else if step < 1.0 { 2 } else { 0 }
+}
+
+/// What an undo or a redo changed, in a few words: the setting it moved and from what to what ("index
+/// 1.80 → 1.50"), and how many more it moved with it; otherwise what part of the scene it changed.
+pub fn undo_words(was: &gf_core::setup::Setup, now: &gf_core::setup::Setup) -> String {
+    let (a, b) = (serde_json::to_value(&was.settings).unwrap_or_default(), serde_json::to_value(&now.settings).unwrap_or_default());
+    let mut moved: Vec<String> = Vec::new();
+    if let (Some(a), Some(b)) = (a.as_object(), b.as_object()) {
+        let knobs = gf_core::state::State::engine_knobs();
+        for (name, va) in a {
+            let (Some(x), Some(y)) = (va.as_f64(), b.get(name).and_then(|v| v.as_f64())) else { continue };
+            if x == y { continue; }
+            let (label, digits) = match knobs.iter().find(|k| k.id == *name) {
+                Some(k) => (k.label.clone(), digits_of(k.step)),
+                None => (name.clone(), 2),
+            };
+            moved.push(format!("{label} {x:.digits$} → {y:.digits$}"));
+        }
+    }
+    if let Some(first) = moved.first() {
+        return if moved.len() > 1 { format!("{first} and {} more", moved.len() - 1) } else { first.clone() };
+    }
+    // nothing among the settings: say which part of the scene it was
+    let (a, b) = (serde_json::to_value(was).unwrap_or_default(), serde_json::to_value(now).unwrap_or_default());
+    let names = [
+        ("family", "the shape"), ("preset", "the shape"), ("values", "the shape's sliders"), ("shape", "the shape's build"), ("orientation", "the view's turn"),
+        ("tracks", "what is animated"), ("rig", "the lights"), ("hdri", "the environment picture"), ("layers", "the layers"), ("bodies", "a body's material"),
+        ("lamps", "the lamps"), ("csg", "the csg parts"), ("render", "the video's choices"),
+    ];
+    let parts: Vec<&str> = names.iter().filter(|(k, _)| a.get(k) != b.get(k)).map(|(_, w)| *w).fold(Vec::new(), |mut v, w| { if !v.contains(&w) { v.push(w); } v });
+    if parts.is_empty() { "a change".to_owned() } else { parts.join(", ") }
 }

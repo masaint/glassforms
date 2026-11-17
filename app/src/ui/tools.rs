@@ -1,8 +1,10 @@
-//! The tool bar over the picture, and the little cube of the room's axes in the other corner.
+//! The tool bars over the picture, and the little cube of the room's axes.
 //!
-//! The bar is one row beside the left panel: the tools (select, move, turn, size; the camera, orbiting
-//! or flying), the handles' axes (the scene's or the chosen thing's own), snapping, and "frame", which
-//! brings what is chosen to the middle of the picture. Every one of them says its key when hovered.
+//! Split as the panels are (the owner's ruling: the left is everything that is not about objects, the
+//! right everything that is): beside the left panel the camera's bar (orbiting or flying, "frame", which
+//! brings what is chosen to the middle of the picture, and the ten camera slots) with the cube; beside the
+//! right panel the object bar (select, all, move, turn, size; the handles' axes, the scene's or the chosen
+//! thing's own; snapping). Every one of them says its key when hovered.
 //! None of them changes anything but numbers the sliders also change (see handles.rs and gf_core::view),
 //! so whatever they do is kept in a setup and animates as the sliders do.
 //!
@@ -28,15 +30,23 @@ pub struct Nav {
     pub speed: f64,
     /// a few words shown under the bar for a moment (the speed, as the wheel changes it)
     pub said: Option<(String, Instant)>,
+    /// they are about what the object tools did (shown under the object bar, not the camera's)
+    pub said_by_objects: bool,
 }
 impl Default for Nav {
     fn default() -> Self {
-        Self { fly: false, speed: 1.5, said: None }
+        Self { fly: false, speed: 1.5, said: None, said_by_objects: false }
     }
 }
 impl Nav {
     pub fn say(&mut self, words: String) {
         self.said = Some((words, Instant::now()));
+        self.said_by_objects = false;
+    }
+    /// The same, under the object bar.
+    pub fn say_for_objects(&mut self, words: String) {
+        self.said = Some((words, Instant::now()));
+        self.said_by_objects = true;
     }
     /// Fly, or orbit again. Nothing in the picture moves; orbiting turns about what is in the middle of it.
     pub fn set_fly(&mut self, st: &mut State, fly: bool) {
@@ -54,7 +64,6 @@ const GAP: f32 = 3.0;
 const SPLIT: f32 = 9.0;
 /// The cube's square, and about how wide the bar is.
 pub const CUBE: f32 = 84.0;
-pub const BAR_W: f32 = 380.0;
 const AXIS_INK: [Color32; 3] = [Color32::from_rgb(235, 90, 85), Color32::from_rgb(110, 205, 95), Color32::from_rgb(95, 145, 240)];
 
 #[derive(Clone, Copy)]
@@ -149,22 +158,143 @@ fn icon_button(ui: &mut Ui, rect: Rect, id: Id, which: Icon, on: bool, mark: boo
     resp
 }
 
-/// Where the bar stands: beside the left panel (at the window's corner when the panel is hidden).
-fn bar_at(px: &Panels, full: Rect) -> Pos2 {
+/// How tall a bar is, and how far below the bars (and the cube) a floating window starts by default,
+/// so that it covers neither.
+pub const BAR_H: f32 = B + 10.0;
+const BELOW: f32 = 10.0;
+
+/// The two bars, by the owner's split of the window: the camera's tools (orbit, fly, frame, the camera
+/// slots) beside the left panel with the cube of the room's axes, which says which way the camera looks;
+/// the object tools (select, all, move, turn, size, world or local, snap) beside the right panel, the
+/// panel of objects. About how wide each is, in points.
+pub const CAMERA_W: f32 = 2.0 * 5.0 + 2.0 * B + 2.0 * GAP + FRAME_W + SPLIT + 10.0 * DOT + 4.0;
+/// The width of "frame".
+const FRAME_W: f32 = 54.0;
+pub const OBJECT_W: f32 = 2.0 * 5.0 + 5.0 * B + 4.0 * GAP + SPLIT + 2.0 * 50.0 + GAP;
+/// One camera slot's width in the camera bar.
+const DOT: f32 = 11.0;
+
+/// Where the camera's bar stands: beside the left panel (at the window's corner when it is hidden).
+fn camera_at(px: &Panels, full: Rect) -> Pos2 {
     Pos2::new(px.left_at.map_or(full.left() + EDGE, |r| r.right() + 10.0), full.top() + EDGE)
 }
+/// Where the object bar's right end stands: beside the right panel (at the window's corner when it is hidden).
+fn object_end(px: &Panels, full: Rect) -> f32 {
+    px.right_at.map_or(full.right() - EDGE, |r| r.left() - 10.0)
+}
 
-/// The tool bar. Changes the tools, the camera and the state as its buttons are pressed.
-pub fn bar(ctx: &egui::Context, st: &mut State, px: &mut Panels, full: Rect) {
-    let at = bar_at(px, full);
+/// The lowest a floating window on the left starts without covering the camera's bar or the cube; and on
+/// the right, without covering the object bar.
+pub fn below_left(full: Rect) -> f32 {
+    full.top() + EDGE + CUBE.max(BAR_H) + BELOW
+}
+pub fn below_right(full: Rect) -> f32 {
+    full.top() + EDGE + BAR_H + BELOW
+}
+
+/// The bars and the cube, between the panels; where the room between them is short, the cube gives way
+/// first, then the object bar.
+pub fn bars(ctx: &egui::Context, st: &mut State, px: &mut Panels, full: Rect) {
+    let lo = px.left_at.map_or(full.left(), |r| r.right());
+    let hi = px.right_at.map_or(full.right(), |r| r.left());
+    let room = hi - lo;
+    if room >= CAMERA_W + 24.0 { camera_bar(ctx, st, px, full); }
+    if room >= CAMERA_W + OBJECT_W + 44.0 { object_bar(ctx, st, px, full); }
+    if room >= CAMERA_W + OBJECT_W + CUBE + 60.0 { cube(ctx, st, px, full); }
+    words(ctx, px, full);
+}
+
+/// The camera's bar: orbit or fly, frame, and the ten camera slots (a dot for each, filled where a view is
+/// stored: a click goes to it, ctrl+click stores the view there).
+fn camera_bar(ctx: &egui::Context, st: &mut State, px: &mut Panels, full: Rect) {
+    let at = camera_at(px, full);
     let font = mono(SIZE);
     let fill = panel_fill(px.bright);
-    let shown = egui::Area::new(Id::unique("tool bar")).order(egui::Order::Middle).fixed_pos(at).constrain(false).fade_in(false).show(ctx, |ui| {
+    let shown = egui::Area::new(Id::unique("camera bar")).order(egui::Order::Middle).fixed_pos(at).constrain(false).fade_in(false).show(ctx, |ui| {
         let pad = 5.0;
+        let w = CAMERA_W;
+        let frame_w = FRAME_W;
+        let _ = w;
+        let (_, whole) = ui.allocate_space(egui::vec2(w, B + 2.0 * pad));
+        ui.painter().rect(whole, PANEL_RADIUS, fill, panel_stroke(), StrokeKind::Inside);
+        let mut x = whole.left() + pad;
+        let y = whole.top() + pad;
+        let mut place = |wd: f32, gap: f32| {
+            let r = Rect::from_min_size(Pos2::new(x, y), egui::vec2(wd, B));
+            x += wd + gap;
+            r
+        };
+        let camera = px.handles.tool() == Tool::Camera;
+        let r = place(B, GAP);
+        px.note("tool:orbit", r);
+        if icon_button(ui, r, Id::unique(("tool", "orbit")), Icon::Orbit, camera && !px.nav.fly, !px.nav.fly)
+            .on_hover_text("orbit: dragging turns the view round the shape (or what was framed), the wheel comes closer, a click focuses while the lens has an aperture · V: orbit or fly")
+            .clicked()
+        {
+            px.handles.set_tool(Tool::Camera);
+            px.nav.set_fly(st, false);
+        }
+        let r = place(B, GAP);
+        px.note("tool:fly", r);
+        if icon_button(ui, r, Id::unique(("tool", "fly")), Icon::Fly, camera && px.nav.fly, px.nav.fly)
+            .on_hover_text("fly: W A S D move, Q and E down and up, a drag (either button) looks round, the wheel sets the speed; shift: fast, ctrl: slow · V: orbit or fly")
+            .clicked()
+        {
+            px.handles.set_tool(Tool::Camera);
+            px.nav.set_fly(st, true);
+        }
+        let r = place(frame_w, SPLIT);
+        px.note("tool:frame", r);
+        if button(ui, r, Id::unique(("tool", "frame")), "frame", false, font.clone())
+            .on_hover_text("the camera slides to have what is chosen in the middle of the picture, and turns about it from then on (nothing chosen: the whole scene) · F")
+            .clicked()
+        {
+            frame(st, px);
+        }
+        // the camera slots: 1 to 9, then 0, as the keys
+        let ctrl = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
+        for i in 0..gf_core::history::SLOTS {
+            let r = Rect::from_min_size(Pos2::new(x + i as f32 * DOT, y), egui::vec2(DOT, B));
+            let n = (i + 1) % 10;
+            px.note(format!("view-slot:{n}"), r);
+            let resp = ui.interact(r, Id::unique(("view slot", i)), Sense::click());
+            let stored = st.view_stored(i);
+            let hot = resp.hovered();
+            if hot { ui.ctx().set_cursor_icon(CursorIcon::PointingHand); }
+            let c = Pos2::new(r.center().x, r.center().y - 4.0);
+            let ink = if hot { Color32::WHITE } else if stored { BRIGHT } else { HINT };
+            if stored { ui.painter().circle_filled(c, 3.2, ink); } else { ui.painter().circle_stroke(c, 2.8, Stroke::new(1.0, ink)); }
+            ui.painter().text(Pos2::new(r.center().x, r.bottom() - 5.0), Align2::CENTER_CENTER, format!("{n}"), mono(8.5), if hot { BRIGHT } else if stored { DIM } else { HINT });
+            let tip = if stored { format!("view {n}: click to go to it (shift+{n}) · ctrl+click stores this view in its place (ctrl+{n})") } else { format!("no view in {n} yet: ctrl+click (or ctrl+{n}) stores this view there") };
+            if resp.on_hover_text(tip).clicked() {
+                if ctrl {
+                    st.store_view(i);
+                    px.nav.say(format!("view {n} stored · click its dot or shift+{n} to go back to it"));
+                } else if st.recall_view(i) {
+                    px.nav.say(format!("view {n}"));
+                } else {
+                    px.nav.say(format!("no view in {n} yet · ctrl+click its dot stores one"));
+                }
+            }
+        }
+        whole
+    });
+    px.note("camera bar", shown.response.rect);
+}
+
+/// The object bar: the tools that choose, move, turn and size what is in the scene, the handles' axes and
+/// snapping.
+fn object_bar(ctx: &egui::Context, st: &mut State, px: &mut Panels, full: Rect) {
+    let font = mono(SIZE);
+    let fill = panel_fill(px.bright);
+    let words = [if px.handles.local { "local" } else { "world" }, "snap"];
+    let pad = 5.0;
+    // (laid out from the right end leftwards: the words' buttons are as wide as the wider word could want)
+    let wide = [50.0f32, 46.0];
+    let w = 2.0 * pad + 5.0 * B + 4.0 * GAP + SPLIT + wide.iter().sum::<f32>() + GAP;
+    let at = Pos2::new(object_end(px, full) - w, full.top() + EDGE);
+    let shown = egui::Area::new(Id::unique("tool bar")).order(egui::Order::Middle).fixed_pos(at).constrain(false).fade_in(false).show(ctx, |ui| {
         let tool = px.handles.tool();
-        let words = [if px.handles.local { "local" } else { "world" }, "snap", "frame"];
-        let wide: Vec<f32> = words.iter().map(|w| button_size(ui, w, &font, egui::vec2(7.0, 2.0)).x.max(B + 8.0)).collect();
-        let w = 2.0 * pad + 7.0 * B + 5.0 * GAP + 3.0 * SPLIT + wide.iter().sum::<f32>() + GAP;
         let (_, whole) = ui.allocate_space(egui::vec2(w, B + 2.0 * pad));
         ui.painter().rect(whole, PANEL_RADIUS, fill, panel_stroke(), StrokeKind::Inside);
         let mut x = whole.left() + pad;
@@ -189,25 +319,6 @@ pub fn bar(ctx: &egui::Context, st: &mut State, px: &mut Panels, full: Rect) {
                 if *t != Tool::Select && st.stack.sel >= st.layer_count() { px.handles.let_go(); }
             }
         }
-        let camera = tool == Tool::Camera;
-        let r = place(B, GAP);
-        px.note("tool:orbit", r);
-        if icon_button(ui, r, Id::unique(("tool", "orbit")), Icon::Orbit, camera && !px.nav.fly, !px.nav.fly)
-            .on_hover_text("orbit: dragging turns the view round the shape (or what was framed), the wheel comes closer, a click focuses while the lens has an aperture · V: orbit or fly")
-            .clicked()
-        {
-            px.handles.set_tool(Tool::Camera);
-            px.nav.set_fly(st, false);
-        }
-        let r = place(B, SPLIT);
-        px.note("tool:fly", r);
-        if icon_button(ui, r, Id::unique(("tool", "fly")), Icon::Fly, camera && px.nav.fly, px.nav.fly)
-            .on_hover_text("fly: W A S D move, Q and E down and up, a drag (either button) looks round, the wheel sets the speed; shift: fast, ctrl: slow · V: orbit or fly")
-            .clicked()
-        {
-            px.handles.set_tool(Tool::Camera);
-            px.nav.set_fly(st, true);
-        }
         let r = place(wide[0], GAP);
         px.note("tool:axes", r);
         if button(ui, r, Id::unique(("tool", "axes")), words[0], false, font.clone())
@@ -216,7 +327,7 @@ pub fn bar(ctx: &egui::Context, st: &mut State, px: &mut Panels, full: Rect) {
         {
             px.handles.local = !px.handles.local;
         }
-        let r = place(wide[1], SPLIT);
+        let r = place(wide[1], 0.0);
         px.note("tool:snap", r);
         if button(ui, r, Id::unique(("tool", "snap")), words[1], px.handles.snap, font.clone())
             .on_hover_text("the handles go in steps: 0.05 of a unit, 15 degrees, sizes by 0.05 (ctrl does the same while dragging, or the opposite while this is on)")
@@ -224,29 +335,25 @@ pub fn bar(ctx: &egui::Context, st: &mut State, px: &mut Panels, full: Rect) {
         {
             px.handles.snap = !px.handles.snap;
         }
-        let r = place(wide[2], 0.0);
-        px.note("tool:frame", r);
-        if button(ui, r, Id::unique(("tool", "frame")), words[2], false, font.clone())
-            .on_hover_text("the camera slides to have what is chosen in the middle of the picture, and turns about it from then on (nothing chosen: the whole scene) · F")
-            .clicked()
-        {
-            frame(st, px);
-        }
         whole
     });
     px.note("tool bar", shown.response.rect);
 }
 
-/// A few words under the bar for a moment (the fly speed, an undo, a camera slot), drawn whether or not
-/// the bar has room to show.
+/// A few words under a bar for a moment (the fly speed, an undo, a camera slot under the camera's bar;
+/// what the object tools did under the object bar), drawn whether or not the bar has room to show.
 pub fn words(ctx: &egui::Context, px: &mut Panels, full: Rect) {
     if let Some((words, when)) = &px.nav.said {
         let age = when.elapsed();
         if age < Duration::from_millis(1600) {
             let a = if age < Duration::from_millis(1100) { 1.0 } else { 1.0 - (age.as_secs_f32() - 1.1) / 0.5 };
             let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, Id::unique("tool bar words")));
-            let at = bar_at(px, full) + egui::vec2(6.0, B + 16.0);
             let g = p.layout_no_wrap(words.clone(), mono(SMALL), fade(BRIGHT, 0.85 * a));
+            let at = if px.nav.said_by_objects {
+                Pos2::new(object_end(px, full) - 6.0 - g.size().x, full.top() + EDGE + B + 16.0)
+            } else {
+                camera_at(px, full) + egui::vec2(6.0, B + 16.0)
+            };
             p.rect_filled(Rect::from_min_size(at - egui::vec2(5.0, 2.0), g.size() + egui::vec2(10.0, 4.0)), BUTTON_RADIUS, Color32::from_black_alpha((110.0 * a) as u8));
             p.galley(at, g, BRIGHT);
             ctx.request_repaint_after(Duration::from_millis(40));
@@ -296,10 +403,10 @@ pub fn frame(st: &mut State, px: &mut Panels) {
     });
 }
 
-/// The cube of the room's axes, beside the right panel (at the window's corner when it is hidden).
+/// The cube of the room's axes, beside the camera's bar: it says which way the camera looks, and a click on
+/// one of its ends looks from that side (the one home for "look from the left").
 pub fn cube(ctx: &egui::Context, st: &mut State, px: &mut Panels, full: Rect) {
-    let right = px.right_at.map_or(full.right() - EDGE, |r| r.left() - 10.0);
-    let at = Pos2::new(right - CUBE, full.top() + EDGE);
+    let at = camera_at(px, full) + egui::vec2(CAMERA_W + 10.0, 0.0);
     let fill = panel_fill(px.bright);
     let shown = egui::Area::new(Id::unique("view cube")).order(egui::Order::Middle).fixed_pos(at).constrain(false).fade_in(false).show(ctx, |ui| {
         let (_, sq) = ui.allocate_space(egui::vec2(CUBE, CUBE));

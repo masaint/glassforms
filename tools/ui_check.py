@@ -48,7 +48,7 @@ runs = 0
 # the groups that fold, from the top of each panel, and the ones folded when nothing is remembered
 LEFT_GROUPS = ['material', 'light', 'camera', 'quality', 'output']
 RIGHT_GROUPS = ['placement', 'joins', 'animate']
-FOLDED = ['animate-more', 'camera', 'camera-character', 'camera-grade', 'lab-casts', 'lab-in it', 'lab-special optics', 'material-chooser', 'output', 'placement', 'quality', 'video']
+FOLDED = ['animate-more', 'camera', 'camera-bokeh', 'camera-character', 'camera-grade', 'lab-casts', 'lab-in it', 'lab-special optics', 'material-chooser', 'output', 'placement', 'quality', 'video']
 # the chooser of named materials opened in the panel (it is folded at first)
 CHOOSER = 'fold:material-chooser;'
 
@@ -139,7 +139,7 @@ def look(script, name, frames=48, **how):
     d = run(script, shot=path, frames=frames, **how)
     seen = np.asarray(Image.open(path).convert('RGB')).astype(float)
     free = np.ones(seen.shape[:2], dtype=bool)
-    for part in ('left', 'right', 'room', 'lab', 'help', 'foot', 'help mark'):
+    for part in ('left', 'right', 'room', 'lab', 'help', 'foot', 'help mark', 'camera bar', 'tool bar', 'view cube'):
         if part in d['rects']:
             x0, y0, x1, y1 = d['rects'][part]
             free[max(0, int(y0) - 4):int(y1) + 5, max(0, int(x0) - 4):int(x1) + 5] = False
@@ -273,10 +273,10 @@ def stops_move_and_keep_the_value_inside():
 
 @check
 def a_range_is_dragged_by_its_handles_and_its_stretch():
-    lit = 'wave:P.ior;wait:2'
+    lit = 'lab:open;wave:P.ior;wait:4'
     d = run(lit)
     slot, t = d['rects']['slot:P.ior'], d['tracks']['P.ior']
-    assert within(slot, d['rects']['left']), 'the index slider is not in view in the left panel: %s' % slot
+    assert within(slot, d['rects']['lab']), 'the index slider is not in view in the materials lab: %s' % slot
     (lo, hi, _), y = d['ranges']['P.ior'], (slot[1] + slot[3]) / 2
     per_point = (hi - lo) / (slot[2] - slot[0] - 9.0)
     # the second handle, 20 points to the right
@@ -304,30 +304,30 @@ def a_range_is_dragged_by_its_handles_and_its_stretch():
 
 @check
 def a_slider_is_dragged_with_the_pointer():
-    d = run('wait:2')
+    d = run('lab:open;wait:4')
     slot = d['rects']['slot:P.disp']
     y = (slot[1] + slot[3]) / 2
     least, most, step = d['ranges']['P.disp']
     x = at(slot, least, most, 0.3)
-    d2 = run('wait:2;pdown:%.2f,%.2f;pup' % (x, y))
+    d2 = run('lab:open;wait:4;pdown:%.2f,%.2f;pup' % (x, y))
     assert close(d2['knobs']['P.disp'], 0.3, 1e-9), 'a press at 0.3 gave %s' % d2['knobs']['P.disp']
-    d3 = run('wait:2;pdown:%.2f,%.2f;pmove:%.2f,%.2f;pmove:%.2f,%.2f;pup' % (x, y, x + 30, y - 40, slot[2] + 200, y - 80))
+    d3 = run('lab:open;wait:4;pdown:%.2f,%.2f;pmove:%.2f,%.2f;pmove:%.2f,%.2f;pup' % (x, y, x + 30, y - 40, slot[2] + 200, y - 80))
     assert close(d3['knobs']['P.disp'], most), 'dragged past the end it gave %s' % d3['knobs']['P.disp']
     # with shift held the handle does not jump to the press, and moves a tenth as far as the pointer: 35.5
     # points of pointer are 3.55 of handle, worth what 3.55 points of the slot's travel are (the slot's
     # width comes from the window, which sets it by the panel's layout), on the slider's steps
-    fine = run('wait:2;spdown:%.2f,%.2f;pmove:%.2f,%.2f;pmove:%.2f,%.2f;pup' % (slot[2] - 10, y, slot[2] - 10 + 20, y, slot[2] - 10 + 35.5, y + 9))
+    fine = run('lab:open;wait:4;spdown:%.2f,%.2f;pmove:%.2f,%.2f;pmove:%.2f,%.2f;pup' % (slot[2] - 10, y, slot[2] - 10 + 20, y, slot[2] - 10 + 35.5, y + 9))
     want = round((0.09 + 3.55 * (most - least) / (slot[2] - slot[0] - 9.0)) / step) * step
     assert close(fine['knobs']['P.disp'], want, 1e-6), 'shift-dragged 35.5 points it went from 0.09 to %s, not %s' % (fine['knobs']['P.disp'], want)
-    after = run('wait:2;spdown:%.2f,%.2f;pmove:%.2f,%.2f;pup;pdown:%.2f,%.2f;pup' % (slot[2] - 10, y, slot[2] + 5, y, x, y))
+    after = run('lab:open;wait:4;spdown:%.2f,%.2f;pmove:%.2f,%.2f;pup;pdown:%.2f,%.2f;pup' % (slot[2] - 10, y, slot[2] + 5, y, x, y))
     assert close(after['knobs']['P.disp'], 0.3, 1e-9), 'after a shift-drag a plain press gave %s' % after['knobs']['P.disp']
     # the wave button, pressed with the pointer
-    d4 = run('wait:2;' + press(d['rects']['wave:P.disp']))
+    d4 = run('lab:open;wait:4;' + press(d['rects']['wave:P.disp']))
     assert d4['tracks'].get('P.disp', {}).get('on'), 'pressing the wave button did not light it'
     # a slider of the shape, in the right panel
     b = d['rects']['slot:attractors/thomas/b']
     assert within(b, d['rects']['right']), b
-    d5 = run('wait:2;pdown:%.2f,%.2f;pup;wait:3' % (b[2] - 4.5, (b[1] + b[3]) / 2))
+    d5 = run('lab:open;wait:4;pdown:%.2f,%.2f;pup;wait:3' % (b[2] - 4.5, (b[1] + b[3]) / 2))
     assert d5['knobs']['attractors/thomas/b'] > d['knobs']['attractors/thomas/b'], 'a press at the end of the shape\'s slider left it at %s' % d5['knobs']['attractors/thomas/b']
     return 'a press sets 0.300, a drag past the end %.3f, with shift a drag of 35.5 points moves a tenth as far (%.3f); the wave button lights; the shape\'s b goes to %.4f' % (
         most, fine['knobs']['P.disp'], d5['knobs']['attractors/thomas/b'])
@@ -409,7 +409,8 @@ def the_wheel_moves_the_camera_and_changes_the_lens():
 @check
 def a_click_focuses_where_there_is_glass():
     # a family newly shown starts spinning again: stop it, so that nothing turns while the check looks
-    setup = 'family:knots;set:spin=0;hide:both;set:aperture=0.05;set:fnear=-0.3;set:ffar=0.1;wait:10;'
+    # (with the orbit tool: with an object tool a click chooses, and alt+click focuses)
+    setup = 'family:knots;set:spin=0;press:tool:orbit;hide:both;set:aperture=0.05;set:fnear=-0.3;set:ffar=0.1;wait:10;'
     d = run(setup + 'click:0.5,0.2')['settings']
     assert close(d['ffar'] - d['fnear'], 0.4), 'the band changed thickness: %s to %s' % (d['fnear'], d['ffar'])
     assert not close(d['fnear'], -0.3, 1e-3), 'the band did not move'
@@ -437,8 +438,12 @@ def the_light_room_opens_moves_and_closes():
     room = d['rects'].get('room')
     assert d['room']['open'] and room, 'pressing "light room" did not open it'
     assert apart(room, d['rects']['left']) and apart(room, d['rects']['right']) and within(room, [0, 0, w, h]), 'it first appears at %s, over a panel' % room
-    for part in ('room/preview', 'room/around:picture', 'room/floor:on', 'room/light:1', 'room/add', 'room/reset', 'ball', 'room/slot:P.lspin'):
+    for part in ('room/preview', 'room/around:picture', 'room/floor:on', 'room/light:1', 'room/add', 'room/reset'):
         assert within(d['rects'][part], room), '%s is not in view in the light room: %s' % (part, d['rects'][part])
+    # (it opens under the tools over the picture, so its foot is in view with the lights folded)
+    f = run('room:open;fold:room-lights;wait:4', size=BIG)
+    for part in ('ball', 'room/slot:P.lspin'):
+        assert within(f['rects'][part], f['rects']['room']), '%s is not in view in the light room: %s' % (part, f['rects'][part])
     order = [d['rects'][k][1] for k in ('room/preview', 'group:room-surround', 'group:room-floor', 'group:room-lights', 'group:room-cast', 'group:room-turn')]
     assert order == sorted(order), 'the light room is out of order: %s' % order
     # the ball, dragged with the pointer, turns the lights; they go back when told to
@@ -467,10 +472,10 @@ def the_light_room_opens_moves_and_closes():
     c = run('room:open;wait:4;%s;wait:3' % press(d['rects']['room:close']), size=BIG)
     assert not c['room']['open'] and 'room' not in c['rects'], 'the cross did not close it'
     # the light's yaw is in the light room only (the left panel keeps the one-press things)
-    assert 'slot:P.lyaw' not in base['rects'] and within(d['rects']['room/slot:P.lyaw'], room), 'the light yaw is not in the light room alone'
-    q3 = run('room:open;wait:4;%s;wait:2' % on(d, 'P.lyaw', 180, 'room/'), size=BIG)
+    assert 'slot:P.lyaw' not in base['rects'] and within(f['rects']['room/slot:P.lyaw'], f['rects']['room']), 'the light yaw is not in the light room alone'
+    q3 = run('room:open;fold:room-lights;wait:4;%s;wait:2' % on(f, 'P.lyaw', 180, 'room/'), size=BIG)
     assert close(q3['lights']['yaw'], 180, 0.01), 'the yaw slider in the light room gave %s' % q3['lights']['yaw']
-    q4 = run('room:open;wait:4;%s;wait:2' % on(d, 'P.lpitch', 45, 'room/'), size=BIG)
+    q4 = run('room:open;fold:room-lights;wait:4;%s;wait:2' % on(f, 'P.lpitch', 45, 'room/'), size=BIG)
     assert close(q4['lights']['pitch'], 45, 0.01), 'the pitch slider of the light room gave %s' % q4['lights']['pitch']
     room = [round(v) for v in room]
     return 'opens from its button clear of the panels at %s, %d tall, all of it in view; the ball gives yaw %.1f, pitch %.1f; dragged by its title it moves by 150, 220 and stays in the window; the cross closes it; its yaw slider (the only one) sets yaw %.0f' % (
@@ -562,7 +567,9 @@ def an_environment_picture_lights_the_shape():
     assert d['hdri']['name'] == os.path.basename(SAMPLE) and d['hdri']['size'] == [4096, 2048] and d['hdri']['error'] is None and not d['hdri']['loading'], d['hdri']
     assert not d['rig']['lit'] and 'room/light:1' not in r and 'room/mark:1' not in r, 'the lights are still shown as lit'
     assert d['settings']['hdriShow'] == 0 and behind(lit) < 3, 'the picture is shown behind the shape without being asked (%.1f)' % behind(lit)
-    assert apart_by(before, lit) > 5, 'lit by the picture the shape looks the same (%.2f)' % apart_by(before, lit)
+    # (compared with the light room shut: open, it covers part of the shape)
+    bare = apart_by(look('wait:4', 'picture_before_bare'), look('hdri:%s;wait:4' % SAMPLE, 'picture_lit_bare'))
+    assert bare > 5, 'lit by the picture the shape looks the same (%.2f)' % bare
     for part in ('room/clear', 'room/show:on', 'room/lit:on', 'room/slot:P.hdriGain', 'room/slot:P.hdriBlur'):
         assert within(r[part], r['room']), '%s is not in view in the light room' % part
     # in the left panel the brightness beside the light room button is now the picture's
@@ -608,12 +615,12 @@ def an_environment_picture_lights_the_shape():
 
 @check
 def clay_is_drawn_instead_of_the_material():
-    glass = look('wait:3', 'clay_glass')
+    glass = look('lab:open;wait:4', 'clay_glass')
     r = glass[0]['rects']
-    assert glass[0]['settings']['clay'] == 0 and glass[0]['settles'] == 1024 and within(r['drawn:clay'], r['left']) and r['drawn:clay'][1] < r['slot:P.ior'][1], 'the clay switch is not at the head of the material group'
-    clay = look('wait:3;%s;wait:3' % press(r['drawn:clay']), 'clay_clay')
+    assert glass[0]['settings']['clay'] == 0 and glass[0]['settles'] == 1024 and within(r['drawn:clay'], r['left']) and within(r['slot:P.ior'], r['lab']), 'the clay switch is not at the head of the material group'
+    clay = look('lab:open;wait:4;%s;wait:3' % press(r['drawn:clay']), 'clay_clay')
     d = clay[0]
-    assert d['settings']['clay'] == 1 and d['settles'] == 96 and re.search(r' · refining 48/96 · ', d['says']['perf']), 'pressed, clay is %s and the line says %r' % (d['settings']['clay'], d['says']['perf'])
+    assert d['settings']['clay'] == 1 and d['settles'] == 96 and re.search(r' · refining \d+/96 · ', d['says']['perf']), 'pressed, clay is %s and the line says %r' % (d['settings']['clay'], d['says']['perf'])
     assert apart_by(glass, clay) > 5, 'clay looks like glass (%.2f grey levels apart)' % apart_by(glass, clay)
     # the sliders of the glass are still there, greyed; a press on one does not move it
     dim = []
@@ -624,11 +631,11 @@ def clay_is_drawn_instead_of_the_material():
     assert max(dim) < 0.8, 'the glass sliders are not greyed in clay: %s of their brightness' % ['%.2f' % v for v in dim]
     try_it = on(glass[0], 'P.ior', 2.0) + ';wait:2'
     # (a press on one greyed puts the material back instead of moving it)
-    pressed = run('wait:3;%s;wait:3;%s' % (press(r['drawn:clay']), try_it), size=BIG)
+    pressed = run('lab:open;wait:4;%s;wait:3;%s' % (press(r['drawn:clay']), try_it), size=BIG)
     assert pressed['knobs']['P.ior'] == 1.5 and pressed['settings']['clay'] == 0, 'pressing the greyed index in clay: index %s, clay %s' % (pressed['knobs']['P.ior'], pressed['settings']['clay'])
-    assert close(run('wait:3;' + try_it, size=BIG)['knobs']['P.ior'], 2.0, 1e-9), 'the index slider does not answer in glass'
+    assert close(run('lab:open;wait:4;' + try_it, size=BIG)['knobs']['P.ior'], 2.0, 1e-9), 'the index slider does not answer in glass'
     # glass again, and the same picture as before
-    again = look('wait:3;%s;wait:8;%s;wait:3' % (press(r['drawn:clay']), press(d['rects']['drawn:material'])), 'clay_glass_again')
+    again = look('lab:open;wait:4;%s;wait:8;%s;wait:3' % (press(r['drawn:clay']), press(d['rects']['drawn:material'])), 'clay_glass_again')
     assert again[0]['settings']['clay'] == 0 and apart_by(glass, again) < 2.5, 'glass again is %.2f from glass before' % apart_by(glass, again)
     # the C key; and clay settles, at its own count
     assert run('key:c;wait:3')['settings']['clay'] == 1 and run('key:c;wait:3;key:c;wait:3')['settings']['clay'] == 0, 'C did not switch clay on and off'
@@ -693,7 +700,9 @@ def a_material_is_chosen_by_name():
     assert [x['words'] for x in g['material']['recipe']] == ['gold'], 'gold has the recipe %s' % g['material']['recipe']
     assert apart_by(glass, gold) > 3, 'gold looks like glass (%.2f grey levels apart)' % apart_by(glass, gold)
     # a slider moved makes it "changed"; pressing the material again puts it back as named
-    frost = choose + ';' + on(g, 'P.rough', 0.4) + ';wait:3'
+    # (the sliders are in the materials lab)
+    gl = run(CHOOSER + 'wait:3;' + choose + ';lab:open;wait:4', size=BIG)
+    frost = choose + ';lab:open;wait:4;' + on(gl, 'P.rough', 0.4) + ';wait:3'
     c = run(CHOOSER + 'wait:3;' + frost, size=BIG)
     assert c['material']['changed'] and close(c['knobs']['P.rough'], 0.4, 0.011), 'frosted, gold is %s with frost %s' % (c['material']['changed'], c['knobs']['P.rough'])
     again = run(CHOOSER + 'wait:3;' + frost + ';%s;wait:3' % press(c['rects']['mat:gold']), size=BIG)
@@ -722,7 +731,7 @@ def a_material_is_chosen_by_name():
     fold = press(r['mat-name'])
     f1 = run(CHOOSER + 'wait:3;%s;wait:3' % fold, size=BIG)
     assert not f1['material']['chooser'] and 'material-chooser' in f1['closed'] and not listed(f1) and 'mat-group:glass' not in f1['rects'], 'a press on the name did not fold the chooser'
-    assert f1['rects']['slot:P.ior'][1] < r['slot:P.ior'][1] - 100 and 'recipe' in f1['rects'], 'folded, the sliders did not move up'
+    assert f1['rects']['recipe'][1] < r['recipe'][1] - 100, 'folded, the rows under it did not move up'
     f2 = run(CHOOSER + 'wait:3;%s;wait:3;%s;wait:3' % (fold, press(f1['rects']['mat-name'])), size=BIG)
     assert f2['material']['chooser'] and 'glass' in listed(f2), 'a second press did not bring the chooser back'
     # a setup keeps it, changed or not
@@ -773,8 +782,9 @@ def what_does_not_go_with_a_material_is_greyed_and_says_why():
     r = d['rects']
     by = lambda dump: {c['name']: c for c in dump['material']['controls']}
     c = by(d)
-    # as glass: the body's colour waits for a body that shows it; what a film has of its own is not shown until there is a film
-    assert not c['bodyR']['acts'] and c['bodyR']['shown'] and c['bodyR']['wants'] == 'needs milkiness or metal' and 'colour:bodyR' in r, c['bodyR']
+    # as glass: the body's colour waits for a body that shows it (out of sight until milkiness or a metal is on); what a
+    # film has of its own is not shown until there is a film
+    assert not c['bodyR']['acts'] and not c['bodyR']['shown'] and c['bodyR']['wants'] == 'needs milkiness or metal' and 'colour:bodyR' not in r, c['bodyR']
     assert c['film']['acts'] and not c['filmIor']['shown'] and c['filmIor']['wants'] == 'needs thin film nm' and 'slot:P.filmIor' not in r, c['filmIor']
     # with a film: its controls are there; the one that needs its unevenness too is greyed and does not answer until that is given
     film = 'lab:open;set:film=300;ready;wait:4'
@@ -800,19 +810,19 @@ def what_does_not_go_with_a_material_is_greyed_and_says_why():
     for where in ('', ''):
         tried = run('lab:open;arg:material=gold;wait:4;' + on(gold, 'P.ior', 2.0, where) + ';wait:2', size=BIG)
         assert tried['knobs']['P.ior'] == gold['knobs']['P.ior'] and tried['settings']['metal'] == 0, 'pressing the greyed index on gold (%s): index %s, metal %s' % (where or 'the left panel', tried['knobs']['P.ior'], tried['settings']['metal'])
-    assert close(run('arg:material=gold;wait:4;' + on(gold, 'P.rough', 0.5) + ';wait:2', size=BIG)['knobs']['P.rough'], 0.5, 0.011), 'frost does not answer on gold'
+    assert close(run('lab:open;arg:material=gold;wait:4;' + on(gold, 'P.rough', 0.5) + ';wait:2', size=BIG)['knobs']['P.rough'], 0.5, 0.011), 'frost does not answer on gold'
     # drawn as clay, only what lies on the clay stays lit, and the recipe begins with the clay
     clay = run('lab:open;p:clay=1;ready;wait:4', size=BIG)
     k = by(clay)
     lit = sorted(n for n, x in k.items() if x['acts'])
     assert lit == ['coat', 'film'], 'lit in clay: %s' % lit
     assert k['sss']['wants'] == 'not while drawn as clay' and not any(x['acts'] for x in clay['material']['glass']), k['sss']
-    bare = run('p:clay=1;wait:4;' + on(clay, 'P.rough', 0.5) + ';wait:2', size=BIG)
+    bare = run('lab:open;p:clay=1;wait:4;' + on(clay, 'P.rough', 0.5) + ';wait:2', size=BIG)
     assert bare['knobs']['P.rough'] == 0 and bare['settings']['film'] == 360, 'pressing frost on bare clay: frost %s, film %s' % (bare['knobs']['P.rough'], bare['settings']['film'])
-    assert close(run('p:clay=1;wait:4;' + on(clay, 'P.coat', 0.5) + ';wait:2', size=BIG)['knobs']['P.coat'], 0.5, 0.011), 'the clear coat does not answer on clay'
+    assert close(run('lab:open;p:clay=1;wait:4;' + on(clay, 'P.coat', 0.5) + ';wait:2', size=BIG)['knobs']['P.coat'], 0.5, 0.011), 'the clear coat does not answer on clay'
     unclayed = run('p:clay=1;wait:4;%s;wait:3' % press(clay['rects']['recipe:0:x']), size=BIG)
     assert unclayed['settings']['clay'] == 0, 'the cross on "clay" in the recipe did not bring the material back'
-    return 'as glass the body\'s colour is greyed, saying "%s", and a film\'s own controls are not shown until there is a film; then the film flow is greyed (to %.0f%%), saying "%s", and a press on it makes the film uneven instead of moving it; on gold the index, tint and inside are greyed ("%s") in the panel and in the lab, a press on the index takes the metal off, and the body\'s colour is lit; as clay only %s stay lit, and the recipe\'s first cross takes the clay off' % (
+    return 'as glass the body\'s colour is out of sight, waiting ("%s"), and a film\'s own controls are not shown until there is a film; then the film flow is greyed (to %.0f%%), saying "%s", and a press on it makes the film uneven instead of moving it; on gold the index, tint and inside are greyed ("%s") in the panel and in the lab, a press on the index takes the metal off, and the body\'s colour is lit; as clay only %s stay lit, and the recipe\'s first cross takes the clay off' % (
         c['bodyR']['wants'], 100 * dim, e['filmFlow']['wants'], g['density']['wants'], ', '.join(lit))
 
 
@@ -820,7 +830,7 @@ def what_does_not_go_with_a_material_is_greyed_and_says_why():
 def the_materials_lab_is_the_material_layer_by_layer():
     w, h = BIG
     base = run('wait:2', size=BIG)
-    assert 'lab button' not in base['rects'] and within(base['rects']['lab'], base['rects']['left']), 'the material is not wholly in the left panel'
+    assert within(base['rects']['lab button'], base['rects']['left']) and 'lab' not in base['rects'] and 'slot:P.ior' not in base['rects'], 'the panel does not hold only which material it is, and the way into the lab'
     # every part of it in view at once: its sub-groups (in it, special optics, casts) opened
     d = run('lab:open;wait:4', size=BIG)
     lab, r = d['rects'].get('lab'), d['rects']
@@ -844,11 +854,12 @@ def the_materials_lab_is_the_material_layer_by_layer():
                 ys.append(r[key][1])
                 shown += 1
             else:
-                assert key not in r and c['under'] and rows[c['under']]['value'] == 0, '%s is drawn although %s is off' % (name, c['under'])
+                assert key not in r, '%s is drawn although it waits for a part that is off (%s)' % (name, c['under'] or c['wants'])
                 hidden.append(name)
     assert ys == sorted(ys) and hidden, 'the lab is out of order: %s' % ys
     assert mat['says'] == {'made of': 'glass', 'surface': 'polished', 'on it': 'nothing', 'in it': 'nothing', 'special optics': 'none'}, mat['says']
-    assert within(r['recipe:0'], lab) and 'mat-reset' not in r, 'the head of the material is not in view, or offers a reset for a material not changed'
+    assert within(r['recipe:0'], r['left']) and within(r['mat-reset'], r['left']) and not mat['changed'], 'the head of the material is not in the panel, or its reset is missing'
+    assert all(within(r[k], lab) for k in ('slot:P.ior', 'group:lab-made of')), 'the sliders are not in the lab'
     # a part switched on shows the rest of its controls under its switch, set in a little
     filmed = run('lab:open;wait:4;%s;wait:4' % on(d, 'P.film', 300, ''), size=BIG)
     fr = filmed['rects']
@@ -856,8 +867,8 @@ def the_materials_lab_is_the_material_layer_by_layer():
     assert fr['slot:P.film'][3] <= fr['slot:P.filmIor'][1] < fr['slot:P.coat'][1] and filmed['material']['says']['on it'].startswith('film 3'), filmed['material']['says']
     assert close(fr['slot:P.filmIor'][0], fr['slot:P.film'][0], 0.01), 'the sliders under a switch do not line up with it'
 
-    # M folds the material away and brings it back
-    assert 'material' in run('key:m;wait:3')['closed'] and 'material' not in run('key:m;wait:3;key:m;wait:3')['closed'], 'M did not fold and unfold the material'
+    # M opens the lab and closes it
+    assert run('key:m;wait:3')['lab']['open'] and not run('key:m;wait:3;key:m;wait:3')['lab']['open'], 'M did not open and close the materials lab'
     opened = 'lab:open;wait:4'
     # a slider
     sl = run('%s;%s;wait:2' % (opened, on(d, 'P.bubbles', 0.3, '')), size=BIG)
@@ -911,7 +922,7 @@ def the_materials_lab_is_the_material_layer_by_layer():
     f2 = run('wait:3', size=BIG, flags=('--ui-store', store))
     assert folded in f2['closed'], 'the fold of %s was not remembered: %s' % (layers[-1], f2['closed'])
     lab = [round(v) for v in lab]
-    return 'wholly in the left panel (%d tall with every part in view); M folds it; %d layers (%s) with %d rows shown and %d waiting under switches that are off; a film switched on brings its six controls up under it; a slider, a switch, a list, a stepped number and a colour (by hue, or in parts that can travel) all answer the pointer; reset (shown once it is changed) puts the material back; the fold of a sub-group is remembered' % (
+    return 'a window of its own (%d tall with every part in view), the panel holding which material it is; M opens it; %d layers (%s) with %d rows shown and %d waiting under switches that are off; a film switched on brings its six controls up under it; a slider, a switch, a list, a stepped number and a colour (by hue, or in parts that can travel) all answer the pointer; reset (shown once it is changed) puts the material back; the fold of a sub-group is remembered' % (
         lab[3] - lab[1], len(layers), ', '.join(layers), shown, len(hidden))
 
 
@@ -953,7 +964,7 @@ def a_material_is_put_together_part_by_part_and_taken_apart_again():
     again = look(back, 'recipe_glass_again')
     s0, s1 = d['settings'], again[0]['settings']
     assert all(s1[k] == s0[k] for k in ('metal', 'rough', 'coat', 'film', 'ior', 'disp')) and not again[0]['material']['changed'], 'taken apart, it is not the glass it was'
-    assert apart_by(glass, again) < 1.5, 'taken apart again it is %.2f grey levels from the glass it began as' % apart_by(glass, again)
+    assert apart_by(glass, again) < 1.5, 'taken apart again it is %.2f grey levels from the glass it began as (settings that differ: %s)' % (apart_by(glass, again), {k: (v, s1.get(k)) for k, v in s0.items() if s1.get(k) != v})
     return 'from "%s" by the list of metals, then frost, clear coat and thin film in the stack: "%s" (%.1f grey levels from the glass); each layer\'s title says its part; the crosses of the recipe, in the lab and in the panel, take it apart again to "%s", within %.1f of the glass it began as' % (
         ' · '.join(words(d)), ' · '.join(words(e)), apart_by(glass, made), ' · '.join(words(again[0])), apart_by(glass, again))
 
@@ -1000,9 +1011,9 @@ def focus_is_blurred_afterwards_or_traced_through_the_lens():
     a = run('%s;%s' % (lens, try_rays), size=BIG, pairs=filling)['settings']
     b = run('%s;%s;wait:3;%s' % (lens, press(r['focus:exact']), try_rays), size=BIG, pairs=filling)['settings']
     assert a['lensN'] == 1 and b['lensN'] == 6, 'the lens rays slider: %s when the blur is made afterwards, %s through the lens' % (a['lensN'], b['lensN'])
-    # the shape of the opening and its turn are with the lens's character, at the foot of the group: the
+    # the shape of the opening and its turn are with the focus, folded under it while the lens is open: the
     # turn answers in both modes
-    character = 'set:aperture=0.15;p:blades=6;fold:material;camera:open;fold:camera-character;wait:4;scroll:left=3000;wait:3'
+    character = 'set:aperture=0.15;p:blades=6;fold:material;camera:open;fold:camera-bokeh;wait:4;scroll:left=3000;wait:3'
     t = run(character, size=BIG, pairs=filling)
     assert within(t['rects']['slot:P.bokehRot'], t['rects']['left']), 'the blade turn is not in view'
     try_turn = on(t, 'P.bokehRot', 90, '') + ';wait:2'
@@ -1035,7 +1046,7 @@ def each_body_has_a_material_of_its_own():
     # the dot of the second body opens the lab on that body; the lab's head names both bodies and says which
     d = run(TWO_BODIES + 'wait:6;%s;wait:4' % press(r['layer:2:material']), size=BIG, pairs=TWO_PAIRS)
     lr, mat = d['rects'], d['material']
-    assert d['lab']['open'] and mat['body'] == 2 and not mat['own'] and not any(k.startswith('body:') for k in lr), 'the material does not show the second body: %s' % mat['body']
+    assert 'material' not in d['closed'] and mat['body'] == 2 and not mat['own'] and not any(k.startswith('body:') for k in lr), 'the material does not show the second body: %s' % mat['body']
     assert 'own:on' in lr, 'the left material group does not follow the selected body'
     # given a material of its own, then gold by name: the first body stays glass
     g = run(TWO_BODIES + 'wait:6;%s;wait:4;%s;wait:6' % (press(r['layer:2:material']), press(lr['own:on'])), size=BIG, pairs=TWO_PAIRS)
@@ -1061,7 +1072,7 @@ def shadows_and_caustics_are_switched_for_all_and_for_each_body():
     assert not any(k.startswith('castShadow') for k in r), 'a body\'s switches show outside the lab'
     # by body: the selected body's switches are in the lab, and only there
     # (the lab's layers folded, so that its casts are in view under its chooser)
-    lab_short = 'room:close;fold:lab-casts;wait:4'
+    lab_short = 'room:close;lab:open;fold:lab-made of;fold:lab-surface;fold:lab-on it;fold:lab-in it;fold:lab-special optics;wait:4'
     d = run(clay + 'room:open;fold:room-surround;fold:room-floor;fold:room-lights;wait:4;%s;wait:8;%s' % (press(r['room/cast:body']), lab_short), size=BIG, pairs=TWO_PAIRS)
     assert d['settings']['cast'] == 1 and d['casting']['on'], 'pressing "by body" gave cast %s, casting %s' % (d['settings']['cast'], d['casting'])
     key = 'castShadow2:no'
@@ -1069,7 +1080,7 @@ def shadows_and_caustics_are_switched_for_all_and_for_each_body():
     e = run(clay + 'room:open;fold:room-surround;fold:room-floor;fold:room-lights;wait:4;%s;wait:8;%s;%s;wait:8' % (press(r['room/cast:body']), lab_short, press(d['rects'][key])), size=BIG, pairs=TWO_PAIRS)
     assert e['settings']['castShadow2'] == 0 and e['casting']['casters'][1] == [False, False] and e['casting']['casters'][0][0], e['casting']
     # the lab has the same switches, and clay has no caustics to cast: that switch is greyed
-    lab = run(clay + 'arg:cast=1;fold:lab-casts;wait:8', size=BIG, pairs=TWO_PAIRS)
+    lab = run(clay + 'arg:cast=1;lab:open;wait:8', size=BIG, pairs=TWO_PAIRS)
     assert 'castShadow2:yes' in lab['rects'] and 'castCaustic2:yes' in lab['rects'], 'the lab lacks the body\'s switches'
     # the light room: the sliders and the detail (the three-way switch is in the light group only)
     room = run(clay + 'arg:cast=2;room:open;fold:room-surround;fold:room-floor;fold:room-lights;wait:8', size=BIG, pairs=TWO_PAIRS)
@@ -1084,14 +1095,22 @@ def shadows_and_caustics_are_switched_for_all_and_for_each_body():
 def a_greyed_control_pressed_switches_on_what_it_needs():
     base = run('lab:open;wait:4', size=BIG)
     r = base['rects']
-    assert base['settings']['sss'] == 0 and base['settings']['sssWalk'] == 0 and 'wake:sssWalk' in r, 'true scattering is not waiting on milkiness'
-    d = run('lab:open;wait:4;%s;wait:4' % press(r['wake:sssWalk']), size=BIG)
+    # what only waits for a part to be switched on is out of sight until it is (true scattering, on milkiness)
+    walk = next(c for c in base['material']['controls'] if c['name'] == 'sssWalk')
+    assert base['settings']['sss'] == 0 and not walk['shown'] and 'wake:sssWalk' not in r and 'sssWalk:on' not in r, 'true scattering is in sight without milkiness'
+    # what does nothing because of something that is on stays in sight, greyed: the index on gold; a press takes the metal off
+    gold = 'lab:open;arg:material=gold;ready;wait:4'
+    g = run(gold, size=BIG)
+    assert 'wake:ior' in g['rects'], 'the index on gold is not greyed in sight'
+    d = run('%s;%s;wait:4' % (gold, press(g['rects']['wake:ior'])), size=BIG)
     s = d['settings']
-    assert s['sssWalk'] == 1 and s['sss'] > 0 and d['error'] is None, 'pressed, true scattering %s with milkiness %s' % (s['sssWalk'], s['sss'])
+    assert s['metal'] == 0 and d['error'] is None, 'pressed, the greyed index left metal at %s' % s['metal']
+    m = run('lab:open;set:sss=0.5;wait:4', size=BIG)
+    assert 'sssWalk:on' in m['rects'], 'with milkiness on, true scattering is not in sight'
     # a film's own control, pressed while there is no film, is not shown; the coat's index puts on a coat
     coat = run('lab:open;wait:4;%s;wait:4' % press(r['wake:coatIor']), size=BIG)['settings'] if 'wake:coatIor' in r else None
     assert coat is None or coat['coat'] > 0, 'pressing the coat index left no coat'
-    return 'from plain glass, a press on the greyed true scattering leaves it on with milkiness at %.2f%s' % (s['sss'], '' if coat is None else '; the coat index puts on a clear coat of %.2f' % coat['coat'])
+    return 'true scattering is out of sight until milkiness is on; on gold a press on the greyed index takes the metal off%s' % ('' if coat is None else '; the coat index puts on a clear coat of %.2f' % coat['coat'])
 
 
 @check
@@ -1114,7 +1133,7 @@ def the_camera_is_one_group_in_a_photographers_terms():
     # (the material folded away, so that the camera is in view)
     base = run('fold:material;fold:camera;wait:4', size=BIG)
     r, c = base['rects'], base['camera']
-    assert all(k in r for k in ('group:cam-lens', 'lens:0', 'slot:P.zoom', 'dof:on', 'group:cam-view', 'slot:P.dist', 'slot:P.elev', 'slot:R.0', 'view:top', 'reset view', 'group:cam-exposure', 'slot:P.ev', 'slot:shutter', 'slot:P.bloom', 'tone')), 'the camera section lacks a row'
+    assert all(k in r for k in ('group:cam-lens', 'lens:0', 'slot:P.zoom', 'dof:on', 'group:cam-view', 'slot:P.dist', 'slot:P.elev', 'slot:R.0', 'reset view', 'group:cam-exposure', 'slot:P.ev', 'slot:shutter', 'slot:P.bloom', 'tone')), 'the camera section lacks a row'
     assert all(within(r[k], r['left']) for k in ('lens:0', 'dof:on')) and c['fstop'] is None and 'everything sharp' in c['says'], c
     assert run('key:k;wait:3')['cameraWindow']['open'] and not run('key:k;wait:3;key:k;wait:3')['cameraWindow']['open'], 'K did not open and fold the camera'
     lens = run('fold:material;fold:camera;wait:4;%s;wait:4' % press(r['lens:3']), size=BIG)
@@ -1289,7 +1308,7 @@ def a_file_from_the_old_arrangement_keeps_all_but_its_folds():
         json.dump(before, f, indent=2)
     d = run('wait:3', flags=('--ui-store', store))
     assert sorted(d['closed']) == FOLDED, 'the old file left %s folded' % d['closed']
-    assert 'slot:P.ior' in d['rects'] and 'render' not in d['rects'], 'the material is not open, or video is not folded'
+    assert 'lab button' in d['rects'] and 'render' not in d['rects'], 'the material is not open, or video is not folded'
     v = d['videoChoices']
     assert (v['size'], v['fps'], v['samples'], v['lens'], v['shutter'], v['codec'], v['quality']) == ('2560x1440', 30, 64, 8, 0.5, 'h265', 20), 'the old file\'s video choices were lost: %s' % v
     assert d['stillBits'] == 16 and d['folders']['stills'].endswith('stills from before'), 'the old file\'s still choices were lost'
@@ -1760,10 +1779,9 @@ def the_arrangement_is_as_designed():
         ys = [r['group:' + g][1] for g in LEFT_GROUPS]
         assert ys == sorted(ys) and all(within(r['group:' + g], left) for g in LEFT_GROUPS), 'the left panel\'s groups are out of order or out of view: %s' % ys
         assert close(r['group:material'][1], left[1] + 20, 1.0), 'the material is not at the head of the left panel'
-        for name in ('mat-name', 'recipe', 'drawn:material', 'drawn:clay', 'slot:P.ior', 'slot:P.disp', 'slot:P.density', 'colour:tintR', 'slot:P.rough', 'slot:P.sss',
-                     'slot:P.coat', 'slot:P.film', 'room button', 'room button', 'group:light', 'group:camera', 'group:quality', 'group:output'):
+        for name in ('mat-name', 'recipe', 'mat-reset', 'drawn:material', 'drawn:clay', 'lab button', 'room button', 'group:light', 'group:camera', 'group:quality', 'group:output'):
             assert within(r[name], left), '%s is not in view in the left panel' % name
-        hidden = [k for k in ('slot:P.dist', 'slot:R.0', 'view:front', 'slot:P.ev', 'render', 'slot:P.av', 'slot:P.zoom', 'lens:0', 'detail:384') if k in r]
+        hidden = [k for k in ('slot:P.dist', 'slot:R.0', 'slot:P.ior', 'slot:P.ev', 'render', 'slot:P.av', 'slot:P.zoom', 'lens:0', 'detail:384') if k in r]
         assert not hidden, 'shown although their groups are folded (or do not apply): %s' % hidden
         # the right panel: its two groups in order
         assert within(r['group:animate'], right) and 'group:detail' not in r, 'the right panel\'s groups are out of order'
@@ -1778,13 +1796,13 @@ def the_arrangement_is_as_designed():
     opened = run('wait:2;%s;wait:2' % press(d['rects']['group:camera']), size=BIG)
     assert 'camera' not in opened['closed'] and 'lens:0' in opened['rects'], opened['closed']
     shut = run('wait:2;%s;wait:3' % press(d['rects']['group:material']), size=BIG)
-    assert 'material' in shut['closed'] and 'slot:P.ior' not in shut['rects'], 'a press on the material title did not fold it'
-    everything = run(';'.join('fold:' + g for g in FOLDED) + ';camera:open;set:aperture=0.05;wait:3', size=BIG)
+    assert 'material' in shut['closed'] and 'lab button' not in shut['rects'], 'a press on the material title did not fold it'
+    everything = run(';'.join('fold:' + g for g in FOLDED) + ';camera:open;lab:open;set:aperture=0.05;wait:3', size=BIG)
     for knob in ('P.dist', 'P.zoom', 'P.roll', 'P.elev', 'P.shiftX', 'R.0', 'R.1', 'R.2', 'P.ev', 'P.bloom', 'P.wbTemp', 'P.contrast', 'P.smooth', 'P.scale', 'P.ns', 'P.nw',
                  'P.av', 'P.focus', 'P.band', 'P.subjectLog', 'P.lensN', 'P.bokehRot', 'P.distort', 'P.tiltX', 'P.grain',
                  'P.ior', 'P.disp', 'P.nb', 'P.speed', 'P.spin'):
         assert 'slot:' + knob in everything['rects'] or 'slot:' + knob in everything['rects'], 'with every group open there is no slider for %s' % knob
-    assert everything['closed'] == [] and everything['panels']['left'] > everything['panels']['room'], 'with everything open the left panel should need to scroll'
+    assert everything['closed'] == [], 'not everything opened: %s' % everything['closed']
     lights = run('room:open;wait:4', size=BIG)['rects']
     assert all('room/slot:P.' + k in lights for k in ('lyaw', 'lpitch', 'lroll', 'lspin')), 'the light room lacks the lights\' sliders'
     return 'material (the named materials, the glass, the way into the lab) and the light room\'s button open on the left, the camera, quality and output folded under them; the shape and animate on the right; nothing scrolls at %s; every group opens from its title and every slider there was is still there' % ', '.join(notes)
@@ -1812,7 +1830,7 @@ def the_line_at_the_foot_says_how_it_is_going():
         assert same_turn(a, b) and close(a['settings']['dist'], b['settings']['dist']), '%s on the line did not do what it does elsewhere on the picture' % name
         assert name == 'a double click' or not same_turn(a, still) or a['settings']['dist'] != still['settings']['dist'], '%s on the line did nothing' % name
     # a click on it focuses on the glass under it, as a click elsewhere does
-    glass, filling = 'set:dist=2.2;set:aperture=0.05;set:fnear=-0.3;set:ffar=0.1;wait:12;', ('scene=surfaces',)
+    glass, filling = 'press:tool:orbit;set:dist=2.2;set:aperture=0.05;set:fnear=-0.3;set:ffar=0.1;wait:12;', ('scene=surfaces',)
     f = run(glass + 'pdown:%.1f,%.1f;pup;wait:2' % (x, y), pairs=filling)['settings']
     assert not close(f['fnear'], -0.3, 1e-3) and close(f['ffar'] - f['fnear'], 0.4), 'a click on the line, with glass under it, did not focus there: %s' % f['fnear']
     # in a narrow window it keeps clear of the panels, or is left out; hidden with the panels it is gone
@@ -1825,7 +1843,7 @@ def the_line_at_the_foot_says_how_it_is_going():
 
 
 @check
-def the_help_opens_from_its_mark_and_holds_the_benchmark():
+def the_help_opens_from_its_mark_and_the_benchmark_runs():
     base = run('wait:2')
     mark, perf = base['rects']['help mark'], base['rects']['perf']
     assert mark[0] >= perf[2] + 8.5 and mark[2] - mark[0] <= 16 and within(mark, [0, 0, W, H]), 'the "?" is at %s, the line at %s' % (mark, perf)
@@ -1839,18 +1857,20 @@ def the_help_opens_from_its_mark_and_holds_the_benchmark():
     assert d['help'] and box and within(box, [0, 0, W, H]), 'pressing the "?" did not open the help'
     assert same_turn(d, base, 0) and d['settings'] == base['settings'], 'pressing the "?" also did something to the picture'
     # a press on the mark is never a press on the picture: not a click that focuses, not the start of a drag
-    glass, filling = 'set:dist=2.2;set:aperture=0.05;set:fnear=-0.3;set:ffar=0.1;wait:12;', ('scene=surfaces',)
+    glass, filling = 'press:tool:orbit;set:dist=2.2;set:aperture=0.05;set:fnear=-0.3;set:ffar=0.1;wait:12;', ('scene=surfaces',)
     x, y = mid(mark)
     f = run(glass + 'pdown:%.1f,%.1f;pup;wait:2' % (x, y), pairs=filling)
     g = run(glass + pull(x, y, 80, -30), pairs=filling)
     assert close(f['settings']['fnear'], -0.3) and f['help'], 'a click on the "?" focused the picture'
     assert same_turn(g, run(glass, pairs=filling), 0), 'a drag begun on the "?" turned the shape'
-    # the benchmark is in it, and runs
-    b = run('help:open;wait:3;%s;wait:8' % press(d['rects']['benchmark']))
+    # the benchmark is in quality (the renderer's speed), and runs
+    q = run('fold:material;fold:quality;wait:3')
+    assert 'benchmark' not in d['rects'] and within(q['rects']['benchmark'], q['rects']['left']), 'the benchmark is not in quality'
+    b = run('fold:material;fold:quality;wait:3;%s;wait:8' % press(q['rects']['benchmark']))
     assert re.match(r'^\d+\.\d\d ms  =  \d+ fps$', b['says']['bench']), 'the benchmark button says %r' % b['says']['bench']
     shut = run('help:open;wait:3;%s;wait:3' % press(d['rects']['help:close']))
     assert not shut['help'] and 'help' not in shut['rects'], 'the cross did not close the help'
-    return 'the "?" follows the line at %s; a press opens the help and leaves the picture alone; the benchmark in it says "%s"; its cross closes it' % ([round(v) for v in mark[:2]], b['says']['bench'])
+    return 'the "?" follows the line at %s; a press opens the help and leaves the picture alone; the benchmark (in quality) says "%s"; its cross closes it' % ([round(v) for v in mark[:2]], b['says']['bench'])
 
 
 @check

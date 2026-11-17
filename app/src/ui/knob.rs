@@ -318,3 +318,23 @@ pub fn colour_rows(ui: &mut Ui, px: &mut Panels, key: &str, rgb: [f64; 3], most:
     ui.data_mut(|d| d.insert_temp(memory, now));
     changed.then(|| hue_rgb(now.hue, now.strength).map(|c| c * level))
 }
+
+/// A colour as its hue and how far it is from white, without its brightness (which something else says,
+/// as a lamp's power does). The colour comes back at full brightness; None if neither was moved.
+pub fn hue_rows(ui: &mut Ui, px: &mut Panels, key: &str, rgb: [f64; 3]) -> Option<[f64; 3]> {
+    let memory = Id::unique(("tint", key));
+    let (hue, strength, _) = rgb_hue(rgb);
+    let kept = ui.data(|d| d.get_temp::<Tint>(memory)).unwrap_or(Tint { hue: 40.0, strength: 0.0 });
+    let mut now = Tint { hue: hue.unwrap_or(kept.hue), strength: strength.unwrap_or(kept.strength) };
+    let mut changed = false;
+    if let Some(v) = hue_row(ui, px, &format!("{key}.hue"), "hue °", now.hue, now.strength).value {
+        now.hue = v;
+        changed = true;
+    }
+    if let Some(v) = value_row(ui, px, &format!("{key}.strength"), "saturation", now.strength, 0.0, 1.0, 0.01).value {
+        now.strength = v;
+        changed = true;
+    }
+    ui.data_mut(|d| d.insert_temp(memory, now));
+    changed.then(|| hue_rgb(now.hue, now.strength))
+}

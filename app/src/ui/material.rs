@@ -169,7 +169,8 @@ const STACK: [Layer; 5] = [
         rows: &[
             ("metal", ""), ("hollow", ""), ("ior", ""), ("disp", ""), ("tintR", ""), ("density", ""), ("spectrum", ""), ("grad", ""), ("gradMode", "grad"),
             ("gradR", "grad"), ("gradAz", "grad"), ("gradEl", "grad"), ("gradOffset", "grad"), ("gradSoft", "grad"), ("gradBands", "grad"), ("gradWave", "grad"), ("fit", ""),
-            ("sss", ""), ("sssDepth", "sss"), ("sssDetail", "sss"), ("bodyR", ""),
+            ("sss", ""), ("sssDepth", "sss"), ("sssDetail", "sss"), ("sssSpread", "sss"),
+            ("sssForward", "sss"), ("sssThrough", "sss"), ("sssHue", "sss"), ("ceramic", "sss"), ("ceramicThrough", "ceramic"), ("meter", "sss"), ("bodyR", ""),
         ],
     },
     Layer { title: "surface", bare: "polished", rows: &[("rough", "")] },
@@ -235,7 +236,7 @@ pub const CHOOSER: &str = "material-chooser";
 
 /// Everything of the material's that folds, by what it is remembered as.
 pub fn folds() -> Vec<String> {
-    std::iter::once(CHOOSER.to_owned()).chain(STACK.iter().skip(3).map(|l| lab_fold(l.title))).chain(std::iter::once("lab-casts".to_owned())).collect()
+    std::iter::once(CHOOSER.to_owned()).chain(STACK.iter().map(|l| lab_fold(l.title))).chain(std::iter::once("lab-casts".to_owned())).collect()
 }
 
 // ---- the recipe -------------------------------------------------------------------------------------
@@ -303,31 +304,54 @@ fn layer_says(layer: usize, parts: &[Part]) -> String {
 /// The recipe as a line of words (more lines if it is long): each part that is on, with a small cross
 /// that takes it off. While the shape is drawn as clay that is said first, with a cross that brings the
 /// material back; whatever is not drawn (hidden by the clay, or left out among bodies of several
-/// materials) is dimmer.
-fn recipe_line(ui: &mut Ui, st: &mut State, px: &mut Panels) {
+/// materials) is dimmer. `reset`: at the right of its first line, the way back to the material as named
+/// (always there, lit once the material has been changed, so that nothing moves when it is).
+///
+/// Nothing below it moves while a slider is held: a part switched on or off by the drag joins or leaves
+/// the line when the pointer is let go, and the line keeps at least the height it had (the owner's rows
+/// must not jump under the pointer).
+fn recipe_line(ui: &mut Ui, st: &mut State, px: &mut Panels, reset: bool) {
     let (p, how) = (settings(st), how(st));
     let clay = how.clay;
     let mut parts = recipe(p);
     // (plain glass has no switch of its own: it shows unless the shape is drawn as clay)
     let shows: Vec<bool> = parts.iter().map(|part| part.off.first().map_or(!clay, |(name, _)| acts_as(name, p, how))).collect();
     if clay { parts.insert(0, Part { words: "clay".into(), layer: 0, off: vec![("clay", 0.0)] }); }
-    let shows: Vec<bool> = if clay { std::iter::once(true).chain(shows).collect() } else { shows };
+    let mut shows: Vec<bool> = if clay { std::iter::once(true).chain(shows).collect() } else { shows };
 
-    // where each goes: along lines that wrap at the panel's width
+    // while the pointer is held, only the parts the line had when it was pressed, and no less height
+    let key = |part: &Part| part.off.first().map_or_else(|| "glass".to_owned(), |o| o.0.to_owned());
+    let memo = Id::unique(("recipe as it was", px.place));
+    let held = ui.input(|i| i.pointer.any_down());
+    let kept: Option<(Vec<String>, f32)> = if held { ui.data(|d| d.get_temp(memo)) } else { None };
+    if let Some((keys, _)) = &kept {
+        let keep: Vec<bool> = parts.iter().map(|part| keys.contains(&key(part))).collect();
+        let mut k = keep.iter();
+        parts.retain(|_| *k.next().unwrap_or(&true));
+        let mut k = keep.iter();
+        shows.retain(|_| *k.next().unwrap_or(&true));
+    }
+
+    // where each goes: along lines that wrap at the panel's width (the first line leaves room for reset)
     let (font, h, cross, space) = (mono(SIZE), 20.0, 12.0, 4.0);
     let width = ui.available_width();
+    let pad = egui::vec2(8.0, 2.0);
+    let reset_w = if reset { button_size(ui, "reset", &font, pad).x } else { 0.0 };
     let mut places: Vec<Rect> = Vec::new();
     let (mut x, mut y) = (0.0f32, 0.0f32);
     for part in &parts {
         let w = (text_width(ui, &part.words, &font) + 15.0 + if part.off.is_empty() { 0.0 } else { cross + 2.0 }).ceil();
-        if x > 0.0 && x + w > width {
+        let room = if y == 0.0 && reset { width - reset_w - space } else { width };
+        if x > 0.0 && x + w > room {
             x = 0.0;
             y += h + space;
         }
         places.push(Rect::from_min_size(Pos2::new(x, y), egui::vec2(w, h)));
         x += w + space;
     }
-    let r = row(ui, y + h);
+    let tall = (y + h).max(kept.as_ref().map_or(0.0, |k| k.1));
+    if !held { ui.data_mut(|d| d.insert_temp(memo, (parts.iter().map(key).collect::<Vec<_>>(), tall))); }
+    let r = row(ui, tall);
     px.note(format!("{}recipe", px.whose()), r);
     let mut taken = None;
     for (i, ((part, place), shows)) in parts.iter().zip(&places).zip(&shows).enumerate() {
@@ -350,6 +374,18 @@ fn recipe_line(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     }
     if let Some(i) = taken {
         for (name, v) in &parts[i].off { set(st, name, *v); }
+    }
+    if reset {
+        let size = button_size(ui, "reset", &font, pad);
+        let at = Rect::from_min_size(Pos2::new(r.right() - size.x, r.top() + (h - size.y) / 2.0), size);
+        px.note("mat-reset", at);
+        let is_changed = changed(st) && own(st);
+        let now = chosen(st);
+        let tip = if is_changed { format!("every setting of the material back to what {} sets", NAMED[now].name) } else { format!("the material is as {} sets it", NAMED[now].name) };
+        ui.scope(|ui| {
+            if !is_changed { ui.disable(); }
+            if button(ui, at, Id::unique("material as named"), "reset", false, font.clone()).on_hover_text(tip).clicked() { choose(st, now); }
+        });
     }
 }
 
@@ -490,7 +526,8 @@ fn name_line(ui: &mut Ui, st: &State, px: &mut Panels, spare: f32, folds: Option
     dot(ui, Pos2::new(r.left() + 5.5, r.center().y), swatches(ui, st)[now], false);
     let room = Rect::from_min_max(Pos2::new(r.left() + 16.0, r.top()), Pos2::new(r.right() - spare, r.bottom()));
     let mut text = NAMED[now].name.to_owned();
-    if changed(st) { text += " · changed"; }
+    // ("changed" only where the name keeps all of its room: the lit reset at the recipe's right says it too)
+    if changed(st) && text_width(ui, &format!("{text} · changed"), &mono(SIZE)) <= room.width() { text += " · changed"; }
     // (folded, the line says which group the material is of, if there is room for that)
     if folds == Some(false) {
         let longer = format!("{} · {text}", NAMED[now].group);
@@ -748,6 +785,7 @@ fn wake(ui: &mut Ui, st: &mut State, px: &mut Panels, name: &str, kind: Option<K
 /// One control from the table, drawn as its kind says; greyed if it does nothing as things stand.
 fn control(ui: &mut Ui, st: &mut State, px: &mut Panels, at: usize, knobs: &[Knob]) {
     let c = &CONTROLS[at];
+    if c.costly { px.costly_shown = true; }
     let live = acts_as(c.name, settings(st), how(st));
     let h = if matches!(c.kind, Kind::Switch | Kind::Choice) { 24.0 } else { ROW_H };
     let tip = about(ui, c.name, c.note, settings(st), how(st), live, h);
@@ -770,11 +808,11 @@ fn control(ui: &mut Ui, st: &mut State, px: &mut Panels, at: usize, knobs: &[Kno
 
 // ---- the group on the left ----------------------------------------------------------------------------
 
-/// The material section, wholly in the left panel: whose material it is (the body of the layer selected
-/// in the layers list), which named material (the chooser folds under its name), whether it is its own,
-/// the recipe, whether it is drawn as itself or as clay, then the material layer by layer from the body
-/// outwards: what it is made of, its surface and what lies on it as groups; what is in it, special optics
-/// and what it casts as sub-groups (detail, folded at first).
+/// The material section of the left panel: only what says which material it is. Whose material it is
+/// (the body of the layer selected in the layers list), which named material (the chooser folds under its
+/// name), whether it is its own, the recipe (with the way back to the material as named at its right),
+/// whether it is drawn as itself or as clay, and the way into the materials lab, where every one of its
+/// controls is (the owner's ruling of 2026-11-17: the sliders live wholly in the lab, nothing twice).
 pub fn group(ui: &mut Ui, st: &mut State, px: &mut Panels, _knobs: &[Knob]) {
     let clay = how(st).clay;
     let name = NAMED[chosen(st)].name;
@@ -796,20 +834,12 @@ pub fn group(ui: &mut Ui, st: &mut State, px: &mut Panels, _knobs: &[Knob]) {
     let names = label_width(ui);
     set_label_width(ui, COL_LABEL_WIDE);
 
-    // which material it is, with the way back to it as named; under that line the chooser of named
-    // materials, which a press on the line folds away or brings back
-    // (the button that puts it back as named is there only while it has been changed)
+    // which material it is; under that line the chooser of named materials, which a press on the line
+    // folds away or brings back. (The way back to the material as named is at the right of the recipe,
+    // where it takes nothing from the name.)
     let open = !px.store.is_closed(CHOOSER);
-    let is_changed = changed(st) && own(st);
-    let (r, pressed) = name_line(ui, st, px, if is_changed { 80.0 } else { 18.0 }, Some(open));
+    let (_, pressed) = name_line(ui, st, px, 18.0, Some(open));
     if pressed { px.store.fold(CHOOSER); }
-    if is_changed {
-        let reset_at = Rect::from_min_size(Pos2::new(r.right() - 74.0, r.center().y - 9.5), egui::vec2(54.0, 19.0));
-        px.note("mat-reset", reset_at);
-        let now = chosen(st);
-        let tip = format!("every setting of the material back to what {} sets", NAMED[now].name);
-        if button(ui, reset_at, Id::unique("material as named"), "reset", false, mono(SIZE)).on_hover_text(tip).clicked() { choose(st, now); }
-    }
     if !px.store.is_closed(CHOOSER) {
         gap(ui, 3.0);
         named(ui, st, px);
@@ -820,7 +850,7 @@ pub fn group(ui: &mut Ui, st: &mut State, px: &mut Panels, _knobs: &[Knob]) {
     gap(ui, 5.0);
     ui.scope(|ui| {
         if !mine { ui.disable(); }
-        recipe_line(ui, st, px);
+        recipe_line(ui, st, px, true);
     });
     gap(ui, 3.0);
 
@@ -832,39 +862,105 @@ pub fn group(ui: &mut Ui, st: &mut State, px: &mut Panels, _knobs: &[Knob]) {
     for (place, name) in run.places.iter().zip(["drawn:material", "drawn:clay"]) { px.note(name, *place); }
     if let Some(i) = run.clicked { st.p.clay = i as f64; }
 
-    // the stack: groups for what it is made of, its surface and what lies on it; sub-groups (folded) for
-    // what is in it and the special optics, each title saying what is on in it
-    let knobs = sliders(st);
-    for (layer, l) in STACK.iter().enumerate() {
-        let says = layer_says(layer, &recipe(settings(st)));
-        if layer < 3 {
-            px.heading(ui, &lab_fold(l.title), l.title);
-            ui.scope(|ui| {
-                if !mine { ui.disable(); }
-                stack_rows(ui, st, px, &layer_rows(layer), &knobs);
-            });
-        } else {
-            px.sub(ui, &lab_fold(l.title), l.title, &says, |ui, px| {
-                if !mine { ui.disable(); }
-                stack_rows(ui, st, px, &layer_rows(layer), &knobs);
-            });
-        }
-    }
-    // what the body casts on the others: its own two switches
-    let (s, c) = gf_core::cast::switches(&st.p, body(st));
-    let word = |x: gf_core::cast::Switch| match x { gf_core::cast::Switch::Auto => "material", gf_core::cast::Switch::On => "yes", gf_core::cast::Switch::Off => "no" };
-    let says = if s == c { format!("{} for both", word(s)) } else { format!("shadow {} · caustics {}", word(s), word(c)) };
-    px.sub(ui, "lab-casts", "casts", &says, |ui, px| {
-        let layer = body(st);
-        studio::switches(ui, st, px, layer);
-    });
-    if CONTROLS.iter().any(|c| c.costly) {
-        gap(ui, 6.0);
-        legend(ui);
+    // the way into the lab, where every control of the material is
+    gap(ui, 2.0);
+    let (resp, at) = wide_button(ui, Id::unique("materials lab"), "materials lab…", px.store.lab_open);
+    px.note("lab button", at);
+    if resp.on_hover_text("every control of the material, layer by layer from the body outwards: what it is made of, its surface, what lies on it, what is in it, special optics, what it casts · key M").clicked() {
+        px.store.lab_open = !px.store.lab_open;
     }
     set_label_width(ui, names);
-    // (where the whole material is, for tests)
-    px.note("lab", Rect::from_min_max(Pos2::new(ui.cursor().left(), top), Pos2::new(ui.cursor().left() + ui.available_width(), ui.cursor().top())));
+    // (where the material's section is, for tests)
+    px.note("material", Rect::from_min_max(Pos2::new(ui.cursor().left(), top), Pos2::new(ui.cursor().left() + ui.available_width(), ui.cursor().top())));
+}
+
+/// Show the materials lab if it is open: a window of its own floating over the picture, with every control
+/// of the material, layer by layer from the body outwards. It is opened from the material section of the
+/// left panel (or with M), dragged wherever it is wanted, and remembered: whether it is open, and where.
+/// `full`: the inside of the program's window; `below`: the lowest a window may start without covering
+/// the camera's tools over the picture.
+pub fn lab(ctx: &egui::Context, st: &mut State, px: &mut Panels, full: Rect, below: f32) {
+    if !px.store.lab_open { return; }
+    // it first appears beside the left panel, under the camera's tools, where it covers neither panel
+    // (beside the light room, if that is open where it would be)
+    let x = px.left_at.map_or(full.left() + EDGE, |r| r.right() + 10.0);
+    let x = if px.store.room_open && px.store.room_at.is_some_and(|p| (p[0] - x).abs() < 8.0) { x + FLOAT_W + 34.0 } else { x };
+    let first = px.store.lab_at.map_or(Pos2::new(x, below), |p| Pos2::new(p[0], p[1]));
+    let max_h = (full.bottom() - first.y.max(EDGE) - EDGE - 44.0).max(80.0);
+    let bodies = st.bodies();
+    let title = if bodies.len() > 1 { format!("materials lab · body {}", st.body_of(st.stack.sel) + 1) } else { "materials lab".to_owned() };
+    let out = floating(ctx, "materials lab", &title, LAB_W, first, max_h, |ui| {
+        if px.rendering { ui.disable(); }
+        px.place = "lab";
+        px.costly_shown = false;
+        set_label_width(ui, LAB_LABEL);
+        // which material it is (words only: it is chosen in the panel)
+        let r = row(ui, 17.0);
+        dot(ui, Pos2::new(r.left() + 5.5, r.center().y), swatches(ui, st)[chosen(st)], false);
+        text_in(ui, Rect::from_min_max(Pos2::new(r.left() + 16.0, r.top()), r.max), Align2::LEFT_CENTER, NAMED[chosen(st)].name, mono(SIZE), DIM);
+        px.note("lab/mat-name", r);
+        let mine = own(st);
+        if !mine { note(ui, "Made of the first body's material: give it a material of its own (own material, in the panel) to change it here."); }
+        // the stack: a group for each layer, each title saying what is on in it
+        let knobs = sliders(st);
+        for (layer, l) in STACK.iter().enumerate() {
+            let says = layer_says(layer, &recipe(settings(st)));
+            if px.window_group(ui, &lab_fold(l.title), l.title, &says) {
+                ui.scope(|ui| {
+                    if !mine { ui.disable(); }
+                    stack_rows(ui, st, px, &layer_rows(layer), &knobs);
+                });
+            }
+        }
+        // what the body casts on the others: its own two switches
+        let (s, c) = gf_core::cast::switches(&st.p, body(st));
+        let word = |x: gf_core::cast::Switch| match x { gf_core::cast::Switch::Auto => "material", gf_core::cast::Switch::On => "yes", gf_core::cast::Switch::Off => "no" };
+        let says = if s == c { format!("{} for both", word(s)) } else { format!("shadow {} · caustics {}", word(s), word(c)) };
+        if px.window_group(ui, "lab-casts", "casts", &says) {
+            let layer = body(st);
+            studio::switches(ui, st, px, layer);
+        }
+        // (the mark of a costly control is explained only while one is in view)
+        if px.costly_shown {
+            gap(ui, 6.0);
+            legend(ui);
+        }
+        gap(ui, 2.0);
+    });
+    if out.closed { px.store.lab_open = false; }
+    px.store.lab_at = Some([out.rect.min.x.round(), out.rect.min.y.round()]);
+    px.note("lab", out.rect);
+    px.note("lab:bar", out.bar);
+    px.note("lab:close", out.cross);
+}
+
+/// Parts a person switches on, at a sensible amount, that other controls depend on: what is tried to tell
+/// whether a control that does nothing as things stand is only waiting for a part to be switched on.
+const PARTS: [(&str, f64); 15] = [
+    ("sss", 1.0), ("metal", 4.0), ("coat", 1.0), ("film", 360.0), ("ceramic", 1.0), ("glow", 2.0), ("bubbles", 0.3), ("grad", 1.0),
+    ("play", 0.8), ("silk", 0.8), ("cracks", 0.4), ("biref", 0.009), ("grin", 0.1), ("rough", 0.3), ("spectrum", 1.0),
+];
+
+/// Does this control do nothing only because a part it belongs to is not on? (Its row then stays out of
+/// sight until the part is switched on, as a part's own rows stand under its switch; a control that does
+/// nothing because of something that is on, an index on a metal, stays in sight, greyed, saying why.)
+/// Told by switching on one part, then two, and seeing whether it then means something.
+fn waits_for_part(name: &str, p: &Settings) -> bool {
+    if material::applies(name, p) { return false; }
+    let off: Vec<(&str, f64)> = PARTS.iter().copied().filter(|(n, _)| !is_on(n, p) && *n != name).collect();
+    let with = |changes: &[(&str, f64)]| {
+        let mut q = p.clone();
+        for (n, v) in changes { q.set(n, *v); }
+        material::applies(name, &q)
+    };
+    if off.iter().any(|a| with(&[*a])) { return true; }
+    off.iter().enumerate().any(|(i, a)| off[i + 1..].iter().any(|b| with(&[*a, *b])))
+}
+
+/// Is a row of the stack shown? Not while the part it stands under is off, nor while it waits for a part
+/// that is off.
+fn row_shown(name: &str, under: &str, p: &Settings) -> bool {
+    (under.is_empty() || is_on(under, p)) && !waits_for_part(name, p)
 }
 
 /// How far the controls of a part stand in from its switch.
@@ -878,7 +974,7 @@ fn stack_rows(ui: &mut Ui, st: &mut State, px: &mut Panels, rows: &[Row], knobs:
     let left = ui.cursor().left();
     for (name, under) in rows {
         let inside = !under.is_empty();
-        if inside && !is_on(under, settings(st)) { continue; }
+        if !row_shown(name, under, settings(st)) { continue; }
         // (the bar runs down beside the rows that follow a switch, and ends where they end)
         if !inside {
             if let Some(top) = run.take() { side_bar(ui, left + 2.0, top, ui.cursor().top() - 1.0, 0.3); }
@@ -911,7 +1007,7 @@ pub fn told(st: &State, px: &Panels) -> serde_json::Value {
     let row = |name: &str| {
         let (layer, under) = place(name).unwrap_or((0, ""));
         let live = acts_as(name, p, how);
-        json!({ "layer": STACK[layer].title, "under": under, "shown": under.is_empty() || is_on(under, p), "acts": live, "value": p.get(name), "wants": if live { None } else { wants_as(name, p, how) } })
+        json!({ "layer": STACK[layer].title, "under": under, "shown": row_shown(name, under, p), "acts": live, "value": p.get(name), "wants": if live { None } else { wants_as(name, p, how) } })
     };
     let controls: Vec<serde_json::Value> = CONTROLS
         .iter()
@@ -1000,7 +1096,7 @@ mod tests {
                 assert!(under.is_empty() || rows[..at].iter().any(|r| r.0 == *under), "{name} stands under {under}, which is not above it in {}", STACK[l].title);
             }
         }
-        assert_eq!(folds().len(), STACK.len() - 1);
+        assert_eq!(folds().len(), STACK.len() + 2);
         // the named materials: ids are unique, and each group's materials come in one run
         for (i, n) in NAMED.iter().enumerate() {
             assert_eq!(NAMED.iter().position(|m| m.id == n.id), Some(i), "two materials are called {}", n.id);

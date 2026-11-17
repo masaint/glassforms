@@ -1,12 +1,12 @@
 //! What lies over the picture without being a panel: the quiet line of figures at the foot of the window
 //! (how large the picture is traced, how fast, how long the shape took to build), the small "?" after it,
-//! and the help the "?" opens: what the mouse and the keys do, and the benchmark.
+//! and the help the "?" opens: what the mouse, the tools over the picture and the keys do.
 
 use eframe::egui::{self, Align2, Color32, CursorIcon, Id, Pos2, Rect, Sense, Stroke, Ui};
 
 use super::theme::*;
 use super::widgets::*;
-use super::{Bench, Panels, Request};
+use super::Panels;
 
 /// How far the line's middle is from the foot of the window, and the size of its letters.
 const FOOT: f32 = 15.0;
@@ -65,26 +65,33 @@ pub fn foot(ui: &mut Ui, px: &mut Panels, full: Rect) {
 }
 
 /// What the mouse does on the picture, and what the keys do. `families`: how many there are.
-fn gestures(families: usize) -> [(&'static str, Vec<(String, &'static str)>); 3] {
+fn gestures(families: usize) -> [(&'static str, Vec<(String, &'static str)>); 4] {
     let s = |t: &str| t.to_owned();
     [
         ("on the picture", vec![
             (s("drag"), "turn the view (flying: look round)"),
-            (s("right-drag, shift-drag"), "slide the view (flying, right-drag looks round)"),
+            (s("right-drag, shift-drag"), "slide the view (flying: right-drag looks round)"),
             (s("ctrl-drag, middle-drag"), "roll the view"),
             (s("wheel"), "closer, further away (flying: how fast)"),
             (s("shift-wheel"), "change the lens"),
-            (s("click"), "choose the shape or lamp there; on nothing, let go"),
-            (s("alt-click"), "focus there (with an aperture; so does a click with the camera tool)"),
+            (s("click"), "choose the shape or lamp there (a lamp opens the light room at it); on nothing, let go"),
+            (s("alt-click"), "focus there, while the lens is open (so does a click with the orbit tool)"),
             (s("double click"), "put the view back"),
+            (s("drop a file"), "a setup opens, a panorama lights the shape, a model becomes the shape (with shift: one more layer)"),
         ]),
         ("on a slider", vec![
             (s("press, drag"), "set it"),
             (s("shift-drag"), "set it finely (ten times finer)"),
             (s("ctrl-shift-drag"), "finer still (a hundred times), between its steps"),
-            (s("alt-drag"), "take it past its ends (with shift, ctrl-shift: finely), as far as is safe"),
-            (s("click its number"), "type a value (enter keeps it, esc leaves it); past its ends shows in green"),
+            (s("alt-drag"), "take it past its ends, as far as is safe (with shift or ctrl-shift: finely)"),
+            (s("click its number"), "type a value: enter keeps it, esc leaves it; past its ends shows in green"),
             (s("∿"), "let it travel while animating"),
+        ]),
+        ("over the picture", vec![
+            (s("orbit, fly, frame"), "the camera's tools, beside the left panel"),
+            (s("dots 1 – 0"), "the camera slots: a click goes to a stored view, ctrl+click stores one"),
+            (s("cube"), "which way the camera looks; a click on an end looks from that side"),
+            (s("select … size"), "the object tools, beside the right panel: choose, move, turn and size"),
         ]),
         ("keys", vec![
             (s("space"), "spin, or stop spinning"),
@@ -94,7 +101,7 @@ fn gestures(families: usize) -> [(&'static str, Vec<(String, &'static str)>); 3]
             (s("R"), "put the view back"),
             (s("L"), "the light room"),
             (s("M"), "the materials lab"),
-            (s("K"), "the camera"),
+            (s("K"), "fold the camera section, or open it"),
             (s("C"), "clay, or the material again"),
             (s("H"), "hide the panels, or show them"),
             (s("G"), "the handles on what is chosen, or not"),
@@ -103,7 +110,7 @@ fn gestures(families: usize) -> [(&'static str, Vec<(String, &'static str)>); 3]
             (s("V"), "orbit, or fly"),
             (s("W A S D  Q E"), "flying: forward, left, back, right; down, up (shift fast, ctrl slow)"),
             (s("F11"), "fullscreen (Esc leaves it)"),
-            (s("ctrl+Z, ctrl+shift+Z"), "undo, redo (also ctrl+Y)"),
+            (s("ctrl+Z, ctrl+shift+Z"), "undo, redo (also ctrl+Y): the line under the camera's tools says what changed"),
             (s("ctrl+1 – 0"), "store the view in a slot"),
             (s("shift+1 – 0"), "go to a stored view"),
             (s("Esc while dragging"), "call the drag off: back as it was"),
@@ -112,37 +119,31 @@ fn gestures(families: usize) -> [(&'static str, Vec<(String, &'static str)>); 3]
     ]
 }
 
-/// The help, if it is open: a floating window. `full`: the inside of the program's window.
+/// How wide the help is, and its column of gestures and keys.
+const HELP_W: f32 = 420.0;
+const HELP_KEYS: f32 = 150.0;
+
+/// The help, if it is open: a floating window. `full`: the inside of the program's window. Its words wrap,
+/// so nothing is cut off at any size.
 pub fn help(ctx: &egui::Context, px: &mut Panels, families: usize, full: Rect) {
     if !px.help_open { return; }
-    let width = FLOAT_W;
+    let width = HELP_W;
     // it first appears in the middle, just above the line it was opened from
-    let first = Pos2::new(full.center().x - (width + 24.0) / 2.0, (full.bottom() - 550.0).max(EDGE));
+    let first = Pos2::new(full.center().x - (width + 24.0) / 2.0, (full.bottom() - 640.0).max(EDGE));
     let out = floating(ctx, "help", "mouse and keys", width, first, (full.height() - 2.0 * EDGE - 44.0).max(80.0), |ui| {
         set_label_width(ui, COL_LABEL);
         for (title, lines) in gestures(families) {
             section(ui, title, "");
             for (what, does) in lines {
-                let r = row(ui, 17.0);
-                text_in(ui, Rect::from_min_size(r.min, egui::vec2(142.0, r.height())), Align2::LEFT_CENTER, &what, mono(SMALL), BRIGHT);
-                text_in(ui, Rect::from_min_max(Pos2::new(r.left() + 146.0, r.top()), r.max), Align2::LEFT_CENTER, does, sans(SMALL), DIM);
+                let top = ui.cursor().top();
+                let left = ui.cursor().left();
+                let g = wrapped(ui, does, sans(SMALL), DIM, ui.available_width() - HELP_KEYS - 4.0, 1.35);
+                let h = g.size().y.max(17.0) + 2.0;
+                let r = row(ui, h);
+                text_in(ui, Rect::from_min_size(Pos2::new(left, top), egui::vec2(HELP_KEYS, 17.0)), Align2::LEFT_CENTER, &what, mono(SMALL), BRIGHT);
+                ui.painter().galley(Pos2::new(r.left() + HELP_KEYS + 4.0, top + (17.0 - SMALL * 1.35) / 2.0), g, DIM);
             }
         }
-        // how fast this view can be drawn when nothing waits for the display
-        section(ui, "speed", "");
-        let caption = match &px.bench {
-            Bench::Idle => "benchmark (no vsync)",
-            Bench::Asked => "running...",
-            Bench::Done(result) => result.as_str(),
-        };
-        ui.scope(|ui| {
-            if px.rendering { ui.disable(); }
-            let (resp, at) = wide_button(ui, Id::unique("benchmark"), caption, false);
-            if resp.on_hover_text("times 60 frames of this view turning, drawn as fast as they will go").clicked() && px.bench != Bench::Asked {
-                px.requests.push(Request::Benchmark);
-            }
-            if px.record { px.rects.insert("benchmark".into(), at); }
-        });
     });
     if out.closed { px.help_open = false; }
     px.note("help", out.rect);

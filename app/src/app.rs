@@ -872,11 +872,18 @@ impl App {
                     if let Some(i) = crate::ui::handles::pick_lamp(&self.engine.state, self.full, d.at) {
                         self.px.handles.pick(Some(i));
                         self.px.lamp = i;
+                        // (the lamp's own controls are in the light room: it opens at this lamp)
+                        self.px.store.room_open = true;
+                        if self.px.store.is_closed("room-lamps") { self.px.store.fold("room-lamps"); }
                     } else if let Some(i) = crate::ui::handles::pick_layer(&self.engine, fx, fy) {
                         self.px.handles.pick(None);
                         if i != self.engine.state.stack.sel { self.engine.state.select_layer(i); }
                     } else {
+                        let had = self.px.handles.picked;
                         self.px.handles.let_go();
+                        if had && (self.px.handles.on || self.px.handles.select) {
+                            self.px.nav.say_for_objects("let go · click a shape to choose it".into());
+                        }
                     }
                 }
                 self.drag = None;
@@ -1004,16 +1011,20 @@ impl App {
     }
 
     fn undo(&mut self) {
+        let before = self.engine.state.undo_snapshot();
         let done = self.history.undo(&mut self.engine.state);
         self.px.handles.grab = None;
         let left = self.history.can_undo();
-        self.px.nav.say(if done { format!("undone · {left} more") } else { "nothing to undo".into() });
+        let what = if done { crate::ui::undo_words(&before, &self.engine.state.undo_snapshot()) } else { String::new() };
+        self.px.nav.say(if done { format!("undone: {what} · {left} more") } else { "nothing to undo".into() });
     }
     fn redo(&mut self) {
+        let before = self.engine.state.undo_snapshot();
         let done = self.history.redo(&mut self.engine.state);
         self.px.handles.grab = None;
         let left = self.history.can_redo();
-        self.px.nav.say(if done { format!("redone · {left} more") } else { "nothing to redo".into() });
+        let what = if done { crate::ui::undo_words(&before, &self.engine.state.undo_snapshot()) } else { String::new() };
+        self.px.nav.say(if done { format!("redone: {what} · {left} more") } else { "nothing to redo".into() });
     }
     /// (slot i: 0 to 9, shown as 1 to 9 and 0)
     fn store_view(&mut self, i: usize) {
@@ -1026,7 +1037,8 @@ impl App {
         self.px.nav.say(words);
     }
 
-    // space: spin.  P: animate.  H: hide the panels.  L: the light room.  F11: fullscreen.  R: reset the view.
+    // space: spin.  P: animate.  H: hide the panels.  L: the light room.  M: the materials lab.  K: fold the
+    // camera.  F11: fullscreen.  R: reset the view.
     // F: frame what is chosen.  V: orbit or fly (flying: W A S D Q E move).  G, T, Esc: the tools.
     // C: clay or glass.  F1: the help.  1-9: family.  arrows: step through the shapes.
     fn keys(&mut self, ctx: &egui::Context) {
@@ -1048,8 +1060,8 @@ impl App {
                     (self.px.hide_left, self.px.hide_right) = (hide, hide);
                 }
                 L => self.px.store.room_open = !self.px.store.room_open,
-                // the material and the camera: their sections opened or folded
-                M => self.px.store.fold("material"),
+                // the materials lab opened or closed; the camera's section opened or folded
+                M => self.px.store.lab_open = !self.px.store.lab_open,
                 K => self.px.store.fold("camera"),
                 C => st.p.clay = if st.p.clay > 0.5 { 0.0 } else { 1.0 },
                 F1 => self.px.help_open = !self.px.help_open,
@@ -1176,6 +1188,7 @@ impl App {
         }
         let (st, px) = (&mut self.engine.state, &mut self.px);
         px.room_h = max_h;
+        px.full = self.full;
         (px.left_at, px.right_at) = (None, None);
         if !px.hide_left {
             let to = px.scroll_to[0].take();
@@ -1199,7 +1212,9 @@ impl App {
         }
         // the windows that float over both: hidden with the panels, but not closed
         if !(px.hide_left && px.hide_right) {
+            let below = crate::ui::tools::below_left(self.full);
             room::show(ctx, st, px, self.full);
+            material::lab(ctx, st, px, self.full, below);
             crate::ui::sculpt::show(ctx, st, px, self.full);
             overlay::help(ctx, px, st.families.len(), self.full);
         }
@@ -1528,12 +1543,12 @@ impl App {
             }
             Act::Room(open) => self.px.store.room_open = open,
             Act::Sculpt(open) => self.px.store.sculpt_open = open,
-            // (the material and the camera are sections of the left panel now: these open or fold them)
+            // (the materials lab is a window of its own; opened by a script, every layer of it is open too, so that
+            // every part of the material is in view)
             Act::Lab(open) => {
-                if open == self.px.store.is_closed("material") { self.px.store.fold("material"); }
-                // (open, as the lab was: every part of the material in view, its sub-groups open too)
+                self.px.store.lab_open = open;
                 if open {
-                    for g in ["lab-in it", "lab-special optics", "lab-casts"] {
+                    for g in material::folds().iter().skip(1) {
                         if self.px.store.is_closed(g) { self.px.store.fold(g); }
                     }
                 }
@@ -1895,7 +1910,7 @@ impl App {
         let camera = json!({ "focal": r.focal, "fstop": r.fstop, "field": [r.field_v, r.field_h], "focusMm": r.focus_mm, "distanceMm": r.distance_mm, "proj": st.camera().proj.id(),
                              "says": crate::ui::camera::summary(st, self.px.aspect) });
         let more = json!({
-            "lab": { "open": !self.px.store.is_closed("material") },
+            "lab": { "open": self.px.store.lab_open, "at": self.px.store.lab_at },
             "cameraWindow": { "open": !self.px.store.is_closed("camera") },
             "model": { "is": st.is_model(), "needsFile": st.needs_file(st.stack.sel), "path": st.model_file(st.stack.sel), "known": self.px.model.known, "file": self.px.model.file,
                        "line": self.px.model.line, "tip": self.px.model.tip, "shell": self.px.model.shell, "foundShell": self.px.model.found_shell, "ownSmooth": self.px.model.own_smooth,
@@ -2078,15 +2093,11 @@ impl eframe::App for App {
             self.fly(&ctx);
         }
         self.panels(&ctx);
-        // the tool bar and the cube of the room's axes, between the panels (in the corners while they are
-        // hidden); where the room between them is too short, the cube gives way first
+        // the camera's bar with the cube beside the left panel, the object tools beside the right (in the
+        // corners while the panels are hidden); where the room between them is too short, the cube gives way
+        // first, then the object tools
         if self.video.is_none() {
-            let lo = self.px.left_at.map_or(self.full.left(), |r| r.right());
-            let hi = self.px.right_at.map_or(self.full.right(), |r| r.left());
-            let room = hi - lo;
-            if room >= crate::ui::tools::BAR_W + 24.0 { crate::ui::tools::bar(&ctx, &mut self.engine.state, &mut self.px, self.full); }
-            if room >= crate::ui::tools::BAR_W + crate::ui::tools::CUBE + 30.0 { crate::ui::tools::cube(&ctx, &mut self.engine.state, &mut self.px, self.full); }
-            crate::ui::tools::words(&ctx, &mut self.px, self.full);
+            crate::ui::tools::bars(&ctx, &mut self.engine.state, &mut self.px, self.full);
         }
         self.serve(frame);
         if self.video.is_none() { self.history_after(&ctx); }

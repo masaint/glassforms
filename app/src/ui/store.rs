@@ -11,15 +11,17 @@ use serde::{Deserialize, Serialize};
 pub const FILE_NAME: &str = "glassforms-ui.json";
 
 /// Which arrangement of the panels this program has. A file written for an earlier arrangement keeps
-/// everything it says except which groups are folded: its groups were other groups, in other places,
-/// and folding them the old way would hide what this arrangement means a newcomer to see.
-pub const ARRANGEMENT: u32 = 6;
+/// everything it says except which groups are folded and where the floating windows were left: its
+/// groups were other groups, in other places, and folding them the old way would hide what this
+/// arrangement means a newcomer to see; and its windows were placed round tools that have since moved
+/// (arrangement 7 split the tool bar and made the material's controls a window of their own).
+pub const ARRANGEMENT: u32 = 7;
 
 /// Every group that folds: those of the left panel from the top, those of the right, those of the light room.
 /// (The chooser of named materials and the layers of the materials lab fold too. They are not listed
 /// here: the material's own code names them, see `material::folds`.)
-pub const GROUPS: [&str; 16] = [
-    "material", "camera", "camera-grade", "camera-character", "quality", "output", "video", "placement", "joins", "animate", "animate-more", "room-surround",
+pub const GROUPS: [&str; 17] = [
+    "material", "camera", "camera-character", "camera-bokeh", "camera-grade", "quality", "output", "video", "placement", "joins", "animate", "animate-more", "room-surround",
     "room-floor", "room-lights", "room-cast", "room-turn",
 ];
 
@@ -27,8 +29,9 @@ pub const GROUPS: [&str; 16] = [
 /// sub-groups (detail: quality, video, placement, easing and loop, the chooser of named materials, the
 /// camera's grade and lens character). Material and light on the left and the animation on the right
 /// start open.
-pub const FOLDED_AT_FIRST: [&str; 12] = [
+pub const FOLDED_AT_FIRST: [&str; 13] = [
     "camera", "quality", "output", "video", "placement", "animate-more", "material-chooser", "lab-in it", "lab-special optics", "lab-casts", "camera-grade", "camera-character",
+    "camera-bokeh",
 ];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -96,6 +99,7 @@ impl Store {
         let mut s: Store = serde_json::from_str(text).unwrap_or_default();
         if s.arrangement != ARRANGEMENT {
             s.closed = Store::default().closed;
+            (s.room_at, s.lab_at, s.camera_at, s.sculpt_at) = (None, None, None, None);
             s.arrangement = ARRANGEMENT;
         }
         s
@@ -163,7 +167,7 @@ mod tests {
 
     #[test]
     fn a_file_with_parts_missing_is_still_read() {
-        let s = Store::read(r#"{ "arrangement": 6, "closed": ["animate"], "video": { "fps": 24 } }"#);
+        let s = Store::read(r#"{ "arrangement": 7, "closed": ["animate"], "video": { "fps": 24 } }"#);
         assert_eq!(s.closed, vec!["animate".to_string()]);
         assert_eq!((s.video.fps, s.video.samples, s.window, s.room_open, s.room_at), (24, RenderOpts::default().samples, None, false, None));
         assert_eq!((s.lab_open, s.lab_at), (false, None));

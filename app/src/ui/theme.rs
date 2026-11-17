@@ -71,8 +71,8 @@ pub const EDGE: f32 = 14.0;
 /// Width inside a window that floats over the picture (the light room, the help).
 pub const FLOAT_W: f32 = 286.0;
 /// The materials lab is wider, and so is its column for names: its controls have names like "double refraction".
-pub const LAB_W: f32 = 310.0;
-pub const LAB_LABEL: f32 = 120.0;
+pub const LAB_W: f32 = 330.0;
+pub const LAB_LABEL: f32 = 138.0;
 /// The columns of a slider's row: name, slider, value, wave button, and the gap between them. In the
 /// right panel the names get more room: a shape's own sliders have names like "pavilion angle °".
 pub const COL_LABEL: f32 = 84.0;
