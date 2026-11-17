@@ -89,6 +89,23 @@ fn tracer_materials() {
     }
 }
 
+/// Wear (dust, polishing lines, uneven colour) together with every sample material, those with things in
+/// them among them: both bring helpers of their own, and two of the same name stop the tracer building
+/// (the owner's crash of 2026-11-17: `fromObj` twice, with dust on a material with inner parts).
+#[test]
+fn tracer_wear_with_every_material() {
+    let m = March { step_scale: 1.0, steps_out: 220, steps_in: 56, layers: 0 };
+    for mat in gf_core::material::Variant::samples() {
+        let mut worn = mat;
+        worn.wear = true;
+        for bodies in [0u8, 2] {
+            worn.bodies = bodies;
+            let v = Variant { light: LightFrom::Lights, backdrop: false, clay: false, mat: worn, cast: false, ..Default::default() };
+            check(&format!("trace.wgsl worn {v:?}"), &tracer_source(&m, v, false));
+        }
+    }
+}
+
 /// The tracer for a scene of several bodies with materials of their own: for two, three and four bodies,
 /// lit by the lights and by an environment picture with and without it behind, for two ways of marching,
 /// built for pictures and for counting.

@@ -213,7 +213,7 @@ fn wNoise(x: vec3f) -> f32 {
   return mix(a, b, s.z);
 }
 // the shape's own frame -> the world (toObj turned back)
-fn fromObj(v: vec3f) -> vec3f { return vec3f(dot(v, vec3f(u.obj0.x, u.obj1.x, u.obj2.x)), dot(v, vec3f(u.obj0.y, u.obj1.y, u.obj2.y)), dot(v, vec3f(u.obj0.z, u.obj1.z, u.obj2.z))); }
+fn wearFromObj(v: vec3f) -> vec3f { return vec3f(dot(v, vec3f(u.obj0.x, u.obj1.x, u.obj2.x)), dot(v, vec3f(u.obj0.y, u.obj1.y, u.obj2.y)), dot(v, vec3f(u.obj0.z, u.obj1.z, u.obj2.z))); }
 
 struct Wear {
   n: vec3f,       // the surface's facing, with the marks under the point
@@ -350,7 +350,7 @@ fn wearAt(p: vec3f, n: vec3f) -> Wear {
     // A scratch's walls face every way across it: it mirrors a fan of directions across itself, so it
     // shows as a faint bright line wherever that fan takes in a light, and as nothing on an even surface.
     w.scr = 0.5 * scrA * on;
-    w.sx = fromObj(across);
+    w.sx = wearFromObj(across);
     w.sig += scrA * keepIt * 0.006;
   }
   // ---- 4. polishing swirls: rings round a few pad centres, seen as arcs round a sharp highlight
@@ -370,7 +370,7 @@ fn wearAt(p: vec3f, n: vec3f) -> Wear {
       let lineFine = 1.0 - smoothstep(0.3, 1.0, px * f);
       ring += (r / rl) * (sin(rl * f) * arcs * lineFine * (1.0 - smoothstep(0.3, 0.5, rl)));
     }
-    w.n = normalize(w.n + fromObj(ring) * (0.03 * swA * (1.0 - worn)));
+    w.n = normalize(w.n + wearFromObj(ring) * (0.03 * swA * (1.0 - worn)));
     w.sig += 0.004 * swA;
   }
   // ---- 5. orange peel: the gentle wave of a sprayed or dipped coat
@@ -380,7 +380,7 @@ fn wearAt(p: vec3f, n: vec3f) -> Wear {
     var t = vec3f(wNoise(k1), wNoise(k1 + vec3f(17.1, 3.3, 9.7)), wNoise(k1 + vec3f(5.9, 23.1, 1.3)))
           + 0.5 * vec3f(wNoise(k2 + vec3f(2.2, 8.1, 4.4)), wNoise(k2 + vec3f(13.5, 1.7, 6.2)), wNoise(k2 + vec3f(7.3, 11.9, 3.1)));
     t -= nq * dot(t, nq);
-    w.n = normalize(w.n + fromObj(t) * (0.006 * peelA));
+    w.n = normalize(w.n + wearFromObj(t) * (0.006 * peelA));
   }
   // ---- 6. smudges and finger marks: a few patches where the object is handled (its exposed parts),
   // duller, with the whorl of a fingertip in them
@@ -416,7 +416,7 @@ fn wearAt(p: vec3f, n: vec3f) -> Wear {
     var bq = vec3f(0.0, 1.0, 0.0) - nq * nq.y;
     let lb = length(bq);
     bq = mix(vec3f(1.0, 0.0, 0.0) - nq * nq.x, bq, smoothstep(0.1, 0.3, lb));
-    w.b = fromObj(normalize(bq + vec3f(1e-6)));
+    w.b = wearFromObj(normalize(bq + vec3f(1e-6)));
     let y = q.y + 0.004 * wNoise(q * 3.0);
     let r = vec3f(q.x * 9.0, q.z * 9.0, 0.0);
     let fine = 1.0 - smoothstep(0.3, 1.0, px * 380.0);
