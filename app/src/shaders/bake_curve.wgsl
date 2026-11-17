@@ -25,8 +25,8 @@ struct B {
   tiles: u32,             // slices across the sheet the coarse volume is worked out on
   stiles: u32,            // slices across the sheet a slab is gathered on
   melted: u32,            // 1 = strands flow together, 0 = hard union
-  pad0: u32,
-  pad1: u32,
+  vary: u32,              // 1 = every point has a radius of its own (a tree): see below
+  ds: f32,                // the step the curve is cut into
 }
 
 @group(0) @binding(0) var<uniform> b: B;
@@ -57,6 +57,16 @@ fn fs_coarse(in: Full) -> @location(0) vec4f {
   let slice = tile.x + tile.y * b.tiles;
   let zc = (f32(slice) + 0.5) / b.cres;
   let p = (vec3f((in.pos.xy - vec2f(tile * cres)) / b.cres, zc) * 2.0 - 1.0) * b.hb;
+  if (b.vary == 1u) {
+    // each point of the cloud carries the thickest radius near it
+    var d = 1e9;
+    for (var i = 0u; i < 4096u; i++) {
+      if (i >= b.cloud_n) { break; }
+      let c = cloud[i];
+      d = min(d, length(p - c.xyz) - c.w);
+    }
+    return vec4f(d, 0.0, 0.0, 1.0);
+  }
   var d2 = 1e18;
   for (var i = 0u; i < 4096u; i++) {
     if (i >= b.cloud_n) { break; }
@@ -100,29 +110,46 @@ fn vs_splat(@builtin(vertex_index) vi: u32, @location(0) seg: u32, @location(1) 
   o.zc = (f32(slice) + 0.5) / b.res;
   return o;
 }
-// distance outside this segment's own surface
-fn seg_dist(in: Seg) -> f32 {
+// distance outside this segment's own surface, and the segment's radius there
+fn seg_dist_r(in: Seg) -> vec2f {
   let p = (vec3f((in.pos.xy - in.origin) / b.res, in.zc) * 2.0 - 1.0) * b.hb;
   let pa = p - in.a.xyz;
   let ba = in.c.xyz - in.a.xyz;
   let h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-12), 0.0, 1.0);
-  return length(pa - ba * h) - mix(in.a.w, in.c.w, h);
+  let r = mix(in.a.w, in.c.w, h);
+  return vec2f(length(pa - ba * h) - r, r);
+}
+fn seg_dist(in: Seg) -> f32 {
+  return seg_dist_r(in).x;
 }
 // hard union: the exact distance, keeping the minimum
 @fragment
 fn fs_splat(in: Seg) -> @location(0) vec4f {
   return vec4f(seg_dist(in), 0.0, 0.0, 1.0);
 }
+// The melt's weight for a strand of radius r: 1 / what a straight strand of that radius, cut into steps
+// of ds, sums to on its own surface. The sum is 1 + I/ds, I the integral of exp(-k (sqrt(r^2 + x^2) - r))
+// along the strand, which is 2 r e^(kr) K1(kr); the expression below is that to within a third of a
+// percent, which leaves the surface within a twentieth of a voxel of the radius.
+fn melt_amp(r: f32) -> f32 {
+  let z = b.k * r;
+  let i = 2.0 / b.k * sqrt(1.0 + 1.5707964 * z + 0.19 * z / (z + 0.8));
+  return 1.0 / (1.0 + i / b.ds);
+}
 // Melted union. A hard union of strands that run a hair apart leaves razor-shallow creases, which tear
 // every reflection. Instead each segment adds exp(k (r - d)), faded to nothing at the edge of its reach,
 // and the sum is turned back into a distance: -log(sum)/k. Strands closer than about 1/k flow together.
 @fragment
 fn fs_melt(in: Seg) -> @location(0) vec4f {
-  let x = seg_dist(in);
+  let xr = seg_dist_r(in);
+  let x = xr.x;
+  // (radii of their own: each segment is weighted for its own radius)
+  var amp = b.amp;
+  if (b.vary == 1u) { amp = melt_amp(xr.y); }
   // amp makes one straight strand sum to exactly 1 on its own surface (its neighbours along the strand
   // all add to it). The fade to zero sits beyond anywhere a merged surface can be, so it shapes nothing.
   let w = clamp((b.band - x) / (0.35 * b.band), 0.0, 1.0);
-  return vec4f(b.amp * exp(min(-b.k * x, 8.0)) * w * w * (3.0 - 2.0 * w), 0.0, 0.0, 1.0);
+  return vec4f(amp * exp(min(-b.k * x, 8.0)) * w * w * (3.0 - 2.0 * w), 0.0, 0.0, 1.0);
 }
 
 // ---- 3. the volume: the far field (the coarse value, lowered by more than it can be wrong, never below

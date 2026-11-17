@@ -674,7 +674,8 @@ impl State {
     pub fn thickness_hint(&self) -> Option<f64> {
         if !self.plain() { return None; }
         let (f, p) = (self.family(), self.preset());
-        (f.kind == Kind::Curve).then(|| 2.0 * p.tube.unwrap_or(f.tube) * self.shape().thick)
+        // (a tree is not one tube: its thickness is measured)
+        (f.kind == Kind::Curve && f.id != crate::presets::trees::FAMILY).then(|| 2.0 * p.tube.unwrap_or(f.tube) * self.shape().thick)
     }
     /// A material given as text: its id (`gold`), or its position in the list.
     fn material_arg(&mut self, v: &str) -> bool {
@@ -770,7 +771,8 @@ impl State {
             add("@melt", "melt", 0.0, 0.03, 0.0005, KnobRef::Melt);
             if !p.fixed_length { add("@len", "length", 0.1, 3.0, 0.02, KnobRef::Len); }
             if p.is_flow() { add("@travel", "travel", 0.0, TRAVEL, 0.005, KnobRef::Travel); }
-            add("@beads", "beads", 0.0, 0.6, 0.01, KnobRef::Beads);
+            // (a tree's strands carry radii of their own: beads would not show on them)
+            if f.id != crate::presets::trees::FAMILY { add("@beads", "beads", 0.0, 0.6, 0.01, KnobRef::Beads); }
         } else {
             add("@puff", "inflate", -0.06, 0.06, 0.001, KnobRef::Puff);
         }
@@ -1342,7 +1344,7 @@ impl State {
                         let end = (off + n).min(have);
                         if c.pose.is_none() { c.pose = Some(curve::placement(&[&c.line[..]], &place)); }
                         pose = c.pose.clone();
-                        RawCurve { lines: vec![c.line[off * 3..end * 3].to_vec()], closed: false }
+                        RawCurve { lines: vec![c.line[off * 3..end * 3].to_vec()], closed: false, ..Default::default() }
                     }
                     Shape::Curve(f) => f(&st.vals, &CurveOpts { len: st.len, quick: matches!(mode, Detail::Quick | Detail::Anim) }),
                     Shape::Field { .. } | Shape::Mesh { .. } => unreachable!(),
@@ -1366,7 +1368,14 @@ impl State {
                 let radius: Option<&(dyn Fn(f64, f64, f64) -> f64 + Sync)> =
                     if beads > 0.0 || taper { Some(&composed) } else if own.is_some() { Some(&plain) } else { None };
                 let lines: Vec<&[f64]> = raw.lines.iter().map(|l| &l[..]).collect();
-                let c = curve::prep_curve(&lines, &PrepOpts { tube, melt, ds, closed, radius, place, pose });
+                let c = if raw.radii.is_empty() {
+                    curve::prep_curve(&lines, &PrepOpts { tube, melt, ds, closed, radius, place, pose })
+                } else {
+                    // strands with a radius of their own at every point (a tree), placed by the whole shape
+                    let pose = pose.or_else(|| (!raw.frame.is_empty()).then(|| curve::placement(&[&raw.frame[..]], &place)));
+                    let radii: Vec<&[f64]> = raw.radii.iter().map(|r| &r[..]).collect();
+                    curve::prep_strands(&lines, &radii, &curve::StrandOpts { thick: st.thick, ds, place, pose })
+                };
                 if c.n < 2 { return Err(format!("{}: preset \"{}\" produced no curve", fam.name, p.id)); }
                 if !moving { st.e = c.pose.e; }
                 st.meta.length = c.length;

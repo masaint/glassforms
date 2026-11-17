@@ -1455,6 +1455,10 @@ pub struct Curve {
     /// with a melt: what every segment's contribution is weighted by, so that a strand alone keeps its radius
     pub amp: f64,
     pub pose: Pose,
+    /// The radius differs a great deal from strand to strand (a tree: trunk and twigs). The melt's weight
+    /// is then worked out for each segment's own radius rather than once for the tube, and the far field
+    /// uses each point's own radius rather than the thickest.
+    pub vary: bool,
 }
 
 /// How far it is from a to b.
@@ -1598,5 +1602,97 @@ pub fn prep_curve(lines: &[&[f64]], o: &PrepOpts) -> Curve {
         *brk.last_mut().unwrap() = 1;
     }
     let n = brk.len();
-    Curve { pts, brk, n, rmax, ds, length, amp, pose }
+    Curve { pts, brk, n, rmax, ds, length, amp, pose, vary: false }
+}
+
+/// What `prep_strands` is asked for.
+pub struct StrandOpts {
+    /// every radius is multiplied by this (the thickness slider)
+    pub thick: f64,
+    /// the length of the steps the strands are cut into
+    pub ds: f64,
+    pub place: PlaceOpts,
+    /// a placement worked out earlier, used instead of working one out from the lines
+    pub pose: Option<Pose>,
+}
+
+/// Strands that each carry their own radius at every point (`radii`, in the lines' own units): a tree's
+/// branches. Placed as `prep_curve` places lines, run through the same smooth curve, and cut into equal
+/// steps of `ds`; the radius is carried along the smooth curve with the points.
+///
+/// No radius comes out thinner than two steps (one and a half voxels of the volume being built): a
+/// thinner strand would not be held by the grid and would break up into beads.
+pub fn prep_strands(lines: &[&[f64]], radii: &[&[f64]], o: &StrandOpts) -> Curve {
+    let pose = match &o.pose { Some(p) => p.clone(), None => placement(lines, &o.place) };
+    let (c, sc, ax) = (pose.c, pose.sc, pose.ax);
+    let place = |p: &[f64; 3]| -> [f64; 3] {
+        let (x, y, z) = ((p[ax[0]] - c[ax[0]]) * sc, (p[ax[1]] - c[ax[1]]) * sc, (p[ax[2]] - c[ax[2]]) * sc);
+        match &pose.e {
+            Some(e) => [x * e[0][0] + y * e[0][1] + z * e[0][2], x * e[1][0] + y * e[1][1] + z * e[1][2], x * e[2][0] + y * e[2][1] + z * e[2][2]],
+            None => [x, y, z],
+        }
+    };
+    // every strand placed: points and radii
+    let strands: Vec<(Vec<[f64; 3]>, Vec<f64>)> = lines
+        .iter()
+        .zip(radii.iter().copied().chain(std::iter::repeat(&[][..])))
+        .map(|(l, r)| {
+            let pts: Vec<[f64; 3]> = points(l).iter().map(place).collect();
+            let rs: Vec<f64> = (0..pts.len()).map(|i| r.get(i).copied().unwrap_or(0.0) * sc * o.thick).collect();
+            (pts, rs)
+        })
+        .collect();
+    let length: f64 = strands.iter().map(|(p, _)| p.windows(2).map(|w| apart(&w[0], &w[1])).sum::<f64>()).sum();
+    let ds = o.ds.max(length / 240000.0);
+    let floor = 2.0 * o.ds;
+    let half = 0.5 * ds;
+
+    let (mut pts, mut brk): (Vec<f32>, Vec<u8>) = (Vec::new(), Vec::new());
+    let mut rmax = 0.0f64;
+    let (mut fine, mut fr): (Vec<[f64; 3]>, Vec<f64>) = (Vec::new(), Vec::new());
+    for (t, tr) in &strands {
+        let m = t.len();
+        if m < 2 { continue; }
+        // a smooth (Catmull-Rom) curve through the points, cut finer than a step; the radius goes straight
+        // from one point's to the next
+        fine.clear();
+        fr.clear();
+        for i in 0..m - 1 {
+            let (a, b, cc, d) = (t[i.saturating_sub(1)], t[i], t[i + 1], t[(i + 2).min(m - 1)]);
+            let n = (apart(&b, &cc) / half).ceil().max(1.0);
+            let n = if n.is_finite() { n as usize } else { 1 };
+            let p: [[f64; 4]; 3] = std::array::from_fn(|k| [2.0 * b[k], cc[k] - a[k], 2.0 * a[k] - 5.0 * b[k] + 4.0 * cc[k] - d[k], 3.0 * b[k] - a[k] - 3.0 * cc[k] + d[k]]);
+            for j in 0..n {
+                let u = j as f64 / n as f64;
+                let (u2, u3) = (u * u, u * u * u);
+                fine.push(p.map(|p| 0.5 * (p[0] + p[1] * u + p[2] * u2 + p[3] * u3)));
+                fr.push(tr[i] + (tr[i + 1] - tr[i]) * u);
+            }
+        }
+        fine.push(t[m - 1]);
+        fr.push(tr[m - 1]);
+
+        // walk along it, putting down a point every ds
+        let mut emit = |p: [f64; 3], r: f64| {
+            let r = r.max(floor);
+            if r > rmax { rmax = r; }
+            pts.extend_from_slice(&[p[0] as f32, p[1] as f32, p[2] as f32, r as f32]);
+            brk.push(0u8);
+        };
+        emit(fine[0], fr[0]);
+        let (mut acc, mut next) = (0.0, ds);
+        for (w, wr) in fine.windows(2).zip(fr.windows(2)) {
+            let len = apart(&w[0], &w[1]);
+            while acc + len >= next && len > 0.0 {
+                let u = (next - acc) / len;
+                emit(std::array::from_fn(|k| w[0][k] + (w[1][k] - w[0][k]) * u), wr[0] + (wr[1] - wr[0]) * u);
+                next += ds;
+            }
+            acc += len;
+        }
+        emit(fine[fine.len() - 1], fr[fr.len() - 1]);
+        *brk.last_mut().unwrap() = 1;
+    }
+    let n = brk.len();
+    Curve { pts, brk, n, rmax, ds, length, amp: 1.0, pose, vary: true }
 }

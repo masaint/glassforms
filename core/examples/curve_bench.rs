@@ -156,7 +156,7 @@ fn prep_curve_plain(lines: &[&[f64]], o: &PrepOpts) -> Curve {
         *brk.last_mut().unwrap() = 1;
     }
     let n = brk.len();
-    Curve { pts, brk, n, rmax, ds, length, amp, pose }
+    Curve { pts, brk, n, rmax, ds, length, amp, pose, vary: false }
 }
 
 /// Every bit of two prepared curves is the same.
@@ -183,7 +183,7 @@ fn bench(fam: &Family, id: &str) {
             line += &format!("{:<22}", format!("{ms} ({whole})"));
             let stretch = orbit_line(flow, &vals, whole, false);
             let pose = placement(&[&stretch], &place);
-            (RawCurve { lines: vec![stretch[..(n as usize * 3).min(stretch.len())].to_vec()], closed: false }, Some(pose))
+            (RawCurve { lines: vec![stretch[..(n as usize * 3).min(stretch.len())].to_vec()], closed: false, ..Default::default() }, Some(pose))
         }
         Shape::Curve(f) => {
             let o = CurveOpts { len: 1.0, quick: false };

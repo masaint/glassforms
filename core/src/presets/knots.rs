@@ -21,7 +21,7 @@ fn ring(f: impl Fn(f64) -> [f64; 3], n: usize) -> Vec<f64> {
     a
 }
 fn closed(lines: Vec<Vec<f64>>) -> RawCurve {
-    RawCurve { lines, closed: true }
+    RawCurve { lines, closed: true, ..Default::default() }
 }
 
 /// A knot drawn on a torus: p times round the axis while q times round the tube.
@@ -273,7 +273,7 @@ fn presets() -> Vec<Preset> {
                         let ph = v[0] * PI * y;
                         a.extend_from_slice(&[r * cos(ph), y, r * sin(ph)]);
                     }
-                    RawCurve { lines: vec![a], closed: false }
+                    RawCurve { lines: vec![a], closed: false, ..Default::default() }
                 })),
             )
         },

@@ -15,6 +15,7 @@ pub mod models;
 pub mod solids;
 pub mod studio;
 pub mod surfaces;
+pub mod trees;
 
 /// One slider of a preset: `id` is what the code calls it, `label` what the panel shows.
 #[derive(Clone, Debug, PartialEq)]
@@ -41,6 +42,12 @@ impl ParamDef {
 pub struct RawCurve {
     pub lines: Vec<Vec<f64>>,
     pub closed: bool,
+    /// A radius at every point of every line, in the curve's own units (it is scaled with the curve when
+    /// the curve is placed). Empty = the tube's one radius, as for every curve but a tree.
+    pub radii: Vec<Vec<f64>>,
+    /// Points to place the curve by instead of its lines (x,y,z...): a shape that grows keeps the place
+    /// and size of the whole of it while only part is there. Empty = the lines.
+    pub frame: Vec<f64>,
 }
 
 /// What a curve function is told: `len` is the length slider, `quick` means a slider is moving.
@@ -182,5 +189,5 @@ impl Family {
 
 /// Every family: the four the web version has, in the order it shows them, then the newer ones.
 pub fn families() -> Vec<Family> {
-    vec![attractors::family(), knots::family(), surfaces::family(), algebraic::family(), gems::family(), solids::family(), forms::family(), studio::family(), models::family()]
+    vec![attractors::family(), knots::family(), surfaces::family(), algebraic::family(), gems::family(), solids::family(), forms::family(), studio::family(), models::family(), trees::family()]
 }

@@ -107,9 +107,9 @@ fn build(fam: &Family, p: &Preset, vals: &[f64], len: f64, quick: bool, baked: O
             pose = Some(placement(&[&line], &place));
             let window = line[off * 3..end].to_vec();
             whole = Some(line);
-            RawCurve { lines: vec![window], closed: false }
+            RawCurve { lines: vec![window], closed: false, ..Default::default() }
         }
-        (Shape::Flow(flow), None) => RawCurve { lines: vec![orbit_line(flow, vals, jsmath::round(flow.steps as f64 * len).max(40.0) as usize, quick)], closed: false },
+        (Shape::Flow(flow), None) => RawCurve { lines: vec![orbit_line(flow, vals, jsmath::round(flow.steps as f64 * len).max(40.0) as usize, quick)], closed: false, ..Default::default() },
         (Shape::Curve(f), _) => f(vals, &CurveOpts { len, quick }),
         _ => panic!("{} is not a curve", p.id),
     };

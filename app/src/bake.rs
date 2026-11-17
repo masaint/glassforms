@@ -42,7 +42,10 @@ struct BakeU {
     tiles: u32,
     stiles: u32,
     melted: u32,
-    pad: [u32; 2],
+    /// 1 = every point has a radius of its own (`Curve::vary`)
+    vary: u32,
+    /// the step the curve is cut into (for the melt's weight with `vary`)
+    ds: f32,
 }
 
 pub struct Volume {
@@ -393,7 +396,7 @@ impl Baker {
             amp = 1.0 / sum;
         }
         let n = brk.len();
-        let thin = Curve { pts, brk, n, rmax: c.rmax, ds, length: c.length, amp, pose: c.pose.clone() };
+        let thin = Curve { pts, brk, n, rmax: c.rmax, ds, length: c.length, amp, pose: c.pose.clone(), vary: c.vary };
         self.build_curve(&thin, res, melt, true)
     }
 
@@ -411,6 +414,12 @@ impl Baker {
         for i in 0..cn {
             let s = (i * stride).min(n - 1) * 4;
             cd[i * 4..i * 4 + 3].copy_from_slice(&c.pts[s..s + 3]);
+            // with radii of their own, each point of the cloud stands for the points round it: the
+            // thickest of them (a point between two cloud points is nearer one of them than a stride)
+            if c.vary {
+                let (a, b) = ((i * stride).saturating_sub(stride), ((i + 1) * stride).min(n - 1));
+                cd[i * 4 + 3] = (a..=b).map(|j| c.pts[j * 4 + 3]).fold(0.0f32, f32::max);
+            }
         }
         if self.cloud.write(&gpu, bytemuck::cast_slice(&cd)) {
             self.g_cloud = Self::buf_group(&gpu, &self.l_cloud, 0, &self.cloud.buf);
@@ -434,7 +443,8 @@ impl Baker {
             k: if melted { (1.0 / melt) as f32 } else { 0.0 }, amp: c.amp as f32, safety: safety as f32,
             // far field: never below the band's edge; melted: never below where sums are still exact
             floor: if melted { (clear - 0.5 * h) as f32 } else { band as f32 },
-            cres: cres as f32, cloud_n: cn as u32, slab: sheet.slab, tiles: Self::coarse_tiles(cres), stiles: sheet.tiles, melted: melted as u32, pad: [0; 2],
+            cres: cres as f32, cloud_n: cn as u32, slab: sheet.slab, tiles: Self::coarse_tiles(cres), stiles: sheet.tiles, melted: melted as u32,
+            vary: c.vary as u32, ds: c.ds as f32,
         };
         gpu.queue.write_buffer(&self.u, 0, bytemuck::bytes_of(&u));
 
