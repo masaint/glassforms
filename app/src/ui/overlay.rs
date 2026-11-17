@@ -103,6 +103,10 @@ fn gestures(families: usize) -> [(&'static str, Vec<(String, &'static str)>); 3]
             (s("V"), "orbit, or fly"),
             (s("W A S D  Q E"), "flying: forward, left, back, right; down, up (shift fast, ctrl slow)"),
             (s("F11"), "fullscreen (Esc leaves it)"),
+            (s("ctrl+Z, ctrl+shift+Z"), "undo, redo (also ctrl+Y)"),
+            (s("ctrl+1 – 0"), "store the view in a slot"),
+            (s("shift+1 – 0"), "go to a stored view"),
+            (s("Esc while dragging"), "call the drag off: back as it was"),
             (s("F1"), "this help (Esc closes it)"),
         ]),
     ]

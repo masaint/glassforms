@@ -334,6 +334,8 @@ pub struct State {
     /// they change
     pub lamps: Vec<crate::lamps::Lamp>,
     pub lamps_rev: u64,
+    /// the ten camera slots (history.rs): stored views, kept in a setup
+    pub views: Vec<Option<crate::history::ViewSlot>>,
     /// the environment picture in use: its path, as given (one that is not absolute is looked for in the
     /// program's folder)
     pub hdri: Option<String>,
@@ -373,7 +375,7 @@ impl State {
         let mut s = Self {
             families, fam, shapes, stack: Stack::new(), parked: vec![None], p: Settings::default(), render: RenderOpts::default(),
             r0: I3, theta: 0.0, r: I3, lphi: 0.0, playing: false, clock: 0.0, tracks: BTreeMap::new(), moved: BTreeMap::new(), rest: BTreeMap::new(),
-            rendering: false, want: None, cut: true, flash_planes: false, rigs, lights_rev: 0, lamps: Vec::new(), lamps_rev: 0, hdri: None, body_mats: Default::default(),
+            rendering: false, want: None, cut: true, flash_planes: false, rigs, lights_rev: 0, lamps: Vec::new(), lamps_rev: 0, views: Vec::new(), hdri: None, body_mats: Default::default(),
             first_scene: true, args: args.to_vec(), auto,
         };
         s.set_scene(fam);

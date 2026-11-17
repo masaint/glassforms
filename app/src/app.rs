@@ -388,6 +388,13 @@ struct App {
     rested: bool,
     /// flying: when the camera was last moved by the keys (while they are held)
     fly_at: Option<Instant>,
+    /// undo and redo (gf_core::history): the entries, when input last came, whether any has come since the
+    /// state last settled, frames since then, and whether Esc has called off the gesture in progress
+    history: gf_core::history::History,
+    input_at: Instant,
+    unsettled: bool,
+    quiet_frames: u32,
+    called_off: bool,
     /// frames a second, as last worked out; and the frames drawn since then, and when that was
     fps: f64,
     drawn: (u32, Instant),
@@ -484,7 +491,7 @@ impl App {
         px.ffmpeg = crate::video::ffmpeg().is_some();
         px.record = opts.scripted;
         Ok(App {
-            engine, rs, shown: None, preview: None, px, seeking: opts.size_px, canvas: (0, 0), full: Rect::ZERO, last: None, rested: false, fly_at: None, fps: 0.0, drawn: (0, Instant::now()), stat_at: Instant::now(),
+            engine, rs, shown: None, preview: None, px, seeking: opts.size_px, canvas: (0, 0), full: Rect::ZERO, last: None, rested: false, fly_at: None, history: Default::default(), input_at: Instant::now(), unsettled: true, quiet_frames: 0, called_off: false, fps: 0.0, drawn: (0, Instant::now()), stat_at: Instant::now(),
             drag: None, video: None, last_video: None, bench_in: 0, frozen: false, test, inject: Vec::new(), dropped: Vec::new(), model_asked: None, model_said: String::new(), adding: None, model_refused: None, failure, store_path,
             saved: store, changed_at: None, frames: Arc::new(AtomicU64::new(0)), passes: 0, ffmpeg_checked: Instant::now(), opts,
         })
@@ -880,6 +887,98 @@ impl App {
         ctx.request_repaint();
     }
 
+    // ---- undo and redo, and the camera slots ---------------------------------------------------
+    /// Before the controls act: input marks the state as unsettled; a press, or a key, begins a gesture,
+    /// so whatever changed before it is settled into an entry of its own first.
+    fn history_before(&mut self, ctx: &egui::Context) {
+        let (pressed, any, keyed) = ctx.input(|i| {
+            let keyed = i.events.iter().any(|e| matches!(e, egui::Event::Key { pressed: true, repeat: false, .. }));
+            (i.pointer.any_pressed(), !i.events.is_empty() || i.pointer.any_down(), keyed)
+        });
+        if any {
+            self.input_at = Instant::now();
+            self.quiet_frames = 0;
+            self.unsettled = true;
+        } else {
+            self.quiet_frames = self.quiet_frames.saturating_add(1);
+        }
+        if pressed || keyed {
+            self.history.settle(&mut self.engine.state);
+        }
+    }
+
+    /// After the controls have acted: a gesture called off with Esc stays called off while the button is
+    /// held (a slider or a drag goes on writing until it is let go); and at a quiet moment (nothing held,
+    /// nothing come for a moment) what changed becomes one entry.
+    fn history_after(&mut self, ctx: &egui::Context) {
+        let down = ctx.input(|i| i.pointer.any_down() || !i.keys_down.is_empty());
+        let st = &mut self.engine.state;
+        if self.called_off {
+            if ctx.input(|i| i.pointer.any_down()) {
+                self.px.handles.grab = None;
+                self.history.cancel(st);
+                return;
+            }
+            self.called_off = false;
+        }
+        if !self.unsettled || down { return; }
+        // (a scripted run's frames come quickly: three quiet frames are its quiet moment)
+        let quiet = self.input_at.elapsed() >= Duration::from_millis(300) || (self.test.is_some() && self.quiet_frames >= 3);
+        if quiet {
+            self.history.settle(st);
+            self.unsettled = false;
+        } else {
+            ctx.request_repaint_after(Duration::from_millis(320));
+        }
+    }
+
+    /// Ctrl+Z undoes, Ctrl+Shift+Z and Ctrl+Y redo; Ctrl+1..0 stores the view in a slot, Shift+1..0 goes
+    /// to it (1..9 alone are the families, as ever).
+    fn history_keys(&mut self, ctx: &egui::Context) {
+        if ctx.egui_wants_keyboard_input() || egui::Popup::is_any_open(ctx) { return; }
+        use egui::Key::*;
+        let digits = [Num1, Num2, Num3, Num4, Num5, Num6, Num7, Num8, Num9, Num0];
+        for ev in ctx.input(|i| i.events.clone()) {
+            let egui::Event::Key { key, pressed: true, repeat: false, modifiers, .. } = ev else { continue };
+            let ctrl = modifiers.ctrl || modifiers.command;
+            match key {
+                Z if ctrl && !modifiers.shift => self.undo(),
+                Z | Y if ctrl => self.redo(),
+                _ => {
+                    let Some(i) = digits.iter().position(|d| *d == key) else { continue };
+                    if ctrl {
+                        self.store_view(i);
+                    } else if modifiers.shift {
+                        self.recall_view(i);
+                    }
+                }
+            }
+        }
+    }
+
+    fn undo(&mut self) {
+        let done = self.history.undo(&mut self.engine.state);
+        self.px.handles.grab = None;
+        let left = self.history.can_undo();
+        self.px.nav.say(if done { format!("undone · {left} more") } else { "nothing to undo".into() });
+    }
+    fn redo(&mut self) {
+        let done = self.history.redo(&mut self.engine.state);
+        self.px.handles.grab = None;
+        let left = self.history.can_redo();
+        self.px.nav.say(if done { format!("redone · {left} more") } else { "nothing to redo".into() });
+    }
+    /// (slot i: 0 to 9, shown as 1 to 9 and 0)
+    fn store_view(&mut self, i: usize) {
+        self.engine.state.store_view(i);
+        self.px.nav.say(format!("view {} stored · shift+{} goes to it", (i + 1) % 10, (i + 1) % 10));
+    }
+    fn recall_view(&mut self, i: usize) {
+        let st = &mut self.engine.state;
+        let words = if st.recall_view(i) { format!("view {}", (i + 1) % 10) } else { format!("no view in {} yet · ctrl+{} stores one", (i + 1) % 10, (i + 1) % 10) };
+        self.px.nav.say(words);
+    }
+
     // space: spin.  P: animate.  H: hide the panels.  L: the light room.  F11: fullscreen.  R: reset the view.
     // F: frame what is chosen.  V: orbit or fly (flying: W A S D Q E move).  G, T, Esc: the tools.
     // C: clay or glass.  F1: the help.  1-9: family.  arrows: step through the shapes.
@@ -927,7 +1026,12 @@ impl App {
                 }
                 // Esc puts away the nearest thing: a drag of a handle (the layer goes back), the help if it
                 // is open, the handles, what is chosen, otherwise the fullscreen
-                Escape if self.px.handles.cancel(st) => {}
+                Escape if self.px.handles.cancel(st) => { self.called_off = true; }
+                // (during any other gesture, a slider's drag or a turn of the view: back to how it began)
+                Escape if ctx.input(|i| i.pointer.any_down()) => {
+                    self.history.cancel(st);
+                    self.called_off = true;
+                }
                 Escape if self.px.help_open => self.px.help_open = false,
                 Escape if self.px.handles.on => self.px.handles.set_tool(crate::ui::handles::Tool::Select),
                 Escape if self.px.handles.picked || self.px.handles.select => {
@@ -939,7 +1043,7 @@ impl App {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
                     }
                 }
-                Num1 | Num2 | Num3 | Num4 | Num5 | Num6 | Num7 | Num8 | Num9 => {
+                Num1 | Num2 | Num3 | Num4 | Num5 | Num6 | Num7 | Num8 | Num9 if !modifiers.shift => {
                     let n = [Num1, Num2, Num3, Num4, Num5, Num6, Num7, Num8, Num9].iter().position(|k| *k == key).unwrap_or(0);
                     if n < st.families.len() { st.set_scene(n); }
                 }
@@ -1184,6 +1288,7 @@ impl App {
             let Some(step) = t.steps.pop_front() else { return };
             match step {
                 Step::Do(act) => {
+                    (self.unsettled, self.quiet_frames) = (true, 0);
                     if let Err(e) = self.act(ctx, act) { return self.fail(ctx, e); }
                     return;
                 }
@@ -1441,10 +1546,15 @@ impl App {
                 _ => return Err(format!("reset: \"{what}\" is not view, object or lights")),
             },
             Act::Key(name) => {
-                let key = script::key(&name)?;
-                let press = |pressed: bool| egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers: none };
-                steps = vec![Step::Input(vec![press(true)], none), Step::Input(vec![press(false)], none), Step::Frames(1)];
+                let (held, bare) = script::held(&name);
+                let key = script::key(bare)?;
+                let press = |pressed: bool| egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers: held };
+                steps = vec![Step::Input(vec![press(true)], held), Step::Input(vec![press(false)], held), Step::Input(Vec::new(), none), Step::Frames(1)];
             }
+            Act::Undo => self.undo(),
+            Act::Redo => self.redo(),
+            Act::SlotStore(i) => self.store_view(i),
+            Act::Slot(i) => self.recall_view(i),
             Act::KeyHold(name, frames) => {
                 let key = script::key(&name)?;
                 let press = |pressed: bool| egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers: none };
@@ -1714,6 +1824,8 @@ impl App {
             "rects": rects,
         });
         told["view"] = camera_told;
+        told["history"] = json!({ "undo": self.history.can_undo(), "redo": self.history.can_redo(),
+            "slots": (0..gf_core::history::SLOTS).filter(|i| self.engine.state.view_stored(*i)).map(|i| (i + 1) % 10).collect::<Vec<_>>() });
         // (what follows is added afterwards: one list of everything is more than the macro that makes it will take)
         let r = st.camera().readout(self.px.aspect);
         let camera = json!({ "focal": r.focal, "fstop": r.fstop, "field": [r.field_v, r.field_h], "focusMm": r.focus_mm, "distanceMm": r.distance_mm, "proj": st.camera().proj.id(),
@@ -1881,7 +1993,9 @@ impl eframe::App for App {
         // the controls change the state ...
         let picture = ui.interact(self.full, Id::unique("picture"), Sense::click_and_drag());
         if self.video.is_none() {
+            self.history_before(&ctx);
             self.gestures(&ctx, &picture);
+            self.history_keys(&ctx);
             self.keys(&ctx);
             self.fly(&ctx);
         }
@@ -1894,8 +2008,10 @@ impl eframe::App for App {
             let room = hi - lo;
             if room >= crate::ui::tools::BAR_W + 24.0 { crate::ui::tools::bar(&ctx, &mut self.engine.state, &mut self.px, self.full); }
             if room >= crate::ui::tools::BAR_W + crate::ui::tools::CUBE + 30.0 { crate::ui::tools::cube(&ctx, &mut self.engine.state, &mut self.px, self.full); }
+            crate::ui::tools::words(&ctx, &mut self.px, self.full);
         }
         self.serve(frame);
+        if self.video.is_none() { self.history_after(&ctx); }
 
         // ... and the engine draws what the state now says
         let mut again = false;

@@ -235,13 +235,17 @@ pub fn bar(ctx: &egui::Context, st: &mut State, px: &mut Panels, full: Rect) {
         whole
     });
     px.note("tool bar", shown.response.rect);
-    // a few words under the bar for a moment
+}
+
+/// A few words under the bar for a moment (the fly speed, an undo, a camera slot), drawn whether or not
+/// the bar has room to show.
+pub fn words(ctx: &egui::Context, px: &mut Panels, full: Rect) {
     if let Some((words, when)) = &px.nav.said {
         let age = when.elapsed();
         if age < Duration::from_millis(1600) {
             let a = if age < Duration::from_millis(1100) { 1.0 } else { 1.0 - (age.as_secs_f32() - 1.1) / 0.5 };
             let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, Id::unique("tool bar words")));
-            let at = Pos2::new(shown.response.rect.left() + 6.0, shown.response.rect.bottom() + 6.0);
+            let at = bar_at(px, full) + egui::vec2(6.0, B + 16.0);
             let g = p.layout_no_wrap(words.clone(), mono(SMALL), fade(BRIGHT, 0.85 * a));
             p.rect_filled(Rect::from_min_size(at - egui::vec2(5.0, 2.0), g.size() + egui::vec2(10.0, 4.0)), BUTTON_RADIUS, Color32::from_black_alpha((110.0 * a) as u8));
             p.galley(at, g, BRIGHT);

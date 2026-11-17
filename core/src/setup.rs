@@ -119,6 +119,9 @@ pub struct Setup {
     /// The lamps standing in the scene (absent while there are none).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lamps: Vec<crate::lamps::Lamp>,
+    /// The ten camera slots, empty or a stored view (absent while none is stored).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub views: Vec<Option<crate::history::ViewSlot>>,
 }
 
 impl State {
@@ -141,6 +144,7 @@ impl State {
             rig: (!self.rig_is_default()).then(|| RigSetup::from(self.rig())),
             hdri: self.hdri.clone(),
             lamps: self.lamps.clone(),
+            views: if self.views.iter().any(|v| v.is_some()) { self.views.clone() } else { Vec::new() },
             layers: self.layers_setup(),
             bodies: (1..self.body_mats.len())
                 .filter_map(|l| self.body_mats[l].as_ref().map(|m| ((l + 1).to_string(), crate::material::body_names().filter_map(|n| m.get(n).map(|v| (n.to_string(), v))).collect())))
@@ -184,6 +188,7 @@ impl State {
         }
         self.set_hdri(s.hdri.clone());
         self.lamps = s.lamps.iter().take(crate::lamps::MAX_LAMPS).copied().collect();
+        self.views = s.views.iter().take(crate::history::SLOTS).cloned().collect();
         self.lamps_rev += 1;
         self.p = s.settings.clone();
         crate::camera::sync(&mut self.p);

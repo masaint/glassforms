@@ -33,7 +33,10 @@
 //!   detail:<n>  motion:<n>      voxels per side: still, and while animating
 //!   play                        start or stop the animation
 //!   view:<name>                 front, back, left, right, top, under; reset:<view|object|lights>
-//!   key:<name>                  space, p, h, l, m, c, f, r, f1, 1-9, left, right, up, down, escape, enter
+//!   key:<name>                  space, p, h, l, m, c, f, r, f1, 1-9, left, right, up, down, escape; with
+//!                               ctrl+, shift+, alt+ before it, held with it (key:ctrl+z, key:shift+3), enter
+//!   undo  redo                  as Ctrl+Z and Ctrl+Shift+Z do
+//!   slot-store:<n>  slot:<n>    store the view in camera slot n (1 to 9, 0), as Ctrl+n does; go to it (Shift+n)
 //!   keyhold:<name>=<frames>     hold a key down while that many frames go by (flying: w, a, s, d, q, e)
 //!   press:<control>             click the middle of a control by the name a test knows it by (tool:move,
 //!                               tool:fly, cube:+y, ...: the state written out lists them under "rects")
@@ -127,6 +130,11 @@ pub enum Act {
     Key(String),
     /// a key held down for so many frames
     KeyHold(String, u32),
+    Undo,
+    Redo,
+    /// store the view in a camera slot (0 to 9: the keys 1 to 9 and 0), or go to it
+    SlotStore(usize),
+    Slot(usize),
     /// a click on the middle of a noted control
     Press(String),
     /// a drag from the middle of a noted control by so many points (the handles over the picture are
@@ -239,7 +247,15 @@ pub fn parse(text: &str) -> Result<Vec<Act>, String> {
             "play" => Act::Play,
             "view" => Act::View(arg.into()),
             "reset" => Act::Reset(arg.into()),
-            "key" => { key(arg)?; Act::Key(arg.into()) }
+            "key" => { key(held(arg).1)?; Act::Key(arg.into()) }
+            "undo" => Act::Undo,
+            "redo" => Act::Redo,
+            "slot-store" | "slot" => {
+                let n: usize = num(name, arg)?;
+                if n > 9 { return Err(format!("{name}: slots are 1 to 9 and 0")); }
+                let i = (n + 9) % 10;
+                if name == "slot" { Act::Slot(i) } else { Act::SlotStore(i) }
+            }
             "keyhold" => { let (k, v) = named(name, arg)?; key(k)?; Act::KeyHold(k.into(), num(name, v)?) }
             "press" => Act::Press(arg.into()),
             "hover" => Act::Hover(arg.into()),
@@ -294,6 +310,19 @@ pub fn parse(text: &str) -> Result<Vec<Act>, String> {
 }
 
 /// The key a name stands for.
+/// The keys held with a key named "ctrl+shift+z" and the like, and the key's own name.
+pub fn held(name: &str) -> (egui::Modifiers, &str) {
+    let mut m = egui::Modifiers::NONE;
+    let mut rest = name;
+    loop {
+        let lower = rest.to_ascii_lowercase();
+        if lower.starts_with("ctrl+") { m.ctrl = true; m.command = true; rest = &rest[5..]; }
+        else if lower.starts_with("shift+") { m.shift = true; rest = &rest[6..]; }
+        else if lower.starts_with("alt+") { m.alt = true; rest = &rest[4..]; }
+        else { return (m, rest); }
+    }
+}
+
 pub fn key(name: &str) -> Result<egui::Key, String> {
     use egui::Key::*;
     Ok(match name.to_ascii_lowercase().as_str() {
