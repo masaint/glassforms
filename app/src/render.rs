@@ -33,6 +33,67 @@ const GEM_EXIT: &str = "      var m: vec3f;
       let q = pos + dir * s;
 ";
 
+/// For a cut stone reshaped by the surface studio (r13, docs/perf_r13.md): the march through the glass
+/// starts where the stone's planes, each moved in by the most the studio can carve (`GemU.info.w`), let it
+/// start, instead of at the ray's start. The studio moves the surface by at most that, so nothing the march
+/// from the start would have met lies before it: the same surface is found with far fewer steps.
+const GEM_CARVED_EXIT: &str = "      var m: vec3f;
+      let s = gemCarved(pos, dir, &m);
+      let q = pos + dir * s;
+";
+const GEM_CARVED_WGSL: &str = "
+// A cut stone the surface studio has reshaped (render.rs GEM_CARVED_EXIT): the stone's planes moved in by
+// gem.info.w bound the surface from inside, so the march from pos can start where the ray leaves that
+// smaller stone. Where the rim's curved wall (not bounded by the planes) is within reach, it starts at pos.
+fn gemCarved(pos: vec3f, dir: vec3f, mOut: ptr<function, vec3f>) -> f32 {
+  let po = toObj(pos);
+  let dob = toObj(dir);
+  let n = i32(gem.info.x);
+  let b = gem.info.w;
+  var t = 1e9;
+  for (var i = 0; i < n; i++) {
+    let pl = gem.pl[i];
+    let dn = dot(pl.xyz, dob);
+    if (dn > 1e-6) { t = min(t, (pl.w - b - dot(pl.xyz, po)) / dn); }
+  }
+  let reach = 3.05 * 2.0 * HB / u.vres + b;
+  // Within the rim's band of heights the rim's wall may cut the ray off first: it stands outside the
+  // circle of radius gem.carve.x about the middle, so the circle moved in likewise bounds it too.
+  let y0 = po.y;
+  let y1 = po.y + dob.y * clamp(t, 0.0, 2.5 * BOUND);
+  if (max(y0, y1) > gem.info.y - reach && min(y0, y1) < gem.info.z + reach) {
+    let r = gem.carve.x - reach;
+    let a = dot(dob.xz, dob.xz);
+    let h = dot(po.xz, dob.xz);
+    let c = dot(po.xz, po.xz) - r * r;
+    if (c >= 0.0 || r <= 0.0) { t = 0.0; }                 // starting outside that circle: march from the start
+    else if (a > 1e-9) { t = min(t, (-h + sqrt(max(h * h - a * c, 0.0))) / a); }
+  }
+  var s = clamp(t, 0.0, 2.5 * BOUND);
+  for (var i = 0; i < STEPS_IN; i++) {
+    let d = -mapW(pos + dir * s);
+    if (d < 0.0008) { break; }
+    s += d * STEP_SCALE;
+    if (s > 2.5 * BOUND) { break; }
+  }
+  s -= mapNW(pos + dir * s);
+  s -= mapNW(pos + dir * s);
+  *mOut = nrm(pos + dir * s);
+  return s;
+}
+";
+
+/// The tracer's text for a reshaped cut stone (`GEM_CARVED_EXIT`); text in which `shade`'s march is not
+/// found is given back as it was.
+pub fn gem_carved_weave(src: &str) -> String {
+    if src.matches(GEM_MARCH).count() != 1 { return src.to_string(); }
+    let decl = GEM_WGSL.replace("{{GEM_MAX}}", &gf_core::presets::gems::MAX_PLANES.to_string()).replace("{{GEM_BINDING}}", &GEM_BINDING.to_string());
+    // (the last plane's place holds the rim's circle: gem.carve)
+    let max = gf_core::presets::gems::MAX_PLANES;
+    let decl = decl.replace(&format!("pl: array<vec4f, {max}> }}"), &format!("pl: array<vec4f, {}>, carve: vec4f }}", max - 1));
+    format!("{}{decl}{GEM_CARVED_WGSL}", src.replace(GEM_MARCH, GEM_CARVED_EXIT))
+}
+
 /// Can a tracer of this kind find its way out of a cut stone from the stone's planes? Plain glass only,
 /// with nothing woven into how it reads the volume or its normals (lamps note where each normal was
 /// taken; a grown stage moves the volume's box).
@@ -280,6 +341,13 @@ fn rough_split(v: &Variant, profile: bool) -> bool {
     frost::splits(&v.mat, v.clay, profile) && !(v.denoise && !profile)
 }
 
+/// GLASSFORMS_HERO_MOVE=2: the moving hero (hero.rs `moving`) for every frame, still ones too (for looking
+/// at its frames alone: a still of one frame is one frame of it).
+fn hero_move_always() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("GLASSFORMS_HERO_MOVE").is_ok_and(|v| v == "2"))
+}
+
 /// Time spent making tracers since the program started, in nanoseconds: (shader modules, pipelines, count).
 pub static TRACER_BUILDS: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
 
@@ -307,6 +375,8 @@ fn tracer_pipeline_of(gpu: &Gpu, layout: &wgpu::BindGroupLayout, cast: Option<&w
     // (a tracer with casting in it reads a second group: what the bodies cast)
     if src.contains("struct FrOut") { return frost::tracer_pipeline(gpu, layout, cast, &module); }
     let layouts: Vec<&wgpu::BindGroupLayout> = std::iter::once(layout).chain(cast).collect();
+    // (one wavelength inside while moving, its dispersion written to a second target: hero.rs `split`)
+    if src.contains(crate::hero::SPLIT_MARK) { return crate::adapt::tracer_pipeline(gpu, "trace (hero split)", &module, &layouts, &[HDR, HDR, HDR]); }
     // (every tracer runs only where the stencil of adaptive refining leaves a pixel to be traced: adapt.rs)
     crate::adapt::tracer_pipeline(gpu, "trace", &module, &layouts, &[HDR])
 }
@@ -491,6 +561,8 @@ pub struct Renderer {
     u_gem: wgpu::Buffer,
     last_gem: Vec<f32>,
     gem: bool,
+    /// the stone is reshaped by the surface studio: its planes only bound the march (`gem_carved_weave`)
+    pub gem_carved: bool,
     /// the shape's formula, when the tracer reads it instead of the volume (gf_core::sdf): what names it,
     /// and its text for the tracer
     sdf: Option<(String, String)>,
@@ -521,9 +593,9 @@ pub struct Renderer {
     picture_smp: wgpu::Sampler,
     no_picture: wgpu::TextureView,
     /// a tracer being built on another thread: which, and where it will arrive
-    building: Option<(String, std::sync::mpsc::Receiver<wgpu::RenderPipeline>)>,
+    building: Option<(String, std::sync::mpsc::Receiver<(wgpu::RenderPipeline, bool)>)>,
     /// tracers made beforehand on another thread (`warm`): what is on its way, and what has been asked for
-    warming: Option<std::sync::mpsc::Receiver<(String, wgpu::RenderPipeline)>>,
+    warming: Option<std::sync::mpsc::Receiver<(String, wgpu::RenderPipeline, bool)>>,
     warm_asked: Vec<String>,
     /// the lights' map and the volume the tracer reads, and how it marches and draws
     scene: Option<(wgpu::TextureView, wgpu::TextureView)>,
@@ -576,7 +648,14 @@ pub struct Renderer {
     pub up: crate::dlss::Upscale,
     /// one wavelength inside the glass (hero.rs): as asked for, and whether the tracer in use has it
     pub hero: crate::hero::Hero,
-    hero_now: bool,
+    /// the hero as woven into the tracer in use (None: the whole comb)
+    hero_cur: Option<crate::hero::Hero>,
+    /// one wavelength inside while the view moves, put back together from the neighbours (hero.rs
+    /// `moving`, `split`; docs/perf_r13.md): set by the engine for the shapes that need it
+    pub hero_move: Option<crate::hero::Hero>,
+    /// the tracers (by key) that write their dispersion apart, and the pass that puts their frame together
+    split_keys: std::collections::HashSet<String>,
+    recon: Option<crate::hero::Recon>,
     /// the antialiasing's pipeline has been made with colour kept apart (hero.rs chroma_taa)
     accum_chroma: bool,
     /// adaptive refining: each pixel's own count, and the stencil that leaves pixels whose mean is
@@ -740,7 +819,7 @@ impl Renderer {
             swapped: false,
             u_sdf: gpu.uniform_buffer("trace: the shape's formula", (gf_core::field::UNIFORM_SIZE).max(gf_core::csg::UNIFORM_FLOATS * 4) as u64),
             last_sdf: Vec::new(),
-            gem: false,
+            gem: false, gem_carved: false,
             u_inner_bodies: gpu.uniform_buffer("trace: inside each body", (material::MAX_BODIES * gf_core::inner::IU_FLOATS * 4) as u64),
             last_inner_bodies: Vec::new(),
             rough_share: -1.0,
@@ -774,7 +853,7 @@ impl Renderer {
             dn: Denoise::new(gpu), shown: 0,
             surface: crate::surface::Surface::new(gpu),
             up: Default::default(),
-            hero: Default::default(), hero_now: false, accum_chroma: false,
+            hero: Default::default(), hero_cur: None, hero_move: None, split_keys: Default::default(), recon: None, accum_chroma: false,
             adapt: crate::adapt::Adapt::new(gpu),
         }
     }
@@ -993,8 +1072,23 @@ impl Renderer {
     pub fn text_with(&self, m: &March, v: Variant, lens: bool, sdf: Option<&(String, String)>) -> String {
         let src = if lens { tracer_source_lens(m, v, self.profile) } else { tracer_source(m, v, self.profile) };
         let src = if v.mat == Default::default() { leave_weave(&cut_weave(&src, self.cut), self.leave_cut) } else { src };
-        let src = if self.gem && gem_fits(&v) { gem_weave(&src) } else { src };
-        let src = if self.hero_now { crate::hero::weave(&src, &self.hero).unwrap_or(src) } else { src };
+        let src = if self.gem && gem_fits(&v) { if self.gem_carved { gem_carved_weave(&src) } else { gem_weave(&src) } } else { src };
+        let src = match self.hero_cur {
+            // (written apart while moving: the plain tracer when that cannot be woven, never the hero alone)
+            Some(h) if h.split > 0 => crate::hero::weave(&src, &h).and_then(|t| crate::hero::split(&t)).unwrap_or(src),
+            Some(h) => crate::hero::weave(&src, &h).unwrap_or(src),
+            None => src,
+        };
+        // (measuring only, docs/perf_r13.md: GLASSFORMS_PROBE_TILEXI=1 gives every pixel of an 8x8 tile the
+        // same wavelengths, to see what rays that keep together across a warp would cost; it changes the
+        // picture and is never set otherwise)
+        let src = if std::env::var("GLASSFORMS_PROBE_TILEXI").is_ok_and(|x| x == "1") { src.replace("let xi = fract(ign(fc) + ", "let xi = fract(ign(floor(fc / 8.0) * 8.0) + ") } else { src };
+        // (and GLASSFORMS_PROBE_TILERAY=k: every pixel of a k x k tile traces the tile's own ray: the most
+        // that keeping a warp's rays together could ever give)
+        let src = match std::env::var("GLASSFORMS_PROBE_TILERAY").ok().and_then(|k| k.parse::<u32>().ok()) {
+            Some(k) => src.replace("let fc = vec2f(pos.x, u.res.y - pos.y);", &format!("let fc = floor(vec2f(pos.x, u.res.y - pos.y) / {k}.0) * {k}.0 + 0.5;")),
+            None => src,
+        };
         match sdf {
             Some((_, decl)) if crate::sdf::fits(&v) => crate::sdf::weave(&src, decl),
             _ => src,
@@ -1073,8 +1167,8 @@ impl Renderer {
     /// The key of `text_with`'s tracer.
     pub fn key_with(&self, m: &March, v: Variant, lens: bool, sdf: Option<&(String, String)>) -> String {
         let sdf = sdf.filter(|_| crate::sdf::fits(&v)).map_or("", |s| s.0.as_str());
-        let hero = if self.hero_now { self.hero.key() } else { "0".into() };
-        format!("{:.2}|{}|{}|{}|{}|{:?}|{}|{}|{sdf}|{hero}|{}|{}", m.step_scale, m.steps_out, m.steps_in, m.layers, self.profile, v, lens, self.gem && gem_fits(&v), self.cut, self.leave_cut)
+        let hero = self.hero_cur.map_or("0".into(), |h| h.key());
+        format!("{:.2}|{}|{}|{}|{}|{:?}|{}|{}|{sdf}|{hero}|{}|{}", m.step_scale, m.steps_out, m.steps_in, m.layers, self.profile, v, lens, self.gem && gem_fits(&v), self.cut, self.leave_cut) + if self.gem && self.gem_carved && gem_fits(&v) { "|carved" } else { "" }
     }
     /// The tracer in use as `tracer_key` and `tracer_text` give it now: the way of marching, the way of
     /// drawing, the lens and the formula (None before there is a shape). For tests and `warm`.
@@ -1109,7 +1203,8 @@ impl Renderer {
         let (gpu, layout, cast) = (self.gpu.clone(), self.l_trace.clone(), self.l_cast.clone());
         let spawned = std::thread::Builder::new().name("tracers beforehand".into()).spawn(move || {
             for (key, src, c) in jobs {
-                if tx.send((key, tracer_pipeline(&gpu, &layout, c.then_some(&cast), &src))).is_err() { return; }
+                let split = src.contains(crate::hero::SPLIT_MARK);
+                if tx.send((key, tracer_pipeline(&gpu, &layout, c.then_some(&cast), &src), split)).is_err() { return; }
             }
         });
         if spawned.is_ok() { self.warming = Some(rx); }
@@ -1117,8 +1212,9 @@ impl Renderer {
     /// Take in the tracers made beforehand that are ready. The number still on their way.
     pub fn warm_upkeep(&mut self) -> usize {
         if let Some(rx) = &self.warming {
-            while let Ok((key, pipe)) = rx.try_recv() {
+            while let Ok((key, pipe, split)) = rx.try_recv() {
                 self.warm_asked.retain(|k| *k != key);
+                if split { self.split_keys.insert(key.clone()); }
                 self.trace_pipes.entry(key).or_insert(pipe);
             }
         }
@@ -1145,7 +1241,9 @@ impl Renderer {
             return;
         }
         if !self.trace_pipes.contains_key(&key) {
-            let pipe = tracer_pipeline(&self.gpu, &self.l_trace, self.variant.cast.then_some(&self.l_cast), &self.tracer_text(&m, self.variant));
+            let src = self.tracer_text(&m, self.variant);
+            if src.contains(crate::hero::SPLIT_MARK) { self.split_keys.insert(key.clone()); }
+            let pipe = tracer_pipeline(&self.gpu, &self.l_trace, self.variant.cast.then_some(&self.l_cast), &src);
             self.trace_pipes.insert(key.clone(), pipe);
         }
         self.trace_key = key;
@@ -1169,7 +1267,7 @@ impl Renderer {
     fn build_centred(&mut self) {
         let Some(m) = self.march else { return };
         let key = self.centred_key();
-        if self.trace_pipes.contains_key(&key) || self.cam.active { return; }
+        if self.trace_pipes.contains_key(&key) || self.cam.active || self.split_keys.contains(&self.trace_key) { return; }
         if let Some(src) = crate::dlss::centre(&self.tracer_text(&m, self.variant)) {
             let pipe = tracer_pipeline(&self.gpu, &self.l_trace, self.variant.cast.then_some(&self.l_cast), &src);
             self.trace_pipes.insert(key, pipe);
@@ -1194,7 +1292,8 @@ impl Renderer {
         let Some(m) = self.march else { return true };
         if let Some((key, rx)) = &self.building {
             match rx.try_recv() {
-                Ok(pipe) => {
+                Ok((pipe, split)) => {
+                    if split { self.split_keys.insert(key.clone()); }
                     self.trace_pipes.insert(key.clone(), pipe);
                     self.building = None;
                 }
@@ -1216,7 +1315,8 @@ impl Renderer {
             let (gpu, layout, src) = (self.gpu.clone(), self.l_trace.clone(), self.tracer_text(&m, v));
             let cast = v.cast.then(|| self.l_cast.clone());
             let spawned = std::thread::Builder::new().name("tracer".into()).spawn(move || {
-                let _ = tx.send(tracer_pipeline(&gpu, &layout, cast.as_ref(), &src));
+                let split = src.contains(crate::hero::SPLIT_MARK);
+                let _ = tx.send((tracer_pipeline(&gpu, &layout, cast.as_ref(), &src), split));
             });
             match spawned {
                 Ok(_) => self.building = Some((key, rx)),
@@ -1392,13 +1492,33 @@ impl Renderer {
         self.t.as_ref().map(|t| &t.final_tex)
     }
 
+    /// What the still pass `ahead` passes from now costs, counted in passes of the tracer in use while
+    /// settling: with one wavelength inside while settling (hero.rs `settling`, clamp 5), every `every`-th
+    /// pass traces the whole comb, about nw / k times as much (an upper bound: the reflection is shared).
+    /// 1 otherwise. (For the refining budget: `Engine::frame_rest`.)
+    pub fn pass_cost(&self, ahead: u32, nw: i32, dispersive: bool) -> f64 {
+        let h = self.hero;
+        // (only where the hero is woven in: plain glass with dispersion, the tracer in use)
+        let woven = dispersive && self.variant.mat == Default::default() && !self.variant.clay && !self.profile && self.hero_cur == Some(h);
+        if woven && h.for_frame(false) && h.clamp == 5 && self.frame_no.wrapping_add(ahead) % 4096 % u32::from(h.every.max(2)) == 0 {
+            (nw.max(1) as f64 / f64::from(h.k.max(1))).max(1.0)
+        } else {
+            1.0
+        }
+    }
+
     /// Trace one frame and fold it into the picture so far.
     ///   moving: something moved since the last frame, so the picture so far is out of date
     ///   cut: something changed outright, so the picture so far is useless
     ///   skip_post: leave out the bloom and the screen (more frames are about to be averaged in)
     pub fn frame(&mut self, tu: &TraceU, look: &Look, moving: bool, cut: bool, skip_post: bool) {
         // one wavelength inside the glass, for this kind of frame (hero.rs): the tracer with it or without
-        let hero = self.hero.for_frame(moving && !cut && look.smooth > 0.0);
+        // (while moving, the split hero where the engine asks for it: three wavelengths and dispersion only)
+        let moving_taa = moving && !cut && look.smooth > 0.0;
+        let hero = match self.hero_move {
+            Some(h) if (moving_taa || hero_move_always()) && tu.nw == 3 && tu.disp != 0.0 && !self.profile => Some(h),
+            _ => self.hero.for_frame(moving_taa).then_some(self.hero),
+        };
         if self.hero.taa > 0 && !self.accum_chroma {
             if let Some(src) = crate::hero::chroma_taa(ACCUM_WGSL) {
                 let module = self.gpu.shader("accumulate (colour apart)", &src, false);
@@ -1406,8 +1526,8 @@ impl Renderer {
             }
             self.accum_chroma = true;
         }
-        if hero != self.hero_now {
-            self.hero_now = hero;
+        if hero != self.hero_cur {
+            self.hero_cur = hero;
             self.build_tracer();
         }
         let Some(t) = self.t.as_ref() else { return };
@@ -1482,6 +1602,14 @@ impl Renderer {
             }
             None if dn.is_some() => {
                 crate::adapt::trace_pass(&mut enc, &[&t.trace_view, dn.as_ref().expect("just asked")], clear, stencil, masked, pipe, g_trace, second);
+            }
+            // (the split hero: into its two targets, then put back together into the frame)
+            None if self.split_keys.contains(&self.trace_key) => {
+                let (tw, th) = (t.tw, t.th);
+                let recon = self.recon.get_or_insert_with(|| crate::hero::Recon::new(&self.gpu));
+                let views = recon.targets(&self.gpu, tw, th);
+                crate::adapt::trace_pass(&mut enc, &views, clear, stencil, masked, pipe, g_trace, second);
+                recon.encode(&mut enc, &t.trace_view);
             }
             None => crate::adapt::trace_pass(&mut enc, &[&t.trace_view], clear, stencil, masked, pipe, g_trace, second),
         }

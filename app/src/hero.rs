@@ -28,18 +28,20 @@ pub struct Hero {
     pub every: u8,
     /// colour kept apart from brightness in the antialiasing that follows motion (heroTaa=1: chroma_taa)
     pub taa: u8,
+    /// the dispersion written apart and filled in from the neighbours (`split`, `Recon`: docs/perf_r13.md)
+    pub split: u8,
 }
 
 impl Hero {
     pub fn asked(mode: Option<f64>, k: Option<f64>) -> Hero {
-        Hero { mode: mode.map_or(0, |m| m.clamp(0.0, 2.0) as u8), k: k.map_or(1, |k| k.clamp(1.0, 3.0) as u8), clamp: 0, seq: 0, every: 6, taa: 0 }
+        Hero { mode: mode.map_or(0, |m| m.clamp(0.0, 2.0) as u8), k: k.map_or(1, |k| k.clamp(1.0, 3.0) as u8), clamp: 0, seq: 0, every: 6, taa: 0, split: 0 }
     }
     /// The speed-up as the setting heroSettle has it: one wavelength inside while settling, a whole-comb
     /// frame in seven (a period with no factor in common with adaptive refining's recheck of 8: with 6, a
     /// settled pixel's rechecks met whole-comb frames in the wrong share, measured -0.57 red on hammered)
     /// keeping the settled picture today's (heroClamp 5), the hashed sequence (heroSeq 3).
     pub fn settling(on: bool) -> Hero {
-        if on { Hero { mode: 2, k: 1, clamp: 5, seq: 3, every: 7, taa: 0 } } else { Hero::default() }
+        if on { Hero { mode: 2, k: 1, clamp: 5, seq: 3, every: 7, taa: 0, split: 0 } } else { Hero::default() }
     }
     /// With the experiment's further choices (`heroClamp`, `heroSeq`).
     pub fn with(mut self, clamp: Option<f64>, seq: Option<f64>, every: Option<f64>, taa: Option<f64>) -> Hero {
@@ -51,7 +53,16 @@ impl Hero {
     }
     /// What the tracer's key holds of it.
     pub fn key(&self) -> String {
-        format!("{}.{}.{}.{}", self.k, self.clamp, self.seq, self.every)
+        format!("{}.{}.{}.{}{}", self.k, self.clamp, self.seq, self.every, if self.split > 0 { ".split" } else { "" })
+    }
+    /// The speed-up while the view moves (r13, docs/perf_r13.md): one wavelength inside, which one from a
+    /// Latin square across the picture stepped by one a frame (every 3x3 block of pixels holds each member
+    /// of the comb three times, and each pixel takes every member in turn), the sample left signed, and
+    /// what the members bring apart from the plain light written to a second target, from which the
+    /// moving frame is filled in from the neighbours (`Recon`). Only for shapes that need it (the engine
+    /// sets `Renderer::hero_move`).
+    pub fn moving() -> Hero {
+        Hero { mode: 1, k: 1, clamp: 0, seq: 2, every: 7, taa: 0, split: 1 }
     }
     pub fn on(&self) -> bool {
         self.mode > 0
@@ -238,4 +249,137 @@ pub fn chroma_taa(src: &str) -> Option<String> {
     (src.matches(OLD).count() == 1).then(|| format!("const CHROMA_SPREAD: f32 = 3.0;
 const CHROMA_KEEP: f32 = 0.4;
 {}", src.replace(OLD, NEW)))
+}
+
+/// What marks a tracer that writes its dispersion apart (`split`).
+pub const SPLIT_MARK: &str = "struct HeroOut";
+
+/// The hero tracer (one member inside, `heroClamp=0`) made to write three targets:
+///   (0) what does not come out of the body (the surface's reflection, every member of the comb, and
+///       where the ray misses, the background) and the distance, as ever;
+///   (1) what the one member brought out of the body, weighted as the hero weighs it (its colour over the
+///       comb's, times three: very noisy in colour pixel by pixel), and which member it was;
+///   (2) the same light counted as plain white light (L: the picture's detail, no colour noise from which
+///       member went in).
+/// (0) + (1) is the hero sample. The pass after (hero_recon.wgsl) puts the frame together from them and
+/// the neighbours. None when the text is not the hero tracer as `weave` makes it with `clamp` 0.
+pub fn split(src: &str) -> Option<String> {
+    const TAIL: &str = "    acc += w * L;
+    one = L;
+";
+    const DECL: &str = "  var heroT = vec3f(0.0);
+";
+    const RET: &str = "  return envR * (racc / wsum) + acc * (f32(W) / f32(heroN)) / wsum;";
+    const GLOBAL: &str = "var<private> heroJ0: i32;";
+    const HEAD: &str = "fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {";
+    const OUT: &str = "return vec4f(col / f32(S), depth);";
+    for s in [TAIL, DECL, RET, GLOBAL, HEAD, OUT] {
+        if src.matches(s).count() != 1 { return None; }
+    }
+    Some(src.replace(TAIL, &format!("{TAIL}    heroLs += L;
+"))
+        .replace(DECL, &format!("{DECL}  var heroLs = vec3f(0.0);
+"))
+        .replace(RET, &format!("  heroA += acc * (f32(W) / f32(heroN)) / wsum;
+  heroL += heroLs / f32(heroN);
+{RET}"))
+        .replace(GLOBAL, &format!("var<private> heroA: vec3f;             // what the members inside brought out (split)
+var<private> heroL: vec3f;             // the same as plain white light
+{GLOBAL}"))
+        .replace(HEAD, "fn fs(@builtin(position) pos: vec4f) -> HeroOut {")
+        .replace(OUT, "return HeroOut(vec4f((col - heroA) / f32(S), depth), vec4f(heroA / f32(S), f32(heroJ0)), vec4f(heroL / f32(S), 0.0));")
+        + "
+struct HeroOut { @location(0) col: vec4f, @location(1) inside: vec4f, @location(2) plain: vec4f }
+")
+}
+
+/// The pass that puts a moving frame of the split tracer back together (shaders/hero_recon.wgsl): the
+/// three targets the tracer writes, and the pass that reads them and writes the frame the antialiasing
+/// folds in. `GLASSFORMS_RECON=mode,radius,sigma,signed` (for measuring) sets how (see the shader), the
+/// neighbourhood (1: 3x3), how alike in brightness neighbours must be, and whether the result is left
+/// signed (1) or held at 0.
+pub struct Recon {
+    pipe: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
+    u: wgpu::Buffer,
+    t: Option<ReconTargets>,
+}
+
+struct ReconTargets {
+    w: u32,
+    h: u32,
+    views: [wgpu::TextureView; 3],
+    group: wgpu::BindGroup,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct ReconU {
+    res: [f32; 2],
+    radius: f32,
+    sigma: f32,
+    mode: f32,
+    pad: [f32; 3],
+}
+
+/// How the frame is put together, unless GLASSFORMS_RECON=mode,radius,sigma,signed says otherwise: the
+/// variant that looked least unlike today's moving frames (docs/perf_r13.md): mode 2, 5x5, no brightness
+/// weighing, the result left signed (held at 0 it loses the rainbow's colour).
+pub const RECON: (f32, f32, f32, f32) = (2.0, 2.0, 1000.0, 1.0);
+
+impl Recon {
+    pub fn new(gpu: &crate::gpu::Gpu) -> Recon {
+        use crate::gpu::*;
+        let module = gpu.shader("hero recon", include_str!("shaders/hero_recon.wgsl"), false);
+        let layout = gpu.bind_layout("hero recon", &[
+            uniform_entry(0, wgpu::ShaderStages::FRAGMENT, false),
+            texture_entry(1, wgpu::TextureViewDimension::D2, false),
+            texture_entry(2, wgpu::TextureViewDimension::D2, false),
+            texture_entry(3, wgpu::TextureViewDimension::D2, false),
+        ]);
+        let pipe = gpu.pipeline(&PipeDesc { label: "hero recon", module: &module, vs: "vs", fs: "fs", layouts: &[&layout], format: crate::render::HDR, blend: None, strip: false, buffers: &[] });
+        let u = gpu.uniform_buffer("hero recon", std::mem::size_of::<ReconU>() as u64);
+        Recon { pipe, layout, u, t: None }
+    }
+
+    /// The targets the split tracer writes, made for this size.
+    pub fn targets(&mut self, gpu: &crate::gpu::Gpu, w: u32, h: u32) -> [&wgpu::TextureView; 3] {
+        if !self.t.as_ref().is_some_and(|t| t.w == w && t.h == h) {
+            self.t = None;
+            let view = |label: &str| gpu.target(label, w, h, crate::render::HDR, &[]).create_view(&Default::default());
+            let views = [view("hero rest"), view("hero inside"), view("hero plain")];
+            let group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("hero recon"),
+                layout: &self.layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.u.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&views[0]) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&views[1]) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&views[2]) },
+                ],
+            });
+            let mut c = RECON;
+            let mut signed = c.3;
+            if let Ok(v) = std::env::var("GLASSFORMS_RECON") {
+                let n: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                if let Some(&m) = n.first() { c.0 = m; }
+                if let Some(&r) = n.get(1) { c.1 = r; }
+                if let Some(&g) = n.get(2) { c.2 = g; }
+                if let Some(&k) = n.get(3) { signed = k; }
+            }
+            gpu.queue.write_buffer(&self.u, 0, bytemuck::bytes_of(&ReconU { res: [w as f32, h as f32], radius: c.1.clamp(0.0, 2.0), sigma: c.2, mode: c.0, pad: [signed, 0.0, 0.0] }));
+            self.t = Some(ReconTargets { w, h, views, group });
+        }
+        let t = self.t.as_ref().expect("just made");
+        [&t.views[0], &t.views[1], &t.views[2]]
+    }
+
+    /// The frame put back together, written to `out` (the targets must have been made for its size).
+    pub fn encode(&self, enc: &mut wgpu::CommandEncoder, out: &wgpu::TextureView) {
+        let Some(t) = self.t.as_ref() else { return };
+        let mut rp = crate::gpu::pass(enc, out, None, false);
+        rp.set_pipeline(&self.pipe);
+        rp.set_bind_group(0, &t.group, &[]);
+        rp.draw(0..3, 0..1);
+    }
 }

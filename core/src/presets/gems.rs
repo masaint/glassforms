@@ -903,6 +903,9 @@ pub struct Inside {
     pub planes: Vec<[f64; 4]>,
     /// lowest and highest point of the rim's wall (an empty band, low above high, when there is none)
     pub band: (f64, f64),
+    /// the radius of the largest circle about the middle that the rim's wall stands outside of (infinite
+    /// when there is no rim): within its height band, the wall leaves a ray inside that circle alone
+    pub inner: f64,
 }
 
 /// The stone of the gem preset `id` at these slider values, swollen by `puff` as the baked field is,
@@ -920,6 +923,7 @@ pub fn inside(id: &str, values: &[f64], puff: f64) -> Option<Inside> {
     }
     if planes.len() > MAX_PLANES { return None; }
     let mut band = (f64::INFINITY, f64::NEG_INFINITY);
+    let mut inner = f64::INFINITY;
     if !matches!(stone.rim, Rim::None) {
         // round the outline: where the wall stands at each bearing, then the heights the planes leave it
         for i in 0..720 {
@@ -937,6 +941,7 @@ pub fn inside(id: &str, values: &[f64], puff: f64) -> Option<Inside> {
                     lo
                 }
             };
+            inner = inner.min(lo);
             let (x, z) = (lo * c, lo * s);
             let (mut y0, mut y1) = (f64::NEG_INFINITY, f64::INFINITY);
             for p in &planes {
@@ -949,7 +954,9 @@ pub fn inside(id: &str, values: &[f64], puff: f64) -> Option<Inside> {
         // covers what falls between)
         if band.0 <= band.1 { band = (band.0 - puff.abs() - 0.01, band.1 + puff.abs() + 0.01); }
     }
-    Some(Inside { planes, band })
+    // (the wall is found to within 2e-5 at bearings half a degree apart: between them it may come in by
+    // up to about lo (1 - cos 0.25 deg); a little is taken off)
+    Some(Inside { planes, band, inner: inner - puff.abs() - 0.002 })
 }
 
 /// The tracer's numbers for `inside`: how many planes, the rim's band, then the planes.

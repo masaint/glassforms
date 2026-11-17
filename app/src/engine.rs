@@ -269,6 +269,8 @@ pub struct Engine {
     pub adapt: bool,
     /// the spectral speed-up of the renderer (hero.rs) is set from the command line, not from the setting
     pub hero_forced: bool,
+    /// the planes of the cut stone up, as last built (before the studio), for `set_carved_gem`
+    gem_planes: Option<Vec<f32>>,
 }
 
 fn rows(m: &[f64; 9]) -> [[f32; 4]; 3] {
@@ -289,7 +291,7 @@ impl Engine {
             maker: Arc::new(OnceLock::new()), picture: None, picture_no: 0, glass: None, glass_from: None, hdri_seen: None, loading: None, next: None, building: false, hdri_error: None, hdri_wait: auto,
             show_wanted: Cell::new(false), show: None, shown: None, lighting_no: 0, last_lu: None,
             dirty: true, cut: true, last_tu: None, last_look: None,
-            planes_until: None, planes_shown: false, size_override: None, auto, averaging: false, error: None, last_bake_ms: 0.0, last_bake_parts: [0.0; 3], time_bakes: false, refine_n: 1, refine_part: 0.0, refine_count: 0, refine_most: REFINE_MOST, adapt: crate::adapt::enabled(), thick_last: None, thick_later: None, bake_done: Arc::default(), spans: [0.0; 4], warmed_for: String::new(), hero_forced: false,
+            planes_until: None, planes_shown: false, size_override: None, auto, averaging: false, error: None, last_bake_ms: 0.0, last_bake_parts: [0.0; 3], time_bakes: false, refine_n: 1, refine_part: 0.0, refine_count: 0, refine_most: REFINE_MOST, adapt: crate::adapt::enabled(), thick_last: None, thick_later: None, bake_done: Arc::default(), spans: [0.0; 4], warmed_for: String::new(), hero_forced: false, gem_planes: None,
         };
         e.paint_lights();
         e
@@ -1091,7 +1093,10 @@ impl Engine {
                 let timed = (matches!(mode, Detail::Full) && self.blocking()) || self.time_bakes;
                 let vol = self.baker.volume().ok_or("no volume")?;
                 self.sculptor.run(0, vol, &skey, s, &phases, timed, !matches!(mode, Detail::Full | Detail::Hq))?;
-                self.renderer.set_gem(None);
+                // (a reshaped stone keeps its planes, moved in by what the studio may carve: render.rs
+                // gem_carved_weave; the shape under the studio is the one they were set for)
+                let planes = self.gem_planes.clone();
+                Self::set_carved_gem(&mut self.renderer, &self.sculptor.sizes, planes.as_deref(), s);
                 self.last_bake_ms = t0.elapsed().as_secs_f64() * 1e3;
                 self.last_bake_parts = [0.0, 0.0, self.last_bake_ms];
                 self.dirty = true;
@@ -1145,12 +1150,22 @@ impl Engine {
             ShapeJob::Field { uniforms } if fam.id == "gems" => {
                 let p = &fam.presets[job.preset];
                 let values: Vec<f64> = uniforms[4..4 + p.params.len().min(gf_core::field::MAX_PARAMS)].iter().map(|&v| v as f64).collect();
-                gf_core::presets::gems::inside(p.id, &values, uniforms[2] as f64).map(|s| gf_core::presets::gems::inside_uniforms(&s))
+                gf_core::presets::gems::inside(p.id, &values, uniforms[2] as f64).map(|s| {
+                    // (the rim's inner circle, kept in the last plane's place for a reshaped stone)
+                    let mut u = gf_core::presets::gems::inside_uniforms(&s);
+                    let n = u.len();
+                    if s.planes.len() < gf_core::presets::gems::MAX_PLANES { u[n - 4] = s.inner.min(1e9) as f32; }
+                    u
+                })
             }
             _ => None,
         };
-        // (a sculpted stone is no longer bounded by its planes)
-        self.renderer.set_gem(if sculpt.is_some() { None } else { gem.as_deref() });
+        // (a sculpted stone is no longer bounded by its planes: they only bound where its march starts)
+        self.gem_planes = gem.clone();
+        match &sculpt {
+            Some(s) => Self::set_carved_gem(&mut self.renderer, &self.sculptor.sizes, gem.as_deref(), s),
+            None => { self.renderer.gem_carved = false; self.renderer.set_gem(gem.as_deref()); }
+        }
         // traced from its formula, when the shape asks to be and has one (not once the surface studio
         // has reshaped its volume: the formula no longer says what the shape is)
         // The tree of formula parts (csg.rs): the shape up when it is traced as "csg", the parts added, the
@@ -1208,6 +1223,26 @@ impl Engine {
         self.layers.built_plain(&mut self.baker, self.state.layer_key(0), job.res, mode, match &job.shape { ShapeJob::Curve { melt, .. } => Some(*melt), _ => None });
         self.dirty = true;
         Ok(())
+    }
+
+    /// A cut stone reshaped by the surface studio: its planes, moved in by the most the studio can carve
+    /// (layers, rounding, thin walls), bound where the tracer's march inside starts (render.rs
+    /// `gem_carved_weave`). Without planes, or with a stack that can reach all through the body, or
+    /// GLASSFORMS_GEM_CARVED=0, the march starts at the ray's start as before.
+    fn set_carved_gem(renderer: &mut crate::render::Renderer, sizes: &[f64], planes: Option<&[f32]>, s: &gf_core::sculpt::Sculpt) {
+        let size = sizes.first().copied().unwrap_or(0.0);
+        let r = if s.any_relative() && size > 0.0 { s.resolved(size) } else { s.clone() };
+        let inward = r.reach().1 + r.round + r.wall;
+        let off = std::env::var("GLASSFORMS_GEM_CARVED").is_ok_and(|v| v == "0");
+        match planes {
+            Some(p) if inward.is_finite() && !off && p.len() >= 8 && (p[0] as usize) < gf_core::presets::gems::MAX_PLANES => {
+                let mut n = p.to_vec();
+                n[3] = inward as f32;
+                renderer.gem_carved = true;
+                renderer.set_gem(Some(&n));
+            }
+            _ => { renderer.gem_carved = false; renderer.set_gem(None); }
+        }
     }
 
     /// One pixel's width at the shape for the view and picture as they are now (for the studio's pre-filter).
@@ -1378,6 +1413,11 @@ impl Engine {
     pub fn draw(&mut self, skip_post: bool) {
         // the spectral speed-up while settling, as the setting says (unless the command line set it)
         if !self.hero_forced { self.renderer.hero = crate::hero::Hero::settling(self.state.p.hero_settle > 0.5); }
+        // (an experiment, off: one wavelength inside while the view moves too, its dispersion filled in
+        // from the neighbours (hero.rs `moving`; docs/perf_r13.md: visibly grainier and streaky, so not
+        // used). GLASSFORMS_HERO_MOVE=1 turns it on for every shape while moving, 2 for still frames too)
+        let on = matches!(std::env::var("GLASSFORMS_HERO_MOVE").as_deref(), Ok("1" | "2"));
+        self.renderer.hero_move = on.then(crate::hero::Hero::moving);
         self.bake_wanted();
         self.light_upkeep();
         if std::mem::take(&mut self.state.cut) { self.cut = true; self.dirty = true; }
@@ -1472,6 +1512,17 @@ impl Engine {
         // (adaptive: what is left of the budget after the whole passes goes to a pass for that share of
         // the pixels; each pixel's own count keeps the mean right)
         let part = if adapt && n < most && n < left { self.refine_part } else { 0.0 };
+        // With one wavelength inside while settling, every `every`-th pass traces the whole comb and costs
+        // several (render.rs `pass_cost`). Where one such pass is well over the budget by itself (sculpted
+        // glass, a hammered stone), every frame that holds one is over it, whatever else it holds: such
+        // frames are kept to one in `every` by giving every frame a single pass and no partial one
+        // (docs/perf_r13.md). Elsewhere the passes are counted as they always were.
+        let (nw, disp) = (tu.nw, tu.disp != 0.0);
+        let whole = (0..16).map(|k| self.renderer.pass_cost(k, nw, disp)).fold(1.0, f64::max);
+        let lone = whole > 1.0 && whole > 1.3 * (n as f64 + part as f64);
+        let (n, part) = if lone { (1, 0.0) } else { (n, part) };
+        // (what this frame's passes cost, in passes: for the timing below)
+        let units = if lone { self.renderer.pass_cost(0, nw, disp) } else { n as f64 + if part >= PART_LEAST { part as f64 } else { 0.0 } };
         // (every so often the frame is timed to its end, and the number of rays set from that)
         let timed = self.refine_count % every == 0;
         if timed { self.gpu.wait(); }
@@ -1487,7 +1538,7 @@ impl Engine {
         self.renderer.adapt.on = false;
         if timed {
             self.gpu.wait();
-            let passes = n as f64 + if part >= PART_LEAST { part as f64 } else { 0.0 };
+            let passes = units;
             // (adaptive frames aim lower than the budget: a pass's cost moves as pixels drop out and come
             // back, and the frame must stay under the 11.1 ms floor when it overshoots)
             let budget = if adapt { ADAPT_BUDGET_MS } else { REFINE_BUDGET_MS };

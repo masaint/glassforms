@@ -233,7 +233,7 @@ fn hero_inside() {
         for src in [tracer_source(&m, v, false), glassforms::render::gem_weave(&tracer_source(&m, v, false))] {
             for k in [1u8, 2] {
                 for (clamp, seq) in [(0u8, 0u8), (1, 1), (2, 2), (2, 1), (3, 3), (4, 3)] {
-                    let h = glassforms::hero::Hero { mode: 1, k, clamp, seq, every: 6, taa: 0 };
+                    let h = glassforms::hero::Hero { mode: 1, k, clamp, seq, every: 6, taa: 0, split: 0 };
                     let woven = glassforms::hero::weave(&src, &h).unwrap_or_else(|| panic!("{v:?}: not woven"));
                     assert!(woven.contains(&format!("const HERO_K: i32 = {k};")), "{v:?}");
                     check(&format!("trace.wgsl hero {h:?} {v:?}"), &woven);
@@ -248,4 +248,21 @@ fn hero_inside() {
 fn hero_chroma_taa() {
     let src = glassforms::hero::chroma_taa(include_str!("../src/shaders/accum.wgsl")).expect("woven");
     check("accum.wgsl colour apart", &src);
+}
+
+/// One wavelength inside while moving, written apart (hero.rs `moving`, `split`; an experiment, off): the
+/// plain tracer, with or without a stone's planes, is woven, valid, and writes three targets; and the pass
+/// that puts the frame together is valid.
+#[test]
+fn hero_split() {
+    check("hero_recon.wgsl", include_str!("../src/shaders/hero_recon.wgsl"));
+    let m = March { step_scale: 0.95, steps_out: 220, steps_in: 56, layers: 2 };
+    for v in variants() {
+        for src in [tracer_source(&m, v, false), glassforms::render::gem_weave(&tracer_source(&m, v, false))] {
+            let h = glassforms::hero::Hero::moving();
+            let woven = glassforms::hero::weave(&src, &h).and_then(|t| glassforms::hero::split(&t)).unwrap_or_else(|| panic!("{v:?}: not split"));
+            assert!(woven.contains(glassforms::hero::SPLIT_MARK), "{v:?}");
+            check(&format!("trace.wgsl hero split {v:?}"), &woven);
+        }
+    }
 }
