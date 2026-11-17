@@ -92,6 +92,7 @@ struct Seg {
   @location(2) @interpolate(flat) origin: vec2f,      // top left of this slice's place on the sheet, in pixels
   @location(3) @interpolate(flat) zc: f32,            // the slice's depth, 0..1
   @location(4) @interpolate(flat) s: vec4f,           // a blade's third point (see below)
+  @location(5) @interpolate(flat) seg: u32,           // where the segment's first point is (a piece's terms follow it)
 }
 @vertex
 fn vs_splat(@builtin(vertex_index) vi: u32, @location(0) seg: u32, @location(1) slice: u32) -> Seg {
@@ -102,8 +103,13 @@ fn vs_splat(@builtin(vertex_index) vi: u32, @location(0) seg: u32, @location(1) 
   var reach = max(a.w, c.w) + b.band;
   if (a.w < 0.0) { reach = 1.2 * c.w - a.w + b.band; }
   // the rectangle the segment can reach, kept inside the slice so that it cannot spill onto its neighbours
-  let lo = max(min(a.xy, c.xy) - reach, vec2f(-b.hb));
-  let hi = min(max(a.xy, c.xy) + reach, vec2f(b.hb));
+  var lo = max(min(a.xy, c.xy) - reach, vec2f(-b.hb));
+  var hi = min(max(a.xy, c.xy) + reach, vec2f(b.hb));
+  // (a solid piece: its box, a the middle and c the half-size)
+  if (a.w < PIECE_BELOW) {
+    lo = max(a.xy - c.xy - b.band, vec2f(-b.hb));
+    hi = min(a.xy + c.xy + b.band, vec2f(b.hb));
+  }
   let corner = vec2f(f32(vi & 1u), f32(vi >> 1u));
   let uv = mix(lo, hi, corner) / b.hb * 0.5 + 0.5;          // 0..1 across the slice, rows from the top
   let t = slice % b.slab;
@@ -115,7 +121,8 @@ fn vs_splat(@builtin(vertex_index) vi: u32, @location(0) seg: u32, @location(1) 
   o.a = a;
   o.c = c;
   o.s = vec4f(0.0);
-  if (a.w < 0.0) { o.s = pts[seg + 2u]; }
+  if (a.w < 0.0 && a.w > PIECE_BELOW) { o.s = pts[seg + 2u]; }
+  o.seg = seg;
   o.origin = tile * b.res;
   o.zc = (f32(slice) + 0.5) / b.res;
   return o;
@@ -148,9 +155,80 @@ fn blade_dist(p: vec3f, a: vec4f, c: vec4f, s: vec4f) -> f32 {
   return length(max(e, vec2f(0.0))) + min(max(e.x, e.y), 0.0) + a.w;
 }
 
+// A solid piece (`curve::add_pieces`): the intersection of its terms, which follow its first two points.
+// Each term is a tag (kind, numbers) and points of its own. Not an exact distance everywhere (the
+// intersection of exact distances is a lower bound outside edges and corners), but never more than one.
+const PIECE_MARK: f32 = -1.0e6;
+const PIECE_BELOW: f32 = -5.0e5;
+fn hex_dist(q: vec3f, r: f32, h: f32) -> f32 {
+  // q: across (x towards a flat side, y), along the axis (z); iq's hexagonal prism
+  let k = vec3f(-0.8660254, 0.5, 0.57735);
+  var p = abs(vec3f(q.y, q.x, q.z));
+  p = vec3f(p.xy - 2.0 * min(dot(k.xy, p.xy), 0.0) * k.xy, p.z);
+  let d = vec2f(length(p.xy - vec2f(clamp(p.x, -k.z * r, k.z * r), r)) * sign(p.y - r), p.z - h);
+  return min(max(d.x, d.y), 0.0) + length(max(d, vec2f(0.0)));
+}
+fn piece_dist(p: vec3f, seg: u32, mark: f32) -> f32 {
+  var i = seg + 2u;
+  let end = i + u32(PIECE_MARK - mark + 0.5);
+  var d = -1e9;
+  for (var guard = 0u; guard < 64u; guard++) {
+    if (i >= end) { break; }
+    let t = pts[i];
+    let q = pts[i + 1u];
+    let kind = u32(t.x + 0.5);
+    if (kind == 0u) { d = max(d, dot(q.xyz, p) - q.w); i += 2u; }
+    else if (kind == 1u) { d = max(d, length(p - q.xyz) - q.w); i += 2u; }
+    else if (kind == 2u) { d = max(d, q.w - length(p - q.xyz)); i += 2u; }
+    else if (kind == 3u) { d = max(d, abs(length(p - q.xyz) - q.w) - t.y); i += 2u; }
+    else if (kind == 4u) { d = max(d, abs(dot(q.xyz, p) - q.w) - t.y); i += 2u; }
+    else if (kind == 5u) {
+      let ax = pts[i + 2u].xyz;
+      let u = pts[i + 3u].xyz;
+      let v = p - q.xyz;
+      d = max(d, hex_dist(vec3f(dot(v, u), dot(v, cross(ax, u)), dot(v, ax)), t.y, t.z));
+      i += 4u;
+    } else {
+      // an outline, filled by the even-odd rule, extruded and rounded
+      let ux = pts[i + 2u].xyz;
+      let uy = pts[i + 3u].xyz;
+      let v = p - q.xyz;
+      let x = vec2f(dot(v, ux), dot(v, uy)) / q.w;
+      let ne = u32(t.y + 0.5);
+      let band = pts[i + 4u];
+      var d2 = 1e18;
+      var inside = false;
+      for (var e = 0u; e < ne; e++) {
+        let s = pts[i + 5u + e];
+        let a0 = s.xy;
+        let a1 = s.zw;
+        let ab = a1 - a0;
+        let h = clamp(dot(x - a0, ab) / max(dot(ab, ab), 1e-12), 0.0, 1.0);
+        let w = x - a0 - ab * h;
+        d2 = min(d2, dot(w, w));
+        if ((a0.y > x.y) != (a1.y > x.y)) {
+          if (x.x < ab.x * (x.y - a0.y) / ab.y + a0.x) { inside = !inside; }
+        }
+      }
+      // (a band of a larger outline: only its own points, and no distance told past its margin, beyond
+      // which edges were left out)
+      if (band.z > 0.0) { d2 = min(d2, band.z * band.z); }
+      var flat = sqrt(d2) * q.w;
+      if (inside) { flat = -flat; }
+      if (band.z > 0.0 && (x.y < band.x || x.y > band.y)) { flat = 1e3; }
+      let z = abs(dot(v, cross(ux, uy))) - t.z;
+      let e2 = vec2f(flat + t.w, z + t.w);
+      d = max(d, length(max(e2, vec2f(0.0))) + min(max(e2.x, e2.y), 0.0) - t.w);
+      i += 5u + ne;
+    }
+  }
+  return d;
+}
+
 // distance outside this segment's own surface, and the segment's radius there (a blade: -1)
 fn seg_dist_r(in: Seg) -> vec2f {
   let p = (vec3f((in.pos.xy - in.origin) / b.res, in.zc) * 2.0 - 1.0) * b.hb;
+  if (in.a.w < PIECE_BELOW) { return vec2f(piece_dist(p, in.seg, in.a.w), -1.0); }
   if (in.a.w < 0.0) { return vec2f(blade_dist(p, in.a, in.c, in.s), -1.0); }
   let pa = p - in.a.xyz;
   let ba = in.c.xyz - in.a.xyz;

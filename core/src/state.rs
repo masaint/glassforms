@@ -393,6 +393,8 @@ impl State {
         for (k, v) in args {
             if k == "csg" || k == "csgGrid" || k == "csgCoarse" || k == "csgPlace" { s.apply_arg(k, v); }
         }
+        // the words of the 3D text
+        if let Some(t) = arg(args, "text") { s.apply_arg("text", t); }
         // the lights and the environment picture, in the order they were given
         for (k, v) in args {
             if Self::is_light_arg(k) { s.apply_arg(k, v); }
@@ -1371,7 +1373,7 @@ impl State {
                         pose = c.pose.clone();
                         RawCurve { lines: vec![c.line[off * 3..end * 3].to_vec()], closed: false, ..Default::default() }
                     }
-                    Shape::Curve(f) => f(&st.vals, &CurveOpts { len: st.len, quick: matches!(mode, Detail::Quick | Detail::Anim) }),
+                    Shape::Curve(f) => f(&st.vals, &CurveOpts { len: st.len, quick: matches!(mode, Detail::Quick | Detail::Anim), text: &st.model }),
                     Shape::Field { .. } | Shape::Mesh { .. } => unreachable!(),
                 };
                 // Beads: lumps of thickness that travel along the tube while the animation plays (a plain
@@ -1393,13 +1395,16 @@ impl State {
                 let radius: Option<&(dyn Fn(f64, f64, f64) -> f64 + Sync)> =
                     if beads > 0.0 || taper { Some(&composed) } else if own.is_some() { Some(&plain) } else { None };
                 let lines: Vec<&[f64]> = raw.lines.iter().map(|l| &l[..]).collect();
-                let c = if raw.radii.is_empty() {
+                let c = if raw.radii.is_empty() && raw.pieces.is_empty() && raw.blades.is_empty() {
                     curve::prep_curve(&lines, &PrepOpts { tube, melt, ds, closed, radius, place, pose })
                 } else {
                     // strands with a radius of their own at every point (a tree), placed by the whole shape
                     let pose = pose.or_else(|| (!raw.frame.is_empty()).then(|| curve::placement(&[&raw.frame[..]], &place)));
                     let radii: Vec<&[f64]> = raw.radii.iter().map(|r| &r[..]).collect();
-                    curve::prep_strands(&lines, &radii, &raw.blades, &curve::StrandOpts { thick: st.thick, ds, place, pose, ground: raw.ground })
+                    let mut c = curve::prep_strands(&lines, &radii, &raw.blades, &curve::StrandOpts { thick: st.thick, ds, place, pose, ground: raw.ground });
+                    // (solid pieces: crystals, bubbles, letters)
+                    curve::add_pieces(&mut c, &raw.pieces, st.thick, ds);
+                    c
                 };
                 if c.n < 2 { return Err(format!("{}: preset \"{}\" produced no curve", fam.name, p.id)); }
                 if !moving { st.e = c.pose.e; }
@@ -1511,6 +1516,15 @@ impl State {
                 true
             }
             "model" => self.set_model(value),
+            // the words of the 3D text (kept as its shape's `model`)
+            "text" => match self.families.iter().position(|f| f.id == crate::presets::text3d::FAMILY) {
+                Some(f) => {
+                    self.shapes[f].model = value.to_string();
+                    self.want = Some(Detail::Full);
+                    true
+                }
+                None => false,
+            },
             _ if Self::is_light_arg(name) => self.apply_light_arg(name, value),
             _ if name.starts_with("p.") => match (self.preset().param_index(&name[2..]), num) {
                 (Some(i), Some(v)) => {

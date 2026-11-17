@@ -1727,3 +1727,184 @@ pub fn prep_strands(lines: &[&[f64]], radii: &[&[f64]], blades: &[crate::presets
     let cut = o.ground.filter(|_| pose.e.is_none() && ax[1] == 1).map(|g| (g - c[1]) * sc);
     Curve { pts, brk, n, rmax, ds, length, amp: 1.0, pose, vary: true, cut }
 }
+
+/// A piece's first point carries this, less the number of points of data that follow its second, in
+/// place of a radius (`add_pieces`). Anything below `PIECE_BELOW` is a piece's.
+pub const PIECE_MARK: f32 = -1.0e6;
+pub const PIECE_BELOW: f32 = -5.0e5;
+
+/// How many points the piece starting at point i takes up, all told (0: no piece starts there).
+pub fn piece_len(pts: &[f32], i: usize) -> usize {
+    let w = pts[i * 4 + 3];
+    if w < PIECE_BELOW { 2 + (PIECE_MARK - w).round() as usize } else { 0 }
+}
+
+/// Solid pieces (`presets::Piece`) added to a curve, placed as its strands are (`c.pose`).
+///
+/// Each piece is a run of points, told apart from a strand's by its first radius (`PIECE_MARK`):
+///   the middle of the box it fills, placed (radius: PIECE_MARK less the count of data points)
+///   the box's half-size (radius 0)
+///   then its terms, each a tag (kind, and up to three numbers) and the term's own points:
+///     0 plane      tag (0)            (n, d)                              n.p - d
+///     1 ball       tag (1)            (c, r)                              |p - c| - r
+///     2 hollow     tag (2)            (c, r)                              r - |p - c|
+///     3 shell      tag (3, t)         (c, r)                              ||p - c| - r| - t
+///     4 slab       tag (4, t)         (n, d)                              |n.p - d| - t
+///     5 hex column tag (5, r, h)      (c), (axis), (u)
+///     6 outline    tag (6, edges, depth, round)  (o, scale), (ux), (uy), (band y0, y1, margin), then
+///                  (x0, y0, x1, y1) per edge
+/// The piece is everything inside all of its terms. The baker draws only the segment from its first
+/// point to its second (`bake_curve.wgsl` `piece_dist`), into its box.
+/// `thick` (the thickness slider) scales the walls of shells and slabs; `ds` is the curve's step: no wall
+/// is drawn thinner than a blade is (`blade_floor`).
+pub fn add_pieces(c: &mut Curve, pieces: &[crate::presets::Piece], thick: f64, ds: f64) {
+    use crate::presets::Term;
+    if pieces.is_empty() { return; }
+    let pose = c.pose.clone();
+    let (cc, sc, ax) = (pose.c, pose.sc, pose.ax);
+    let dir = |d: &[f64; 3]| -> [f64; 3] {
+        let (x, y, z) = (d[ax[0]], d[ax[1]], d[ax[2]]);
+        match &pose.e {
+            Some(e) => [x * e[0][0] + y * e[0][1] + z * e[0][2], x * e[1][0] + y * e[1][1] + z * e[1][2], x * e[2][0] + y * e[2][1] + z * e[2][2]],
+            None => [x, y, z],
+        }
+    };
+    let place = |p: &[f64; 3]| -> [f64; 3] {
+        let q = dir(&[p[0] - cc[0], p[1] - cc[1], p[2] - cc[2]]);
+        [q[0] * sc, q[1] * sc, q[2] * sc]
+    };
+    let thin = blade_floor() * ds;
+    // (a film seen face on through its neighbours shows rings below some two voxels: walls hold that)
+    let wall = thin.max(2.7 * ds);
+    let f = |v: f64| v as f32;
+    for pc in pieces {
+        let mut data: Vec<f32> = Vec::new();
+        let mut put = |a: f64, b: f64, cz: f64, d: f64| data.extend_from_slice(&[f(a), f(b), f(cz), f(d)]);
+        let off = |n: &[f64; 3], d: f64| sc * (d - (n[0] * cc[0] + n[1] * cc[1] + n[2] * cc[2]));
+        for t in &pc.terms {
+            match t {
+                Term::Plane { n, d } => {
+                    let m = dir(n);
+                    put(0.0, 0.0, 0.0, 0.0);
+                    put(m[0], m[1], m[2], off(n, *d));
+                }
+                Term::Ball { c: o, r } | Term::Hollow { c: o, r } => {
+                    let q = place(o);
+                    put(if matches!(t, Term::Ball { .. }) { 1.0 } else { 2.0 }, 0.0, 0.0, 0.0);
+                    put(q[0], q[1], q[2], r * sc);
+                }
+                Term::Shell { c: o, r, t } => {
+                    let q = place(o);
+                    put(3.0, (t * sc * thick).max(wall), 0.0, 0.0);
+                    put(q[0], q[1], q[2], r * sc);
+                }
+                Term::Slab { n, d, t } => {
+                    let m = dir(n);
+                    put(4.0, (t * sc * thick).max(wall), 0.0, 0.0);
+                    put(m[0], m[1], m[2], off(n, *d));
+                }
+                Term::Hex { c: o, axis, u, r, h } => {
+                    let (q, a, uu) = (place(o), dir(axis), dir(u));
+                    put(5.0, r * sc, (h * sc).max(thin), 0.0);
+                    put(q[0], q[1], q[2], 0.0);
+                    put(a[0], a[1], a[2], 0.0);
+                    put(uu[0], uu[1], uu[2], 0.0);
+                }
+                Term::Glyph { o, ux, uy, depth, round, band, edges } => {
+                    let (q, x, y) = (place(o), dir(ux), dir(uy));
+                    let s = (ux[0] * ux[0] + ux[1] * ux[1] + ux[2] * ux[2]).sqrt().max(1e-300);
+                    put(6.0, edges.len() as f64, (depth * sc).max(thin), (round * sc).max(0.0));
+                    put(q[0], q[1], q[2], s * sc);
+                    put(x[0] / s, x[1] / s, x[2] / s, 0.0);
+                    put(y[0] / s, y[1] / s, y[2] / s, 0.0);
+                    put(band[0], band[1], band[2], 0.0);
+                    for e in edges { put(e[0], e[1], e[2], e[3]); }
+                }
+            }
+        }
+        // the box, placed: the box round its eight corners placed
+        let (mut lo, mut hi) = ([f64::MAX; 3], [f64::MIN; 3]);
+        for k in 0..8 {
+            let q = place(&[if k & 1 == 0 { pc.lo[0] } else { pc.hi[0] }, if k & 2 == 0 { pc.lo[1] } else { pc.hi[1] }, if k & 4 == 0 { pc.lo[2] } else { pc.hi[2] }]);
+            for a in 0..3 {
+                lo[a] = lo[a].min(q[a]);
+                hi[a] = hi[a].max(q[a]);
+            }
+        }
+        if !(lo[0] <= hi[0]) || data.is_empty() { continue; }
+        let n = data.len() / 4;
+        c.pts.extend_from_slice(&[f(0.5 * (lo[0] + hi[0])), f(0.5 * (lo[1] + hi[1])), f(0.5 * (lo[2] + hi[2])), PIECE_MARK - n as f32]);
+        c.pts.extend_from_slice(&[f(0.5 * (hi[0] - lo[0])), f(0.5 * (hi[1] - lo[1])), f(0.5 * (hi[2] - lo[2])), 0.0]);
+        c.pts.extend_from_slice(&data);
+        c.brk.push(0);
+        c.brk.extend(std::iter::repeat_n(1u8, n + 1));
+    }
+    c.n = c.brk.len();
+    c.vary = true;
+    c.rmax = c.rmax.max(2.0 * ds);
+}
+
+impl Curve {
+    /// Turn the curve by the rotation m and move it by t: every point of every strand and blade,
+    /// and every piece's points as what each of them is (a position, a direction, a plane).
+    pub fn moved(&mut self, m: &crate::math::Mat3, t: [f64; 3]) {
+        let r = [[m[0], m[1], m[2]], [m[3], m[4], m[5]], [m[6], m[7], m[8]]];
+        let rot = |q: &[f32]| -> [f64; 3] {
+            let v = [q[0] as f64, q[1] as f64, q[2] as f64];
+            [r[0][0] * v[0] + r[0][1] * v[1] + r[0][2] * v[2], r[1][0] * v[0] + r[1][1] * v[1] + r[1][2] * v[2], r[2][0] * v[0] + r[2][1] * v[1] + r[2][2] * v[2]]
+        };
+        fn set(q: &mut [f32], v: [f64; 3]) {
+            for a in 0..3 { q[a] = v[a] as f32; }
+        }
+        let moved = |v: [f64; 3]| [v[0] + t[0], v[1] + t[1], v[2] + t[2]];
+        let n = self.pts.len() / 4;
+        let mut i = 0;
+        while i < n {
+            let m = piece_len(&self.pts, i);
+            if m == 0 {
+                let w = rot(&self.pts[i * 4..]);
+                set(&mut self.pts[i * 4..], moved(w));
+                i += 1;
+                continue;
+            }
+            // the box: its middle moves; its half-size becomes that of the box round the turned box
+            let mid = rot(&self.pts[i * 4..]);
+            set(&mut self.pts[i * 4..], moved(mid));
+            let h = [self.pts[i * 4 + 4] as f64, self.pts[i * 4 + 5] as f64, self.pts[i * 4 + 6] as f64];
+            let ext: [f64; 3] = std::array::from_fn(|a| (0..3).map(|b| (r[a][b] * h[b]).abs()).sum());
+            set(&mut self.pts[i * 4 + 4..], ext);
+            let (mut j, end) = (i + 2, i + m);
+            while j < end {
+                let kind = self.pts[j * 4].round() as i32;
+                let at = (j + 1) * 4;
+                match kind {
+                    0 | 4 => {
+                        // a plane n.p = d: n turns, and d gains n'.t
+                        let nn = rot(&self.pts[at..]);
+                        let d = self.pts[at + 3] as f64 + nn[0] * t[0] + nn[1] * t[1] + nn[2] * t[2];
+                        set(&mut self.pts[at..], nn);
+                        self.pts[at + 3] = d as f32;
+                        j += 2;
+                    }
+                    1..=3 => {
+                        let w = rot(&self.pts[at..]);
+                        set(&mut self.pts[at..], moved(w));
+                        j += 2;
+                    }
+                    _ => {
+                        // a hex column or an outline: a position, then two directions
+                        let w = rot(&self.pts[at..]);
+                        set(&mut self.pts[at..], moved(w));
+                        for k in [2, 3] {
+                            let w = rot(&self.pts[(j + k) * 4..]);
+                            set(&mut self.pts[(j + k) * 4..], w);
+                        }
+                        let edges = if kind == 6 { self.pts[j * 4 + 1].round() as usize } else { 0 };
+                        j += if kind == 6 { 5 } else { 4 } + edges;
+                    }
+                }
+            }
+            i += m;
+        }
+    }
+}

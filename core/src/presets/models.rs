@@ -168,6 +168,8 @@ impl State {
             _ => return None,
         };
         if self.layer_family(layer).id == super::trees::FAMILY { return super::trees::choices(&k.id); }
+        if self.layer_family(layer).id == super::text3d::FAMILY { return super::text3d::choices(&k.id); }
+        if self.layer_family(layer).id == super::branching::FAMILY { return super::branching::choices(&k.id); }
         if self.layer_family(layer).kind != Kind::Mesh { return None; }
         let names: &[&str] = match k.id.as_str() {
             "mode" => &["as found", "solid", "shell"],

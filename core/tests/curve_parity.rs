@@ -110,7 +110,7 @@ fn build(fam: &Family, p: &Preset, vals: &[f64], len: f64, quick: bool, baked: O
             RawCurve { lines: vec![window], closed: false, ..Default::default() }
         }
         (Shape::Flow(flow), None) => RawCurve { lines: vec![orbit_line(flow, vals, jsmath::round(flow.steps as f64 * len).max(40.0) as usize, quick)], closed: false, ..Default::default() },
-        (Shape::Curve(f), _) => f(vals, &CurveOpts { len, quick }),
+        (Shape::Curve(f), _) => f(vals, &CurveOpts { len, quick, text: "" }),
         _ => panic!("{} is not a curve", p.id),
     };
     let lines: Vec<&[f64]> = raw.lines.iter().map(|l| l.as_slice()).collect();

@@ -46,7 +46,13 @@ fn every_preset_of_every_family_builds() {
             if let ShapeJob::Curve { curve, .. } = &job.shape {
                 assert!(curve.n > 10 && curve.pts.iter().all(|v| v.is_finite()), "{}/{}", s.family().id, s.preset().id);
                 // fitted into the volume
-                assert!(curve.pts.chunks(4).all(|q| q[0].abs() < 1.5 && q[1].abs() < 1.5 && q[2].abs() < 1.5), "{}/{}", s.family().id, s.preset().id);
+                // (a solid piece's points are its box's middle, then its half-size and terms: only the middle is a place)
+                let mut i = 0;
+                while i < curve.n {
+                    let q = &curve.pts[i * 4..i * 4 + 3];
+                    assert!(q[0].abs() < 1.5 && q[1].abs() < 1.5 && q[2].abs() < 1.5, "{}/{}", s.family().id, s.preset().id);
+                    i += gf_core::curve::piece_len(&curve.pts, i).max(1);
+                }
             }
             count += 1;
         }

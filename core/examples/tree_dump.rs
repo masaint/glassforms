@@ -18,10 +18,10 @@ fn main() {
     }
     let Shape::Curve(c) = &p.shape else { panic!() };
     let t = Instant::now();
-    let raw = c(&v, &CurveOpts { len: 1.0, quick: false });
+    let raw = c(&v, &CurveOpts { len: 1.0, quick: false, text: "" });
     let grow_ms = t.elapsed().as_secs_f64() * 1e3;
     let t = Instant::now();
-    let _again = c(&v, &CurveOpts { len: 1.0, quick: false });
+    let _again = c(&v, &CurveOpts { len: 1.0, quick: false, text: "" });
     let cut_ms = t.elapsed().as_secs_f64() * 1e3;
     for res in [256.0, 768.0] {
         let t = Instant::now();

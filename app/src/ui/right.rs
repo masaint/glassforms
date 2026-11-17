@@ -75,6 +75,7 @@ pub fn show(ui: &mut Ui, st: &mut State, px: &mut Panels) {
         families(ui, st, px);
         let list = shapes(ui, st, px);
         maths(ui, st, px);
+        words(ui, st, px);
         sliders(ui, st, px);
         // (and, from setups of before, a volume object with parts beside it; not one baked from a tree)
         if st.is_csg_object(st.stack.sel) || (!st.csg.baked && !st.csg.parts.is_empty()) { super::csg::show(ui, st, px); }
@@ -295,6 +296,25 @@ fn maths(ui: &mut Ui, st: &State, px: &mut Panels) {
         }
     }
     gap(ui, 8.0);
+}
+
+/// The words of the 3D text, typed in a box: kept as its shape's `model`, the letters rebuilt as they change.
+fn words(ui: &mut Ui, st: &mut State, px: &mut Panels) {
+    use gf_core::presets::text3d;
+    if st.family().id != text3d::FAMILY { return; }
+    let mut text = st.shape().model.clone();
+    let edit = egui::TextEdit::singleline(&mut text).hint_text(text3d::DEFAULT).font(mono(SIZE)).desired_width(ui.available_width() - 2.0 * INSET);
+    let r = ui.horizontal(|ui| {
+        ui.add_space(INSET);
+        ui.add(edit)
+    }).inner;
+    px.note("text words", r.rect);
+    let r = r.on_hover_text("the words to make solid; a | starts another line");
+    if r.changed() {
+        st.shape_mut().model = text;
+        st.want = Some(gf_core::state::Detail::Full);
+    }
+    gap(ui, 6.0);
 }
 
 /// A knob that is a choice between a few named things (a model drawn as it was found, as a solid or as

@@ -8,14 +8,23 @@
 
 pub mod algebraic;
 pub mod attractors;
+pub mod braids;
+pub mod branching;
+pub mod crystals;
+pub mod fieldlines;
+pub mod foam;
 pub mod forms;
 pub mod gems;
 pub mod knots;
+pub mod links;
 pub mod models;
+pub mod snowflakes;
 pub mod solids;
 pub mod studio;
 pub mod surfaces;
+pub mod text3d;
 pub mod trees;
+pub mod geo;
 
 /// One slider of a preset: `id` is what the code calls it, `label` what the panel shows.
 #[derive(Clone, Debug, PartialEq)]
@@ -53,6 +62,61 @@ pub struct RawCurve {
     pub ground: Option<f64>,
     /// Flat blades (leaves) beside the lines, in the curve's own units.
     pub blades: Vec<Blade>,
+    /// Solid pieces beside the lines, each the intersection of a few simple solids (`Term`), in the
+    /// curve's own units: crystals, bubble walls, letters. The pieces are joined to each other and to the
+    /// lines as the lines are joined (a hard union, or melted).
+    pub pieces: Vec<Piece>,
+}
+impl RawCurve {
+    /// Put the corners of every piece's box into `frame` (with the lines' points, if it is empty), so that
+    /// a shape made of pieces is placed by them.
+    pub fn frame_pieces(&mut self) {
+        if self.frame.is_empty() {
+            for l in &self.lines { self.frame.extend_from_slice(l); }
+        }
+        for p in &self.pieces {
+            for k in 0..8 {
+                self.frame.extend_from_slice(&[if k & 1 == 0 { p.lo[0] } else { p.hi[0] }, if k & 2 == 0 { p.lo[1] } else { p.hi[1] }, if k & 4 == 0 { p.lo[2] } else { p.hi[2] }]);
+            }
+        }
+    }
+}
+
+/// A solid piece: everything inside every one of its terms (an intersection), within the box lo..hi
+/// (which must hold all of it).
+#[derive(Clone, Debug, Default)]
+pub struct Piece {
+    pub lo: [f64; 3],
+    pub hi: [f64; 3],
+    pub terms: Vec<Term>,
+}
+
+/// One of the simple solids a piece is the intersection of. Directions are unit vectors.
+#[derive(Clone, Debug)]
+pub enum Term {
+    /// the side of a plane where n.p < d
+    Plane { n: [f64; 3], d: f64 },
+    /// inside a ball
+    Ball { c: [f64; 3], r: f64 },
+    /// outside a ball (a hollow)
+    Hollow { c: [f64; 3], r: f64 },
+    /// within t of a sphere: a spherical wall of half-thickness t (scaled by the thickness slider, and
+    /// no thinner than the volume holds)
+    Shell { c: [f64; 3], r: f64, t: f64 },
+    /// within t of a plane: a flat wall of half-thickness t (as a shell's)
+    Slab { n: [f64; 3], d: f64, t: f64 },
+    /// a hexagonal column about `axis` through c: flat sides `r` from the axis, one of them facing `u`
+    /// (a unit vector across the axis); `h` its half-height along the axis
+    Hex { c: [f64; 3], axis: [f64; 3], u: [f64; 3], r: f64, h: f64 },
+    /// a flat outline extruded: `edges` (x0, y0, x1, y1) are closed outlines in the plane through `o`
+    /// spanned by `ux` and `uy` (which carry the outline's scale: a point (x, y) is o + x ux + y uy; they
+    /// are at right angles and of one length), filled by the even-odd rule; `depth` its half-depth
+    /// across the plane; `round` how far its edges are rounded.
+    /// `band` (y0, y1, margin): a band of the outline, so that a large outline can be cut into several
+    /// pieces each with fewer edges to look at. Only points with y0 <= y <= y1 are this piece's (no other
+    /// band's), `edges` need hold only those within `margin` of the band (with every edge that crosses
+    /// it), and no distance beyond `margin` is told. A margin of 0: the whole outline, no band.
+    Glyph { o: [f64; 3], ux: [f64; 3], uy: [f64; 3], depth: f64, round: f64, band: [f64; 3], edges: Vec<[f64; 4]> },
 }
 
 /// A flat leaf: from `base` to `tip` along its midrib; `side` a unit vector across it in its plane; its
@@ -68,11 +132,13 @@ pub struct Blade {
     pub cup: f64,
 }
 
-/// What a curve function is told: `len` is the length slider, `quick` means a slider is moving.
+/// What a curve function is told: `len` is the length slider, `quick` means a slider is moving, `text`
+/// the words typed for the shape (`ShapeState::model`: only the 3D text uses it).
 #[derive(Clone, Copy, Debug)]
-pub struct CurveOpts {
+pub struct CurveOpts<'a> {
     pub len: f64,
     pub quick: bool,
+    pub text: &'a str,
 }
 
 /// Velocity of a flow at (x, y, z) for the preset's values.
@@ -209,5 +275,8 @@ impl Family {
 
 /// Every family: the four the web version has, in the order it shows them, then the newer ones.
 pub fn families() -> Vec<Family> {
-    vec![attractors::family(), knots::family(), surfaces::family(), algebraic::family(), gems::family(), solids::family(), forms::family(), studio::family(), trees::family(), models::family()]
+    vec![
+        attractors::family(), knots::family(), surfaces::family(), algebraic::family(), gems::family(), solids::family(), forms::family(), studio::family(), trees::family(), models::family(),
+        links::family(), braids::family(), fieldlines::family(), crystals::family(), foam::family(), branching::family(), snowflakes::family(), text3d::family(),
+    ]
 }

@@ -186,7 +186,7 @@ fn bench(fam: &Family, id: &str) {
             (RawCurve { lines: vec![stretch[..(n as usize * 3).min(stretch.len())].to_vec()], closed: false, ..Default::default() }, Some(pose))
         }
         Shape::Curve(f) => {
-            let o = CurveOpts { len: 1.0, quick: false };
+            let o = CurveOpts { len: 1.0, quick: false, text: "" };
             let ms = time_ms(|| {
                 black_box(f(black_box(&vals), &o));
             });

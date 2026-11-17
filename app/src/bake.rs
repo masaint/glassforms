@@ -195,7 +195,8 @@ impl Baker {
         let l0 = gpu.bind_layout("bake params", &[uniform_entry(0, all, false)]);
         let l_cloud = gpu.bind_layout("bake cloud", &[storage_entry(0, wgpu::ShaderStages::FRAGMENT)]);
         let l_resolve = gpu.bind_layout("bake resolve", &[texture_entry(1, wgpu::TextureViewDimension::D3, true), sampler_entry(2), texture_entry(3, wgpu::TextureViewDimension::D2, false)]);
-        let l_pts = gpu.bind_layout("bake points", &[storage_entry(4, wgpu::ShaderStages::VERTEX)]);
+        // (a solid piece's terms are read where it is drawn: `piece_dist`)
+        let l_pts = gpu.bind_layout("bake points", &[storage_entry(4, wgpu::ShaderStages::VERTEX_FRAGMENT)]);
         // the melt's sums need 32 bits; 16 will do, coarsely, where 32-bit targets cannot be blended into
         let sheet_format = if gpu.blend32 { wgpu::TextureFormat::R32Float } else { wgpu::TextureFormat::R16Float };
         // one instance = one segment in one slice
@@ -428,11 +429,26 @@ impl Baker {
         let mut cd = vec![0f32; 4096 * 4];
         // with radii of their own: how far each point's piece reaches from it (a blade's three points, the
         // whole blade's length and width; `curve::prep_strands`)
+        // (a solid piece: every one of its points stands at the middle of its box and reaches its corners;
+        // `piece` marks them, as the cloud cannot count on a piece's neighbours being near it)
+        let mut piece = vec![false; if c.vary { n } else { 0 }];
+        let mut at: Vec<f32> = Vec::new();
         let ext: Vec<f32> = if c.vary {
             let mut e: Vec<f32> = (0..n).map(|i| c.pts[i * 4 + 3].max(0.0)).collect();
             let mut i = 0;
             while i + 2 < n {
-                if c.pts[i * 4 + 3] < 0.0 {
+                let m = gf_core::curve::piece_len(&c.pts, i);
+                if m > 0 {
+                    let h = &c.pts[i * 4 + 4..i * 4 + 7];
+                    let r = (h[0] * h[0] + h[1] * h[1] + h[2] * h[2]).sqrt();
+                    if at.is_empty() { at = c.pts[..n * 4].to_vec(); }
+                    for j in i..(i + m).min(n) {
+                        e[j] = r;
+                        piece[j] = true;
+                        at.copy_within(i * 4..i * 4 + 3, j * 4);
+                    }
+                    i += m;
+                } else if c.pts[i * 4 + 3] < 0.0 {
                     let d = (0..3).map(|k| (c.pts[i * 4 + 4 + k] - c.pts[i * 4 + k]).powi(2)).sum::<f32>().sqrt();
                     let r = d + c.pts[i * 4 + 7] - c.pts[i * 4 + 3];
                     e[i..i + 3].fill(r);
@@ -445,14 +461,23 @@ impl Baker {
         } else {
             Vec::new()
         };
+        let pos: &[f32] = if at.is_empty() { &c.pts } else { &at };
         for i in 0..cn {
             let s = (i * stride).min(n - 1) * 4;
-            cd[i * 4..i * 4 + 3].copy_from_slice(&c.pts[s..s + 3]);
+            cd[i * 4..i * 4 + 3].copy_from_slice(&pos[s..s + 3]);
             // with radii of their own, each point of the cloud stands for the points round it: the
             // thickest of them (a point between two cloud points is nearer one of them than a stride)
             if c.vary {
                 let (a, b) = ((i * stride).saturating_sub(stride), ((i + 1) * stride).min(n - 1));
                 cd[i * 4 + 3] = (a..=b).map(|j| ext[j]).fold(0.0f32, f32::max);
+                // (pieces need not lie beside each other: the cloud point reaches every one round it)
+                if (a..=b).any(|j| piece[j]) {
+                    let reach = (a..=b).map(|j| {
+                        let d = (0..3).map(|k| (pos[j * 4 + k] - pos[s + k]).powi(2)).sum::<f32>().sqrt();
+                        d + ext[j]
+                    });
+                    cd[i * 4 + 3] = reach.fold(cd[i * 4 + 3], f32::max);
+                }
             }
         }
         if self.cloud.write(&gpu, bytemuck::cast_slice(&cd)) {
@@ -490,9 +515,13 @@ impl Baker {
         let mut total = 0usize;
         for i in 0..n.saturating_sub(1) {
             if c.brk[i] != 0 { continue; }
-            let (za, zb) = (p[i * 4 + 2] as f64, p[i * 4 + 6] as f64);
-            // (a blade: its width, a fifth more for its cup, and its thickness: `curve::prep_strands`)
-            let reach = if p[i * 4 + 3] < 0.0 { 1.2 * p[i * 4 + 7] as f64 - p[i * 4 + 3] as f64 } else { (p[i * 4 + 3] as f64).max(p[i * 4 + 7] as f64) } + band;
+            let (mut za, mut zb) = (p[i * 4 + 2] as f64, p[i * 4 + 6] as f64);
+            // (a blade: its width, a fifth more for its cup, and its thickness: `curve::prep_strands`;
+            // a solid piece: its box, from its middle and half-size: `curve::add_pieces`)
+            let reach = if p[i * 4 + 3] < gf_core::curve::PIECE_BELOW {
+                (za, zb) = (za - zb, za + zb);
+                band
+            } else if p[i * 4 + 3] < 0.0 { 1.2 * p[i * 4 + 7] as f64 - p[i * 4 + 3] as f64 + band } else { (p[i * 4 + 3] as f64).max(p[i * 4 + 7] as f64) + band };
             let a = ((((za.min(zb) - reach) / HB + 1.0) * 0.5 * res as f64 - 0.5).ceil() as i32).max(0);
             let b = ((((za.max(zb) + reach) / HB + 1.0) * 0.5 * res as f64 - 0.5).floor() as i32).min(res as i32 - 1);
             k0[i] = a;

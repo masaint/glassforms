@@ -8,7 +8,7 @@
 use std::time::Instant;
 
 use gf_core::layers::{Combine, Placement, WideUse, UNIFORM_FLOATS};
-use gf_core::math::{apply, euler};
+use gf_core::math::euler;
 use gf_core::presets::Shape;
 use gf_core::state::{Detail, Job, ShapeJob};
 use gf_core::HB;
@@ -442,12 +442,8 @@ impl Engine {
             if in_place {
                 if let ShapeJob::Curve { curve, .. } = &mut job.shape {
                     let r = euler(place.rot[0], place.rot[1], place.rot[2]);
-                    for q in curve.pts.chunks_exact_mut(4) {
-                        let w = apply(&r, [q[0] as f64, q[1] as f64, q[2] as f64]);
-                        for a in 0..3 {
-                            q[a] = (w[a] + place.pos[a]) as f32;
-                        }
-                    }
+                    // (each point as what it is: a solid piece's planes and directions turn without moving)
+                    curve.moved(&r, place.pos);
                     // a flat cut goes up and down with the layer; turned, it would no longer be level
                     let turned = place.rot.iter().any(|&a| a != 0.0);
                     curve.cut = if turned { None } else { curve.cut.map(|y| y + place.pos[1]) };

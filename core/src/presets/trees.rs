@@ -971,7 +971,7 @@ fn draw(g: &Grown, s: &Sliders, grow: f64, quick: bool) -> RawCurve {
         lines.push(l);
         radii.push(r);
     }
-    let mut raw = RawCurve { lines, closed: false, radii, frame: g.frame.clone(), ground: Some(0.0), blades: Vec::new() };
+    let mut raw = RawCurve { lines, closed: false, radii, frame: g.frame.clone(), ground: Some(0.0), blades: Vec::new(), pieces: Vec::new() };
     leaves(g, s, &part, &has_kid, &at, quick, &mut raw);
     raw
 }
