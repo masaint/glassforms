@@ -93,6 +93,16 @@ impl State {
                 None => { if !self.rig_is_default() { self.reset_rig(); } }
             }
             self.cut = true;
+            // the tree of formula parts (csg.rs): put back by itself, and built again (which part the panel
+            // has selected stays, if there still is one)
+            if cur.csg != s.csg || cur.csg_place != s.csg_place || cur.csg_coarse != s.csg_coarse {
+                self.csg.parts = s.csg.iter().take(crate::csg::MAX_PARTS).cloned().collect();
+                self.csg.place = s.csg_place;
+                self.csg.coarse = s.csg_coarse;
+                if self.csg.sel.is_some_and(|i| i >= self.csg.parts.len()) { self.csg.sel = None; }
+                if self.csg.parts.is_empty() { self.csg.whole = false; }
+                self.want = Some(crate::state::Detail::Full);
+            }
         } else {
             // (it was a setup a moment ago: it puts up)
             let _ = self.apply_setup(s);

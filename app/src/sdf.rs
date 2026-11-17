@@ -39,6 +39,7 @@ pub fn fits(v: &Variant) -> bool {
 /// The tracer's text reading the formula `decl` (gf_core::sdf::tracer_decl). Text in which the readings
 /// are not found as expected is given back as it was.
 pub fn weave(src: &str, decl: &str) -> String {
+    if decl.contains("fn csgDist(") { return weave_tree(src, decl); }
     if src.matches(MAP_READ).count() != 1 || src.matches(MAPN_HEAD).count() != 1 || src.matches(NRM_STEP).count() != 1 { return src.to_string(); }
     let band = gf_core::sdf::BAND;
     // (with no band the march is the volume's own: the formula only settles hits and gives normals)
@@ -102,4 +103,37 @@ fn hoist_setups(decl: &str) -> (String, String) {
         }
     }
     (out, calls)
+}
+
+/// The tracer's text reading a tree of formula parts (gf_core::csg::wgsl), or several parts beside a volume
+/// object. As for one shape, the march is the volume's own (here the volume the tree is measured into) and
+/// each hit is settled onto the tree's surface and takes its normal. Where the volume also holds a volume
+/// object (an attractor beside the parts: `csgU.info.w` = 1), the tree is taken only where it is the nearer,
+/// by more than `SDF_NEAR` voxels; elsewhere the volume object's own smooth reading and normal stand.
+pub fn weave_tree(src: &str, decl: &str) -> String {
+    if src.matches(MAPN_HEAD).count() != 1 || src.matches(NRM_STEP).count() != 1 { return src.to_string(); }
+    let mapn = "fn mapN(p: vec3f) -> f32 {
+  let c = csgDist(p);
+  if (csgU.info.w < 0.5) { return c; }
+  let vn = mapNVolume(p);
+  return select(vn, c, c < vn + SDF_NEAR * (2.0 * HB / u.vres));
+}
+// is the surface near p (object frame) the tree's, not the volume object's?
+fn csgTreeHere(p: vec3f) -> bool {
+  return csgU.info.w < 0.5 || csgDist(p) < mapNVolume(p) + SDF_NEAR * (2.0 * HB / u.vres);
+}
+const SDF_NEAR: f32 = 1.5;
+";
+    let nrm = "  let po = toObj(p);
+  if (csgTreeHere(po)) {
+    let n = csgNormal(po);
+    return normalize(n.x * vec3f(u.obj0.x, u.obj1.x, u.obj2.x) + n.y * vec3f(u.obj0.y, u.obj1.y, u.obj2.y) + n.z * vec3f(u.obj0.z, u.obj1.z, u.obj2.z));
+  }
+  let e = vec2f(1.0, -1.0) * (2.0 * HB / u.vres);
+  return normalize(e.xyy * mapNW(p + e.xyy) + e.yyx * mapNW(p + e.yyx) + e.yxy * mapNW(p + e.yxy) + e.xxx * mapNW(p + e.xxx));
+";
+    let src = settle_loops(src).replace("u32(sdfU.pad)", "u32(csgU.info2.y)");
+    src.replace(MAPN_HEAD, &format!("{decl}\n{mapn}fn mapNVolume(p: vec3f) -> f32 {{\n"))
+        .replace(NRM_STEP, nrm)
+        .replace(GEM_UNEVEN, "*mOut = gemWorld(nk);")
 }

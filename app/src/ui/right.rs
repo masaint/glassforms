@@ -64,6 +64,8 @@ pub fn show(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     maths(ui, st, px);
     sliders(ui, st, px);
     trace_row(ui, st, px);
+    // the tree of formula parts
+    super::csg::show(ui, st, px);
     layers::placement(ui, st, px);
     layers::joins(ui, st, px);
     // the surface studio: what the surface of the selected layer's solid is made into
@@ -220,23 +222,23 @@ fn trace_row(ui: &mut Ui, st: &mut State, px: &mut Panels) {
             // cannot be chosen, and why is said under it in full (not cut off)
             let items = [
                 Item::new("volume", true).tip("the shape baked into a grid of distances, which the tracer reads: as fine as its voxels"),
-                Item::new("sdf", false).tip(format!("not for this shape: {why}")),
+                Item::new("csg", false).tip(format!("not for this shape: {why}")),
             ];
             // drawn greyed and not clickable, so it does not look like a button that does nothing
             let run = ui.add_enabled_ui(false, |ui| named_run(ui, Id::unique("trace"), "traced from", &items)).inner;
-            for (w, place) in ["volume", "sdf"].iter().zip(&run.places) { px.note(format!("trace:{w}"), *place); }
+            for (w, place) in ["volume", "csg"].iter().zip(&run.places) { px.note(format!("trace:{w}"), *place); }
             gap(ui, 2.0);
-            paragraph(ui, &format!("sdf is only for shapes with a formula: {why}"), mono(SMALL), FAINT, LINE, INSET);
+            paragraph(ui, &format!("csg is only for shapes with a formula: {why} (parts can still be added beside it)"), mono(SMALL), FAINT, LINE, INSET);
         }
         Support::Formula { .. } => {
             let items = [
                 Item::new("volume", now == Trace::Volume).tip("the shape baked into a grid of distances, which the tracer reads: as fine as its voxels"),
-                Item::new("sdf", now == Trace::Sdf).tip("the tracer works out the shape's formula at every step: exact edges at any zoom, no voxel limit"),
+                Item::new("csg", now == Trace::Csg).tip("the tracer works out the shape's formula: exact edges at any zoom, and the first part of the tree of parts below"),
             ];
             let run = named_run(ui, Id::unique("trace"), "traced from", &items);
-            for (w, place) in ["volume", "sdf"].iter().zip(&run.places) { px.note(format!("trace:{w}"), *place); }
-            if let Some(i) = run.clicked { st.apply_arg("trace", if i == 0 { "volume" } else { "sdf" }); }
-            if now == Trace::Sdf {
+            for (w, place) in ["volume", "csg"].iter().zip(&run.places) { px.note(format!("trace:{w}"), *place); }
+            if let Some(i) = run.clicked { st.apply_arg("trace", if i == 0 { "volume" } else { "csg" }); }
+            if now == Trace::Csg {
                 // when the volume is read after all
                 let why = if st.layer_count() > 1 { Some("there are several layers") }
                     else if st.layer_sculpt(0).is_some_and(|s| !s.is_empty()) { Some("the surface studio is on") }
