@@ -90,9 +90,11 @@ fn arguments_work_as_the_web_urls_do() {
     assert_eq!((s.p.ior, s.shape().thick, s.p.spin), (1.7, 1.4, 0.0));
     let e = gf_core::math::euler_of(&s.r);
     assert!((e[0] - 30.0).abs() < 1e-9, "{e:?}");
-    // a still or a benchmark does not spin unless asked to
+    // nothing spins unless asked to: a still, a benchmark, and the window too (space, or the spin knob,
+    // starts it; spin= on the command line asks for it)
     assert_eq!(State::with_args(&[], true).p.spin, 0.0);
-    assert!(State::with_args(&[], false).p.spin > 0.0);
+    assert_eq!(State::with_args(&[], false).p.spin, 0.0);
+    assert_eq!(State::with_args(&args(&[("spin", "0.4")]), false).p.spin, 0.4);
 }
 
 #[test]

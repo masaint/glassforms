@@ -550,6 +550,8 @@ impl Engine {
             near,
             // (the box only grows for layers that are combined: one plain layer is where it is built)
             grown: !self.state.plain() && self.state.box_k() > 1.0,
+            // (a camera off the axis has its own tracer: plain glass seen from the axis keeps its old one)
+            eye: p.eye_x != 0.0 || p.eye_y != 0.0,
             surface: crate::surface::wanted(&mat, clay),
         };
         // 3. is that tracer built? If not it is being built: carry on as things were

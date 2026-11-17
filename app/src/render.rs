@@ -143,6 +143,8 @@ pub struct Variant {
     /// the stage is larger than ever (layers placed far out: core/src/layers.rs `box_k`): the tracer reads
     /// the box its volume spans from its numbers (`TraceU::pad[2]`), so one text serves every size
     pub grown: bool,
+    /// the camera stands off the line through the object's centre (a free camera: `eye_weave`)
+    pub eye: bool,
     /// an opaque or milky body lit by the surface pass after the tracer (surface.rs): what the tracer
     /// gathers itself changes with it (none: as it always was)
     pub surface: crate::surface::Kind,
@@ -204,6 +206,8 @@ fn tracer_from(template: &str, m: &March, v: Variant, profile: bool) -> String {
         .replace("{{GRAZE}}", mat.graze);
     // a grown stage: the volume spans a larger box, and the ball that holds the scene is larger
     let src = if v.grown { grown(&src) } else { src };
+    // a camera off the axis: its rays start where it stands (the default tracer never has this)
+    let src = if v.eye || template.contains("  cam: Cam,") { eye_weave(&src) } else { src };
     // (lit by the surface pass: the clay gathers only the room, and leaves the lamps to the pass)
     let src = crate::surface::weave(&src, &v);
     // the lamps, and then what the bodies cast, are put in last (never into the default tracer)
@@ -234,6 +238,20 @@ pub fn grown(src: &str) -> String {
         .replace(head, &format!("{head}  HB = bitcast<f32>(u.pad2);
   BOUND = HB * 0.98;
 "))
+}
+
+/// A tracer's text for a camera that stands off the line through the object's centre (`TraceU::eye`):
+/// its first ray starts there, and the width of a pixel at a point is measured from there. Woven in only
+/// while the camera stands off that line (and always into the tracer for any lens, which reads it in
+/// camera_trace.wgsl), so that the tracer of plain glass seen from the line stays its old text.
+pub fn eye_weave(src: &str) -> String {
+    let head = "  pad2: i32,\n";
+    let s = if src.contains("  eye: vec4f,") { src.to_string() } else {
+        assert_eq!(src.matches(head).count(), 1, "the tracer's block has changed");
+        src.replace(head, "  pad2: i32,\n  eye: vec4f,             // xy: where the camera stands across and up from (0, 0, dist)\n")
+    };
+    s.replace("var ro = vec3f(0.0, 0.0, u.dist);", "var ro = vec3f(u.eye.xy, u.dist);")
+        .replace("vec3f(0.0, 0.0, u.dist)", "vec3f(u.eye.xy, u.dist)")
 }
 
 /// Is the stage for rough glass run after this tracer? Not when the tracer is denoised: then what is

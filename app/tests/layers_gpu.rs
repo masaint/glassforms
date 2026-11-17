@@ -78,7 +78,8 @@ fn compare_wide(gpu: &Gpu, comb: &mut Combiner, data: &[(usize, Vec<f16>)], wide
     for k in 0..res {
         for j in 0..res {
             for i in 0..res {
-                let p = [centre(i, res), centre(j, res), centre(k, res)];
+                // (a stage grown for layers placed far out spans box_k times the usual box)
+                let p = [centre(i, res), centre(j, res), centre(k, res)].map(|x| x * c.box_k);
                 let mut d = [0.0; 4];
                 for l in 0..c.n {
                     let (r, v) = &data[l];

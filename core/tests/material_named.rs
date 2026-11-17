@@ -87,7 +87,9 @@ fn everything_a_material_can_set_is_put_back() {
     // every material control but the tint (which is the family's) is among them; and but how finely a
     // milky body's light is worked out, which is a matter of the picture's quality, not of the material
     for c in CONTROLS {
-        assert!(reset.contains(c.name) || c.name.starts_with("tint") || c.name == "sssDetail", "{} is never put back", c.name);
+        // (nor whether the picture is exposed for a milky body: no material sets it, it is how the picture
+        // is taken, and choosing another material leaves it as the user put it)
+        assert!(reset.contains(c.name) || c.name.starts_with("tint") || c.name == "sssDetail" || c.name == "meter", "{} is never put back", c.name);
     }
 }
 
@@ -220,9 +222,11 @@ fn fitting_scales_the_materials_distances() {
     assert!((fit_scale(&p, Some(FIT_THICKNESS)) - 1.0).abs() < 1e-12);
     let thin = fit_scale(&p, Some(0.06));
     assert!((thin - 0.2).abs() < 1e-12);
-    // on a shape a fifth as thick, light scatters five times as often per unit length
-    let (a, b) = (uniforms(&p, 1.0), uniforms(&p, thin));
-    assert!((b[4 * 4] / a[4 * 4] - 5.0).abs() < 1e-4);
+    // a milky body is never made denser to fit a thin shape (light that gets through a thin piece is what
+    // shows it to be translucent: material::sss_fit); on a shape twice as thick it scatters half as often
+    let (a, b, c) = (uniforms(&p, 1.0), uniforms(&p, thin), uniforms(&p, 2.0));
+    assert!((b[4 * 4] / a[4 * 4] - 1.0).abs() < 1e-6);
+    assert!((c[4 * 4] / a[4 * 4] - 0.5).abs() < 1e-4);
     // a material that only changes the family's glass is not fitted: the glass stays as the family has it
     for id in ["frosted", "satin", "seeded", "gold", "mirror"] {
         let mut p = Settings::default();

@@ -844,7 +844,8 @@ impl Combine {
     pub fn eval_bodies_at(&self, d: &[f64; 4], p: [f64; 3]) -> [f64; 4] {
         let mut out = self.eval_bodies(d);
         for o in out.iter_mut().take(self.bodies) {
-            *o = stage(*o, p).clamp(CLAMP.0, CLAMP.1);
+            // (the stage grows with the layers: combine.wgsl cuts to STAGE_R x box_k, `stage.x`)
+            *o = stage_at(*o, p, STAGE_R * self.box_k).clamp(CLAMP.0, CLAMP.1);
         }
         out
     }
@@ -1007,7 +1008,11 @@ pub fn volumes_bytes(res: u32, layers: usize, bodies: usize, plain: bool) -> u64
 
 /// A distance cut to the stage: the smooth intersection with a ball about the centre.
 pub fn stage(f: f64, p: [f64; 3]) -> f64 {
-    let s = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt() - STAGE_R;
+    stage_at(f, p, STAGE_R)
+}
+/// The same for a stage of radius `r` (a grown stage: STAGE_R times `box_k`).
+pub fn stage_at(f: f64, p: [f64; 3], r: f64) -> f64 {
+    let s = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt() - r;
     f.max(s) + dip(STAGE_SOFT, 3, (f - s).abs())
 }
 

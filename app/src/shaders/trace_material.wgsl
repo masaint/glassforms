@@ -136,7 +136,7 @@ fn mirrorWide(p: vec3f, n: vec3f, c: f32) -> f32 {
   let mean = (k1 + k2 + k3) / 3.0;
   let dev = sqrt(0.6666667 * ((k1 - mean) * (k1 - mean) + (k2 - mean) * (k2 - mean) + (k3 - mean) * (k3 - mean)));
   let bend = min((abs(mean) + dev) * 2.0 / (h * h), 1.0 / h);
-  let far = length(p - vec3f(u.eye.xy, u.dist));
+  let far = length(p - vec3f(0.0, 0.0, u.dist));
   let pixel = 2.0 * u.tan_fov / u.res.y;
   let wide = pixel * (1.0 + 2.0 * bend * far / max(c, 0.25));
   return 0.4 * wide;
@@ -291,7 +291,7 @@ fn wearAt(p: vec3f, n: vec3f) -> Wear {
   let q = toObj(p);
   let nq = toObj(n);
   // the width of a pixel at p (as mirrorLod reckons it)
-  let px = length(p - vec3f(u.eye.xy, u.dist)) * 2.0 * u.tan_fov / u.res.y;
+  let px = length(p - vec3f(0.0, 0.0, u.dist)) * 2.0 * u.tan_fov / u.res.y;
   let edgeA = mEdge();
   let cavA = mCavity();
   let scrA = mScratch();
@@ -513,7 +513,7 @@ fn brushN(w: Wear, p: vec3f, rd: vec3f, fc: vec2f, b: i32, wide: f32, sg: f32) -
   let q = toObj(p);
   // (line by line, and in a few broader bands, the grooves are deeper or shallower)
   // (lines finer than a pixel are not drawn, their mean is: as wearAt does)
-  let px = length(p - vec3f(u.eye.xy, u.dist)) * 2.0 * u.tan_fov / u.res.y;
+  let px = length(p - vec3f(0.0, 0.0, u.dist)) * 2.0 * u.tan_fov / u.res.y;
   let fine = 1.0 - smoothstep(0.3, 1.0, px * 150.0);
   let streak = max(0.6 + 0.4 * fine * wNoise(vec3f(q.x * 3.0, q.y * 150.0, q.z * 3.0)) + 0.3 * wNoise(vec3f(q.x * 1.5 + 5.0, q.y * 31.0, q.z * 1.5 + 1.0)), 0.15);
   let ax = br * BR_ACROSS * streak + wide * (1.0 + 1.5 * br) * (0.7 + 0.3 * streak);

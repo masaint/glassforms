@@ -307,6 +307,8 @@ impl Variant {
         let mut k: String = self.flags().iter().filter(|f| f.1).map(|f| f.0.to_lowercase()).collect::<Vec<_>>().join("+");
         if self.mono { k.push_str("+mono"); }
         if self.bubbles { k.push_str("+bubbles"); }
+        if self.ceramic { k.push_str("+ceramic"); }
+        if self.near { k.push_str("+near"); }
         k.push_str(&self.inner.key());
         if self.bodies > 0 { k = if k.is_empty() { format!("{} bodies", self.bodies) } else { format!("{} bodies {k}", self.bodies) }; }
         if k.is_empty() { "glass".into() } else { k }

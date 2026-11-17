@@ -19,8 +19,9 @@ const MARCH: March = March { step_scale: 0.9, steps_out: 220, steps_in: 56, laye
 /// of cast.wgsl taken out (it is added at the end, before anything a rough body's tracer adds). (A tracer lit by a picture holds clay's functions whatever it draws.)
 fn unwoven(src: &str) -> String {
     src.replacen(CAST_WGSL, "", 1)
-        .replace("  let castM = castAt(p, n);
-  var light = nine(0, toEnv(n)) * castM;", "  var light = nine(0, toEnv(n));")
+        .replace("  let castP = castParts(p, n);
+  let castM = max(castP.total - castP.lost, vec3f(0.0)) / max(castP.total, vec3f(1e-5));
+  var light = nine(0, toEnv(n)) * castM + castP.added;", "  var light = nine(0, toEnv(n));")
         .replace(" * min(dot(castM, vec3f(0.2126, 0.7152, 0.0722)), 1.0)", "")
 }
 
@@ -53,7 +54,8 @@ fn tracers_with_casting() {
         for mat in clay_tops {
             let v = Variant { light, backdrop, clay: true, mat, cast: true, ..Default::default() };
             let src = tracer_source(&MARCH, v, false);
-            assert!(src.contains("* castM;") && src.contains("fn castAt("), "{v:?}: clay does not ask what is cast");
+            // (what is cast takes away from the light clay gathers, and the light a lamp focuses on it is added)
+            assert!(src.contains("* castM + castP.added;") && src.contains("fn castAt("), "{v:?}: clay does not ask what is cast");
             check(&format!("trace.wgsl {v:?}"), &src);
             n += 1;
         }

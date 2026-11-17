@@ -52,7 +52,7 @@ const LENS_POINT_TO: &str = "// Each pixel fires `ns` rays at different points w
 /// first ray going through any lens: its own primary(), sampleAt() and lensPoint() are taken out and the
 /// camera's put in their place, and its block of numbers gets the lens at its end.
 pub fn tracer(template: &str) -> String {
-    let s = append(template, "struct U {", "  cam: Cam,               // the lens (see the end of this text)\n");
+    let s = append(template, "struct U {", "  eye: vec4f,             // xy: where the camera stands across and up from (0, 0, dist)\n  cam: Cam,               // the lens (see the end of this text)\n");
     let (s, _) = cut(&s, PRIMARY_FROM, PRIMARY_TO);
     let (s, _) = cut(&s, LENS_POINT_FROM, LENS_POINT_TO);
     format!("{s}{LENS_WGSL}{FIRST_RAY_WGSL}")

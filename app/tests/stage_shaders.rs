@@ -99,7 +99,8 @@ fn no_studio_no_text() {
     assert!(tracer_decl(Seen { backdrop: true, ..floor }, true, "x").contains("let behind = backdropAt(d);"));
     // shadows and caustics on the floor are asked for only when there is someone to answer
     assert!(tracer_decl(floor, false, "x").contains("sweepAt(d.y)) * vec3f(1.0);"));
-    assert!(tracer_decl(Seen { cast: true, ..floor }, false, "x").contains("sweepAt(d.y)) * castFloor(p);"));
+    // (the light the bodies focus onto the floor is added to its colour, not a multiple of it: cast.wgsl, castFloorLight)
+    assert!(tracer_decl(Seen { cast: true, ..floor }, false, "x").contains("sweepAt(d.y)) * castFloor(p) + castFloorLight(p);"));
 }
 
 #[test]

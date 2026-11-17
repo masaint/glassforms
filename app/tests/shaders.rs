@@ -178,3 +178,17 @@ fn grown_tracer() {
         check(&format!("trace.wgsl grown {v:?}"), &tracer_source(&m, v, false));
     }
 }
+
+/// A camera standing off the line through the object's centre gets a tracer of its own (the default
+/// tracer is then left as it was): valid for plain glass, clay and a material, and its rays start there.
+#[test]
+fn eye_tracer() {
+    let m = March { step_scale: 0.95, steps_out: 220, steps_in: 56, layers: 2 };
+    let mats = gf_core::material::Variant::samples();
+    for (clay, mat) in [(false, Default::default()), (true, Default::default()), (false, mats[mats.len() / 2])] {
+        let v = Variant { eye: true, clay, mat, ..Default::default() };
+        let src = tracer_source(&m, v, false);
+        assert!(src.contains("var ro = vec3f(u.eye.xy, u.dist);") && !src.contains("vec3f(0.0, 0.0, u.dist)"), "{v:?}");
+        check(&format!("trace.wgsl {v:?}"), &src);
+    }
+}

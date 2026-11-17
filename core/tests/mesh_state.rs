@@ -13,7 +13,8 @@ fn args(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
 #[test]
 fn the_family_of_models_follows_the_seven() {
     let s = State::new();
-    let f = s.families.last().unwrap();
+    // (other families may come after it: the trees do)
+    let f = s.families.iter().find(|f| f.id == "models").unwrap();
     assert_eq!((f.id, f.name, f.kind), ("models", "Models", Kind::Mesh));
     let ids: Vec<&str> = f.presets.iter().map(|p| p.id).collect();
     assert_eq!(ids, ["teapot", "owl", "goblet", "gear", "pawn", "file"]);
