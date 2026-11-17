@@ -223,3 +223,19 @@ fn dlss() {
         check(&format!("trace.wgsl centred {v:?}"), &src);
     }
 }
+
+/// One wavelength inside the glass (hero.rs): the plain tracer, with or without a cut stone's planes, is
+/// woven for one and for two wavelengths inside, and the result is valid.
+#[test]
+fn hero_inside() {
+    let m = March { step_scale: 0.95, steps_out: 220, steps_in: 56, layers: 2 };
+    for v in variants() {
+        for src in [tracer_source(&m, v, false), glassforms::render::gem_weave(&tracer_source(&m, v, false))] {
+            for k in [1, 2] {
+                let woven = glassforms::hero::weave(&src, k).unwrap_or_else(|| panic!("{v:?}: not woven"));
+                assert!(woven.contains(&format!("const HERO_K: i32 = {k};")), "{v:?}");
+                check(&format!("trace.wgsl hero {k} {v:?}"), &woven);
+            }
+        }
+    }
+}

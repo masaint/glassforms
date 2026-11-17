@@ -77,7 +77,7 @@ use glassforms::engine::Engine;
 use glassforms::gpu::Gpu;
 
 /// Names given as name=value that are not settings of the picture.
-const NOT_SETTINGS: [&str; 27] = ["upscale", "upscaleScale", "refine", "refineMost", "refineRays", "hz", "w", "h", "frames", "anim", "backend", "fps", "samples", "lensRays", "shutter", "codec", "crf", "detail", "play", "seed", "drift", "turn", "rounds", "rebuild", "stride", "inPlace", "noWide"];
+const NOT_SETTINGS: [&str; 29] = ["heroInside", "heroK", "upscale", "upscaleScale", "refine", "refineMost", "refineRays", "hz", "w", "h", "frames", "anim", "backend", "fps", "samples", "lensRays", "shutter", "codec", "crf", "detail", "play", "seed", "drift", "turn", "rounds", "rebuild", "stride", "inPlace", "noWide"];
 
 struct Args {
     flags: Vec<(String, Option<String>)>,
@@ -162,6 +162,8 @@ fn headless(args: &Args) -> Result<Engine, String> {
     // refineMost=N: at most N rays a pixel a refining frame (1: one, as before there were more)
     if let Some(m) = args.num("refineMost") { e.refine_most = m.max(1.0) as u32; }
     if upscale.is_some() { e.renderer.set_upscale(upscale); }
+    // heroInside=1|2 heroK=K: K wavelengths inside the glass, always or only while settling (hero.rs)
+    e.renderer.hero = glassforms::hero::Hero::asked(args.num("heroInside"), args.num("heroK"));
     // (a check that reads the bodies' volume wants it made whatever the bodies are made of)
     e.bodies_always = args.flag("bodies-out").is_some();
     e.layers.stride = args.num("stride").unwrap_or(1.0);

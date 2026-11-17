@@ -519,6 +519,9 @@ pub struct Renderer {
     surface: crate::surface::Surface,
     /// DLSS while the view moves, when asked for and built in (dlss.rs)
     pub up: crate::dlss::Upscale,
+    /// one wavelength inside the glass (hero.rs): as asked for, and whether the tracer in use has it
+    pub hero: crate::hero::Hero,
+    hero_now: bool,
 }
 
 /// The tone map of post.wgsl's final pass, done here in 64-bit arithmetic for a 16-bit still: the picture
@@ -709,6 +712,7 @@ impl Renderer {
             dn: Denoise::new(gpu), shown: 0,
             surface: crate::surface::Surface::new(gpu),
             up: Default::default(),
+            hero: Default::default(), hero_now: false,
         }
     }
 
@@ -921,6 +925,7 @@ impl Renderer {
     fn tracer_text(&self, m: &March, v: Variant) -> String {
         let src = if self.cam.wanted { tracer_source_lens(m, v, self.profile) } else { tracer_source(m, v, self.profile) };
         let src = if self.gem && gem_fits(&v) { gem_weave(&src) } else { src };
+        let src = if self.hero_now { crate::hero::weave(&src, self.hero.k).unwrap_or(src) } else { src };
         match &self.sdf {
             Some((_, decl)) if crate::sdf::fits(&v) => crate::sdf::weave(&src, decl),
             _ => src,
@@ -991,7 +996,8 @@ impl Renderer {
 
     fn tracer_key(&self, m: &March, v: Variant) -> String {
         let sdf = self.sdf.as_ref().filter(|_| crate::sdf::fits(&v)).map_or("", |s| s.0.as_str());
-        format!("{:.2}|{}|{}|{}|{}|{:?}|{}|{}|{sdf}", m.step_scale, m.steps_out, m.steps_in, m.layers, self.profile, v, self.cam.wanted, self.gem && gem_fits(&v))
+        let hero = if self.hero_now { self.hero.k } else { 0 };
+        format!("{:.2}|{}|{}|{}|{}|{:?}|{}|{}|{sdf}|{hero}", m.step_scale, m.steps_out, m.steps_in, m.layers, self.profile, v, self.cam.wanted, self.gem && gem_fits(&v))
     }
 
     /// The pipeline for the way of marching and drawing now set: made the first time, kept after.
@@ -1232,6 +1238,12 @@ impl Renderer {
     ///   cut: something changed outright, so the picture so far is useless
     ///   skip_post: leave out the bloom and the screen (more frames are about to be averaged in)
     pub fn frame(&mut self, tu: &TraceU, look: &Look, moving: bool, cut: bool, skip_post: bool) {
+        // one wavelength inside the glass, for this kind of frame (hero.rs): the tracer with it or without
+        let hero = self.hero.for_frame(moving && !cut && look.smooth > 0.0);
+        if hero != self.hero_now {
+            self.hero_now = hero;
+            self.build_tracer();
+        }
         let Some(t) = self.t.as_ref() else { return };
         if self.g_trace.is_none() { return; }
         if self.variant.cast && self.g_cast.is_none() { return; }

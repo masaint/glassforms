@@ -14,6 +14,7 @@ pub mod engine;
 pub mod export;
 pub mod frost;
 pub mod glare;
+pub mod hero;
 pub mod gpu;
 pub mod hdri;
 pub mod mesh_bake;
