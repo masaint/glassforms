@@ -137,6 +137,20 @@ impl State {
     }
 }
 
+/// A history as a file keeps it.
+#[derive(Serialize, Deserialize)]
+struct SavedHistory {
+    version: u32,
+    undo: Vec<Setup>,
+    #[serde(default)]
+    redo: Vec<Setup>,
+}
+
+/// Where a setup's history is kept: beside it, `name.history.json` for `name.json`.
+pub fn history_path(setup: &std::path::Path) -> std::path::PathBuf {
+    setup.with_extension("history.json")
+}
+
 /// The undo and redo stacks, and the snapshot of the state as it last settled.
 #[derive(Default)]
 pub struct History {
@@ -185,6 +199,22 @@ impl History {
         if let Some(now) = self.last.replace(after.clone()) { self.undo.push(now); }
         st.restore_snapshot(&after);
         true
+    }
+    /// The history as a file keeps it beside a setup: every entry is itself a setup.
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(&SavedHistory { version: crate::setup::VERSION, undo: self.undo.clone(), redo: self.redo.clone() }).expect("setups always serialise")
+    }
+    /// Take up a history read from beside a setup that has just been put up (`st` is that setup): undo
+    /// then walks back through what was done before it was saved. Fails, changing nothing, if the text
+    /// is not a history.
+    pub fn adopt_json(&mut self, text: &str, st: &mut State) -> Result<(), String> {
+        let h: SavedHistory = serde_json::from_str(text).map_err(|e| format!("not a history: {e}"))?;
+        self.undo = h.undo;
+        self.redo = h.redo;
+        let cut = self.undo.len().saturating_sub(CAP);
+        self.undo.drain(..cut);
+        self.last = Some(st.undo_snapshot());
+        Ok(())
     }
     pub fn can_undo(&self) -> usize { self.undo.len() }
     pub fn can_redo(&self) -> usize { self.redo.len() }

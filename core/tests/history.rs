@@ -90,3 +90,29 @@ fn the_camera_slots_are_kept_in_a_setup() {
     t.store_view(0);
     assert!(!h.settle(&mut t));
 }
+
+#[test]
+fn the_history_is_kept_beside_a_setup() {
+    let mut s = State::with_args(&[], true);
+    let mut h = History::default();
+    h.settle(&mut s);
+    let first = s.setup();
+    s.p.exposure = 1.6;
+    h.settle(&mut s);
+    let second = s.setup();
+    s.p.dist = 9.0;
+    h.settle(&mut s);
+    let (text, history) = (s.setup_json(), h.to_json());
+    // opened again elsewhere, undo walks back through what was done before it was saved
+    let mut t = State::with_args(&[], true);
+    let mut g = History::default();
+    g.settle(&mut t);
+    t.apply_setup_json(&text).expect("a setup");
+    g.adopt_json(&history, &mut t).expect("a history");
+    assert_eq!(g.can_undo(), 2);
+    g.undo(&mut t);
+    assert_eq!(t.setup(), second);
+    g.undo(&mut t);
+    assert_eq!(t.setup(), first);
+    assert!(g.adopt_json("not a history", &mut t).is_err());
+}

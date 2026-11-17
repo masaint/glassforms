@@ -395,6 +395,11 @@ struct App {
     unsettled: bool,
     quiet_frames: u32,
     called_off: bool,
+    /// a gesture was called off at this place: the next pass is told the buttons were let go there, so
+    /// that every drag in progress (a slider's, the picture's, a handle's) ends at once, though the hand
+    /// still holds the button
+    let_go_at: Option<Pos2>,
+    put_back: bool,
     /// frames a second, as last worked out; and the frames drawn since then, and when that was
     fps: f64,
     drawn: (u32, Instant),
@@ -493,7 +498,7 @@ impl App {
         px.ffmpeg = crate::video::ffmpeg().is_some();
         px.record = opts.scripted;
         Ok(App {
-            engine, rs, shown: None, preview: None, px, seeking: opts.size_px, canvas: (0, 0), full: Rect::ZERO, last: None, rested: false, fly_at: None, history: Default::default(), input_at: Instant::now(), unsettled: true, quiet_frames: 0, called_off: false, fps: 0.0, drawn: (0, Instant::now()), stat_at: Instant::now(),
+            engine, rs, shown: None, preview: None, px, seeking: opts.size_px, canvas: (0, 0), full: Rect::ZERO, last: None, rested: false, fly_at: None, history: Default::default(), input_at: Instant::now(), unsettled: true, quiet_frames: 0, called_off: false, let_go_at: None, put_back: false, fps: 0.0, drawn: (0, Instant::now()), stat_at: Instant::now(),
             drag: None, video: None, last_video: None, exporting: None, bench_in: 0, frozen: false, test, inject: Vec::new(), dropped: Vec::new(), model_asked: None, model_said: String::new(), adding: None, model_refused: None, failure, store_path,
             saved: store, changed_at: None, frames: Arc::new(AtomicU64::new(0)), passes: 0, ffmpeg_checked: Instant::now(), opts,
         })
@@ -574,6 +579,11 @@ impl App {
     fn save_setup(&mut self, path: &Path) {
         let name = file_name(path);
         let saved = make_folder(path).and_then(|()| std::fs::write(path, self.engine.state.setup_json()).map_err(|e| e.to_string()));
+        // the history beside it (every entry is a setup): undo goes on working after the setup is opened again
+        if saved.is_ok() {
+            self.history.settle(&mut self.engine.state);
+            let _ = std::fs::write(gf_core::history::history_path(path), self.history.to_json());
+        }
         if saved.is_ok() { self.px.store.setup_folder = store::remembered(path, "setups"); }
         self.px.file_text = match saved {
             Ok(()) => format!("saved {name}"),
@@ -584,7 +594,16 @@ impl App {
     /// Put a saved setup up. If it cannot be, everything stays as it is and the panel says why.
     fn load_setup(&mut self, path: &Path) {
         let name = file_name(path);
+        // (whatever was changed before is settled first, so that the loading is an entry of its own)
+        self.history.settle(&mut self.engine.state);
         let loaded = std::fs::read_to_string(path).map_err(|e| e.to_string()).and_then(|text| self.engine.state.apply_setup_json(&text));
+        // its history, if one was kept beside it: undo then walks back through what was done before it was
+        // saved (without one, loading it is one more entry of the history as it stands)
+        if loaded.is_ok() {
+            if let Ok(text) = std::fs::read_to_string(gf_core::history::history_path(path)) {
+                let _ = self.history.adopt_json(&text, &mut self.engine.state);
+            }
+        }
         if loaded.is_ok() { self.px.store.setup_folder = store::remembered(path, "setups"); }
         self.px.file_text = match loaded {
             Ok(()) => format!("loaded {name}"),
@@ -799,6 +818,11 @@ impl App {
     // wheel: move closer or away.  shift+wheel: change the lens, moving the camera to keep the shape the same size.
     // click (with a lens aperture set): focus there.   double click: put the view back.
     fn gestures(&mut self, ctx: &egui::Context, picture: &egui::Response) {
+        // a gesture called off with Esc: nothing more of it is taken until the button is let go
+        if self.called_off {
+            self.drag = None;
+            return;
+        }
         let st = &mut self.engine.state;
         let (down, delta, at, mods) = ctx.input(|i| (picture.is_pointer_button_down_on(), i.pointer.delta(), i.pointer.latest_pos(), i.modifiers));
         if down && self.drag.is_none() {
@@ -925,7 +949,10 @@ impl App {
         } else {
             self.quiet_frames = self.quiet_frames.saturating_add(1);
         }
-        if pressed || keyed {
+        // (a key pressed while a button is held is part of the gesture: Esc calls it off, Ctrl or Shift
+        // change how it goes)
+        let held = ctx.input(|i| i.pointer.any_down()) && !pressed;
+        if pressed || (keyed && !held) {
             self.history.settle(&mut self.engine.state);
         }
     }
@@ -936,12 +963,9 @@ impl App {
     fn history_after(&mut self, ctx: &egui::Context) {
         let down = ctx.input(|i| i.pointer.any_down() || !i.keys_down.is_empty());
         let st = &mut self.engine.state;
+        if std::mem::take(&mut self.put_back) { self.history.cancel(st); }
         if self.called_off {
-            if ctx.input(|i| i.pointer.any_down()) {
-                self.px.handles.grab = None;
-                self.history.cancel(st);
-                return;
-            }
+            if ctx.input(|i| i.pointer.any_down()) { return; }
             self.called_off = false;
         }
         if !self.unsettled || down { return; }
@@ -1049,11 +1073,18 @@ impl App {
                 }
                 // Esc puts away the nearest thing: a drag of a handle (the layer goes back), the help if it
                 // is open, the handles, what is chosen, otherwise the fullscreen
-                Escape if self.px.handles.cancel(st) => { self.called_off = true; }
+                // (a gesture called off is put back once, and what the held button goes on doing is ignored
+                // until it is let go: drags are stopped, and the picture takes no more of them)
+                Escape if self.px.handles.cancel(st) => {
+                    self.called_off = true;
+                    self.let_go_at = Some(ctx.input(|i| i.pointer.latest_pos()).unwrap_or_default());
+                }
                 // (during any other gesture, a slider's drag or a turn of the view: back to how it began)
                 Escape if ctx.input(|i| i.pointer.any_down()) => {
-                    self.history.cancel(st);
+                    // (put back once, after the panels have drawn: a slider still held this frame writes once more)
+                    self.put_back = true;
                     self.called_off = true;
+                    self.let_go_at = Some(ctx.input(|i| i.pointer.latest_pos()).unwrap_or_default());
                 }
                 Escape if self.px.help_open => self.px.help_open = false,
                 Escape if self.px.handles.on => self.px.handles.set_tool(crate::ui::handles::Tool::Select),
@@ -1936,10 +1967,9 @@ fn save_png(path: &Path, image: &egui::ColorImage) -> Result<(), String> {
     write_png(path, image.size[0] as u32, image.size[1] as u32, png::ColorType::Rgba, png::BitDepth::Eight, &rgba)
 }
 
-impl eframe::App for App {
-    /// A scripted run sees only the input its script gives it, so that a mouse that happens to be over
-    /// the window cannot change what a test finds.
-    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
+impl App {
+    /// A scripted run sees only the input its script gives it (see `raw_input_hook`).
+    fn script_input(&mut self, raw: &mut egui::RawInput) {
         let Some(t) = &mut self.test else { return };
         raw.events.retain(|e| {
             use egui::Event::*;
@@ -1956,6 +1986,20 @@ impl eframe::App for App {
         if t.told != Some(t.held) { raw.events.push(egui::Event::ModifiersChanged(t.held)); }
         raw.events.extend(self.inject.iter().cloned());
         raw.dropped_files.extend(self.dropped.iter().map(|p| Arc::new(Dropped(p.clone())) as egui::DroppedFileHandle));
+    }
+}
+
+impl eframe::App for App {
+    /// A scripted run sees only the input its script gives it, so that a mouse that happens to be over
+    /// the window cannot change what a test finds.
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
+        self.script_input(raw);
+        // (a gesture called off: the buttons let go, as far as everything drawn is concerned)
+        if let Some(pos) = self.let_go_at {
+            for button in [PointerButton::Primary, PointerButton::Secondary, PointerButton::Middle] {
+                raw.events.push(egui::Event::PointerButton { pos, button, pressed: false, modifiers: egui::Modifiers::NONE });
+            }
+        }
     }
 
     /// What goes on whether or not the window is being drawn: the benchmark, a video.
@@ -1982,6 +2026,7 @@ impl eframe::App for App {
         // this pass has taken the script's input; the script moves on, one step for every frame drawn
         self.inject.clear();
         self.dropped.clear();
+        self.let_go_at = None;
         if let Some(t) = &mut self.test { t.told = Some(t.held); }
         self.script(&ctx);
         if let Some(s) = self.opts.scale {
