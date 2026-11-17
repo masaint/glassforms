@@ -26,6 +26,15 @@ rfd = { version = "0.18", default-features = false }
 exr = "1.74"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }      # numbers read back exactly as written
+# NVIDIA DLSS Super Resolution while the view moves (optional, off by default: see docs/dlss.md). Building
+# with it needs NVIDIA's DLSS SDK (DLSS_SDK), Vulkan headers (VULKAN_SDK) and libclang; running it needs
+# nvngx_dlss.dll beside the program. Neither is part of this repository.
+dlss_wgpu = { version = "6.0", optional = true }
+uuid = { version = "1", optional = true }
+
+[features]
+default = []
+dlss = ["dep:dlss_wgpu", "dep:uuid"]
 
 [dev-dependencies]
 naga = { version = "30.0.2", features = ["wgsl-in"] }

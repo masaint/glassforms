@@ -43,7 +43,7 @@ use crate::ui::{animate, gizmo, knob, left, material, overlay, right, room, widg
 use crate::video::{Codec, VideoJob, VideoOpts, VideoResult};
 
 /// Things given as name=value that are about the window or the video rather than settings of the picture.
-const NOT_SETTINGS: [&str; 14] = ["w", "h", "frames", "anim", "backend", "vsync", "fps", "samples", "lensRays", "shutter", "codec", "crf", "detail", "play"];
+const NOT_SETTINGS: [&str; 16] = ["upscale", "upscaleScale", "w", "h", "frames", "anim", "backend", "vsync", "fps", "samples", "lensRays", "shutter", "codec", "crf", "detail", "play"];
 
 /// What the command line asked of the window.
 struct Opts {
@@ -130,7 +130,7 @@ pub fn run(pairs: Vec<(String, String)>, flags: Vec<(String, Option<String>)>) -
     let native = eframe::NativeOptions {
         viewport,
         renderer: eframe::Renderer::Wgpu,
-        wgpu_options: wgpu_options(opts.pair("backend").unwrap_or("auto"), opts.pair("vsync") != Some("0")),
+        wgpu_options: wgpu_options(opts.pair("backend").unwrap_or("auto"), opts.pair("vsync") != Some("0"), crate::dlss::window_parts(opts.pair("upscale") == Some("dlss"))),
         persist_window: false,
         dithering: false,
         centered: !opts.scripted || opts.show,
@@ -243,7 +243,18 @@ fn leave_own_console() -> bool {
 
 /// How the graphics device is made: the fastest adapter, through Vulkan where there is a choice
 /// (measured faster than DirectX 12 for this renderer), with the features and limits the renderer wants.
-fn wgpu_options(backend: &str, vsync: bool) -> egui_wgpu::WgpuConfiguration {
+/// `dlss`: the parts of a device already opened for DLSS (dlss.rs), which are used as they are.
+fn wgpu_options(backend: &str, vsync: bool, dlss: Option<(wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue)>) -> egui_wgpu::WgpuConfiguration {
+    if let Some((instance, adapter, device, queue)) = dlss {
+        return egui_wgpu::WgpuConfiguration {
+            surface: egui_wgpu::SurfaceConfig {
+                present_mode: if vsync { wgpu::PresentMode::AutoVsync } else { wgpu::PresentMode::AutoNoVsync },
+                desired_maximum_frame_latency: Some(1),
+            },
+            wgpu_setup: egui_wgpu::WgpuSetupExisting { instance, adapter, device, queue }.into(),
+            ..Default::default()
+        };
+    }
     let mut setup = egui_wgpu::WgpuSetupCreateNew::without_display_handle();
     setup.instance_descriptor.backends = match backend {
         "dx12" => wgpu::Backends::DX12,
@@ -435,7 +446,16 @@ impl App {
         if let Some(v) = number("shutter") { state.render.shutter = v.min(1.0); }
         if let Some(v) = number("crf") { state.render.crf = v as u32; }
         if let Some(c) = opts.pair("codec").and_then(Codec::from_id) { state.render.codec = c.id().into(); }
-        let engine = Engine::new(gpu, state, false);
+        // upscale=dlss upscaleScale=S: DLSS while the view moves, when the device was opened for it (dlss.rs)
+        let upscale = crate::dlss::asked(opts.pair("upscale"), opts.pair("upscaleScale").and_then(|v| v.trim().parse().ok()));
+        #[cfg(feature = "dlss")]
+        let gpu = {
+            let mut gpu = gpu;
+            if upscale.is_some() && rs.adapter.get_info().backend == wgpu::Backend::Vulkan { gpu.dlss_adapter = Some(rs.adapter.clone()); }
+            gpu
+        };
+        let mut engine = Engine::new(gpu, state, false);
+        if upscale.is_some() { engine.renderer.set_upscale(upscale); }
         theme::install_fonts(&cc.egui_ctx);
         theme::install_style(&cc.egui_ctx);
 

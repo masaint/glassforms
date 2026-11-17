@@ -75,7 +75,7 @@ use glassforms::engine::Engine;
 use glassforms::gpu::Gpu;
 
 /// Names given as name=value that are not settings of the picture.
-const NOT_SETTINGS: [&str; 25] = ["refine", "refineMost", "refineRays", "hz", "w", "h", "frames", "anim", "backend", "fps", "samples", "lensRays", "shutter", "codec", "crf", "detail", "play", "seed", "drift", "turn", "rounds", "rebuild", "stride", "inPlace", "noWide"];
+const NOT_SETTINGS: [&str; 27] = ["upscale", "upscaleScale", "refine", "refineMost", "refineRays", "hz", "w", "h", "frames", "anim", "backend", "fps", "samples", "lensRays", "shutter", "codec", "crf", "detail", "play", "seed", "drift", "turn", "rounds", "rebuild", "stride", "inPlace", "noWide"];
 
 struct Args {
     flags: Vec<(String, Option<String>)>,
@@ -141,7 +141,10 @@ fn write_png16(path: &str, w: u32, h: u32, rgb: &[u16]) -> Result<(), String> {
 
 /// An engine with no window, the shape built and the pictures sized.
 fn headless(args: &Args) -> Result<Engine, String> {
-    let gpu = Gpu::headless(args.text("backend").unwrap_or("vulkan"))?;
+    // upscale=dlss upscaleScale=S: DLSS while the view moves (a build with the cargo feature `dlss` only)
+    let upscale = glassforms::dlss::asked(args.text("upscale"), args.num("upscaleScale"));
+    let backend = args.text("backend").unwrap_or("vulkan");
+    let gpu = if upscale.is_some() { glassforms::dlss::headless_gpu(backend)? } else { Gpu::headless(backend)? };
     let mut state = State::with_args(&args.pairs, true);
     if let Some(Some(path)) = args.flag("setup") {
         // a saved setup first, then whatever was given on the command line over it
@@ -156,6 +159,7 @@ fn headless(args: &Args) -> Result<Engine, String> {
     let mut e = Engine::new(gpu, state, true);
     // refineMost=N: at most N rays a pixel a refining frame (1: one, as before there were more)
     if let Some(m) = args.num("refineMost") { e.refine_most = m.max(1.0) as u32; }
+    if upscale.is_some() { e.renderer.set_upscale(upscale); }
     // (a check that reads the bodies' volume wants it made whatever the bodies are made of)
     e.bodies_always = args.flag("bodies-out").is_some();
     e.layers.stride = args.num("stride").unwrap_or(1.0);
@@ -664,6 +668,7 @@ fn run() -> Result<(), String> {
             out += &format!(",\"{name}\":{{\"p50\":{:.2},\"p80\":{:.2},\"p95\":{:.2},\"max\":{:.2}}}", pct(v, 0.5), pct(v, 0.8), pct(v, 0.95), pct(v, 1.0));
         }
         println!("{out}}}");
+        if e.renderer.up.scale.is_some() { eprintln!("dlss: {} of {} frames drawn through DLSS", e.renderer.up.drawn, 3 * n); }
         return Ok(());
     }
     if let Some(n) = args.flag("bench-anim") {

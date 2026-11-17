@@ -16,6 +16,9 @@ pub struct Gpu {
     pub blend32: bool,
     /// a compute shader can write straight into a 16-bit float volume (otherwise volumes are drawn a slice at a time)
     pub storage16: bool,
+    /// the adapter, kept when the device was opened for DLSS (dlss.rs), which asks for it every frame
+    #[cfg(feature = "dlss")]
+    pub dlss_adapter: Option<wgpu::Adapter>,
 }
 
 /// The device features the renderer uses when the adapter has them.
@@ -87,7 +90,10 @@ impl Gpu {
             });
             storage16 = pollster::block_on(scope.pop()).is_none();
         }
-        Ok(Gpu { device, queue, name: format!("{} ({:?})", info.name, info.backend), blend32: f.contains(wgpu::Features::FLOAT32_BLENDABLE), storage16 })
+        Ok(Gpu { device, queue, name: format!("{} ({:?})", info.name, info.backend), blend32: f.contains(wgpu::Features::FLOAT32_BLENDABLE), storage16,
+            #[cfg(feature = "dlss")]
+            dlss_adapter: None,
+        })
     }
 
     /// Block until the GPU has done everything submitted so far.

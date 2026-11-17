@@ -8,6 +8,7 @@ pub mod cast_light;
 pub mod bubbles;
 pub mod combine;
 pub mod denoise;
+pub mod dlss;
 pub mod dof;
 pub mod engine;
 pub mod frost;

@@ -209,3 +209,17 @@ fn eye_tracer() {
         check(&format!("trace.wgsl {v:?}"), &src);
     }
 }
+
+/// DLSS's passes (dlss.rs), and the tracer it draws with: every way of building the tracer has the line
+/// that scatters each pixel's rays, which DLSS's tracer replaces, and the result is valid.
+#[test]
+fn dlss() {
+    check("dlss_prep.wgsl", include_str!("../src/shaders/dlss_prep.wgsl"));
+    check("dlss_resolve.wgsl", include_str!("../src/shaders/dlss_resolve.wgsl"));
+    let m = March { step_scale: 0.95, steps_out: 220, steps_in: 56, layers: 2 };
+    for v in variants() {
+        let src = glassforms::dlss::centre(&tracer_source(&m, v, false)).unwrap_or_else(|| panic!("{v:?}: no line to centre"));
+        assert!(src.contains("let shift = vec2f(0.5);"), "{v:?}");
+        check(&format!("trace.wgsl centred {v:?}"), &src);
+    }
+}

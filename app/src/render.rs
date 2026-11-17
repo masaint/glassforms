@@ -512,6 +512,8 @@ pub struct Renderer {
     glared: bool,
     /// direct light with shadows on opaque and milky bodies, after the tracer (surface.rs)
     surface: crate::surface::Surface,
+    /// DLSS while the view moves, when asked for and built in (dlss.rs)
+    pub up: crate::dlss::Upscale,
 }
 
 /// The tone map of post.wgsl's final pass, done here in 64-bit arithmetic for a 16-bit still: the picture
@@ -696,6 +698,7 @@ impl Renderer {
             frost: Frost::new(gpu),
             dn: Denoise::new(gpu), shown: 0,
             surface: crate::surface::Surface::new(gpu),
+            up: Default::default(),
         }
     }
 
@@ -958,6 +961,7 @@ impl Renderer {
         }
         self.trace_key = key;
         self.cam.active = self.cam.wanted;
+        if self.up.scale.is_some() { self.build_centred(); }
         // A tracer through a lens has passes of its own after it (folding the frame in, the final
         // picture). They are made here, with the tracer, rather than by the first frame that needs them:
         // making them takes a good part of a second, which the first frame would otherwise take too.
@@ -965,6 +969,32 @@ impl Renderer {
             self.cam.accum(&self.gpu, ACCUM_WGSL, &self.l_accum, ACC);
             self.cam.last(&self.gpu, POST_WGSL, &self.l_final, [LDR, HDR], false);
         }
+    }
+
+    /// The key of the tracer built with every pixel's rays at the same offset (for DLSS: dlss.rs).
+    fn centred_key(&self) -> String {
+        format!("{}|centred", self.trace_key)
+    }
+
+    /// Build the tracer for DLSS that goes with the tracer in use, if it is not built (and can be).
+    fn build_centred(&mut self) {
+        let Some(m) = self.march else { return };
+        let key = self.centred_key();
+        if self.trace_pipes.contains_key(&key) || self.cam.active { return; }
+        if let Some(src) = crate::dlss::centre(&self.tracer_text(&m, self.variant)) {
+            let pipe = tracer_pipeline(&self.gpu, &self.l_trace, self.variant.cast.then_some(&self.l_cast), &src);
+            self.trace_pipes.insert(key, pipe);
+        }
+    }
+
+    /// Ask for DLSS while the view moves, at this share of the size a side (None: not).
+    pub fn set_upscale(&mut self, scale: Option<f64>) {
+        // (a build without DLSS has nothing to ask for)
+        self.up.scale = scale.filter(|_| crate::dlss::BUILT);
+        self.up.live = false;
+        if scale.is_some() { self.build_centred(); }
+        #[cfg(feature = "dlss")]
+        if let Some((tw, th)) = self.t.as_ref().map(|t| (t.tw, t.th)) { self.up.ready(&self.gpu, tw, th, &self.u_accum); }
     }
 
     /// Is the tracer for this way of drawing built? If it is not, it is built on another thread (it takes
@@ -1140,6 +1170,11 @@ impl Renderer {
         self.shown = 0;
         self.accum_n = 0;
         self.prev = None;
+        #[cfg(feature = "dlss")]
+        {
+            self.up.ready(&self.gpu, tw, th, &self.u_accum);
+            self.up.live = false;
+        }
         true
     }
 
@@ -1154,7 +1189,7 @@ impl Renderer {
     ///   skip_post: leave out the bloom and the screen (more frames are about to be averaged in)
     pub fn frame(&mut self, tu: &TraceU, look: &Look, moving: bool, cut: bool, skip_post: bool) {
         let Some(t) = self.t.as_ref() else { return };
-        let Some(g_trace) = self.g_trace.as_ref() else { return };
+        if self.g_trace.is_none() { return; }
         if self.variant.cast && self.g_cast.is_none() { return; }
         // How to treat the picture so far.
         let taa = moving && !cut && look.smooth > 0.0;
@@ -1188,19 +1223,17 @@ impl Renderer {
         u.jitter = if jit { [(halton(self.jitter_n, 2) - 0.5) as f32, (halton(self.jitter_n, 3) - 0.5) as f32] } else { [0.0, 0.0] };
         self.gpu.queue.write_buffer(&self.u_trace, 0, bytemuck::bytes_of(&u));
 
-        // (a studio's backdrop stands in the room, not in the lights' frame: where one is shown, it is the
-        // room that says where a piece of the background was at the previous frame)
-        let seen = self.variant.stage;
-        let now = PrevView { obj: u.obj, env: if seen.backdrop { self.stage.room } else { u.env }, room: self.stage.room, floor: self.stage.mid[3], cam: [u.dist, u.tan_fov], eye: [u.eye[0], u.eye[1]], shift: u.shift, lens: u.cam };
-        let was = self.prev.unwrap_or(now);
-        let au = AccumU {
-            res: u.res, cam: now.cam, cam_p: was.cam, shift: now.shift, shift_p: was.shift, w: weight as f32, moving: if taa { 1.0 } else { 0.0 },
-            obj: now.obj, objp: was.obj, debug: look.debug, spread: look.spread, sky: if self.variant.backdrop || seen.backdrop { 1.0 } else { 0.0 }, pad: 0.0,
-            env: now.env, envp: was.env,
-            room: now.room, roomp: was.room, floor: [if seen.floor { 1.0 } else { 0.0 }, now.floor, was.floor, 0.0],
-            eye: [now.eye[0], now.eye[1], was.eye[0], was.eye[1]],
-            lens: now.lens, lens_p: was.lens,
-        };
+        // DLSS in place of the antialiasing that follows motion, when asked for (dlss.rs)
+        #[cfg(feature = "dlss")]
+        {
+            // (GLASSFORMS_DLSS_FORCE=1: a still picture too, after its first frame: for checking DLSS's inputs)
+            let forced = !cut && self.accum_n > 0 && self.up.scale.is_some() && std::env::var_os("GLASSFORMS_DLSS_FORCE").is_some();
+            if (taa || forced) && self.frame_dlss(tu, look, skip_post) { return; }
+            self.up.live = false;
+        }
+        let Some(t) = self.t.as_ref() else { return };
+        let Some(g_trace) = self.g_trace.as_ref() else { return };
+        let (now, au) = self.accum_u(&u, weight, taa, look);
         self.gpu.queue.write_buffer(&self.u_accum, 0, bytemuck::bytes_of(&au));
 
         let mut enc = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
@@ -1259,6 +1292,81 @@ impl Renderer {
         self.frame_no += 1;
         if !skip_post { self.encode_post(&mut enc, &u, look, !moving && !cut); }
         self.gpu.queue.submit([enc.finish()]);
+    }
+
+    /// What the antialiasing is told for a frame traced with these numbers, and what it keeps of the view.
+    fn accum_u(&self, u: &TraceU, weight: f64, taa: bool, look: &Look) -> (PrevView, AccumU) {
+        // (a studio's backdrop stands in the room, not in the lights' frame: where one is shown, it is the
+        // room that says where a piece of the background was at the previous frame)
+        let seen = self.variant.stage;
+        let now = PrevView { obj: u.obj, env: if seen.backdrop { self.stage.room } else { u.env }, room: self.stage.room, floor: self.stage.mid[3], cam: [u.dist, u.tan_fov], eye: [u.eye[0], u.eye[1]], shift: u.shift, lens: u.cam };
+        let was = self.prev.unwrap_or(now);
+        let au = AccumU {
+            res: u.res, cam: now.cam, cam_p: was.cam, shift: now.shift, shift_p: was.shift, w: weight as f32, moving: if taa { 1.0 } else { 0.0 },
+            obj: now.obj, objp: was.obj, debug: look.debug, spread: look.spread, sky: if self.variant.backdrop || seen.backdrop { 1.0 } else { 0.0 }, pad: 0.0,
+            env: now.env, envp: was.env,
+            room: now.room, roomp: was.room, floor: [if seen.floor { 1.0 } else { 0.0 }, now.floor, was.floor, 0.0],
+            eye: [now.eye[0], now.eye[1], was.eye[0], was.eye[1]],
+            lens: now.lens, lens_p: was.lens,
+        };
+        (now, au)
+    }
+
+    /// Fold this frame in through DLSS: trace a smaller picture with every pixel's ray at the frame's
+    /// offset, work out its motion and depth, and let DLSS make the full-size picture so far from it.
+    /// False (nothing done) when it cannot be done this frame.
+    #[cfg(feature = "dlss")]
+    fn frame_dlss(&mut self, tu: &TraceU, look: &Look, skip_post: bool) -> bool {
+        if self.up.scale.is_none() || self.cam.active || self.profile { return false; }
+        // (not with the stages that work on the full-size traced frame: rough glass's blur, the denoiser)
+        if rough_split(&self.variant, self.profile) || self.variant.denoise { return false; }
+        if self.variant.cast && self.g_cast.is_none() { return false; }
+        let Some((tw, th)) = self.t.as_ref().map(|t| (t.tw, t.th)) else { return false };
+        if !self.trace_pipes.contains_key(&self.centred_key()) { self.build_centred(); }
+        if !self.trace_pipes.contains_key(&self.centred_key()) { return false; }
+        let Some(f) = self.up.begin(&self.gpu, tw, th, &self.u_accum) else { return false };
+        let mut u = *tu;
+        u.res = [f.res[0] as f32, f.res[1] as f32];
+        u.frame = self.frame_no as i32;
+        // the tracer's offsets count up from the bottom; DLSS's down from the top
+        u.jitter = [f.jitter[0], -f.jitter[1]];
+        self.gpu.queue.write_buffer(&self.u_trace, 0, bytemuck::bytes_of(&u));
+        let (now, au) = self.accum_u(&u, 1.0, true, look);
+        self.gpu.queue.write_buffer(&self.u_accum, 0, bytemuck::bytes_of(&au));
+        let (Some(t), Some(g_trace)) = (self.t.as_ref(), self.g_trace.as_ref()) else { return false };
+        let Some((small_tex, small_view)) = self.up.small() else { return false };
+        let mut enc = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame (dlss)") });
+        {
+            let mut rp = pass(&mut enc, small_view, None, true);
+            rp.set_pipeline(&self.trace_pipes[&self.centred_key()]);
+            rp.set_bind_group(0, g_trace, &[]);
+            if let Some(g) = self.g_cast.as_ref().filter(|_| self.variant.cast) { rp.set_bind_group(1, g, &[]); }
+            rp.draw(0..3, 0..1);
+        }
+        if self.surface.on() {
+            if let Some((_, vol)) = &self.scene {
+                let hb = self.variant.grown.then(|| f32::from_bits(u.pad[2] as u32));
+                self.surface.encode(&self.gpu, &mut enc, small_tex, small_view, vol, &self.lin, &self.u_lamps, &u, hb, self.variant.near);
+            }
+        }
+        self.up.encode_prep(&mut enc);
+        let target = t.accum_view[1 - self.acc_idx].clone();
+        let Some(cb) = self.up.upscale(&self.gpu, &mut enc, &f) else { return false };
+        let mut after = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame (after dlss)") });
+        self.up.encode_resolve(&mut after, &target);
+        self.dn.live = false;
+        self.up.live = true;
+        self.up.drawn += 1;
+        self.prev = Some(now);
+        self.acc_idx = 1 - self.acc_idx;
+        self.accum_n += 1;
+        self.frame_no += 1;
+        // (the passes after are told the full-size picture's numbers, as ever)
+        let mut full = *tu;
+        full.res = [tw as f32, th as f32];
+        if !skip_post { self.encode_post(&mut after, &full, look, false); }
+        self.gpu.queue.submit([enc.finish(), cb, after.finish()]);
+        true
     }
 
     /// Bloom the picture so far and put it on the screen, without tracing anything.
