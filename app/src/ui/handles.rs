@@ -76,6 +76,10 @@ pub enum Part {
 pub enum Target {
     Layer(usize),
     Lamp(usize),
+    /// a part of the tree of formulas (csg.rs), selected in its list: moved within the object
+    Part(usize),
+    /// the tree's object, the whole shape: moved in the scene, its parts with it
+    Whole,
 }
 
 /// A drag in progress.
@@ -176,6 +180,9 @@ impl View {
         let (m, pos, rot) = match target {
             Target::Layer(i) => { let p = st.stack.layers.get(i)?.place; (st.view_r(), p.pos, p.rot) }
             Target::Lamp(i) => { let l = st.lamps.get(i)?; (st.light_m(), l.pos, l.rot) }
+            // (a part is moved in a frame turned with the object: see csg.rs `part_handle`)
+            Target::Part(i) => { let (ro, pos, rot, _) = st.csg.part_handle(i)?; (gf_core::math::mul(&st.view_r(), &ro), pos, rot) }
+            Target::Whole => { let p = st.csg.place; (st.view_r(), p.pos, p.rot) }
         };
         let c = apply(&m, pos);
         let own = if local { euler(rot[0], rot[1], rot[2]) } else { [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0] };
@@ -321,6 +328,14 @@ fn values(st: &State, t: Target) -> [f64; 8] {
             let l = st.lamps[i];
             [l.pos[0], l.pos[1], l.pos[2], l.rot[0], l.rot[1], l.rot[2], l.size[0], l.size[1]]
         }
+        Target::Part(i) => {
+            let (_, pos, rot, size) = st.csg.part_handle(i).unwrap_or_default();
+            [pos[0], pos[1], pos[2], rot[0], rot[1], rot[2], size, 0.0]
+        }
+        Target::Whole => {
+            let p = st.csg.place;
+            [p.pos[0], p.pos[1], p.pos[2], p.rot[0], p.rot[1], p.rot[2], p.size, 0.0]
+        }
     }
 }
 
@@ -328,6 +343,8 @@ fn exists(st: &State, t: Target) -> bool {
     match t {
         Target::Layer(i) => i < st.layer_count(),
         Target::Lamp(i) => i < st.lamps.len(),
+        Target::Part(i) => i < st.csg.parts.len(),
+        Target::Whole => !st.csg.parts.is_empty(),
     }
 }
 
@@ -357,6 +374,9 @@ impl Handles {
     pub fn chosen(&self, st: &State) -> Option<Target> {
         if !self.picked { return None; }
         if let Some(i) = self.lamp.filter(|i| *i < st.lamps.len()) { return Some(Target::Lamp(i)); }
+        // (a part selected in the tree's list: it is what the handles move)
+        if let Some(i) = st.csg.sel.filter(|i| *i < st.csg.parts.len() && st.plain()) { return Some(Target::Part(i)); }
+        if st.csg.whole && !st.csg.parts.is_empty() && st.plain() { return Some(Target::Whole); }
         (st.stack.sel < st.layer_count()).then_some(Target::Layer(st.stack.sel))
     }
 
@@ -604,7 +624,23 @@ impl Handles {
     /// Write the numbers through their sliders (so that they are what the sliders say, within their range).
     fn write(&self, st: &mut State, t: Target, v: &[f64; 8], quick: bool) {
         // (a layer's sliders: x, y, z, three turns, size; a lamp's begin the same, then its second size)
+        // (the tree's placements have no knobs: they are written as they are, within their sliders' ranges)
+        let turn = |c: usize| ((v[3 + c] + 540.0) % 360.0) - 180.0;
+        if let Target::Part(i) = t {
+            st.csg.set_part_handle(i, [v[0], v[1], v[2]], [turn(0), turn(1), turn(2)], v[6]);
+            st.want = Some(if quick { gf_core::state::Detail::Anim } else { gf_core::state::Detail::Full });
+            return;
+        }
+        if let Target::Whole = t {
+            let pl = &mut st.csg.place;
+            for c in 0..3 { pl.pos[c] = v[c].clamp(-1.4, 1.4); }
+            pl.rot = [turn(0), turn(1), turn(2)];
+            pl.size = v[6].clamp(0.05, 2.0);
+            st.want = Some(if quick { gf_core::state::Detail::Anim } else { gf_core::state::Detail::Full });
+            return;
+        }
         let knobs = match t {
+            Target::Part(_) | Target::Whole => unreachable!("written above"),
             Target::Layer(i) => st.place_knobs(i),
             Target::Lamp(i) => st.lamp_knobs_of(i).into_iter().take(8).collect(),
         };
@@ -625,6 +661,11 @@ impl Handles {
             Target::Layer(i) => {
                 let pl = st.stack.layers[i].place;
                 Some((apply(&st.view_r(), pl.pos), gf_core::FIT * pl.size.abs().max(1e-3), if st.layer_count() > 1 { format!("{} · {}", i + 1, st.layer_title(i)) } else { st.layer_title(i) }))
+            }
+            Target::Part(i) => st.csg.part_in_scene(i).map(|(c, size)| (apply(&st.view_r(), c), gf_core::FIT * size.max(1e-3), format!("part {}", i + 1))),
+            Target::Whole => {
+                let pl = st.csg.place;
+                Some((apply(&st.view_r(), pl.pos), gf_core::FIT * pl.size.abs().max(1e-3), "csg shape".to_string()))
             }
             Target::Lamp(i) => st.lamp_in_view(i).map(|(c, _)| {
                 let l = &st.lamps[i];

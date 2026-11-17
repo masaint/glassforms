@@ -264,6 +264,14 @@ pub fn frame(st: &mut State, px: &mut Panels) {
             let pl = st.stack.layers[i].place;
             (pl.pos, gf_core::FIT * pl.size.abs().max(1e-3))
         }
+        Some(Target::Part(i)) => {
+            let Some((c, size)) = st.csg.part_in_scene(i) else { return };
+            (c, gf_core::FIT * size.max(1e-3))
+        }
+        Some(Target::Whole) => {
+            let pl = st.csg.place;
+            (pl.pos, gf_core::FIT * pl.size.abs().max(1e-3))
+        }
         Some(Target::Lamp(i)) => {
             let Some((c, _)) = st.lamp_in_view(i) else { return };
             let l = &st.lamps[i];
@@ -282,6 +290,8 @@ pub fn frame(st: &mut State, px: &mut Panels) {
     px.nav.say(match px.handles.chosen(st) {
         Some(Target::Layer(i)) => format!("framed {}", st.layer_title(i)),
         Some(Target::Lamp(i)) => format!("framed lamp {}", i + 1),
+        Some(Target::Part(i)) => format!("framed part {}", i + 1),
+        Some(Target::Whole) => "framed the csg shape".into(),
         None => "framed the scene".into(),
     });
 }
