@@ -78,93 +78,11 @@ fn setups_keep_the_way_a_shape_is_traced() {
     assert!(st.apply_arg("trace", "sdf"));
     let s = st.setup();
     let text = serde_json::to_string(&s).unwrap();
-    // (the word is "csg" now; "sdf", from before the tree, still reads)
-    assert!(text.contains("\"trace\":\"csg\""), "{text}");
+    assert!(text.contains("\"trace\":\"sdf\""), "{text}");
     let mut other = gf_core::state::State::new();
     other.apply_setup(&serde_json::from_str(&text).unwrap()).unwrap();
-    assert_eq!(other.shape().trace, gf_core::sdf::Trace::Csg);
+    assert_eq!(other.shape().trace, gf_core::sdf::Trace::Sdf);
     // a shape traced from its volume leaves the word out, so its setup is the file it always was
     assert!(st.apply_arg("trace", "volume"));
     assert!(!serde_json::to_string(&st.setup()).unwrap().contains("trace"));
-}
-
-// ---- the tree of formula parts (gf_core::csg)
-
-fn formulas(fams: &[gf_core::presets::Family]) -> Vec<(usize, usize)> {
-    let mut out = Vec::new();
-    for (fi, f) in fams.iter().enumerate() {
-        for (pi, p) in f.presets.iter().enumerate() {
-            if matches!(gf_core::sdf::support(f, p), gf_core::sdf::Support::Formula { .. }) { out.push((fi, pi)); }
-        }
-    }
-    out
-}
-
-/// Every formula as a part of a tree: in the tracer, in the pass that measures the tree into a volume, and
-/// in the one that measures the parts' boxes.
-#[test]
-fn every_formula_is_a_part() {
-    let fams = gf_core::presets::families();
-    let m = March { step_scale: 0.9, steps_out: 220, steps_in: 56, layers: 2 };
-    let plain = tracer_source(&m, Variant::default(), false);
-    let all = formulas(&fams);
-    assert_eq!(all.len(), 77);
-    for &k in &all {
-        let name = format!("{}/{}", fams[k.0].id, fams[k.0].presets[k.1].id);
-        let src = glassforms::sdf::weave(&plain, &gf_core::csg::wgsl(&fams, &[k], gf_core::sdf::BINDING, false));
-        assert!(src.contains("let c = csgDist(p);") && src.contains("csgNormal(po)") && src.contains("for (var sdfS = 0u;"), "{name}");
-        check(&format!("{name} (tree)"), &src);
-        check(&format!("{name} (merge)"), &glassforms::csg::merge_source(&gf_core::csg::wgsl(&fams, &[k], 0, true)));
-        check(&format!("{name} (extents)"), &glassforms::csg::extent_source(&gf_core::csg::wgsl(&fams, &[k], 0, false)));
-    }
-}
-
-/// One tree holding many kinds at once (their names must not meet), in other ways of drawing too.
-#[test]
-fn many_kinds_in_one_tree() {
-    let fams = gf_core::presets::families();
-    let kinds: Vec<(usize, usize)> = formulas(&fams).into_iter().step_by(3).collect();
-    let decl = gf_core::csg::wgsl(&fams, &kinds, gf_core::sdf::BINDING, false);
-    let m = March { step_scale: 0.9, steps_out: 220, steps_in: 56, layers: 2 };
-    check("many kinds", &glassforms::sdf::weave(&tracer_source(&m, Variant::default(), false), &decl));
-    check("many kinds (merge)", &glassforms::csg::merge_source(&gf_core::csg::wgsl(&fams, &kinds, 0, true)));
-    let mut vs = vec![Variant { light: LightFrom::Picture, backdrop: true, ..Default::default() }, Variant { clay: true, ..Default::default() }];
-    for mat in gf_core::material::Variant::samples().into_iter().filter(|v| v.bodies == 0 && !v.bubbles).take(8) {
-        vs.push(Variant { mat, ..Default::default() });
-    }
-    for v in vs {
-        check(&format!("tree {v:?}"), &glassforms::sdf::weave(&tracer_source(&m, v, false), &decl));
-        check(&format!("tree {v:?} (lens)"), &glassforms::sdf::weave(&tracer_source_lens(&m, v, false), &decl));
-    }
-}
-
-#[test]
-fn setups_keep_the_tree() {
-    let mut st = gf_core::state::State::new();
-    let alg = st.families.iter().position(|f| f.id == "algebraic").unwrap();
-    st.set_scene(alg);
-    assert!(st.apply_arg("trace", "csg"));
-    assert!(st.apply_arg("csg", "studio/sphere@0.5,0,0@0,0,0@0.4@subtract@0.05; gems/brilliant@-0.5,0,0@0,0,0@0.3@union@0@1"));
-    st.csg.place.pos = [0.1, 0.2, 0.0];
-    st.csg.parts[0].smooth_rel = true;
-    let (tree, joined) = st.csg_tree();
-    assert_eq!(tree.len(), 3);
-    assert!(!joined);
-    let text = serde_json::to_string(&st.setup()).unwrap();
-    assert!(text.contains("\"subtract\"") && text.contains("csg_place") && text.contains("smooth_rel"), "{text}");
-    let mut other = gf_core::state::State::new();
-    other.apply_setup(&serde_json::from_str(&text).unwrap()).unwrap();
-    assert_eq!(other.csg.parts, st.csg.parts);
-    assert_eq!(other.csg.place, st.csg.place);
-    // a volume object with parts: they are joined to it
-    let att = st.families.iter().position(|f| f.id == "attractors").unwrap();
-    st.set_scene(att);
-    assert!(st.apply_arg("csgGrid", "5:studio/capsule"));
-    let (tree, joined) = st.csg_tree();
-    assert_eq!(tree.len(), 5);
-    assert!(joined);
-    // nothing of the tree in a setup without one
-    let mut plain = gf_core::state::State::new();
-    plain.set_scene(alg);
-    assert!(!serde_json::to_string(&plain.setup()).unwrap().contains("csg"));
 }

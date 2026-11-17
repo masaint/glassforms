@@ -32,7 +32,6 @@
 
 pub mod animate;
 pub mod camera;
-pub mod csg;
 pub mod gizmo;
 pub mod handles;
 pub mod knob;

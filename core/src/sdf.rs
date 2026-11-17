@@ -31,20 +31,18 @@ pub enum Trace {
     /// from the distance volume baked from it (as always)
     #[default]
     Volume,
-    /// from its formula: alone, or as the first part of a tree of formulas (gf_core::csg). Setups and
-    /// command lines from before the tree say "sdf"
-    #[serde(rename = "csg", alias = "sdf")]
-    Csg,
+    /// from its formula, evaluated per step
+    Sdf,
 }
 
 impl Trace {
     /// The word a setup and a command line use.
     pub fn name(self) -> &'static str {
-        match self { Trace::Volume => "volume", Trace::Csg => "csg" }
+        match self { Trace::Volume => "volume", Trace::Sdf => "sdf" }
     }
     pub fn is_volume(&self) -> bool { *self == Trace::Volume }
     pub fn parse(s: &str) -> Option<Self> {
-        match s.trim() { "volume" => Some(Trace::Volume), "csg" | "sdf" => Some(Trace::Csg), _ => None }
+        match s.trim() { "volume" => Some(Trace::Volume), "sdf" => Some(Trace::Sdf), _ => None }
     }
 }
 
@@ -100,7 +98,7 @@ pub const SLOPE_E: f32 = 0.0007;
 pub const NORMAL_E: f32 = 0.0004;
 
 /// `text` with every `from` that starts a name (not preceded by a letter, digit, `_` or `.`) made `to`.
-pub(crate) fn rename(text: &str, from: &str, to: &str) -> String {
+fn rename(text: &str, from: &str, to: &str) -> String {
     let mut out = String::with_capacity(text.len() + 64);
     let mut rest = text;
     while let Some(i) = rest.find(from) {
@@ -125,7 +123,7 @@ fn adapt(text: &str) -> String {
 
 /// The names a text declares at its top level (`fn`, `const`, `struct`, `alias`, `var<...>` at the start
 /// of a line).
-pub(crate) fn top_names(text: &str) -> Vec<String> {
+fn top_names(text: &str) -> Vec<String> {
     let mut names = Vec::new();
     for line in text.lines() {
         let rest = ["fn ", "const ", "struct ", "alias ", "override "].iter().find_map(|k| line.strip_prefix(k))
@@ -140,7 +138,7 @@ pub(crate) fn top_names(text: &str) -> Vec<String> {
 /// `text` with every name in `names` (whole names only, and not after a `.`, where a name is a member)
 /// given `prefix`: the preset's own names must not meet the tracer's (a seashell has a `beyond`, and so
 /// has the tracer).
-pub(crate) fn prefix_names(text: &str, names: &[String], prefix: &str) -> String {
+fn prefix_names(text: &str, names: &[String], prefix: &str) -> String {
     let mut out = String::with_capacity(text.len() + 256);
     let mut word = String::new();
     let mut prev = ' ';

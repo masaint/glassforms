@@ -63,8 +63,7 @@ pub fn show(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     let list = shapes(ui, st, px);
     maths(ui, st, px);
     sliders(ui, st, px);
-    // how the shape is traced, and the tree of formula parts
-    super::csg::show(ui, st, px);
+    trace_row(ui, st, px);
     layers::placement(ui, st, px);
     layers::joins(ui, st, px);
     // the surface studio: what the surface of the selected layer's solid is made into
@@ -207,6 +206,50 @@ fn maths(ui: &mut Ui, st: &State, px: &mut Panels) {
         }
     }
     gap(ui, 8.0);
+}
+
+/// How the shape is traced: from its baked volume, or from its formula (gf_core::sdf). A shape with no
+/// formula says why it has only the volume; one traced from its formula says when the volume is read
+/// after all.
+fn trace_row(ui: &mut Ui, st: &mut State, px: &mut Panels) {
+    use gf_core::sdf::{support, Support, Trace};
+    let now = st.shape().trace;
+    match support(st.family(), st.preset()) {
+        Support::VolumeOnly(why) => {
+            // the same control as for every shape, so it is found in the same place: sdf is there but
+            // cannot be chosen, and why is said under it in full (not cut off)
+            let items = [
+                Item::new("volume", true).tip("the shape baked into a grid of distances, which the tracer reads: as fine as its voxels"),
+                Item::new("sdf", false).tip(format!("not for this shape: {why}")),
+            ];
+            // drawn greyed and not clickable, so it does not look like a button that does nothing
+            let run = ui.add_enabled_ui(false, |ui| named_run(ui, Id::unique("trace"), "traced from", &items)).inner;
+            for (w, place) in ["volume", "sdf"].iter().zip(&run.places) { px.note(format!("trace:{w}"), *place); }
+            gap(ui, 2.0);
+            paragraph(ui, &format!("sdf is only for shapes with a formula: {why}"), mono(SMALL), FAINT, LINE, INSET);
+        }
+        Support::Formula { .. } => {
+            let items = [
+                Item::new("volume", now == Trace::Volume).tip("the shape baked into a grid of distances, which the tracer reads: as fine as its voxels"),
+                Item::new("sdf", now == Trace::Sdf).tip("the tracer works out the shape's formula at every step: exact edges at any zoom, no voxel limit"),
+            ];
+            let run = named_run(ui, Id::unique("trace"), "traced from", &items);
+            for (w, place) in ["volume", "sdf"].iter().zip(&run.places) { px.note(format!("trace:{w}"), *place); }
+            if let Some(i) = run.clicked { st.apply_arg("trace", if i == 0 { "volume" } else { "sdf" }); }
+            if now == Trace::Sdf {
+                // when the volume is read after all
+                let why = if st.layer_count() > 1 { Some("there are several layers") }
+                    else if st.layer_sculpt(0).is_some_and(|s| !s.is_empty()) { Some("the surface studio is on") }
+                    else if gf_core::material::bubbles(&st.p).is_some() { Some("the material has bubbles") }
+                    else { None };
+                if let Some(why) = why {
+                    gap(ui, 2.0);
+                    paragraph(ui, &format!("reads the volume while {why}"), mono(SMALL), FAINT, LINE, INSET);
+                }
+            }
+        }
+    }
+    gap(ui, 4.0);
 }
 
 /// A knob that is a choice between a few named things (a model drawn as it was found, as a solid or as

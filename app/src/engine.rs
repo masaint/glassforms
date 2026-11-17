@@ -137,8 +137,6 @@ pub struct Engine {
     pub(crate) baker: Baker,
     /// the surface studio: reshapes a layer's volume after the baker has built it (see sculpt.rs)
     pub sculptor: crate::sculpt::Sculptor,
-    /// the tree of formula parts measured into a volume beside the shape's own (csg.rs)
-    pub csg: crate::csg::CsgWork,
     /// the combining step and what each layer's volume holds (see combine.rs)
     pub layers: LayerWork,
     /// polygon models: the files read, and what turns them into volumes (see mesh_bake.rs)
@@ -264,14 +262,12 @@ fn rows(m: &[f64; 9]) -> [[f32; 4]; 3] {
 
 impl Engine {
     pub fn new(gpu: Gpu, state: State, auto: bool) -> Self {
-        let mut renderer = Renderer::new(&gpu);
-        // (in the window a tracer that takes seconds to make is made aside; stills wait for it)
-        renderer.wait_builds = auto;
+        let renderer = Renderer::new(&gpu);
         let cast = crate::cast::Cast::new(&gpu, renderer.cast_layout());
         let lights_tex = renderer.env_target(env::ENV_W as u32, env::ENV_H as u32);
         let lights_view = lights_tex.create_view(&wgpu::TextureViewDescriptor::default());
         let mut e = Self {
-            baker: Baker::new(&gpu), sculptor: crate::sculpt::Sculptor::new(&gpu), csg: crate::csg::CsgWork::new(&gpu), layers: LayerWork::new(&gpu), models: crate::mesh_bake::Models::new(auto), bubbler: Bubbler::new(&gpu), stage: crate::stage::StageWork::new(auto), bubbles_in: None, body_bubbles_in: None, scatter: Scatter::new(&gpu), glow: glow::Kept::default(), shape_no: 0, thickness: None, fit_now: 1.0, soft_ok: false, meter: 1.0, fine_crisp: false, fine_room: false, bodies_always: false, body_thick: None, gpu, state, renderer, cast, lights_tex, lights_view, painted: None, painted_px: Vec::new(), lights_lit: true, rig_sh: None, lights_sh: None, room_sh: None, last_lamps: None,
+            baker: Baker::new(&gpu), sculptor: crate::sculpt::Sculptor::new(&gpu), layers: LayerWork::new(&gpu), models: crate::mesh_bake::Models::new(auto), bubbler: Bubbler::new(&gpu), stage: crate::stage::StageWork::new(auto), bubbles_in: None, body_bubbles_in: None, scatter: Scatter::new(&gpu), glow: glow::Kept::default(), shape_no: 0, thickness: None, fit_now: 1.0, soft_ok: false, meter: 1.0, fine_crisp: false, fine_room: false, bodies_always: false, body_thick: None, gpu, state, renderer, cast, lights_tex, lights_view, painted: None, painted_px: Vec::new(), lights_lit: true, rig_sh: None, lights_sh: None, room_sh: None, last_lamps: None,
             maker: Arc::new(OnceLock::new()), picture: None, picture_no: 0, glass: None, glass_from: None, hdri_seen: None, loading: None, next: None, building: false, hdri_error: None, hdri_wait: auto,
             show_wanted: Cell::new(false), show: None, shown: None, lighting_no: 0, last_lu: None,
             dirty: true, cut: true, last_tu: None, last_look: None,
@@ -574,10 +570,6 @@ impl Engine {
         // (and with the lens that is on: the plain one, or the first ray traced through the camera's own arithmetic)
         self.renderer.cam.wanted = crate::camera::wanted(&self.state.p, !self.focus_after());
         self.building = !self.hdri_wait && !self.renderer.prepare(v);
-        if self.renderer.take_swapped() {
-            self.cut = true;
-            self.dirty = true;
-        }
         if self.building {
             if self.show_wanted.get() { self.draw_preview(); }
             return;
@@ -849,7 +841,7 @@ impl Engine {
         // (the box the scene's volume spans: grown when the layers are placed far out)
         self.bubbler.hb = if self.layers.combined { self.state.scene_hb() } else { gf_core::HB };
         // (the volume the tracer reads: the one shape's, or the layers combined)
-        let scene = if self.layers.combined { self.layers.combiner.volume() } else if let Some(v) = self.csg.volume() { Some(v) } else { self.baker.layer_volume(0) };
+        let scene = if self.layers.combined { self.layers.combiner.volume() } else { self.baker.layer_volume(0) };
         if let Some(vol) = scene {
             let vol = match &bubbles {
                 Some(b) => self.bubbler.carve(vol, b),
@@ -1078,36 +1070,8 @@ impl Engine {
         self.renderer.set_gem(if sculpt.is_some() { None } else { gem.as_deref() });
         // traced from its formula, when the shape asks to be and has one (not once the surface studio
         // has reshaped its volume: the formula no longer says what the shape is)
-        // The tree of formula parts (csg.rs): the shape up when it is traced as "csg", the parts added, the
-        // object that places them. One shape alone, unmoved, is read by its own text (sdf.rs); anything
-        // more by the tree's, from the volume the tree is measured into.
-        let (parts, joined) = self.state.csg_tree();
-        let alone = parts.len() == 1 && !joined && self.state.csg.place.is_identity();
-        let traced = alone;
-        self.csg.active = false;
-        if !parts.is_empty() && !alone {
-            self.renderer.set_gem(None);
-            let fams = &self.state.families;
-            let kinds = gf_core::csg::kinds(&parts);
-            let key = gf_core::csg::key(fams, &kinds);
-            let object = self.state.csg.place;
-            // each part's box, measured once for what it is (while things move, nothing is measured)
-            let unboxed = gf_core::csg::uniforms(fams, &parts, &kinds, job.res, joined, &[], &object);
-            let sigs: Vec<String> = parts.iter().map(|p| format!("{}/{}|{:?}|{}", p.fam, p.preset, p.vals, p.puff)).collect();
-            let extents = self.csg.ext.measure(&key, || gf_core::csg::wgsl(fams, &kinds, 0, false), &unboxed, &sigs, matches!(mode, Detail::Anim));
-            let numbers = gf_core::csg::uniforms(fams, &parts, &kinds, job.res, joined, &extents, &object);
-            // (traced coarsely: from the volume the parts are measured into, alone)
-            if self.state.csg.coarse {
-                self.renderer.set_sdf(None);
-            } else {
-                let decl = (self.renderer.sdf_key() != Some(key.as_str())).then(|| gf_core::csg::wgsl(fams, &kinds, gf_core::sdf::BINDING, false));
-                self.renderer.set_sdf(Some((&key, decl, &numbers)));
-            }
-            let src = self.baker.volume().ok_or("no volume")?;
-            self.csg.merge(src, &key, || gf_core::csg::wgsl(fams, &kinds, 0, true), &numbers);
-        }
+        let traced = self.state.layer_shape(0).is_some_and(|s| s.trace == gf_core::sdf::Trace::Sdf) && sculpt.is_none();
         match &job.shape {
-            _ if !parts.is_empty() && !alone => {}
             ShapeJob::Field { uniforms } if traced => {
                 let p = &fam.presets[job.preset];
                 let key = format!("{}/{}", fam.id, p.id);
@@ -1119,7 +1083,7 @@ impl Engine {
             }
             _ => self.renderer.set_sdf(None),
         }
-        let vol = match self.csg.volume() { Some(v) => v, None => self.baker.volume().ok_or("no volume")? };
+        let vol = self.baker.volume().ok_or("no volume")?;
         self.renderer.set_scene(&self.lights_view, vol, step, out, inn, layers);
         let meta = &mut self.state.shapes[job.family].meta;
         meta.res = job.res;

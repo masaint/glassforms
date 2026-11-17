@@ -454,12 +454,6 @@ pub struct Renderer {
     /// the shape's formula, when the tracer reads it instead of the volume (gf_core::sdf): what names it,
     /// and its text for the tracer
     sdf: Option<(String, String)>,
-    /// a tracer for a tree of several formula parts takes seconds to make the first time: unless this is
-    /// set (stills, checks), it is made on another thread and the tracer in use goes on drawing (on the
-    /// volume the tree is measured into) until it is there
-    pub wait_builds: bool,
-    /// the tracer just changed to the one made on another thread (the picture starts again)
-    swapped: bool,
     u_sdf: wgpu::Buffer,
     last_sdf: Vec<f32>,
     u_inner_bodies: wgpu::Buffer,
@@ -688,9 +682,7 @@ impl Renderer {
             u_gem: gpu.uniform_buffer("trace: the stone's planes", (4 * (1 + gf_core::presets::gems::MAX_PLANES) * 4) as u64),
             last_gem: Vec::new(),
             sdf: None,
-            wait_builds: true,
-            swapped: false,
-            u_sdf: gpu.uniform_buffer("trace: the shape's formula", (gf_core::field::UNIFORM_SIZE).max(gf_core::csg::UNIFORM_FLOATS * 4) as u64),
+            u_sdf: gpu.uniform_buffer("trace: the shape's formula", gf_core::field::UNIFORM_SIZE as u64),
             last_sdf: Vec::new(),
             gem: false,
             u_inner_bodies: gpu.uniform_buffer("trace: inside each body", (material::MAX_BODIES * gf_core::inner::IU_FLOATS * 4) as u64),
@@ -947,10 +939,6 @@ impl Renderer {
         }
     }
     /// What names the formula the tracer is given, if it is given one.
-    /// Did the tracer just change to one made on another thread? (Asked once: the picture starts again.)
-    pub fn take_swapped(&mut self) -> bool {
-        std::mem::take(&mut self.swapped)
-    }
     pub fn sdf_key(&self) -> Option<&str> {
         self.sdf.as_ref().map(|s| s.0.as_str())
     }
@@ -1023,13 +1011,6 @@ impl Renderer {
     fn build_tracer(&mut self) {
         let Some(m) = self.march else { return };
         let key = self.tracer_key(&m, self.variant);
-        // a tree of several parts: made on another thread (`prepare` takes it up), unless there is no
-        // tracer yet to go on with
-        let slow = self.sdf.as_ref().is_some_and(|s| s.0.starts_with("csg:")) && crate::sdf::fits(&self.variant);
-        if !self.trace_pipes.contains_key(&key) && slow && !self.wait_builds && self.trace_pipes.contains_key(&self.trace_key) {
-            let _ = self.prepare(self.variant);
-            return;
-        }
         if !self.trace_pipes.contains_key(&key) {
             let pipe = tracer_pipeline(&self.gpu, &self.l_trace, self.variant.cast.then_some(&self.l_cast), &self.tracer_text(&m, self.variant));
             self.trace_pipes.insert(key.clone(), pipe);
@@ -1089,14 +1070,7 @@ impl Renderer {
             }
         }
         let key = self.tracer_key(&m, v);
-        if self.trace_pipes.contains_key(&key) {
-            // (a tracer made on another thread for the scene as it is: it takes over)
-            if v == self.variant && self.trace_key != key {
-                self.trace_key = key;
-                self.swapped = true;
-            }
-            return true;
-        }
+        if self.trace_pipes.contains_key(&key) { return true; }
         if self.building.is_none() {
             let (tx, rx) = std::sync::mpsc::channel();
             let (gpu, layout, src) = (self.gpu.clone(), self.l_trace.clone(), self.tracer_text(&m, v));

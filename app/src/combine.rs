@@ -413,7 +413,7 @@ impl Engine {
 
     /// The volume the tracer reads: the one shape's, or the layers combined.
     pub fn scene_volume(&self) -> Option<&Volume> {
-        if self.layers.combined { self.layers.combiner.volume() } else if let Some(v) = self.csg.volume() { Some(v) } else { self.baker.layer_volume(0) }
+        if self.layers.combined { self.layers.combiner.volume() } else { self.baker.layer_volume(0) }
     }
 
     /// Build what has changed of the layers, this carefully, combine them, and point the tracer at the result.
@@ -596,7 +596,6 @@ impl Engine {
         // (several pieces are not one cut stone: the tracer marches through them)
         self.renderer.set_gem(None);
         self.renderer.set_sdf(None);
-        self.csg.active = false;
         let vol = self.layers.combiner.volume().ok_or("no volume")?;
         self.renderer.set_scene(&self.lights_view, vol, step, out, inn, pieces);
         self.dirty = true;

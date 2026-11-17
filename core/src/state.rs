@@ -336,8 +336,6 @@ pub struct State {
     pub lamps_rev: u64,
     /// the ten camera slots (history.rs): stored views, kept in a setup
     pub views: Vec<Option<crate::history::ViewSlot>>,
-    /// the tree of formula parts joined to the scene, and the object that places it (csg.rs): none unless added
-    pub csg: crate::csg::Csg,
     /// the environment picture in use: its path, as given (one that is not absolute is looked for in the
     /// program's folder)
     pub hdri: Option<String>,
@@ -377,7 +375,7 @@ impl State {
         let mut s = Self {
             families, fam, shapes, stack: Stack::new(), parked: vec![None], p: Settings::default(), render: RenderOpts::default(),
             r0: I3, theta: 0.0, r: I3, lphi: 0.0, playing: false, clock: 0.0, tracks: BTreeMap::new(), moved: BTreeMap::new(), rest: BTreeMap::new(),
-            rendering: false, want: None, cut: true, flash_planes: false, rigs, lights_rev: 0, lamps: Vec::new(), lamps_rev: 0, views: Vec::new(), csg: Default::default(), hdri: None, body_mats: Default::default(),
+            rendering: false, want: None, cut: true, flash_planes: false, rigs, lights_rev: 0, lamps: Vec::new(), lamps_rev: 0, views: Vec::new(), hdri: None, body_mats: Default::default(),
             first_scene: true, args: args.to_vec(), auto,
         };
         s.set_scene(fam);
@@ -385,10 +383,6 @@ impl State {
         // layers' own arguments, among which a track may name one of a body's sliders
         for (k, v) in args { s.apply_body_arg(k, v); }
         s.layer_args();
-        // the tree of formula parts (csg.rs)
-        for (k, v) in args {
-            if k == "csg" || k == "csgGrid" || k == "csgCoarse" || k == "csgPlace" { s.apply_arg(k, v); }
-        }
         // the lights and the environment picture, in the order they were given
         for (k, v) in args {
             if Self::is_light_arg(k) { s.apply_arg(k, v); }
@@ -1438,41 +1432,6 @@ impl State {
                 self.set_r(&euler(r[0], r[1], r[2]));
                 true
             }
-            // the tree's parts: as text (csg.rs `parse_arg`), or a cube of n of one shape for timing
-            // (csgGrid=n:family/preset); the parts traced from the volume they are measured into
-            "csg" => match crate::csg::parse_arg(value) {
-                Some(parts) => {
-                    self.csg.parts = parts.into_iter().take(crate::csg::MAX_PARTS).collect();
-                    self.want = Some(Detail::Full);
-                    true
-                }
-                None => false,
-            },
-            "csgGrid" => match value.split_once(':').and_then(|(n, s)| Some((n.parse::<usize>().ok()?, s.split_once('/')?))) {
-                Some((n, (f, p))) => {
-                    self.csg.parts = crate::csg::grid_of(n.min(crate::csg::MAX_PARTS), f, p);
-                    self.want = Some(Detail::Full);
-                    true
-                }
-                None => false,
-            },
-            // where the whole tree stands: x,y,z@rx,ry,rz@size (what follows the place may be left off)
-            "csgPlace" => match crate::csg::parse_arg(&format!("studio/sphere@{value}")).and_then(|p| p.first().map(|p| p.place)) {
-                Some(place) => {
-                    self.csg.place = place;
-                    self.want = Some(Detail::Full);
-                    true
-                }
-                None => false,
-            },
-            "csgCoarse" => match num {
-                Some(v) => {
-                    self.csg.coarse = v > 0.5;
-                    self.want = Some(Detail::Full);
-                    true
-                }
-                None => false,
-            },
             "trace" => match crate::sdf::Trace::parse(value) {
                 Some(t) => {
                     self.shape_mut().trace = t;

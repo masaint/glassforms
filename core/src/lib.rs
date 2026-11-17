@@ -10,7 +10,6 @@ pub mod export;
 pub mod field;
 pub mod history;
 pub mod sdf;
-pub mod csg;
 pub mod inner;
 pub mod lamps;
 pub mod limits;
