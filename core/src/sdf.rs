@@ -2,12 +2,11 @@
 //!
 //! A shape given by an equation (`Shape::Field`) is baked into a grid of distances, and the tracer reads
 //! the grid. The grid is what limits how sharp the glass can be: an edge or a thin wall is as fine as a
-//! voxel and no finer, however close the camera comes. Traced directly, the tracer evaluates the shape's
-//! `raw(p)` itself within `BAND` voxels of the surface, settles every hit onto the formula's zero and
-//! takes every normal from the formula: the surface is the formula's own, at any zoom. Further from the
-//! surface it still skips through empty space by the volume, which is a sure distance there (formulas
-//! that jump or flatten far from their surface made sheets of false surface in mid-air when the march
-//! trusted them everywhere), and costs one lookup a step instead of four evaluations.
+//! voxel and no finer, however close the camera comes. Traced directly, the tracer still marches through
+//! the volume (a sure distance everywhere, one lookup a step: formulas that jump or flatten far from their
+//! surface made sheets of false surface in mid-air when the march trusted them), but settles every hit
+//! onto the formula's own zero and takes every normal from the formula: the surface is the formula's own,
+//! at any zoom, for a few readings of it a hit.
 //!
 //! The formula is not a distance. Most presets' `raw` is only negative inside and positive outside, so the
 //! tracer divides it by the length of its slope (four evaluations about the point, the same four the bake's
@@ -60,11 +59,18 @@ pub enum Support {
 /// distance exactly, inside and out; a cut stone's is the largest of its facets' distances, exact
 /// inside and short of the truth outside.
 const EXACT: &[&str] = &["studio", "gems"];
+/// Single presets whose `raw` is a true distance: the kaleidoscope's polyhedra and frames (the distance to
+/// the corner their faces make, exactly) and the stellations (the distance to a wedge of face planes).
+const EXACT_PRESETS: &[&str] = &[
+    "solids/tetrahedron", "solids/cube", "solids/octahedron", "solids/dodecahedron", "solids/icosahedron",
+    "solids/cuboctahedron", "solids/football", "solids/frame",
+    "solids/stellaoctangula", "solids/stardodecahedron", "solids/staricosahedron",
+];
 
 /// Can this family's preset be traced from its formula?
 pub fn support(fam: &Family, p: &Preset) -> Support {
     match &p.shape {
-        Shape::Field { .. } => Support::Formula { exact: EXACT.contains(&fam.id) },
+        Shape::Field { .. } => Support::Formula { exact: EXACT.contains(&fam.id) || EXACT_PRESETS.contains(&format!("{}/{}", fam.id, p.id).as_str()) },
         Shape::Flow(_) | Shape::Curve(_) => Support::VolumeOnly("drawn from curves: no formula to trace"),
         Shape::Mesh { .. } => Support::VolumeOnly("a model file: no formula to trace"),
     }
@@ -81,8 +87,11 @@ pub const STEP_MAX: f32 = 0.1;
 /// times finer, so that their edges are as sharp as the formula allows, not as the grid does.
 pub const FINER: f32 = 4.0;
 /// Within how many voxels of the surface the tracer marches by the formula; further out by the volume,
-/// which is a sure distance there (app/src/sdf.rs).
-pub const BAND: f32 = 1.5;
+/// which is a sure distance there (app/src/sdf.rs). None: the march is the volume's own throughout, and the
+/// formula only settles each hit onto its own surface and gives the normal there. Marching by it within 1.5
+/// voxels, as at first, cost up to six times the volume's time (the cube, the seashell) and showed nothing
+/// that settling does not (docs/sdf_mode.md).
+pub const BAND: f32 = 0.0;
 /// How far apart the four evaluations that give the slope are (as in the bake's walk).
 pub const SLOPE_E: f32 = 0.0007;
 /// How far apart the readings that give a normal are: a tenth of a 768-voxel grid's spacing.
@@ -170,14 +179,19 @@ pub fn tracer_decl(fam: &Family, p: &Preset) -> Option<String> {
         "  var sd = raw(p);\n".to_string()
     } else {
         format!("  const e: f32 = {SLOPE_E};
-  const k = vec2f(1.0, -1.0);
-  let a = raw(p + e*k.xyy);
-  let b = raw(p + e*k.yyx);
-  let c = raw(p + e*k.yxy);
-  let d = raw(p + e*k.xxx);
-  let g = (k.xyy*a + k.yyx*b + k.yxy*c + k.xxx*d) / (4.0 * e);
+  // (the four readings in a loop the compiler is not told the length of: the preset's text is then put
+  // in once, not four times, wherever the tracer settles a hit; a larger shader runs slower everywhere)
+  var f = 0.0;
+  var g = vec3f(0.0);
+  for (var i = 0u; i < SDF_TAPS; i++) {{
+    let o = sdfTap(i);
+    let v = raw(p + e * o);
+    f += v;
+    g += o * v;
+  }}
+  g /= 4.0 * e;
   // the value over the slope: the distance near the surface; held to a step that can be trusted
-  var sd = clamp(0.25 * (a + b + c + d) * inverseSqrt(max(dot(g, g), 1e-12)), -SDF_STEP_MAX, SDF_STEP_MAX);
+  var sd = clamp(0.25 * f * inverseSqrt(max(dot(g, g), 1e-12)), -SDF_STEP_MAX, SDF_STEP_MAX);
 ")
     };
     let head = format!(
@@ -189,6 +203,12 @@ struct SdfU {{ hb: f32, res: f32, puff: f32, pad: f32, pr: SdfPr }}
 const SDF_STEP_MAX: f32 = {STEP_MAX};
 const SDF_NE: f32 = {NORMAL_E};
 const SDF_BAND: f32 = {BAND:.1};
+// how many readings a slope takes: four, though the compiler cannot see it (`pad` is always 0)
+var<private> SDF_TAPS: u32;
+// the corners of a tetrahedron, the four directions a slope is read in
+fn sdfTap(i: u32) -> vec3f {{
+  return vec3f(select(-1.0, 1.0, i == 0u || i == 3u), select(-1.0, 1.0, i >= 2u), select(-1.0, 1.0, i == 1u || i == 3u));
+}}
 ",
         name = p.name, pr = pr.join(", "),
     );
@@ -199,19 +219,49 @@ const SDF_BAND: f32 = {BAND:.1};
 fn sdfClip(p: vec3f) -> f32 {{ return {clip}; }}
 // the distance to the surface from p, in the object's frame, as the bake would store it
 fn sdfDist(p: vec3f) -> f32 {{
+  SDF_TAPS = 4u + u32(sdfU.pad);
 {estimate}  sd -= sdfU.puff;
   let w = sdfShell(p);
   if (w > 0.0) {{ sd = abs(sd) - w; }}
   return clamp(smax(sd, sdfClip(p), 0.03), -1.0, 1.0);
 }}
-// The outward normal at p, in the object's frame. Where the surface is the formula's own (no wall about
-// it, the clip well away) it is the slope of the formula: four evaluations. Elsewhere, of the distance.
+// The outward normal at p, in the object's frame: the slope of the formula, four readings (a wall about
+// the surface faces away from it on either side: the slope, turned to the side p is on; how its thickness
+// changes along the surface is too slow to tilt it). Where the clip comes within the 0.03 it is blended
+// over, its own slope is read at the same four points and the two are blended as the cut blends them
+// (the share each has in a smooth maximum). The distance itself is never read here: it would put the
+// whole formula into the shader once more.
 fn sdfNormal(p: vec3f) -> vec3f {{
-  let k = vec2f(1.0, -1.0) * SDF_NE;
-  if (sdfShell(p) <= 0.0 && sdfClip(p) < -0.06) {{
-    return normalize(k.xyy * raw(p + k.xyy) + k.yyx * raw(p + k.yyx) + k.yxy * raw(p + k.yxy) + k.xxx * raw(p + k.xxx));
+  SDF_TAPS = 4u + u32(sdfU.pad);
+  let clipNear = sdfClip(p) >= -0.035;
+  var f = 0.0;
+  var g = vec3f(0.0);
+  var cf = 0.0;
+  var cg = vec3f(0.0);
+  for (var i = 0u; i < SDF_TAPS; i++) {{
+    let o = sdfTap(i);
+    let v = raw(p + SDF_NE * o);
+    f += v;
+    g += o * v;
+    if (clipNear) {{
+      let c = sdfClip(p + SDF_NE * o);
+      cf += c;
+      cg += o * c;
+    }}
   }}
-  return normalize(k.xyy * sdfDist(p + k.xyy) + k.yyx * sdfDist(p + k.yyx) + k.yxy * sdfDist(p + k.yxy) + k.xxx * sdfDist(p + k.xxx));
+  var n = normalize(g);
+  // the distance at p, as sdfDist would have it (the readings' mean over the slope)
+  var sd = f * SDF_NE * inverseSqrt(max(dot(g, g), 1e-30)) - sdfU.puff;
+  let w = sdfShell(p);
+  if (w > 0.0) {{
+    n *= select(1.0, -1.0, sd < 0.0);
+    sd = abs(sd) - w;
+  }}
+  if (clipNear) {{
+    let share = clamp(0.5 + 0.5 * (sd - 0.25 * cf) / 0.03, 0.0, 1.0);
+    n = normalize(share * n + (1.0 - share) * normalize(cg));
+  }}
+  return n;
 }}
 ",
         shell = adapt(shell), clip = adapt(clip),

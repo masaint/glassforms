@@ -40,10 +40,66 @@ pub fn fits(v: &Variant) -> bool {
 /// are not found as expected is given back as it was.
 pub fn weave(src: &str, decl: &str) -> String {
     if src.matches(MAP_READ).count() != 1 || src.matches(MAPN_HEAD).count() != 1 || src.matches(NRM_STEP).count() != 1 { return src.to_string(); }
+    let band = gf_core::sdf::BAND;
+    // (with no band the march is the volume's own: the formula only settles hits and gives normals)
+    let src = if band > 0.0 { src.replace(MAP_READ, MAP_HYBRID) } else { src.to_string() };
+    let src = settle_loops(&src);
+    // What the preset works out once from its sliders (a cut stone's planes, a prism's sides), which it
+    // does at its first evaluation behind a flag: done once at the start of the pixel instead, so that
+    // that work is not put into the shader again at every place the formula is read.
+    let (hoisted, setups) = hoist_setups(decl);
+    let entry = src.find("\nfn fs(").and_then(|i| src[i..].find("{\n").map(|j| i + j + 2));
+    let (src, decl) = match entry {
+        Some(at) if !setups.is_empty() => (format!("{}{setups}{}", &src[..at], &src[at..]), hoisted),
+        _ => (src, decl.to_string()),
+    };
     let src = src
-        .replace(MAP_READ, MAP_HYBRID)
         // (the volume's smooth reading is kept under another name, unused)
         .replace(MAPN_HEAD, &format!("{decl}\nfn mapN(p: vec3f) -> f32 {{ return sdfDist(p); }}\nfn mapNVolume(p: vec3f) -> f32 {{\n"))
         .replace(NRM_STEP, NRM_SDF);
     src.replace(GEM_UNEVEN, "*mOut = gemWorld(nk);")
+}
+
+/// Every pair of settling steps (`t += mapNW(...)` twice, as the tracer settles a hit onto the surface)
+/// made one step in a loop of two whose length the compiler cannot see (`sdfU.pad` is always 0): the
+/// formula is then put in once at each place a hit is settled, not twice. A larger shader runs slower
+/// everywhere, marching through the volume included (the seashell: 10.3 ms with the formula written out at
+/// every step, 7.3 with its readings in loops).
+fn settle_loops(src: &str) -> String {
+    let lines: Vec<&str> = src.split_inclusive('\n').collect();
+    let mut out = String::with_capacity(src.len() + 256);
+    let mut i = 0;
+    while i < lines.len() {
+        let l = lines[i];
+        let t = l.trim_start();
+        // (the code of a line, without its comment)
+        let code = |x: &str| x.split("//").next().unwrap_or("").trim().to_string();
+        let c = code(t);
+        let settle = c.starts_with("t += mapNW(") || c.starts_with("t -= mapNW(") || c.starts_with("s -= mapNW(") || c.starts_with("s += mapNW(");
+        if settle && i + 1 < lines.len() && code(lines[i + 1]) == c {
+            let indent = &l[..l.len() - t.len()];
+            out.push_str(&format!("{indent}for (var sdfS = 0u; sdfS < 2u + u32(sdfU.pad); sdfS++) {{ {c} }}\n"));
+            i += 2;
+        } else {
+            out.push_str(l);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// The formula's text with every first-evaluation setup (`if (!sdf_gem_ready) { sdf_gem_setup(); }`) taken
+/// out, and the calls that do those setups, as lines to put at the start of the pixel.
+fn hoist_setups(decl: &str) -> (String, String) {
+    let mut out = String::with_capacity(decl.len());
+    let mut calls = String::new();
+    for line in decl.split_inclusive('\n') {
+        let t = line.trim();
+        let call = t.strip_prefix("if (!sdf_").and_then(|r| r.split_once(") { ")).and_then(|(_, r)| r.strip_suffix("(); }"));
+        match call {
+            Some(f) if f.starts_with("sdf_") && !f.contains(' ') => calls += &format!("  {f}();\n"),
+            _ => out.push_str(line),
+        }
+    }
+    (out, calls)
 }

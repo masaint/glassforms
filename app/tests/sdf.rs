@@ -18,7 +18,12 @@ fn every_formula_weaves_into_the_tracer() {
             let Some(decl) = gf_core::sdf::tracer_decl(&f, p) else { continue };
             let src = glassforms::sdf::weave(&plain, &decl);
             assert_ne!(src, plain, "{}/{}: nothing was woven in", f.id, p.id);
-            assert!(src.contains("{ v = sdfDist(p); }") && src.contains("sdfNormal(toObj(p))"), "{}/{}", f.id, p.id);
+            // the march is the volume's own; hits settle in loops; work done once from the sliders is done once a pixel
+            assert!(!src.contains("sdfDist(p); }
+  {{PROFILE") && src.contains("for (var sdfS = 0u;"), "{}/{}", f.id, p.id);
+            if f.id == "gems" { assert!(!src.contains("if (!sdf_gem_ready)") && src.contains("  sdf_gem_setup();
+"), "{}: the stone's setup is not hoisted", p.id); }
+            assert!(src.contains("fn mapN(p: vec3f) -> f32 { return sdfDist(p); }") && src.contains("sdfNormal(toObj(p))"), "{}/{}", f.id, p.id);
             check(&format!("{}/{}", f.id, p.id), &src);
             if f.id == "gems" {
                 let g = glassforms::sdf::weave(&gem_weave(&plain), &decl);
@@ -48,11 +53,11 @@ fn the_formula_weaves_into_other_tracers() {
         assert!(glassforms::sdf::fits(&v));
         for profile in [false, true] {
             let src = glassforms::sdf::weave(&tracer_source(&m, v, profile), &decl);
-            assert!(src.contains("{ v = sdfDist(p); }"), "{v:?}: not woven");
+            assert!(src.contains("fn mapN(p: vec3f) -> f32 { return sdfDist(p); }"), "{v:?}: not woven");
             check(&format!("{v:?}"), &src);
         }
         let src = glassforms::sdf::weave(&tracer_source_lens(&m, v, false), &decl);
-        assert!(src.contains("{ v = sdfDist(p); }"), "{v:?} (lens): not woven");
+        assert!(src.contains("fn mapN(p: vec3f) -> f32 { return sdfDist(p); }"), "{v:?} (lens): not woven");
         check(&format!("{v:?} (lens)"), &src);
     }
 }
