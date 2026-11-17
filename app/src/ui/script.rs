@@ -33,7 +33,7 @@
 //!   detail:<n>  motion:<n>      voxels per side: still, and while animating
 //!   play                        start or stop the animation
 //!   view:<name>                 front, back, left, right, top, under; reset:<view|object|lights>
-//!   key:<name>                  space, p, h, l, m, c, f, r, f1, 1-9, left, right, up, down, escape
+//!   key:<name>                  space, p, h, l, m, c, f, r, f1, 1-9, left, right, up, down, escape, enter
 //!   keyhold:<name>=<frames>     hold a key down while that many frames go by (flying: w, a, s, d, q, e)
 //!   press:<control>             click the middle of a control by the name a test knows it by (tool:move,
 //!                               tool:fly, cube:+y, ...: the state written out lists them under "rects")
@@ -47,7 +47,8 @@
 //!   click:<fx>,<fy>             click at that fraction of the picture's width and height; dblclick: the same, twice
 //!   ball:<dx>,<dy>              drag the light ball (with the pointer if the light room is open)
 //!   pdown:<x>,<y>  pmove:<x>,<y>  pup     the pointer itself, in points
-//!   spdown:<x>,<y>              the same press with shift held, until the pointer is let go
+//!   spdown:<x>,<y>              the same press with shift held, until the pointer is let go; cspdown: ctrl and shift;
+//!                               apdown: alt; aspdown: alt and shift; caspdown: ctrl, alt and shift
 //!   vopt:<name>=<v>             a video choice: size, fps, samples, lens, shutter, codec, quality
 //!   video:<frames>              render that many frames of a video and wait for it; video-start: does not wait
 //!   cancel                      cancel the video
@@ -138,8 +139,8 @@ pub enum Act {
     Type(String),
     Click(f32, f32, bool),
     Ball(f32, f32),
-    /// where, and whether shift is held from now until the pointer is let go
-    PointerDown(f32, f32, bool),
+    /// where, and the keys held from now until the pointer is let go: shift, ctrl, alt
+    PointerDown(f32, f32, [bool; 3]),
     PointerMove(f32, f32),
     PointerUp,
     VideoOpt(String, String),
@@ -256,7 +257,11 @@ pub fn parse(text: &str) -> Result<Vec<Act>, String> {
             "type" => Act::Type(arg.into()),
             "click" | "dblclick" => { let (x, y) = pair(name, arg)?; Act::Click(x, y, name == "dblclick") }
             "ball" => { let (x, y) = pair(name, arg)?; Act::Ball(x, y) }
-            "pdown" | "spdown" => { let (x, y) = pair(name, arg)?; Act::PointerDown(x, y, name == "spdown") }
+            "pdown" | "spdown" | "cspdown" | "apdown" | "aspdown" | "caspdown" => {
+                let (x, y) = pair(name, arg)?;
+                let keys = &name[..name.len() - 5];
+                Act::PointerDown(x, y, [keys.contains('s'), keys.contains('c'), keys.contains('a')])
+            }
             "pmove" => { let (x, y) = pair(name, arg)?; Act::PointerMove(x, y) }
             "pup" => Act::PointerUp,
             "vopt" => { let (k, v) = named(name, arg)?; Act::VideoOpt(k.into(), v.into()) }
@@ -298,6 +303,7 @@ pub fn key(name: &str) -> Result<egui::Key, String> {
         "up" => ArrowUp,
         "down" => ArrowDown,
         "escape" | "esc" => Escape,
+        "enter" | "return" => Enter,
         other => egui::Key::from_name(&other.to_ascii_uppercase()).or_else(|| egui::Key::from_name(name)).ok_or_else(|| format!("key: there is no key called \"{name}\""))?,
     })
 }

@@ -183,6 +183,8 @@ impl State {
         self.lamps_rev += 1;
         self.p = s.settings.clone();
         crate::camera::sync(&mut self.p);
+        // (a file may hold anything: every setting to its hard limits, `limits`)
+        self.p.hold_hard();
         // each body's own material: the scene's settings with the body's laid over them
         self.body_mats = Default::default();
         for (layer, values) in &s.bodies {

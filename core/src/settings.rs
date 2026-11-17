@@ -27,9 +27,20 @@ macro_rules! settings {
             pub fn get(&self, name: &str) -> Option<f64> {
                 match name { $( $name => Some(self.$field), )* _ => self.get_derived(name) }
             }
-            /// False if there is no such setting.
+            /// False if there is no such setting. The value is held to the setting's hard limits
+            /// (`limits::setting`); one that is not a number sets nothing.
             pub fn set(&mut self, name: &str, v: f64) -> bool {
+                if v.is_nan() { return Self::NAMES.contains(&name) || Self::DERIVED.contains(&name); }
+                let v = match crate::limits::setting(name) { Some(h) => crate::limits::hold(v, h), None => v };
                 match name { $( $name => { self.$field = v; true } )* _ => self.set_derived(name, v) }
+            }
+            /// Every setting held to its hard limits (after a setup has been read, or a setting set by a
+            /// way that writes the field itself).
+            pub fn hold_hard(&mut self) {
+                $( if let Some(h) = crate::limits::setting($name) { self.$field = crate::limits::hold(self.$field, h); } )*
+                for a in &mut self.absorb { *a = crate::limits::hold(*a, (0.0, 1000.0)); }
+                for s in &mut self.shift { *s = crate::limits::hold(*s, (-100.0, 100.0)); }
+                for r in &mut self.rot { *r = crate::limits::hold(*r, (-36000.0, 36000.0)); }
             }
         }
     };

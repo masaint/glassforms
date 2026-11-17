@@ -227,6 +227,8 @@ pub fn set(p: &mut Settings, name: &str, v: f64) -> bool {
         _ => return false,
     }
     sync(p);
+    // (the fields are written directly above: hold them all to their hard limits, `limits`)
+    p.hold_hard();
     true
 }
 

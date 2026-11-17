@@ -31,6 +31,8 @@ pub const ERROR_FILL: Color32 = Color32::from_rgb(0x12, 0x06, 0x08);
 /// Menus and hover notes.
 pub const MENU_FILL: Color32 = Color32::from_rgb(0x14, 0x16, 0x1d);
 /// The mark of something that costs noticeably more to draw.
+/// A slider's value taken past the slider's own ends (with alt, or typed): out of bounds.
+pub const PAST: Color32 = Color32::from_rgb(0x5f, 0xe3, 0xc0);
 pub const COSTLY: Color32 = Color32::from_rgb(0xe6, 0xb4, 0x6a);
 
 /// White at this opacity (0 to 1).

@@ -131,12 +131,12 @@ impl ShapeState {
     pub fn set_knob(&mut self, r: &KnobRef, v: f64) {
         match r {
             KnobRef::Param(i) => { if let Some(x) = self.vals.get_mut(*i) { *x = v; } }
-            KnobRef::Thick => self.thick = v,
-            KnobRef::Melt => self.melt = v,
-            KnobRef::Len => self.len = v,
-            KnobRef::Travel => self.travel = v,
-            KnobRef::Beads => self.beads = v,
-            KnobRef::Puff => self.puff = v,
+            KnobRef::Thick => self.thick = crate::limits::hold(v, crate::limits::THICK),
+            KnobRef::Melt => self.melt = crate::limits::hold(v, crate::limits::MELT),
+            KnobRef::Len => self.len = crate::limits::hold(v, crate::limits::LEN),
+            KnobRef::Travel => self.travel = crate::limits::hold(v, (0.0, TRAVEL)),
+            KnobRef::Beads => self.beads = crate::limits::hold(v, crate::limits::BEADS),
+            KnobRef::Puff => self.puff = crate::limits::hold(v, crate::limits::PUFF),
             _ => {}
         }
     }
@@ -401,7 +401,7 @@ impl State {
             .map(|f| {
                 let preset = arg(args, "preset").and_then(|id| f.presets.iter().position(|p| p.id == id)).unwrap_or(0);
                 let p = &f.presets[preset];
-                let vals = p.params.iter().map(|d| arg_num(args, &format!("p.{}", d.id)).unwrap_or(d.value)).collect();
+                let vals = p.params.iter().map(|d| arg_num(args, &format!("p.{}", d.id)).map_or(d.value, |v| crate::limits::hold(v, crate::limits::widen(d.lo, d.hi)))).collect();
                 ShapeState {
                     preset, vals,
                     thick: arg_num(args, "thick").unwrap_or(1.0), len: arg_num(args, "len").unwrap_or(1.0),
@@ -823,8 +823,9 @@ impl State {
         }
     }
     /// A slider was moved by hand. `quick`: it is still being dragged.
+    /// It is held to the knob's hard limits (`limits::knob`), whatever its slider's range.
     pub fn user_set(&mut self, k: &Knob, v: f64, quick: bool) {
-        self.set(&k.r, v);
+        self.set(&k.r, crate::limits::hold(v, crate::limits::knob(k)));
         self.after_user(k, quick);
     }
     /// What follows from a knob having been changed by hand (its value, or the stops of its track).
@@ -1453,6 +1454,8 @@ impl State {
             _ if Self::is_light_arg(name) => self.apply_light_arg(name, value),
             _ if name.starts_with("p.") => match (self.preset().param_index(&name[2..]), num) {
                 (Some(i), Some(v)) => {
+                    let d = &self.preset().params[i];
+                    let v = crate::limits::hold(v, crate::limits::widen(d.lo, d.hi));
                     self.shape_mut().vals[i] = v;
                     self.want = Some(Detail::Full);
                     true

@@ -439,6 +439,8 @@ pub struct Moved {
     pub value: Option<f64>,
     /// the pointer has just let go of it
     pub released: bool,
+    /// it is being dragged in the finest steps (ctrl+shift): show more of the value's digits
+    pub finer: bool,
 }
 
 /// Width of a range's handles, and of the allowance a plain slider's round handle keeps at each end.
@@ -446,9 +448,15 @@ const HANDLE_W: f32 = 9.0;
 
 /// The nearest value a slider with this step can take.
 pub fn snap(v: f64, lo: f64, hi: f64, step: f64) -> f64 {
-    let s = if step > 0.0 { lo + ((v - lo) / step).round() * step } else { v };
+    snap_from(v, lo, (lo, hi), step)
+}
+/// The same with the steps counted from `origin` (the slider's own low end, so that a value past either
+/// end still lands on its steps) and the value kept within `limits`.
+pub fn snap_from(v: f64, origin: f64, (lo, hi): (f64, f64), step: f64) -> f64 {
+    let s = if step > 0.0 { origin + ((v - origin) / step).round() * step } else { v };
     // rid of the dust that multiplying by a step like 0.01 leaves behind
-    ((s.clamp(lo, hi)) * 1e9).round() / 1e9
+    let s = (s * 1e9).round() / 1e9;
+    if s.is_nan() { lo } else { s.clamp(lo, hi) }
 }
 
 struct Rail {
@@ -472,22 +480,59 @@ impl Rail {
     }
 }
 
-/// How much less a slider moves than the pointer while shift is held.
+/// How much less a slider moves than the pointer while shift is held, and while ctrl and shift are.
 pub const FINE: f64 = 0.1;
+pub const FINER: f64 = 0.01;
+/// With ctrl and shift held the steps are this much smaller too, so that a value can be set between two
+/// of the slider's own steps.
+const FINER_STEPS: f64 = 0.01;
 
-/// What a slider remembers while it is dragged with shift held: where the pointer was when shift went
-/// down, and the value then.
+/// How the keys held while dragging change a slider: how far it moves for the pointer's travel, how fine
+/// its steps are, and whether it may go past its ends (as far as its hard limits).
+///
+///   (none)            the handle goes to the pointer, on the slider's steps, within its range
+///   shift             a tenth as fast, from where it was
+///   ctrl+shift        a hundredth as fast, in steps a hundredth as large
+///   alt               past either end, as fast as the pointer
+///   alt+shift         past either end, a tenth as fast
+///   ctrl+alt+shift    past either end, a hundredth as fast, in steps a hundredth as large
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Keys {
+    pub speed: f64,
+    pub finer: bool,
+    pub past: bool,
+}
+impl Keys {
+    pub fn of(m: &egui::Modifiers) -> Self {
+        let finer = m.shift && m.ctrl;
+        Self { speed: if finer { FINER } else if m.shift { FINE } else { 1.0 }, finer, past: m.alt }
+    }
+    /// The handle follows the pointer from where it was rather than jumping to it.
+    fn relative(&self) -> bool {
+        self.speed < 1.0 || self.past
+    }
+    fn step(&self, step: f64) -> f64 {
+        if self.finer { step * FINER_STEPS } else { step }
+    }
+}
+
+/// What hovering over a slider's value says.
+pub const VALUE_TIP: &str = "click to type a value (enter keeps it, esc leaves it)\ndrag the slider with shift: finer · ctrl+shift: finer still · alt: past its ends";
+
+/// What a slider remembers while it is dragged from where it was: where the pointer was when the keys
+/// last changed, the value then, and the keys.
 #[derive(Clone, Copy)]
 struct Hold {
     x: f32,
     value: f64,
+    keys: Keys,
 }
 
 /// What the pointer does to a slider (nothing is drawn): press anywhere on it to bring the handle there,
-/// and drag. With shift held the handle does not jump to the pointer but moves a tenth as far as the
-/// pointer does, for setting a value exactly. Returns what happened, where the handle now is, and whether
-/// the pointer is on it.
-fn slide(ui: &mut Ui, rect: Rect, id: Id, value: f64, lo: f64, hi: f64, step: f64) -> (Moved, f32, bool) {
+/// and drag; the keys held change that (`Keys`). `hard`: how far it may go past its ends with alt.
+/// Returns what happened, where the handle now is, and whether the pointer is on it.
+#[allow(clippy::too_many_arguments)]
+fn slide(ui: &mut Ui, rect: Rect, id: Id, value: f64, lo: f64, hi: f64, step: f64, hard: (f64, f64)) -> (Moved, f32, bool) {
     let rail = Rail::new(rect, lo, hi);
     let resp = ui.interact(rect.expand2(egui::vec2(0.0, 2.0)), id, Sense::drag());
     let live = ui.is_enabled();
@@ -495,14 +540,19 @@ fn slide(ui: &mut Ui, rect: Rect, id: Id, value: f64, lo: f64, hi: f64, step: f6
     let hold = id.with("held finely");
     if live && (resp.dragged() || resp.drag_started()) {
         if let Some(p) = resp.interact_pointer_pos() {
-            let v = if ui.input(|i| i.modifiers.shift) {
-                let from = ui.data(|d| d.get_temp::<Hold>(hold)).unwrap_or(Hold { x: p.x, value });
+            let keys = ui.input(|i| Keys::of(&i.modifiers));
+            let v = if keys.relative() {
+                // (when the keys change, the slider carries on from where it is, without a jump)
+                let from = ui.data(|d| d.get_temp::<Hold>(hold)).filter(|h| h.keys == keys).unwrap_or(Hold { x: p.x, value, keys });
                 ui.data_mut(|d| d.insert_temp(hold, from));
-                snap(from.value + (p.x - from.x) as f64 / rail.width as f64 * (hi - lo) * FINE, lo, hi, step)
+                // (without alt: within the range, though a value already past an end may stay there)
+                let limits = if keys.past { (hard.0.min(lo), hard.1.max(hi)) } else { (lo.min(from.value), hi.max(from.value)) };
+                snap_from(from.value + (p.x - from.x) as f64 / rail.width as f64 * (hi - lo) * keys.speed, lo, limits, keys.step(step))
             } else {
                 ui.data_mut(|d| d.remove::<Hold>(hold));
                 snap(rail.value(p.x), lo, hi, step)
             };
+            out.finer = keys.finer;
             if v != value { out.value = Some(v); }
         }
     } else if resp.drag_stopped() {
@@ -513,15 +563,95 @@ fn slide(ui: &mut Ui, rect: Rect, id: Id, value: f64, lo: f64, hi: f64, step: f6
     (out, x, live && (resp.hovered() || resp.dragged()))
 }
 
-/// A slider: a rail filled up to its handle.
+/// A slider: a rail filled up to its handle. With alt it may be taken past its ends by twice its width
+/// (`gf_core::limits::widen`); a knob's row gives it the knob's own hard limits instead (`slider_to`).
 pub fn slider(ui: &mut Ui, rect: Rect, id: Id, value: f64, lo: f64, hi: f64, step: f64, accent: Color32) -> Moved {
-    let (out, x, hot) = slide(ui, rect, id, value, lo, hi, step);
+    slider_to(ui, rect, id, value, lo, hi, step, accent, gf_core::limits::widen(lo, hi))
+}
+
+/// The same, with the hard limits it may be taken to with alt.
+#[allow(clippy::too_many_arguments)]
+pub fn slider_to(ui: &mut Ui, rect: Rect, id: Id, value: f64, lo: f64, hi: f64, step: f64, accent: Color32, hard: (f64, f64)) -> Moved {
+    let (out, x, hot) = slide(ui, rect, id, value, lo, hi, step, hard);
     let y = rect.center().y;
     let p = ui.painter();
     p.rect_filled(Rect::from_min_max(Pos2::new(rect.left(), y - 1.5), Pos2::new(rect.right(), y + 1.5)), 2, white(0.16));
     p.rect_filled(Rect::from_min_max(Pos2::new(rect.left(), y - 1.5), Pos2::new(x, y + 1.5)), 2, fade(accent, 0.8));
     p.circle_filled(Pos2::new(x, y), if hot { 5.5 } else { 5.0 }, if hot { BRIGHT } else { accent });
     out
+}
+
+/// How many digits to show of a value: as many as its slider's steps have, more (up to four more) when it
+/// lies between them (set in the finest steps, or typed).
+pub fn digits_for(value: f64, digits: usize) -> usize {
+    let mut d = digits;
+    while d < digits + 4 {
+        let s = value * 10f64.powi(d as i32);
+        if !s.is_finite() || (s - s.round()).abs() < 1e-6 * s.abs().max(1.0) { break; }
+        d += 1;
+    }
+    d
+}
+
+/// What typing into a value remembers: the text so far, and whether it has been given the keyboard yet.
+#[derive(Clone)]
+struct Typing {
+    text: String,
+    focused: bool,
+}
+
+/// A slider's value, written at the right of `rect`, with `digits` decimals if they fit (else fewer, but
+/// never fewer than `least`: the slider's own). Past the slider's own ends (`lo`..`hi`) it is written
+/// in `PAST`, so that a setting taken out of bounds shows that it is. Click it to type a value instead:
+/// enter keeps it, esc (or a click elsewhere) leaves the value as it was. Returns a value typed and kept;
+/// the caller holds it to the hard limits.
+#[allow(clippy::too_many_arguments)]
+pub fn value_text(ui: &mut Ui, rect: Rect, id: Id, value: f64, digits: usize, least: usize, lo: f64, hi: f64, size: f32) -> Option<f64> {
+    let key = id.with("typing");
+    let mut d = digits.max(least);
+    let mut shown = format!("{value:.d$}");
+    while d > least && text_width(ui, &shown, &mono(size)) > rect.width() {
+        d -= 1;
+        shown = format!("{value:.d$}");
+    }
+    if let Some(mut t) = ui.data(|d| d.get_temp::<Typing>(key)) {
+        // (the field reaches over the end of the slider: a typed number may be longer than a shown one)
+        let field = Rect::from_min_max(Pos2::new(rect.right() - 74.0, rect.center().y - 9.0), Pos2::new(rect.right() + 2.0, rect.center().y + 9.0));
+        let edit_id = id.with("field");
+        let edit = egui::TextEdit::singleline(&mut t.text).id(edit_id).font(mono(size)).text_color(BRIGHT).margin(egui::Margin::symmetric(4, 1)).align(Align2::RIGHT_CENTER).desired_width(field.width());
+        let resp = ui.put(field, edit);
+        if !t.focused {
+            // (the whole of the old value chosen, so that what is typed takes its place)
+            resp.request_focus();
+            if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), edit_id) {
+                state.cursor.set_char_range(Some(egui::text_selection::CCursorRange::select_all_str(&t.text)));
+                egui::TextEdit::store_state(ui.ctx(), edit_id, state);
+            }
+            t.focused = true;
+        }
+        let (enter, esc) = ui.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
+        if resp.lost_focus() || esc || (enter && !resp.has_focus()) {
+            ui.data_mut(|d| d.remove::<Typing>(key));
+            if enter && !esc {
+                return t.text.trim().parse::<f64>().ok().filter(|v| v.is_finite());
+            }
+            return None;
+        }
+        ui.data_mut(|d| d.insert_temp(key, t));
+        return None;
+    }
+    let past = value < lo - 1e-12 || value > hi + 1e-12;
+    let resp = ui.interact(rect, id.with("value"), Sense::click());
+    let hot = ui.is_enabled() && resp.hovered();
+    if hot { ui.ctx().set_cursor_icon(CursorIcon::Text); }
+    let ink = if past { PAST } else if hot { Color32::WHITE } else { BRIGHT };
+    text_in(ui, rect, Align2::RIGHT_CENTER, &shown, mono(size), ink);
+    let tip = if past { format!("past this slider's ends ({lo} to {hi})\n{VALUE_TIP}") } else { VALUE_TIP.to_owned() };
+    let resp = resp.on_hover_text(tip);
+    if ui.is_enabled() && resp.clicked() {
+        ui.data_mut(|d| d.insert_temp(key, Typing { text: shown, focused: false }));
+    }
+    None
 }
 
 /// A colour of full brightness from its hue (degrees) and how far it is from white (0 = white, 1 = the
@@ -559,7 +689,7 @@ pub fn shown_colour(c: [f64; 3]) -> Color32 {
 
 /// A slider of hues: its rail is the hues themselves, at the strength given.
 pub fn hue_slider(ui: &mut Ui, rect: Rect, id: Id, hue: f64, strength: f64) -> Moved {
-    let (out, x, hot) = slide(ui, rect, id, hue, 0.0, 360.0, 1.0);
+    let (out, x, hot) = slide(ui, rect, id, hue, 0.0, 360.0, 1.0, (0.0, 360.0));
     let y = rect.center().y;
     let p = ui.painter();
     let (left, width, parts) = (rect.left() + HANDLE_W / 2.0, rect.width() - HANDLE_W, 36);
@@ -618,11 +748,14 @@ struct Grip {
     x: f32,
     from: f64,
     to: f64,
+    keys: Keys,
 }
 
 /// The slider of an animated knob: a handle for each stop it travels between, the stretch between them
 /// (drag it to move both, kept inside the slider's range), and a mark at the present value.
-pub fn range(ui: &mut Ui, rect: Rect, id: Id, from: f64, to: f64, now: f64, lo: f64, hi: f64, step: f64, digits: usize) -> Stops {
+/// The keys held change it as they do a slider (`Keys`): with alt the stops may go past its ends, to `hard`.
+#[allow(clippy::too_many_arguments)]
+pub fn range(ui: &mut Ui, rect: Rect, id: Id, from: f64, to: f64, now: f64, lo: f64, hi: f64, step: f64, digits: usize, hard: (f64, f64)) -> Stops {
     let rail = Rail::new(rect, lo, hi);
     let live = ui.is_enabled();
     let (xa, xb, y) = (rail.at(from), rail.at(to), rect.center().y);
@@ -656,19 +789,22 @@ pub fn range(ui: &mut Ui, rect: Rect, id: Id, from: f64, to: f64, now: f64, lo: 
             if resp.drag_stopped() { out.released = true; }
             continue;
         };
-        if resp.drag_started() {
-            ui.data_mut(|d| d.insert_temp(id, Grip { x: p.x, from, to }));
+        let keys = ui.input(|i| Keys::of(&i.modifiers));
+        // (taken hold of again whenever the keys change, so that the stops carry on without a jump)
+        if resp.drag_started() || ui.data(|d| d.get_temp::<Grip>(id)).is_some_and(|g| g.keys != keys) {
+            ui.data_mut(|d| d.insert_temp(id, Grip { x: p.x, from, to, keys }));
         }
         if resp.dragged() {
             if let Some(g) = ui.data(|d| d.get_temp::<Grip>(id)) {
-                // (with shift held, a tenth as far as the pointer)
-                let fine = if ui.input(|i| i.modifiers.shift) { FINE } else { 1.0 };
-                let moved = (p.x - g.x) as f64 / rail.width as f64 * (hi - lo) * fine;
+                let moved = (p.x - g.x) as f64 / rail.width as f64 * (hi - lo) * keys.speed;
+                // (within the slider's range, or past it with alt; a stop already past an end may stay there)
+                let (a, b) = if keys.past { (hard.0.min(lo), hard.1.max(hi)) } else { (lo.min(g.from).min(g.to), hi.max(g.from).max(g.to)) };
+                let st = keys.step(step);
                 let new = match which {
-                    0 => (snap(g.from + moved, lo, hi, step), to),
-                    1 => (from, snap(g.to + moved, lo, hi, step)),
+                    0 => (snap_from(g.from + moved, lo, (a, b), st), to),
+                    1 => (from, snap_from(g.to + moved, lo, (a, b), st)),
                     _ => {
-                        let d = moved.clamp(lo - g.from.min(g.to), hi - g.from.max(g.to));
+                        let d = moved.clamp(a - g.from.min(g.to), b - g.from.max(g.to));
                         (g.from + d, g.to + d)
                     }
                 };

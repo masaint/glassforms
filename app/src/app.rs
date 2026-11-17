@@ -1525,8 +1525,9 @@ impl App {
                 }
                 None => gizmo::drag(st, dx as f64, dy as f64),
             },
-            Act::PointerDown(x, y, shift) => {
-                let (at, held) = (Pos2::new(x, y), if shift { egui::Modifiers::SHIFT } else { none });
+            Act::PointerDown(x, y, [shift, ctrl, alt]) => {
+                let held = egui::Modifiers { shift, ctrl, alt, command: ctrl, mac_cmd: false };
+                let at = Pos2::new(x, y);
                 steps = vec![Step::Input(vec![egui::Event::PointerMoved(at)], held), Step::Input(vec![button(at, PointerButton::Primary, true, held)], held)];
             }
             // (whatever key the press was made with stays held until the pointer is let go)

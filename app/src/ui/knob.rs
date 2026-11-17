@@ -43,6 +43,8 @@ pub fn name(ui: &mut Ui, rect: Rect, id: Id, text: &str, size: f32, tip: &str) {
 /// Move the stops of a knob's track. The value is kept between the new stops, and the trip carries on
 /// from wherever the value now is.
 pub fn set_stops(st: &mut State, k: &Knob, from: f64, to: f64) {
+    let hard = gf_core::limits::knob(k);
+    let (from, to) = (gf_core::limits::hold(from, hard), gf_core::limits::hold(to, hard));
     let Some(tr) = st.tracks.get_mut(&k.key) else { return };
     tr.from = from;
     tr.to = to;
@@ -73,14 +75,25 @@ pub fn set_ease(st: &mut State, k: &Knob, ease: i32, at: u8) {
     }
 }
 
-/// A plain slider's row: a name, a slider, the value. Returns what the user did to it.
+/// The value at the end of a slider's row (`value_text`): what a drag or typing made it, held to `hard`.
+#[allow(clippy::too_many_arguments)]
+fn value_end(ui: &mut Ui, rect: Rect, id: Id, out: &mut Moved, value: f64, lo: f64, hi: f64, step: f64, hard: (f64, f64), size: f32) {
+    let shown = out.value.unwrap_or(value);
+    let digits = if out.finer { digits_of(step) + 2 } else { digits_for(shown, digits_of(step)) };
+    if let Some(v) = value_text(ui, rect, id.with("value"), shown, digits, digits_of(step), lo, hi, size) {
+        out.value = Some(gf_core::limits::hold(v, (hard.0.min(lo), hard.1.max(hi))));
+        out.released = true;
+    }
+}
+
+/// A plain slider's row: a name, a slider, the value (click it to type one). Returns what the user did.
 pub fn plain_row(ui: &mut Ui, id: Id, label: &str, value: f64, lo: f64, hi: f64, step: f64) -> Moved {
     let r = row(ui, ROW_H);
     let c = cols(ui, r);
     name(ui, c.label, id.with("name"), label, SIZE, "");
-    let out = slider(ui, c.slot, id, value, lo, hi, step, ACCENT);
-    let shown = out.value.unwrap_or(value);
-    text_in(ui, c.value, Align2::RIGHT_CENTER, &format!("{shown:.*}", digits_of(step)), mono(SIZE), BRIGHT);
+    let hard = gf_core::limits::widen(lo, hi);
+    let mut out = slider_to(ui, c.slot, id, value, lo, hi, step, ACCENT, hard);
+    value_end(ui, c.value, id, &mut out, value, lo, hi, step, hard, SIZE);
     out
 }
 
@@ -92,9 +105,9 @@ pub fn value_row(ui: &mut Ui, px: &mut Panels, key: &str, label: &str, value: f6
     let id = Id::unique(("value", px.place, key));
     px.note(format!("{}slot:{key}", px.whose()), c.slot);
     name(ui, c.label, id.with("name"), label, SIZE, "");
-    let out = slider(ui, c.slot, id, value, lo, hi, step, ACCENT);
-    let shown = out.value.unwrap_or(value);
-    text_in(ui, c.value, Align2::RIGHT_CENTER, &format!("{shown:.*}", digits_of(step)), mono(SIZE), BRIGHT);
+    let hard = gf_core::limits::widen(lo, hi);
+    let mut out = slider_to(ui, c.slot, id, value, lo, hi, step, ACCENT, hard);
+    value_end(ui, c.value, id, &mut out, value, lo, hi, step, hard, SIZE);
     out
 }
 
@@ -180,23 +193,36 @@ pub fn knob_row_with(ui: &mut Ui, st: &mut State, k: &Knob, px: &mut Panels, ext
     px.note(format!("{}slot:{}", px.whose(), k.key), c.slot);
     px.note(format!("{}wave:{}", px.whose(), k.key), c.wave);
     let value = st.get(&k.r);
+    let hard = gf_core::limits::knob(k);
     let track = st.tracks.get(&k.key).filter(|t| t.on).cloned();
+    let mut finer = false;
     match &track {
         Some(tr) => {
-            let out = range(ui, c.slot, id.with("range"), tr.from, tr.to, value, k.lo, k.hi, k.step, digits);
+            let out = range(ui, c.slot, id.with("range"), tr.from, tr.to, value, k.lo, k.hi, k.step, digits, hard);
             if let Some((from, to)) = out.moved { set_stops(st, k, from, to); }
             if out.released { st.after_user(k, false); }
         }
         None => {
-            let out = slider(ui, c.slot, id.with("slider"), value, k.lo, k.hi, k.step, ACCENT);
+            let out = slider_to(ui, c.slot, id.with("slider"), value, k.lo, k.hi, k.step, ACCENT, hard);
+            finer = out.finer;
             if let Some(v) = out.value { st.user_set(k, v, true); }
             if out.released { st.after_user(k, false); }
         }
     }
     if extra.shown.is_empty() {
-        text_in(ui, c.value, Align2::RIGHT_CENTER, &format!("{:.digits$}", st.get(&k.r)), mono(SIZE), BRIGHT);
+        // (typed: kept at once, as a slider let go is; an animated knob's value is where its trip has
+        // got to, so typing moves it there and its trip carries on from it)
+        let now = st.get(&k.r);
+        let shown_digits = if finer { digits + 2 } else { digits_for(now, digits) };
+        if let Some(v) = value_text(ui, c.value, id.with("value"), now, shown_digits, digits, k.lo, k.hi, SIZE) {
+            st.user_set(k, v, false);
+            if track.is_some() { st.rephase(k); }
+        }
     } else {
-        text_in(ui, c.value, Align2::RIGHT_CENTER, extra.shown, mono(SIZE), BRIGHT);
+        // (a value in words, a focal length for a slider that zooms by doublings: typed as the slider's own
+        // number is not what it shows, so it is not typed into; past the ends it still shows)
+        let past = value < k.lo - 1e-12 || value > k.hi + 1e-12;
+        text_in(ui, c.value, Align2::RIGHT_CENTER, extra.shown, mono(SIZE), if past { PAST } else { BRIGHT });
     }
     if k.wave {
         let lit = track.is_some();
@@ -233,9 +259,12 @@ fn track_rows(ui: &mut Ui, st: &mut State, k: &Knob, id: Id, digits: usize) {
     let r = row(ui, 17.0);
     let c = cols(ui, r);
     text_in(ui, part(Rect::from_min_max(Pos2::new(left, c.label.top()), c.label.max)).0, Align2::LEFT_CENTER, "every s", mono(SMALL), DIM);
-    let out = slider(ui, c.slot, id.with("every"), tr.period, 1.0, 120.0, 0.5, ACCENT_MINI);
-    if let Some(v) = out.value { set_period(st, k, v); }
-    text_in(ui, c.value, Align2::RIGHT_CENTER, &format!("{:.2}", out.value.unwrap_or(tr.period)), mono(SMALL), BRIGHT);
+    // (a trip of no time at all would divide by nothing; one of an hour is as slow as anything wants)
+    let hard = (0.1, 3600.0);
+    let mut out = slider_to(ui, c.slot, id.with("every"), tr.period, 1.0, 120.0, 0.5, ACCENT_MINI, hard);
+    let shown = out.value.unwrap_or(tr.period);
+    if let Some(v) = value_text(ui, c.value, id.with("every value"), shown, digits_for(shown, 2), 2, 1.0, 120.0, SMALL) { out.value = Some(gf_core::limits::hold(v, hard)); }
+    if let Some(v) = out.value { set_period(st, k, gf_core::limits::hold(v, hard)); }
 
     let (label, rest) = part(row(ui, 22.0));
     text_in(ui, label, Align2::LEFT_CENTER, "ease", mono(SMALL), DIM);

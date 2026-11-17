@@ -81,6 +81,9 @@ fn gestures(families: usize) -> [(&'static str, Vec<(String, &'static str)>); 3]
         ("on a slider", vec![
             (s("press, drag"), "set it"),
             (s("shift-drag"), "set it finely (ten times finer)"),
+            (s("ctrl-shift-drag"), "finer still (a hundred times), between its steps"),
+            (s("alt-drag"), "take it past its ends (with shift, ctrl-shift: finely), as far as is safe"),
+            (s("click its number"), "type a value (enter keeps it, esc leaves it); past its ends shows in green"),
             (s("∿"), "let it travel while animating"),
         ]),
         ("keys", vec![

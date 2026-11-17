@@ -306,7 +306,8 @@ fn exposure(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     knob::name(ui, label_r, Id::unique(("shutter name", px.place)), "shutter °", SIZE, "how long the shutter stays open each frame, as a film camera's angle: the motion blur of a video (360: the whole frame; 180: a film camera's usual)");
     let slot = Rect::from_min_max(Pos2::new(label_r.right() + COL_GAP, r.center().y - 6.0), Pos2::new(r.right() - COL_WAVE - 2.0 * COL_GAP - 76.0, r.center().y + 6.0));
     px.note(format!("{}slot:shutter", px.whose()), slot);
-    let moved = slider(ui, slot, Id::unique(("shutter", px.place)), angle, 0.0, 360.0, 5.0, ACCENT);
+    // (a shutter open longer than the whole frame means nothing: no further with alt either)
+    let moved = slider_to(ui, slot, Id::unique(("shutter", px.place)), angle, 0.0, 360.0, 5.0, ACCENT, (0.0, 360.0));
     if let Some(v) = moved.value { st.render.shutter = gf_core::camera::shutter_of_angle(v); }
     let words = if angle <= 0.0 { "off".to_owned() } else { format!("{angle:.0}° · 1/{speed:.0} s") };
     text_in(ui, Rect::from_min_max(Pos2::new(slot.right() + COL_GAP, r.top()), Pos2::new(r.right() - COL_WAVE - COL_GAP, r.bottom())), Align2::RIGHT_CENTER, &words, mono(SIZE), BRIGHT);
