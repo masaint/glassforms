@@ -27,6 +27,10 @@ struct B {
   melted: u32,            // 1 = strands flow together, 0 = hard union
   vary: u32,              // 1 = every point has a radius of its own (a tree): see below
   ds: f32,                // the step the curve is cut into
+  cut: f32,               // nothing below this height is kept (a tree cut flat at the ground); -1e9 = none
+  pad2: u32,
+  pad3: u32,
+  pad4: u32,
 }
 
 @group(0) @binding(0) var<uniform> b: B;
@@ -164,10 +168,12 @@ fn resolve(px: vec2f, slice: u32) -> vec4f {
   let t = slice % b.slab;
   let origin = vec2i(i32(t % b.stiles), i32(t / b.stiles)) * i32(b.res);
   let s = textureLoad(sheetTex, origin + vec2i(px), 0).r;
-  if (b.melted == 0u) { return vec4f(min(far, s), 0.0, 0.0, 1.0); }
+  // (the flat cut: the height below which nothing is kept, as a distance)
+  let below = b.cut - (px.y / b.res * 2.0 - 1.0) * b.hb;
+  if (b.melted == 0u) { return vec4f(max(min(far, s), below), 0.0, 0.0, 1.0); }
   var d = 1e9;
   if (s > 1e-9) { d = -log(s) / b.k; }
-  return vec4f(clamp(min(far, d), -1.0, 4.0), 0.0, 0.0, 1.0);
+  return vec4f(clamp(max(min(far, d), below), -1.0, 4.0), 0.0, 0.0, 1.0);
 }
 // drawn: one slice per pass, the slice number arriving as the instance number
 @fragment

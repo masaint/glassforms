@@ -46,6 +46,9 @@ struct BakeU {
     vary: u32,
     /// the step the curve is cut into (for the melt's weight with `vary`)
     ds: f32,
+    /// nothing below this height is kept (`Curve::cut`); -1e9 = nothing cut
+    cut: f32,
+    pad: [u32; 3],
 }
 
 pub struct Volume {
@@ -396,7 +399,7 @@ impl Baker {
             amp = 1.0 / sum;
         }
         let n = brk.len();
-        let thin = Curve { pts, brk, n, rmax: c.rmax, ds, length: c.length, amp, pose: c.pose.clone(), vary: c.vary };
+        let thin = Curve { pts, brk, n, rmax: c.rmax, ds, length: c.length, amp, pose: c.pose.clone(), vary: c.vary, cut: c.cut };
         self.build_curve(&thin, res, melt, true)
     }
 
@@ -444,7 +447,7 @@ impl Baker {
             // far field: never below the band's edge; melted: never below where sums are still exact
             floor: if melted { (clear - 0.5 * h) as f32 } else { band as f32 },
             cres: cres as f32, cloud_n: cn as u32, slab: sheet.slab, tiles: Self::coarse_tiles(cres), stiles: sheet.tiles, melted: melted as u32,
-            vary: c.vary as u32, ds: c.ds as f32,
+            vary: c.vary as u32, ds: c.ds as f32, cut: c.cut.map_or(-1e9, |y| y as f32), pad: [0; 3],
         };
         gpu.queue.write_buffer(&self.u, 0, bytemuck::bytes_of(&u));
 

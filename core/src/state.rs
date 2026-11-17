@@ -1381,7 +1381,7 @@ impl State {
                     // strands with a radius of their own at every point (a tree), placed by the whole shape
                     let pose = pose.or_else(|| (!raw.frame.is_empty()).then(|| curve::placement(&[&raw.frame[..]], &place)));
                     let radii: Vec<&[f64]> = raw.radii.iter().map(|r| &r[..]).collect();
-                    curve::prep_strands(&lines, &radii, &curve::StrandOpts { thick: st.thick, ds, place, pose })
+                    curve::prep_strands(&lines, &radii, &curve::StrandOpts { thick: st.thick, ds, place, pose, ground: raw.ground })
                 };
                 if c.n < 2 { return Err(format!("{}: preset \"{}\" produced no curve", fam.name, p.id)); }
                 if !moving { st.e = c.pose.e; }

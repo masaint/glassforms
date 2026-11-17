@@ -250,6 +250,24 @@ fn picture(uv: vec2f, img: i32) -> f32 {
   return dot(c, vec3f(0.2126, 0.7152, 0.0722));
 }
 
+// How thick the body is about p (a point at distance f from the surface, h a voxel): its local radius,
+// as far as `most`. Looking in from the surface along the normal, the depth below the surface rises
+// with the distance in until the middle is passed: the deepest found is the radius. (Beyond `most`
+// all that matters is that it is more.)
+fn thickness(p: vec3f, f: f32, most: f32, h: f32) -> f32 {
+  let g = vec3f(srcAt(p + vec3f(h, 0.0, 0.0)) - srcAt(p - vec3f(h, 0.0, 0.0)),
+                srcAt(p + vec3f(0.0, h, 0.0)) - srcAt(p - vec3f(0.0, h, 0.0)),
+                srcAt(p + vec3f(0.0, 0.0, h)) - srcAt(p - vec3f(0.0, 0.0, h)));
+  let n = g / max(length(g), 1e-6);
+  let reach = clamp(2.0 * most, 2.0 * h, 0.6);
+  var best = 0.0;
+  for (var k = 1; k <= 10; k++) {
+    let t = f32(k) / 10.0 * reach;
+    best = max(best, -srcAt(p - n * (f + t)));
+  }
+  return best;
+}
+
 // ---- the stack ---------------------------------------------------------------------------------
 
 @compute @workgroup_size(8, 8, 4)
@@ -313,6 +331,7 @@ fn cs_eval(@builtin(global_invocation_id) gid: vec3u) {
     if (maskKind == 1) { m = prev; }
     if (maskKind == 2) { m = smoothstep(k4.x - k4.y, k4.x + k4.y, p0.y); }
     if (maskKind == 3) { m = smoothstep(k4.x - k4.y, k4.x + k4.y, length(p0)); }
+    if (maskKind == 4) { m = smoothstep(k4.x - k4.y, k4.x + k4.y, thickness(p0, f0, k4.x + k4.y, h)); }
     if (maskKind != 0 && k4.z > 0.5) { m = 1.0 - m; }
     // the pre-filter, in this layer's units; and how much of a single-sized pattern can be seen at all
     fpq = u.head[2].y / scale;

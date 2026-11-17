@@ -1459,6 +1459,8 @@ pub struct Curve {
     /// is then worked out for each segment's own radius rather than once for the tube, and the far field
     /// uses each point's own radius rather than the thickest.
     pub vary: bool,
+    /// Nothing below this height (y, in the volume) is kept: a flat cut (`RawCurve::ground`).
+    pub cut: Option<f64>,
 }
 
 /// How far it is from a to b.
@@ -1602,7 +1604,7 @@ pub fn prep_curve(lines: &[&[f64]], o: &PrepOpts) -> Curve {
         *brk.last_mut().unwrap() = 1;
     }
     let n = brk.len();
-    Curve { pts, brk, n, rmax, ds, length, amp, pose, vary: false }
+    Curve { pts, brk, n, rmax, ds, length, amp, pose, vary: false, cut: None }
 }
 
 /// What `prep_strands` is asked for.
@@ -1614,6 +1616,8 @@ pub struct StrandOpts {
     pub place: PlaceOpts,
     /// a placement worked out earlier, used instead of working one out from the lines
     pub pose: Option<Pose>,
+    /// a level in the lines' own units below which nothing is kept (`RawCurve::ground`)
+    pub ground: Option<f64>,
 }
 
 /// Strands that each carry their own radius at every point (`radii`, in the lines' own units): a tree's
@@ -1694,5 +1698,7 @@ pub fn prep_strands(lines: &[&[f64]], radii: &[&[f64]], o: &StrandOpts) -> Curve
         *brk.last_mut().unwrap() = 1;
     }
     let n = brk.len();
-    Curve { pts, brk, n, rmax, ds, length, amp: 1.0, pose, vary: true }
+    // the ground's level as placed (only for a shape that is not turned: a cut is level in the volume)
+    let cut = o.ground.filter(|_| pose.e.is_none() && ax[1] == 1).map(|g| (g - c[1]) * sc);
+    Curve { pts, brk, n, rmax, ds, length, amp: 1.0, pose, vary: true, cut }
 }

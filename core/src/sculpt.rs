@@ -173,12 +173,15 @@ pub enum Mask {
     Height,
     /// from the middle out
     Radial,
+    /// where the body is thicker than a size (its local radius): a trunk and its limbs, not the twigs
+    Thick,
 }
-pub const MASKS: [(Mask, &str, &str); 4] = [
+pub const MASKS: [(Mask, &str, &str); 5] = [
     (Mask::None, "none", "the layer acts everywhere"),
     (Mask::Above, "above", "the layer acts only where the layer above it in the list has its pattern"),
     (Mask::Height, "height", "the layer acts from a height upwards"),
     (Mask::Radial, "radial", "the layer acts from a distance from the middle outwards"),
+    (Mask::Thick, "thick", "the layer acts only where the body is thicker than a size: on a trunk and its limbs, not on the twigs"),
 ];
 
 fn yes() -> bool {

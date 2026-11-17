@@ -469,6 +469,9 @@ fn netNearest(x: vec3f, nrm: vec3f, seed: u32) -> NetCell {
   return r;
 }
 
+//#if CRACK_DEPTH
+// (the net of cracks run in from the surface: only with a crack depth, the one case that reads it, and
+// the one case in which the tracer of several bodies has mapOB)
 // the surface's outward direction about o (the shape's own frame), from four reads of the distance
 fn netNormal(o: vec3f) -> vec3f {
   let hs = 0.01;
@@ -556,6 +559,7 @@ fn crackleNet(pos: vec3f, dir: vec3f, s: f32, n: f32) -> Crack {
   }
   return out;
 }
+//#endif
 
 // ---- what a crossing of a crack's face does to the path ----
 // R: what the face mirrors; V: what its veil sends back as light from all round; back: the mirrored

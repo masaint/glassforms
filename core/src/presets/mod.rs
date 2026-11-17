@@ -48,6 +48,9 @@ pub struct RawCurve {
     /// Points to place the curve by instead of its lines (x,y,z...): a shape that grows keeps the place
     /// and size of the whole of it while only part is there. Empty = the lines.
     pub frame: Vec<f64>,
+    /// A level (y, in the curve's own units) below which nothing of the shape is kept: a tree's foot and
+    /// roots are cut flat where they meet the ground. None = nothing cut.
+    pub ground: Option<f64>,
 }
 
 /// What a curve function is told: `len` is the length slider, `quick` means a slider is moving.
@@ -189,5 +192,5 @@ impl Family {
 
 /// Every family: the four the web version has, in the order it shows them, then the newer ones.
 pub fn families() -> Vec<Family> {
-    vec![attractors::family(), knots::family(), surfaces::family(), algebraic::family(), gems::family(), solids::family(), forms::family(), studio::family(), models::family(), trees::family()]
+    vec![attractors::family(), knots::family(), surfaces::family(), algebraic::family(), gems::family(), solids::family(), forms::family(), studio::family(), trees::family(), models::family()]
 }

@@ -605,8 +605,9 @@ fn draw(g: &Grown, s: &Sliders, grow: f64) -> RawCurve {
             if k == 0 {
                 rad *= 1.0 + 0.25 * (1.0 - q[1] / g.base).max(0.0);
                 rad *= 1.0 + 0.4 * s.flare * (-q[1] / (3.0 * trunk_r.max(1e-6))).exp();
-                // the foot's round end sits on the ground, among the roots
-                if j == 0 { q[1] = q[1].max(rad); }
+                // the foot goes on below the ground, where the shape is cut flat (`ground`): a sawn base,
+                // not a round end
+                if j == 0 { q[1] -= rad; }
             }
             l.extend_from_slice(&q);
             r.push(rad);
@@ -655,7 +656,7 @@ fn draw(g: &Grown, s: &Sliders, grow: f64) -> RawCurve {
             }
         }
     }
-    RawCurve { lines, closed: false, radii, frame: g.frame.clone() }
+    RawCurve { lines, closed: false, radii, frame: g.frame.clone(), ground: Some(0.0) }
 }
 
 /// Trees grown lately, by their sliders (all but `grow`): moving `grow` only cuts one of them.

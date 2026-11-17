@@ -215,11 +215,17 @@ fn only_what_changed_is_built_again() {
     let jobs: Vec<bool> = (0..3).map(|i| matches!(s.layer_job(i, Detail::Quick, Some(64)).unwrap().shape, ShapeJob::Curve { .. })).collect();
     assert_eq!(jobs, [true, false, true]);
     assert_eq!(s.stack.sel, 0);
-    // the combined volume is as fine as the finest layer
+    // the combined volume is as fine as the finest layer. (Layer 2 was moved 0.3 out above: fitted
+    // within 1.4, it now reaches 1.7, past the stage's 1.44, so the stage has grown a step, to 1.25
+    // times, and its volume has as many more voxels, to keep the same detail.)
     s.layer_shape_mut(1).unwrap().res = 512;
     s.layer_shape_mut(2).unwrap().res = 384;
     s.layer_shape_mut(0).unwrap().res = 256;
-    assert_eq!((s.layer_res(0, Detail::Full), s.layer_res(1, Detail::Full), s.scene_res(Detail::Full), s.scene_res(Detail::Anim)), (256, 512, 512, 256));
+    assert_eq!(s.box_k(), 1.25);
+    assert_eq!((s.layer_res(0, Detail::Full), s.layer_res(1, Detail::Full), s.scene_res(Detail::Full), s.scene_res(Detail::Anim)), (256, 512, 640, 320));
+    // and with that layer back in the middle, the stage is as it always was
+    s.stack.set_place(1, 0, 0.0);
+    assert_eq!((s.box_k(), s.scene_res(Detail::Full), s.scene_res(Detail::Anim)), (1.0, 512, 256));
 }
 
 #[test]

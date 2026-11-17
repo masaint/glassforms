@@ -156,7 +156,7 @@ fn prep_curve_plain(lines: &[&[f64]], o: &PrepOpts) -> Curve {
         *brk.last_mut().unwrap() = 1;
     }
     let n = brk.len();
-    Curve { pts, brk, n, rmax, ds, length, amp, pose, vary: false }
+    Curve { pts, brk, n, rmax, ds, length, amp, pose, vary: false, cut: None }
 }
 
 /// Every bit of two prepared curves is the same.

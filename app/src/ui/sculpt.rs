@@ -252,6 +252,13 @@ fn layer_rows(ui: &mut Ui, st: &mut State, px: &mut Panels, i: usize) {
         let m = knob::value_row(ui, px, &key("mask width"), "edge", l.mask_width, 0.01, 1.0, 0.01);
         after(st, &m, |s, v| s.layers[i].mask_width = v);
     }
+    if l.mask == Mask::Thick {
+        // (a radius, and how gradually the layer comes in about it: sizes of branches, not of the scene)
+        let m = knob::value_row(ui, px, &key("mask at"), "thicker than", l.mask_at, 0.0, 0.3, 0.001);
+        after(st, &m, |s, v| s.layers[i].mask_at = v);
+        let m = knob::value_row(ui, px, &key("mask width"), "edge", l.mask_width, 0.001, 0.1, 0.001);
+        after(st, &m, |s, v| s.layers[i].mask_width = v);
+    }
     if l.mask != Mask::None {
         let items = [Item::new("as it is", !l.mask_invert), Item::new("turned round", l.mask_invert)];
         if let Some(k) = named_run(ui, Id::unique(("sculpt invert", i)), "mask is", &items).clicked {

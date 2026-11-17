@@ -28,7 +28,7 @@ fn main() {
         let lines: Vec<&[f64]> = raw.lines.iter().map(|l| &l[..]).collect();
         let radii: Vec<&[f64]> = raw.radii.iter().map(|l| &l[..]).collect();
         let pose = gf_core::curve::placement(&[&raw.frame[..]], &gf_core::curve::PlaceOpts { centre: true, ..Default::default() });
-        let c = gf_core::curve::prep_strands(&lines, &radii, &gf_core::curve::StrandOpts { thick: 1.0, ds: 0.75 * 2.0 * gf_core::HB / res, place: Default::default(), pose: Some(pose) });
+        let c = gf_core::curve::prep_strands(&lines, &radii, &gf_core::curve::StrandOpts { thick: 1.0, ds: 0.75 * 2.0 * gf_core::HB / res, place: Default::default(), pose: Some(pose), ground: raw.ground });
         eprintln!("prep at {res}: {} points in {:.1} ms", c.n, t.elapsed().as_secs_f64() * 1e3);
     }
     let pts: usize = raw.lines.iter().map(|l| l.len() / 3).sum();

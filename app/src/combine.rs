@@ -447,6 +447,9 @@ impl Engine {
                             q[a] = (w[a] + place.pos[a]) as f32;
                         }
                     }
+                    // a flat cut goes up and down with the layer; turned, it would no longer be level
+                    let turned = place.rot.iter().any(|&a| a != 0.0);
+                    curve.cut = if turned { None } else { curve.cut.map(|y| y + place.pos[1]) };
                 }
             }
             let t1 = Instant::now();

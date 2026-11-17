@@ -24,8 +24,9 @@ BARK = {'layers': [
     {'kind': 'noise', 'scale': 0.03, 'depth': 0.0025, 'a': 3, 'b': 0.5, 'mode': 'both'},
 ]}
 # (only below the crown: the twigs are too thin to take grooves)
-BARK['layers'][0].update(mask='height', mask_at=-0.15, mask_width=0.25, mask_invert=True)
-BARK['layers'][1].update(mask='height', mask_at=-0.15, mask_width=0.25, mask_invert=True)
+BARK_BARE_ARG = 'sculpt=' + json.dumps(BARK, separators=(',', ':'))
+BARK['layers'][0].update(mask='thick', mask_at=0.02, mask_width=0.006)
+BARK['layers'][1].update(mask='thick', mask_at=0.012, mask_width=0.004)
 BARK_ARG = 'sculpt=' + json.dumps(BARK, separators=(',', ':'))
 COLUMN = ['p.crown=0.85', 'p.width=0.5', 'p.shape=-0.8', 'p.leader=1', 'p.upturn=-0.3', 'p.angle=75', 'p.light=0']
 SPREAD = ['p.crown=0.5', 'p.width=1.5', 'p.shape=0.6', 'p.leader=0.05', 'p.upturn=-0.1', 'p.light=0.5', 'p.angle=55']
@@ -86,6 +87,17 @@ SETS = {
         ('close clay melt 0', T + ['p.seed=2', 'clay=1', 'fov=9', 'melt=0']),
         ('close clay melt 0.01', T + ['p.seed=2', 'clay=1', 'fov=9', 'melt=0.01']),
         ('close glass', T + ['p.seed=2', 'fov=9']),
+    ],
+    'foot': [
+        ('foot glass', T + ['p.seed=2', 'fov=8', 'shiftY=-2.3']),
+        ('foot clay', T + ['p.seed=2', 'fov=8', 'shiftY=-2.3', 'clay=1']),
+        ('whole glass', T + ['p.seed=2']),
+    ],
+    'bark': [
+        ('bark, thick mask', T + ['p.seed=1', 'clay=1', BARK_ARG]),
+        ('bark, no mask', T + ['p.seed=1', 'clay=1', BARK_BARE_ARG]),
+        ('bark, thick mask, close', T + ['p.seed=1', 'clay=1', 'fov=9', BARK_ARG]),
+        ('bark, thick mask, glass', T + ['p.seed=1', BARK_ARG]),
     ],
     'first': [
         ('glass_s1', T + ['p.seed=1']),
