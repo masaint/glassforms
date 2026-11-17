@@ -1159,6 +1159,9 @@ pub fn family() -> Family {
         steps_in: 96,
         // a convex stone: a ray that has left it never meets it again
         layers: 0,
+        // light still inside after many bounces carries little, and following it to the end cost a hammered
+        // stone a sixth of its frame: end it at a twentieth (docs/cache_bounces.md)
+        thr_cut: 0.05,
         defaults: vec![
             // diamond: n = 2.42 at 550 nm, and n(400 nm) − n(700 nm) = 0.058 (2.464 − 2.406, Peter's fit)
             ("ior", Setting::Num(2.42)), ("disp", Setting::Num(0.058)), ("absorb", Setting::Vec3([0.0, 0.0, 0.0])),

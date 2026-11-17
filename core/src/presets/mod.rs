@@ -193,13 +193,15 @@ pub struct Family {
     pub steps_out: u32,
     pub steps_in: u32,
     pub layers: u32,
+    /// paths inside end once what they carry falls below this (plain glass's tracer: render.rs `cut_weave`)
+    pub thr_cut: f64,
 }
 impl Family {
     /// A family with forms.js's defaults for everything not given.
     pub fn new(id: &'static str, name: &'static str, kind: Kind) -> Self {
         Self {
             id, name, kind, presets: Vec::new(), lights: Vec::new(), ambient: [0.006, 0.011, 0.022], defaults: Vec::new(),
-            melt: 0.006, tube: 0.03, align: false, step_scale: 0.95, steps_out: 220, steps_in: 56, layers: 2,
+            melt: 0.006, tube: 0.03, align: false, step_scale: 0.95, steps_out: 220, steps_in: 56, layers: 2, thr_cut: 0.02,
         }
     }
     pub fn preset(&self, id: &str) -> Option<&Preset> { self.presets.iter().find(|p| p.id == id) }

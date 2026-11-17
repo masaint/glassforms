@@ -77,7 +77,7 @@ use glassforms::engine::Engine;
 use glassforms::gpu::Gpu;
 
 /// Names given as name=value that are not settings of the picture.
-const NOT_SETTINGS: [&str; 38] = ["heroInside", "heroK", "heroClamp", "heroSeq", "heroEvery", "heroTaa", "upscale", "upscaleScale", "refine", "refineMost", "refineRays", "hz", "w", "h", "frames", "anim", "backend", "fps", "samples", "lensRays", "shutter", "codec", "crf", "detail", "play", "seed", "drift", "turn", "rounds", "rebuild", "stride", "inPlace", "noWide", "refineTime", "adapt", "adaptTol", "adaptMin", "adaptShow"];
+const NOT_SETTINGS: [&str; 42] = ["live", "shot", "events", "switches", "heroInside", "heroK", "heroClamp", "heroSeq", "heroEvery", "heroTaa", "upscale", "upscaleScale", "refine", "refineMost", "refineRays", "hz", "w", "h", "frames", "anim", "backend", "fps", "samples", "lensRays", "shutter", "codec", "crf", "detail", "play", "seed", "drift", "turn", "rounds", "rebuild", "stride", "inPlace", "noWide", "refineTime", "adapt", "adaptTol", "adaptMin", "adaptShow"];
 
 struct Args {
     flags: Vec<(String, Option<String>)>,
@@ -676,6 +676,147 @@ fn run() -> Result<(), String> {
             e.render(n_ref);
             save(&e, &format!("ref_{i:03}"))?;
         }
+        return Ok(());
+    }
+    if args.flag("interact").is_some() {
+        // Scripted interaction, frame by frame as the window runs it (events=a;b;c, each one of):
+        //   idle:N            N frames with nothing done
+        //   turn:N            N frames of the view turned by hand
+        //   drag:N:name=a..b  a setting dragged from a to b over N frames (a shape's: built quick while
+        //                     dragged, in full on release, as a slider does)
+        //   set:name=value    a setting changed once (then the frames go on)
+        // For every frame: the time the engine's call took (what holds up the window's thread), and that
+        // plus waiting for the GPU to finish it. Prints a line of JSON: per event the slowest and 99th
+        // percentile of both, and every frame over 20 ms with what it spent its time on.
+        let mut e = headless(&args)?;
+        e.render(4);
+        // from here on as the window runs: nothing read or built is waited for
+        e.auto = false;
+        e.models.wait = false;
+        e.stage = glassforms::stage::StageWork::new(false);
+        e.hdri_wait = false;
+        let ((w, h), _) = e.renderer.size();
+        let dt = 1.0 / 90.0;
+        let turn = gf_core::math::axis_angle(0.3, 1.0, 0.2, 0.6 / 120.0);
+        let mut out = String::from("{\"events\":[");
+        let mut slow = String::new();
+        let pct = |v: &[f64], q: f64| -> f64 {
+            let mut s = v.to_vec();
+            s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            s[((q * (s.len() - 1) as f64).round() as usize).min(s.len() - 1)]
+        };
+        let mut frame_no = 0usize;
+        for (k, ev) in args.text("events").unwrap_or("idle:60").split(';').filter(|s| !s.is_empty()).enumerate() {
+            let (kind, rest) = ev.split_once(':').unwrap_or((ev, ""));
+            let (n, what) = match kind { "set" => (1usize, rest), _ => { let (n, w) = rest.split_once(':').unwrap_or((rest, "")); (n.parse().unwrap_or(1), w) } };
+            let (name, value) = what.split_once('=').unwrap_or(("", ""));
+            let (a, b) = value.split_once("..").map(|(a, b)| (a.parse::<f64>().unwrap_or(0.0), b.parse::<f64>().unwrap_or(0.0))).unwrap_or((0.0, 0.0));
+            let (mut calls, mut walls) = (Vec::new(), Vec::new());
+            let mut shape = false;
+            let frames = if kind == "drag" { n + 1 } else if kind == "set" { 1 } else { n };
+            for i in 0..frames {
+                match kind {
+                    "drag" if i < n => {
+                        let v = a + (b - a) * (i + 1) as f64 / n as f64;
+                        let before = e.state.want;
+                        e.state.want = None;
+                        if name == "cells.depth" {
+                            // a studio edit: the depth of a layer of cells carved into the shape
+                            let json = format!("{{\"layers\":[{{\"kind\":\"cells\",\"scale\":0.14,\"depth\":{v},\"a\":0.75,\"b\":0.9,\"mode\":\"carve\"}}],\"round\":0.012,\"crumbs\":0.06}}");
+                            if let Some(sc) = gf_core::sculpt::Sculpt::from_arg(&json) { e.state.shape_mut().sculpt = sc; e.state.want = Some(Detail::Full); }
+                        } else if !e.state.apply_arg(name, &format!("{v}")) { eprintln!("no such setting: {name}"); }
+                        if e.state.want.is_some() { shape = true; e.state.want = Some(Detail::Quick); } else { e.state.want = before; }
+                    }
+                    "drag" => if shape { e.state.want = Some(Detail::Full); },
+                    "set" => { if !e.state.apply_arg(name, value) { eprintln!("no such setting: {name}"); } }
+                    "turn" => e.state.turn(&turn),
+                    _ => {}
+                }
+                let tb0 = glassforms::render::TRACER_BUILDS[1].load(std::sync::atomic::Ordering::Relaxed) + glassforms::render::TRACER_BUILDS[0].load(std::sync::atomic::Ordering::Relaxed);
+                e.last_bake_parts = [0.0; 3];
+                let t0 = Instant::now();
+                e.frame(w, h, dt);
+                let call = t0.elapsed().as_secs_f64() * 1e3;
+                let tracer_ms = (glassforms::render::TRACER_BUILDS[1].load(std::sync::atomic::Ordering::Relaxed) + glassforms::render::TRACER_BUILDS[0].load(std::sync::atomic::Ordering::Relaxed) - tb0) as f64 / 1e6;
+                e.gpu.wait();
+                let wall = t0.elapsed().as_secs_f64() * 1e3;
+                calls.push(call);
+                walls.push(wall);
+                if wall > 20.0 {
+                    let s = e.spans;
+                    slow += &format!("{}{{\"frame\":{frame_no},\"event\":{k},\"i\":{i},\"callMs\":{call:.1},\"wallMs\":{wall:.1},\"sizes\":{:.1},\"build\":{:.1},\"lights\":{:.1},\"draw\":{:.1},\"bakeParts\":[{:.1},{:.1},{:.1}],\"tracerMs\":{tracer_ms:.1}}}", if slow.is_empty() { "" } else { "," }, s[0], s[1], s[2], s[3], e.last_bake_parts[0], e.last_bake_parts[1], e.last_bake_parts[2]);
+                }
+                frame_no += 1;
+            }
+            out += &format!("{}{{\"event\":\"{}\",\"frames\":{},\"callMax\":{:.1},\"callP99\":{:.1},\"wallMax\":{:.1},\"wallP99\":{:.1},\"wallP50\":{:.1}}}",
+                if k > 0 { "," } else { "" }, ev.replace('"', "'").chars().take(60).collect::<String>(), calls.len(), pct(&calls, 1.0), pct(&calls, 0.99), pct(&walls, 1.0), pct(&walls, 0.99), pct(&walls, 0.5));
+        }
+        // shot=<file>: the picture as it stands after the last event (settled, if the events end idle)
+        if let Some(path) = args.text("shot") {
+            let (w, h, rgba) = e.screenshot()?;
+            write_png(path, w, h, &rgba)?;
+        }
+        println!("{out}],\"slow\":[{slow}]}}");
+        return Ok(());
+    }
+    if args.flag("bench-switch").is_some() {
+        // The hitch when something needs a tracer not made yet: switches=name:value,name:value/... (each
+        // group applied in turn, on top of the last). For each: the first frame after it, a frame after
+        // that, and the time making tracers took within that first frame (shader module; pipeline).
+        // Also the time from the program's start to the first frame drawn.
+        use std::sync::atomic::Ordering::Relaxed;
+        let started = Instant::now();
+        let mut e = headless(&args)?;
+        e.auto = false;
+        let ((w, h), _) = e.renderer.size();
+        let builds = || [0, 1, 2].map(|i| glassforms::render::TRACER_BUILDS[i].load(Relaxed));
+        e.frame(w, h, 1.0 / 90.0);
+        e.gpu.wait();
+        let first = started.elapsed().as_secs_f64() * 1e3;
+        let b = builds();
+        // live=1: from here on as the window runs (nothing waited for), with the tracers it makes
+        // beforehand given time to be made (up to 30 s) before the first switch
+        let mut warm_ms = 0.0;
+        if args.num("live").unwrap_or(0.0) > 0.5 {
+            e.auto = false;
+            e.models.wait = false;
+            e.hdri_wait = false;
+            let t = Instant::now();
+            loop {
+                e.frame(w, h, 1.0 / 90.0);
+                e.gpu.wait();
+                if e.warm_upkeep() == 0 || t.elapsed().as_secs_f64() > 30.0 { break; }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            warm_ms = t.elapsed().as_secs_f64() * 1e3;
+        }
+        let mut out = format!("{{\"warmMs\":{warm_ms:.0},\"firstFrameMs\":{first:.1},\"startTracers\":{},\"startModuleMs\":{:.1},\"startPipelineMs\":{:.1},\"switches\":[", b[2], b[0] as f64 / 1e6, b[1] as f64 / 1e6);
+        for (k, group) in args.text("switches").unwrap_or("").split('/').filter(|g| !g.is_empty()).enumerate() {
+            for (name, value) in group.split(',').filter_map(|p| p.split_once(':')) {
+                if !e.state.apply_arg(name, value) { eprintln!("no such setting: {name}"); }
+            }
+            let b0 = builds();
+            let t0 = Instant::now();
+            e.frame(w, h, 1.0 / 90.0);
+            e.gpu.wait();
+            let first = t0.elapsed().as_secs_f64() * 1e3;
+            let t1 = Instant::now();
+            e.frame(w, h, 1.0 / 90.0);
+            e.gpu.wait();
+            let next = t1.elapsed().as_secs_f64() * 1e3;
+            let b1 = builds();
+            // (a way of drawing built on another thread: how long the old one went on being shown)
+            let mut shown_after = t0.elapsed().as_secs_f64() * 1e3;
+            for _ in 0..600 {
+                if !e.building { break; }
+                e.frame(w, h, 1.0 / 90.0);
+                e.gpu.wait();
+                shown_after = t0.elapsed().as_secs_f64() * 1e3;
+            }
+            out += &format!("{}{{\"set\":\"{group}\",\"firstMs\":{first:.1},\"nextMs\":{next:.1},\"tracers\":{},\"moduleMs\":{:.1},\"pipelineMs\":{:.1},\"shownAfterMs\":{shown_after:.0}}}",
+                if k > 0 { "," } else { "" }, b1[2] - b0[2], (b1[0] - b0[0]) as f64 / 1e6, (b1[1] - b0[1]) as f64 / 1e6);
+        }
+        println!("{out}]}}");
         return Ok(());
     }
     if let Some(n) = args.flag("session") {

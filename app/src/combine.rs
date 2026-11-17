@@ -569,7 +569,8 @@ impl Engine {
         let sizes: Vec<u32> = vols.iter().map(|v| v.res).collect();
         let same = self.layers.combined && rebuilt.is_empty() && !self.layers.force && self.layers.last.as_ref().is_some_and(|l| l.0 == c && l.1 == res && l.2 == sizes && l.3 == uses)
             && self.layers.combiner.bodies_volume().is_some() == (c.bodies_shown() > 1 && self.layers.combiner.bodies_wanted);
-        let timed = matches!(mode, Detail::Full) || self.time_bakes;
+        // (in the window nothing waits for the GPU: see `bake`)
+        let timed = (matches!(mode, Detail::Full) && self.blocking()) || self.time_bakes;
         let t2 = Instant::now();
         if timed { self.gpu.wait(); }
         let t3 = Instant::now();

@@ -198,6 +198,63 @@ impl Gpu {
     }
 }
 
+/// Whole layers of a 3D texture copied out for reading later, without waiting for the GPU (see
+/// `Gpu::read_later`): `take` hands them over once the GPU has done the copy, and None until then.
+pub struct Later {
+    buf: wgpu::Buffer,
+    done: Arc<AtomicBool>,
+    row: u32,
+    padded: u32,
+    h: u32,
+    layers: usize,
+}
+impl Later {
+    /// The layers, each `w` x `h` texels tightly packed, if they have arrived (never blocks).
+    pub fn take(&self, gpu: &Gpu) -> Option<Vec<Vec<u8>>> {
+        let _ = gpu.device.poll(wgpu::PollType::Poll);
+        if !self.done.load(Ordering::SeqCst) { return None; }
+        let view = self.buf.slice(..).get_mapped_range().ok()?;
+        let per = self.padded as usize * self.h as usize;
+        let out = (0..self.layers)
+            .map(|k| {
+                let mut layer = Vec::with_capacity(self.row as usize * self.h as usize);
+                for r in 0..self.h as usize {
+                    let o = k * per + r * self.padded as usize;
+                    layer.extend_from_slice(&view[o..o + self.row as usize]);
+                }
+                layer
+            })
+            .collect();
+        drop(view);
+        self.buf.unmap();
+        Some(out)
+    }
+}
+
+impl Gpu {
+    /// Copy layers `zs` of a texture (each `w` x `h` texels of `bytes_per_texel`) out to be read later:
+    /// nothing waits here (`Later::take`).
+    pub fn read_later(&self, tex: &wgpu::Texture, zs: &[u32], w: u32, h: u32, bytes_per_texel: u32) -> Later {
+        let row = w * bytes_per_texel;
+        let padded = row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let per = padded as u64 * h as u64;
+        let buf = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("read later"), size: per * zs.len() as u64, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        for (k, &z) in zs.iter().enumerate() {
+            enc.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo { texture: tex, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: 0, z }, aspect: wgpu::TextureAspect::All },
+                wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: k as u64 * per, bytes_per_row: Some(padded), rows_per_image: Some(h) } },
+                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            );
+        }
+        self.queue.submit([enc.finish()]);
+        let done = Arc::new(AtomicBool::new(false));
+        let flag = done.clone();
+        buf.slice(..).map_async(wgpu::MapMode::Read, move |r| flag.store(r.is_ok(), Ordering::SeqCst));
+        Later { buf, done, row, padded, h, layers: zs.len() }
+    }
+}
+
 /// A buffer that is filled afresh again and again, and only made anew when it is too small.
 pub struct GrowBuf {
     pub buf: wgpu::Buffer,

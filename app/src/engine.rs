@@ -161,6 +161,18 @@ pub struct Engine {
     shape_no: u64,
     /// how thick the shape is, measured from its volume (None: not measured since it was last built)
     thickness: Option<f64>,
+    /// in the window: the last thickness measured (stands in while the next is read back), and the read
+    /// on its way (`measure_thickness_later`)
+    thick_last: Option<f64>,
+    thick_later: Option<crate::gpu::Later>,
+    /// in the window: a full build's time to the end, set by the GPU when it has done the build (the
+    /// frame does not wait for it), with the family it was for
+    bake_done: Arc<std::sync::Mutex<Option<(usize, f64)>>>,
+    /// how long the last `frame` spent in its parts, in ms: sizes and the stage's box, building the shape,
+    /// the lights, the rest (drawing) (for finding frames that block the window: --interact)
+    pub spans: [f64; 4],
+    /// the tracer the variants made beforehand were last asked for (`warm_upkeep`)
+    warmed_for: String,
     /// what the material's distances are multiplied by at present (1 unless it is fitted to the shape)
     fit_now: f64,
     /// the softened copies of the lights' map are those of the map as it is now painted
@@ -211,7 +223,7 @@ pub struct Engine {
     /// a change of picture that waits for its tracer to be built: Some(None) = no picture any more
     next: Option<Option<Hdri>>,
     /// the tracer the lighting calls for is being built on another thread
-    building: bool,
+    pub building: bool,
     /// why the last environment picture could not be used
     pub hdri_error: Option<String>,
     /// wait for a picture to be read instead of carrying on without it meanwhile (stills, videos, timings)
@@ -275,7 +287,7 @@ impl Engine {
             maker: Arc::new(OnceLock::new()), picture: None, picture_no: 0, glass: None, glass_from: None, hdri_seen: None, loading: None, next: None, building: false, hdri_error: None, hdri_wait: auto,
             show_wanted: Cell::new(false), show: None, shown: None, lighting_no: 0, last_lu: None,
             dirty: true, cut: true, last_tu: None, last_look: None,
-            planes_until: None, planes_shown: false, size_override: None, auto, averaging: false, error: None, last_bake_ms: 0.0, last_bake_parts: [0.0; 3], time_bakes: false, refine_n: 1, refine_part: 0.0, refine_count: 0, refine_most: REFINE_MOST, adapt: crate::adapt::enabled(),
+            planes_until: None, planes_shown: false, size_override: None, auto, averaging: false, error: None, last_bake_ms: 0.0, last_bake_parts: [0.0; 3], time_bakes: false, refine_n: 1, refine_part: 0.0, refine_count: 0, refine_most: REFINE_MOST, adapt: crate::adapt::enabled(), thick_last: None, thick_later: None, bake_done: Arc::default(), spans: [0.0; 4], warmed_for: String::new(),
         };
         e.paint_lights();
         e
@@ -881,7 +893,16 @@ impl Engine {
     fn material_scale(&mut self) -> f64 {
         if self.state.p.fit <= 0.5 { return 1.0; }
         let thickness = self.state.thickness_hint().or_else(|| {
-            if self.thickness.is_none() { self.thickness = self.measure_thickness(); }
+            if self.thickness.is_none() {
+                if self.blocking() || self.thick_last.is_none() {
+                    self.thickness = self.measure_thickness();
+                } else {
+                    // in the window the frame does not wait for the GPU to hand the slices back: the last
+                    // thickness stands until they arrive (a frame or two), and the picture then starts again
+                    self.thickness = self.measure_thickness_later();
+                    return self.thickness.or(self.thick_last);
+                }
+            }
             self.thickness
         });
         material::fit_scale(&self.state.p, thickness)
@@ -893,19 +914,59 @@ impl Engine {
     /// part.) Only for shapes that are not a single tube, and only when a material asks to be fitted.
     fn measure_thickness(&self) -> Option<f64> {
         let vol = self.scene_volume()?;
-        let (mut sum, mut count) = (0.0f64, 0u64);
-        for i in 0..12 {
-            let z = ((i as f64 + 0.5) / 12.0 * vol.res as f64) as u32;
-            let bytes = self.gpu.read(&vol.tex, 0, 0, z.min(vol.res - 1), vol.res, vol.res, 2).ok()?;
-            for h in bytemuck::cast_slice::<u8, half::f16>(&bytes) {
-                let d = h.to_f32();
-                if d < 0.0 {
-                    sum -= d as f64;
-                    count += 1;
+        let slices: Vec<Vec<u8>> = thickness_slices(vol.res).into_iter().map(|z| self.gpu.read(&vol.tex, 0, 0, z, vol.res, vol.res, 2)).collect::<R<_>>().ok()?;
+        thickness_of(&slices)
+    }
+
+    /// The same without waiting: the slices are asked for, and the thickness given once they are back
+    /// (None until then; asked again by the next call).
+    fn measure_thickness_later(&mut self) -> Option<f64> {
+        if self.thick_later.is_none() {
+            let vol = self.scene_volume()?;
+            self.thick_later = Some(self.gpu.read_later(&vol.tex, &thickness_slices(vol.res), vol.res, vol.res, 2));
+        }
+        let slices = self.thick_later.as_ref()?.take(&self.gpu)?;
+        self.thick_later = None;
+        thickness_of(&slices)
+    }
+
+    /// Does this frame wait for the GPU where the work is wanted at once? Stills, videos and benchmarks
+    /// do; the window does not (GLASSFORMS_BLOCKING=1 makes it, as it used to: for comparing).
+    pub(crate) fn blocking(&self) -> bool {
+        self.auto || std::env::var_os("GLASSFORMS_BLOCKING").is_some()
+    }
+
+    /// In the window: once a tracer is in use, the ones a first click is likely to want next are made on
+    /// another thread (the camera off the centre line or back on it, the other kind of lens, the shape
+    /// traced from its formula or from its volume), so that the click does not wait for a compile.
+    /// (GLASSFORMS_NO_WARM=1 leaves it out, for comparing.) The number of tracers still being made.
+    pub fn warm_upkeep(&mut self) -> usize {
+        let left = self.renderer.warm_upkeep();
+        if std::env::var_os("GLASSFORMS_NO_WARM").is_some() { return left; }
+        let (key, sdf) = self.renderer.tracer_now();
+        if key.is_empty() || key == self.warmed_for { return left; }
+        let (key, sdf) = (key.to_string(), sdf.cloned());
+        self.warmed_for = key;
+        let v = self.renderer.variant();
+        let lens = self.renderer.cam.wanted;
+        let mut wanted = vec![(Variant { eye: !v.eye, ..v }, lens, sdf.clone()), (v, !lens, sdf.clone())];
+        match sdf {
+            // (traced from a formula, a single shape's or a tree's: its counterpart read from the volume)
+            Some(_) => wanted.push((v, lens, None)),
+            None => {
+                let (fam, p) = (self.state.family(), self.state.preset());
+                let sculpted = self.state.layer_sculpt(0).is_some_and(|s| !s.is_empty());
+                // (a shape alone, read from its volume, with no tree of parts: the switch to its formula)
+                let (parts, _) = self.state.csg_tree();
+                if self.state.plain() && !sculpted && parts.is_empty() && self.state.csg.place.is_identity() {
+                    if let Some(decl) = gf_core::sdf::tracer_decl(fam, p) {
+                        wanted.push((v, lens, Some((format!("{}/{}", fam.id, p.id), decl))));
+                    }
                 }
             }
         }
-        (count > 0).then(|| 5.0 * sum / count as f64)
+        self.renderer.warm(&wanted);
+        self.renderer.warm_upkeep()
     }
 
     /// Start writing the shape as a mesh to `path` (.obj or .stl): the volume the tracer draws, every layer
@@ -996,7 +1057,10 @@ impl Engine {
         self.build(mode)?;
         self.stage.rebuilt();
         // (while the shape animates its thickness is not measured afresh every frame: the last one stands)
-        if !matches!(mode, Detail::Anim | Detail::Hq) {
+        // (nor, in the window, while a slider is being dragged: the last stands until it is let go)
+        if !matches!(mode, Detail::Anim | Detail::Hq) && !(matches!(mode, Detail::Quick) && !self.blocking() && self.thickness.is_some()) {
+            self.thick_last = self.thickness.or(self.thick_last);
+            self.thick_later = None;
             self.thickness = None;
             self.body_thick = None;
         }
@@ -1022,7 +1086,7 @@ impl Engine {
             if self.sculptor.has(&skey) && self.baker.volume().is_some_and(|v| v.res == res) && self.layers.built_plain_still() {
                 let t0 = Instant::now();
                 let phases = self.state.sculpt_phases(0);
-                let timed = matches!(mode, Detail::Full) || self.time_bakes;
+                let timed = (matches!(mode, Detail::Full) && self.blocking()) || self.time_bakes;
                 let vol = self.baker.volume().ok_or("no volume")?;
                 self.sculptor.run(0, vol, &skey, s, &phases, timed, !matches!(mode, Detail::Full | Detail::Hq))?;
                 self.renderer.set_gem(None);
@@ -1050,16 +1114,25 @@ impl Engine {
             let vol = self.baker.volume().ok_or("no volume")?;
             self.sculptor.keep(0, vol, &skey);
             let phases = self.state.sculpt_phases(0);
-            self.sculptor.run(0, vol, &skey, s, &phases, matches!(mode, Detail::Full) || self.time_bakes, !matches!(mode, Detail::Full | Detail::Hq))?;
+            self.sculptor.run(0, vol, &skey, s, &phases, (matches!(mode, Detail::Full) && self.blocking()) || self.time_bakes, !matches!(mode, Detail::Full | Detail::Hq))?;
         } else {
             self.sculptor.forget(0);
         }
         self.sculptor.drop_layers(1);
         let kept: Vec<String> = sculpt.iter().map(|_| self.state.layer_key(0)).collect();
         self.sculptor.keep_only(&kept);
-        // a full build is timed to the end, so the figure shown is honest; while moving nothing waits
+        // a full build is timed to the end, so the figure shown is honest; while moving nothing waits. In
+        // the window nothing waits at all: the GPU says when it has done the build, and the figure shown
+        // is set then (`frame`), so that the window keeps following the pointer meanwhile
         let t2 = Instant::now();
-        if matches!(mode, Detail::Full) || self.time_bakes { self.gpu.wait(); }
+        if (matches!(mode, Detail::Full) && self.blocking()) || self.time_bakes {
+            self.gpu.wait();
+        } else if matches!(mode, Detail::Full) {
+            let (slot, fam) = (self.bake_done.clone(), job.family);
+            self.gpu.queue.on_submitted_work_done(move || {
+                if let Ok(mut s) = slot.lock() { *s = Some((fam, t0.elapsed().as_secs_f64() * 1e3)); }
+            });
+        }
         let ms = t0.elapsed().as_secs_f64() * 1e3;
         self.last_bake_ms = ms;
         self.last_bake_parts = [(t1 - t0).as_secs_f64() * 1e3, (t2 - t1).as_secs_f64() * 1e3, t2.elapsed().as_secs_f64() * 1e3];
@@ -1120,6 +1193,10 @@ impl Engine {
             _ => self.renderer.set_sdf(None),
         }
         let vol = match self.csg.volume() { Some(v) => v, None => self.baker.volume().ok_or("no volume")? };
+        // where paths inside end (the family's), and whether faint light leaving the glass is followed
+        // through further pieces (not for a reshaped shape or a tree: docs/cache_bounces.md)
+        self.renderer.cut = fam.thr_cut;
+        self.renderer.leave_cut = sculpt.is_some() || fam.id == "trees";
         self.renderer.set_scene(&self.lights_view, vol, step, out, inn, layers);
         let meta = &mut self.state.shapes[job.family].meta;
         meta.res = job.res;
@@ -1319,11 +1396,29 @@ impl Engine {
 
     /// One turn of the live loop: move everything on by `dt` seconds, then draw if there is anything to draw.
     pub fn frame(&mut self, canvas_w: u32, canvas_h: u32, dt: f64) -> Did {
+        let t0 = Instant::now();
+        // (a full build the GPU has finished since: its time to the end is the figure shown)
+        if let Some((fam, ms)) = self.bake_done.lock().ok().and_then(|mut s| s.take()) {
+            self.last_bake_ms = ms;
+            if let Some(sh) = self.state.shapes.get_mut(fam) { sh.meta.ms = ms; }
+        }
         self.resize(canvas_w, canvas_h);
         if !self.state.rendering { self.state.tick(dt); }
         self.box_upkeep();
+        let t1 = Instant::now();
         self.bake_wanted();
+        let t2 = Instant::now();
         self.light_upkeep();
+        if !self.blocking() { let _ = self.warm_upkeep(); }
+        let t3 = Instant::now();
+        let ms = |a: Instant, b: Instant| (b - a).as_secs_f64() * 1e3;
+        self.spans = [ms(t0, t1), ms(t1, t2), ms(t2, t3), 0.0];
+        let did = self.frame_rest();
+        self.spans[3] = t3.elapsed().as_secs_f64() * 1e3;
+        did
+    }
+
+    fn frame_rest(&mut self) -> Did {
         if std::mem::take(&mut self.state.cut) { self.cut = true; self.dirty = true; }
         // the focus planes: shown while switched on, and for a moment after a plane is moved
         let now = Instant::now();
@@ -1561,4 +1656,26 @@ impl Engine {
     pub fn screenshot(&self) -> R<(u32, u32, Vec<u8>)> {
         self.renderer.read_screen()
     }
+}
+
+/// The dozen slices of a volume `res` voxels a side that its thickness is measured from.
+fn thickness_slices(res: u32) -> Vec<u32> {
+    (0..12).map(|i| (((i as f64 + 0.5) / 12.0 * res as f64) as u32).min(res - 1)).collect()
+}
+
+/// Five times the mean depth of the points inside, from those slices (16-bit floats).
+fn thickness_of(slices: &[Vec<u8>]) -> Option<f64> {
+    let (mut sum, mut count) = (0.0f64, 0u64);
+    for bytes in slices {
+        // (only values with the sign bit set can be below zero: the rest are passed over unconverted)
+        for &b in bytemuck::cast_slice::<u8, u16>(bytes) {
+            if b & 0x8000 == 0 { continue; }
+            let d = half::f16::from_bits(b).to_f32();
+            if d < 0.0 {
+                sum -= d as f64;
+                count += 1;
+            }
+        }
+    }
+    (count > 0).then(|| 5.0 * sum / count as f64)
 }

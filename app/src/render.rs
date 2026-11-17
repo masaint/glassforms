@@ -162,6 +162,25 @@ pub struct March {
 /// The tracer's source for one way of marching and one way of drawing. `profile`: built to count its
 /// lookups instead of making a picture (red = plain lookups while marching, green = smooth (eight-tap)
 /// lookups, blue = plain lookups that found the surface far off).
+/// Plain glass's paths inside end once what they carry falls below `cut` (as written in trace.wgsl: 0.02).
+/// A family may end them sooner (`Family::thr_cut`): gems, whose light that is still inside after many
+/// bounces carries little and costs most of the frame (docs/cache_bounces.md).
+pub fn cut_weave(src: &str, cut: f64) -> String {
+    if cut == 0.02 { return src.to_string(); }
+    let c = format!("{cut:.3}");
+    src.replace("if (b >= u.nb || thr < 0.02) { break; }", &format!("if (b >= u.nb || thr < {c}) {{ break; }}"))
+        .replace("      if (thr < 0.02) { break; }\n      dir = reflect(dir, m);", &format!("      if (thr < {c}) {{ break; }}\n      dir = reflect(dir, m);"))
+}
+
+/// Light leaving plain glass that carries less than a twentieth of the sample sees the lights at once
+/// instead of being followed through further pieces. Only for shapes where those paths cost most and add
+/// nothing that can be seen (a shape reshaped by the surface studio, trees: docs/cache_bounces.md); plain
+/// glass is traced as it always was.
+pub fn leave_weave(src: &str, on: bool) -> String {
+    if !on { return src.to_string(); }
+    src.replacen("        if (LAYERS > 0) {\n          L += thr * (1.0 - F) * att * beyond(", "        if (LAYERS > 0 && thr * (1.0 - F) * max(att.x, max(att.y, att.z)) >= 0.05) {\n          L += thr * (1.0 - F) * att * beyond(", 1)
+}
+
 pub fn tracer_source(m: &March, v: Variant, profile: bool) -> String {
     tracer_from(TRACE_WGSL, m, v, profile)
 }
@@ -261,8 +280,29 @@ fn rough_split(v: &Variant, profile: bool) -> bool {
     frost::splits(&v.mat, v.clay, profile) && !(v.denoise && !profile)
 }
 
+/// Time spent making tracers since the program started, in nanoseconds: (shader modules, pipelines, count).
+pub static TRACER_BUILDS: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+
 fn tracer_pipeline(gpu: &Gpu, layout: &wgpu::BindGroupLayout, cast: Option<&wgpu::BindGroupLayout>, src: &str) -> wgpu::RenderPipeline {
+    use std::sync::atomic::Ordering::Relaxed;
+    // (measuring only: GLASSFORMS_SHADER_NONCE=<n> adds a test that never passes, so that the driver
+    // sees a shader it has not compiled before)
+    let nonced;
+    let src = match std::env::var("GLASSFORMS_SHADER_NONCE") {
+        Ok(n) => { nonced = src.replacen("fn ign(p: vec2f) -> f32 { return", &format!("fn ign(p: vec2f) -> f32 {{ if (u.frame == -{}) {{ return 0.5; }} return", n.trim()), 1); nonced.as_str() }
+        Err(_) => src,
+    };
+    let t0 = std::time::Instant::now();
     let module = gpu.shader("trace", src, true);
+    let t1 = std::time::Instant::now();
+    let pipe = tracer_pipeline_of(gpu, layout, cast, src, module);
+    TRACER_BUILDS[0].fetch_add((t1 - t0).as_nanos() as u64, Relaxed);
+    TRACER_BUILDS[1].fetch_add(t1.elapsed().as_nanos() as u64, Relaxed);
+    TRACER_BUILDS[2].fetch_add(1, Relaxed);
+    pipe
+}
+
+fn tracer_pipeline_of(gpu: &Gpu, layout: &wgpu::BindGroupLayout, cast: Option<&wgpu::BindGroupLayout>, src: &str, module: wgpu::ShaderModule) -> wgpu::RenderPipeline {
     if src.contains(denoise::MARK) { return denoise::tracer_pipeline(gpu, layout, cast, &module); }
     // (a tracer with casting in it reads a second group: what the bodies cast)
     if src.contains("struct FrOut") { return frost::tracer_pipeline(gpu, layout, cast, &module); }
@@ -482,6 +522,9 @@ pub struct Renderer {
     no_picture: wgpu::TextureView,
     /// a tracer being built on another thread: which, and where it will arrive
     building: Option<(String, std::sync::mpsc::Receiver<wgpu::RenderPipeline>)>,
+    /// tracers made beforehand on another thread (`warm`): what is on its way, and what has been asked for
+    warming: Option<std::sync::mpsc::Receiver<(String, wgpu::RenderPipeline)>>,
+    warm_asked: Vec<String>,
     /// the lights' map and the volume the tracer reads, and how it marches and draws
     scene: Option<(wgpu::TextureView, wgpu::TextureView)>,
     march: Option<March>,
@@ -506,6 +549,11 @@ pub struct Renderer {
     last_final: Option<FinalU>,
     /// build the tracer so that it counts its lookups instead of making a picture
     pub profile: bool,
+    /// where plain glass's paths inside end, by what they carry (`cut_weave`; set from the family before `set_scene`)
+    pub cut: f64,
+    /// light leaving plain glass that carries little is not followed through further pieces (`leave_weave`):
+    /// set before `set_scene`, for a shape the surface studio has reshaped and for trees
+    pub leave_cut: bool,
     /// focus as a stage between the picture so far and the bloom
     dof: Dof,
     /// what is seen through rough glass, blurred: a stage between the tracer and the picture so far
@@ -717,10 +765,10 @@ impl Renderer {
                 ..Default::default()
             }),
             no_picture: no_picture.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::Cube), ..Default::default() }),
-            building: None, scene: None, march: None, variant: Variant::default(),
+            building: None, warming: None, warm_asked: Vec::new(), scene: None, march: None, variant: Variant::default(),
             u_accum: gpu.uniform_buffer("accumulate", std::mem::size_of::<AccumU>() as u64),
             u_final: gpu.uniform_buffer("final", std::mem::size_of::<FinalU>() as u64),
-            g_trace: None, t: None, acc_idx: 0, accum_n: 0, frame_no: 0, jitter_n: 0, was_taa: false, prev: None, last_final: None, profile: false,
+            g_trace: None, t: None, acc_idx: 0, accum_n: 0, frame_no: 0, jitter_n: 0, was_taa: false, prev: None, last_final: None, profile: false, cut: 0.02, leave_cut: false,
             dof: Dof::new(gpu), focused: false, cam: Default::default(), glare: crate::glare::Glare::new(gpu), glared: false,
             frost: Frost::new(gpu),
             dn: Denoise::new(gpu), shown: 0,
@@ -938,10 +986,16 @@ impl Renderer {
     }
     /// The tracer's text for the lens that is wanted.
     fn tracer_text(&self, m: &March, v: Variant) -> String {
-        let src = if self.cam.wanted { tracer_source_lens(m, v, self.profile) } else { tracer_source(m, v, self.profile) };
+        self.text_with(m, v, self.cam.wanted, self.sdf.as_ref())
+    }
+    /// The same through either lens and with any formula (or none): what `tracer_text` would give were
+    /// those the ones in use (`warm`).
+    pub fn text_with(&self, m: &March, v: Variant, lens: bool, sdf: Option<&(String, String)>) -> String {
+        let src = if lens { tracer_source_lens(m, v, self.profile) } else { tracer_source(m, v, self.profile) };
+        let src = if v.mat == Default::default() { leave_weave(&cut_weave(&src, self.cut), self.leave_cut) } else { src };
         let src = if self.gem && gem_fits(&v) { gem_weave(&src) } else { src };
         let src = if self.hero_now { crate::hero::weave(&src, &self.hero).unwrap_or(src) } else { src };
-        match &self.sdf {
+        match sdf {
             Some((_, decl)) if crate::sdf::fits(&v) => crate::sdf::weave(&src, decl),
             _ => src,
         }
@@ -1014,9 +1068,69 @@ impl Renderer {
     }
 
     fn tracer_key(&self, m: &March, v: Variant) -> String {
-        let sdf = self.sdf.as_ref().filter(|_| crate::sdf::fits(&v)).map_or("", |s| s.0.as_str());
+        self.key_with(m, v, self.cam.wanted, self.sdf.as_ref())
+    }
+    /// The key of `text_with`'s tracer.
+    pub fn key_with(&self, m: &March, v: Variant, lens: bool, sdf: Option<&(String, String)>) -> String {
+        let sdf = sdf.filter(|_| crate::sdf::fits(&v)).map_or("", |s| s.0.as_str());
         let hero = if self.hero_now { self.hero.key() } else { "0".into() };
-        format!("{:.2}|{}|{}|{}|{}|{:?}|{}|{}|{sdf}|{hero}", m.step_scale, m.steps_out, m.steps_in, m.layers, self.profile, v, self.cam.wanted, self.gem && gem_fits(&v))
+        format!("{:.2}|{}|{}|{}|{}|{:?}|{}|{}|{sdf}|{hero}|{}|{}", m.step_scale, m.steps_out, m.steps_in, m.layers, self.profile, v, lens, self.gem && gem_fits(&v), self.cut, self.leave_cut)
+    }
+    /// The tracer in use as `tracer_key` and `tracer_text` give it now: the way of marching, the way of
+    /// drawing, the lens and the formula (None before there is a shape). For tests and `warm`.
+    pub fn live_tracer(&self) -> Option<(March, Variant, bool, Option<(String, String)>)> {
+        Some((self.march?, self.variant, self.cam.wanted, self.sdf.clone()))
+    }
+    /// `tracer_key` and `tracer_text` for the tracer in use (for tests: they must equal `key_with` and
+    /// `text_with` given `live_tracer`).
+    pub fn live_key_text(&self) -> Option<(String, String)> {
+        let m = self.march?;
+        Some((self.tracer_key(&m, self.variant), self.tracer_text(&m, self.variant)))
+    }
+
+    /// Make tracers beforehand, one after another on another thread, so that the first switch to one of
+    /// them does not hold up a frame while it is compiled (a tracer the driver has not seen takes 0.4 to
+    /// 1.4 s: docs/cache_bounces.md). Each is (the way of drawing, through which lens, the formula). Those
+    /// made already are left out; they are taken in by `warm_upkeep`.
+    pub fn warm(&mut self, wanted: &[(Variant, bool, Option<(String, String)>)]) {
+        let Some(m) = self.march else { return };
+        // (a batch still running is let go: what it has finished is taken in, the rest asked for again)
+        self.warm_upkeep();
+        self.warm_asked.clear();
+        let mut jobs = Vec::new();
+        for (v, lens, sdf) in wanted {
+            let key = self.key_with(&m, *v, *lens, sdf.as_ref());
+            if self.trace_pipes.contains_key(&key) || self.warm_asked.contains(&key) { continue; }
+            self.warm_asked.push(key.clone());
+            jobs.push((key, self.text_with(&m, *v, *lens, sdf.as_ref()), v.cast));
+        }
+        if jobs.is_empty() { return; }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (gpu, layout, cast) = (self.gpu.clone(), self.l_trace.clone(), self.l_cast.clone());
+        let spawned = std::thread::Builder::new().name("tracers beforehand".into()).spawn(move || {
+            for (key, src, c) in jobs {
+                if tx.send((key, tracer_pipeline(&gpu, &layout, c.then_some(&cast), &src))).is_err() { return; }
+            }
+        });
+        if spawned.is_ok() { self.warming = Some(rx); }
+    }
+    /// Take in the tracers made beforehand that are ready. The number still on their way.
+    pub fn warm_upkeep(&mut self) -> usize {
+        if let Some(rx) = &self.warming {
+            while let Ok((key, pipe)) = rx.try_recv() {
+                self.warm_asked.retain(|k| *k != key);
+                self.trace_pipes.entry(key).or_insert(pipe);
+            }
+        }
+        self.warm_asked.iter().filter(|k| !self.trace_pipes.contains_key(*k)).count()
+    }
+    /// Is the tracer of this key made (for tests)?
+    pub fn has_tracer(&self, key: &str) -> bool {
+        self.trace_pipes.contains_key(key)
+    }
+    /// The key of the tracer in use, and the shape's formula as given to it, if any (for `warm`).
+    pub fn tracer_now(&self) -> (&str, Option<&(String, String)>) {
+        (&self.trace_key, self.sdf.as_ref())
     }
 
     /// The pipeline for the way of marching and drawing now set: made the first time, kept after.
