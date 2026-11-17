@@ -56,20 +56,34 @@ pub fn show(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     set_label_width(ui, COL_LABEL_WIDE);
     let top = ui.cursor().top();
 
-    // the layers (which is selected decides what everything below shows), then the selected layer's
-    // shape and where it is placed, then how the layers are joined
-    layers::strip(ui, st, px);
-    families(ui, st, px);
-    let list = shapes(ui, st, px);
-    maths(ui, st, px);
-    sliders(ui, st, px);
-    trace_row(ui, st, px);
-    // the tree of formula parts
-    super::csg::show(ui, st, px);
-    layers::placement(ui, st, px);
-    layers::joins(ui, st, px);
-    // the surface studio: what the surface of the selected layer's solid is made into
-    super::sculpt::button(ui, st, px);
+    // Two tabs at the head: volume objects and csg objects, made from the same shapes. The tab is the
+    // selected object's kind; the other tab, chosen, makes a new object of its kind from the shape picked.
+    let creating = tabs(ui, st, px);
+    // the objects (which is selected decides what everything below shows)
+    if st.object_count() > 0 { layers::strip(ui, st, px); }
+    let list = if creating {
+        // the shapes to make one from (the selected object is left as it is)
+        families_new(ui, st, px);
+        let list = shapes_new(ui, st, px);
+        let what = if px.tab.unwrap_or(false) { "a csg object: a tree whose first part is this shape, its formula traced exactly, or a grid of it" } else { "a volume object: the shape baked into a grid of distances" };
+        paragraph(ui, &format!("a shape picked here makes {what}"), mono(SMALL), FAINT, LINE, INSET);
+        gap(ui, 6.0);
+        list
+    } else {
+        // the selected object's shape, its own sliders, its tree (a csg object), where it is placed, then how
+        // the objects are joined
+        families(ui, st, px);
+        let list = shapes(ui, st, px);
+        maths(ui, st, px);
+        sliders(ui, st, px);
+        // (and, from setups of before, a volume object with parts beside it; not one baked from a tree)
+        if st.is_csg_object(st.stack.sel) || (!st.csg.baked && !st.csg.parts.is_empty()) { super::csg::show(ui, st, px); }
+        layers::placement(ui, st, px);
+        layers::joins(ui, st, px);
+        // the surface studio: what the surface of the selected object's solid is made into
+        super::sculpt::button(ui, st, px);
+        list
+    };
     // everything that moves
     animate::show(ui, st, px);
 
@@ -79,6 +93,79 @@ pub fn show(ui: &mut Ui, st: &mut State, px: &mut Panels) {
         px.right_rest = rest;
         ui.ctx().request_repaint();
     }
+}
+
+/// The two tabs at the head of the panel: volume objects and csg objects. The tab shown is the selected
+/// object's kind, put back whenever the selection (or what kind it is) changes; the other tab, chosen, lets a
+/// shape be picked to make a new object of that kind. True while picking a shape makes a new object (the
+/// other tab is up, or there is no object at all).
+fn tabs(ui: &mut Ui, st: &mut State, px: &mut Panels) -> bool {
+    let count = st.object_count();
+    let kind = count > 0 && st.is_csg_object(st.stack.sel);
+    let seen = (st.stack.sel, count, kind);
+    if px.tab_seen != seen {
+        px.tab_seen = seen;
+        px.tab = None;
+        px.browse_fam = st.fam;
+    }
+    let csg = px.tab.unwrap_or(kind);
+    let items = [
+        Item::new("volume", !csg).tip("volume objects: a shape baked into a grid of distances, which the tracer reads; joined to the others"),
+        Item::new("csg", csg).tip("csg objects: a tree of parts joined by union, subtract or intersect with smooth seams; each part a shape's formula, traced exactly, or a grid of a shape with none"),
+    ];
+    let run = filled_run(ui, Id::unique("object tabs"), &items, egui::vec2(8.0, 3.0), &mono(SIZE));
+    for (w, place) in ["volume", "csg"].iter().zip(&run.places) { px.note(format!("tab:{w}"), *place); }
+    if let Some(i) = run.clicked {
+        let want = i == 1;
+        px.tab = (want != kind || count == 0).then_some(want);
+        px.browse_fam = st.fam;
+    }
+    gap(ui, 6.0);
+    count == 0 || px.tab.is_some_and(|t| t != kind)
+}
+
+/// The families, while making a new object: the one browsed is the panel's own, not the selected object's.
+fn families_new(ui: &mut Ui, st: &mut State, px: &mut Panels) {
+    let fam = px.browse_fam.min(st.families.len() - 1);
+    let items: Vec<Item> = st.families.iter().enumerate().map(|(i, f)| Item::new(f.name, i == fam)).collect();
+    let run = filled_run(ui, Id::unique("families new"), &items, egui::vec2(7.0, 2.0), &mono(SIZE));
+    drop(items);
+    for (f, place) in st.families.iter().zip(&run.places) { px.note(format!("family:{}", f.id), *place); }
+    if let Some(i) = run.clicked { px.browse_fam = i; }
+    gap(ui, 8.0);
+}
+
+/// The shapes of the family browsed, while making a new object: picking one makes it, of the tab's kind, and
+/// selects it (the tab then is its kind). Returns the height the list was shown at.
+fn shapes_new(ui: &mut Ui, st: &mut State, px: &mut Panels) -> f32 {
+    let fam = px.browse_fam.min(st.families.len() - 1);
+    let n = st.families[fam].presets.len();
+    let r = row(ui, 13.0);
+    text_in(ui, r, Align2::LEFT_CENTER, &format!("{n} shapes"), mono(10.0), HINT);
+    gap(ui, 5.0);
+    let (width, pad, font) = (ui.available_width(), egui::vec2(8.0, 3.0), mono(SIZE));
+    let line = button_size(ui, "x", &font, pad).y + RUN_SPACE;
+    let lines = ((px.room_h - px.right_rest - 1.0 + RUN_SPACE) / line).floor().max(LIST_LEAST);
+    let list = egui::ScrollArea::vertical().id_salt("shapes new").max_height(lines * line - RUN_SPACE).min_scrolled_height(line - RUN_SPACE).auto_shrink([false, true]).show(ui, |ui| {
+        ui.set_width(width);
+        let items: Vec<Item> = st.families[fam].presets.iter().map(|p| Item::new(p.name, false)).collect();
+        button_run(ui, Id::unique("shapes new"), 0.0, &items, pad, &font, 0.0)
+    });
+    let shown = Rect::from_min_size(list.inner_rect.min, egui::vec2(list.inner_rect.width(), list.inner_rect.height().min(list.content_size.y)));
+    px.note("shapes", shown);
+    for (p, place) in st.families[fam].presets.iter().zip(&list.inner.places) {
+        if shown.contains_rect(*place) { px.note(format!("shape:{}", p.id), *place); }
+    }
+    if let Some(i) = list.inner.clicked {
+        let csg = px.tab.unwrap_or(false);
+        // (a model that stands for a file of the user's asks for one)
+        if st.create_object(fam, i, csg).is_some() && st.needs_file(st.stack.sel) { px.requests.push(Request::LoadModel); }
+    }
+    if st.object_count() >= gf_core::layers::MAX_LAYERS {
+        gap(ui, 3.0);
+        paragraph(ui, &format!("{} objects at most: take one away to make another", gf_core::layers::MAX_LAYERS), mono(SMALL), HINT, LINE, INSET);
+    }
+    shown.height()
 }
 
 /// The families: a button each. However many there are, they fill whole lines. (The buttons are as tall
@@ -208,53 +295,6 @@ fn maths(ui: &mut Ui, st: &State, px: &mut Panels) {
         }
     }
     gap(ui, 8.0);
-}
-
-/// How the shape is traced: from its baked volume, or from its formula (gf_core::sdf). A shape with no
-/// formula says why it has only the volume; one traced from its formula says when the volume is read
-/// after all.
-fn trace_row(ui: &mut Ui, st: &mut State, px: &mut Panels) {
-    use gf_core::sdf::{support, Support, Trace};
-    let now = st.shape().trace;
-    match support(st.family(), st.preset()) {
-        Support::VolumeOnly(_) => {
-            // a shape with no formula (curves, a model) is the tree's first part as a grid part: its own
-            // volume, read by the tracer in its own frame, joined to the parts below by any operation
-            let items = [
-                Item::new("volume", now == Trace::Volume).tip("the shape baked into a grid of distances, which the tracer reads: as fine as its voxels; parts below are joined to it as a union"),
-                Item::new("csg", now == Trace::Csg).tip("the shape as the first part of the tree below, read from its own volume (it has no formula): the parts below join it by union, subtract or intersect, with smooth seams"),
-            ];
-            let run = named_run(ui, Id::unique("trace"), "traced from", &items);
-            for (w, place) in ["volume", "csg"].iter().zip(&run.places) { px.note(format!("trace:{w}"), *place); }
-            if let Some(i) = run.clicked { st.apply_arg("trace", if i == 0 { "volume" } else { "csg" }); }
-            if now == Trace::Csg {
-                gap(ui, 2.0);
-                let why = if st.layer_count() > 1 { "reads the volume while there are several layers" } else { "a grid part: read from its own volume, as fine as its voxels" };
-                paragraph(ui, why, mono(SMALL), FAINT, LINE, INSET);
-            }
-        }
-        Support::Formula { .. } => {
-            let items = [
-                Item::new("volume", now == Trace::Volume).tip("the shape baked into a grid of distances, which the tracer reads: as fine as its voxels"),
-                Item::new("csg", now == Trace::Csg).tip("the tracer works out the shape's formula: exact edges at any zoom, and the first part of the tree of parts below"),
-            ];
-            let run = named_run(ui, Id::unique("trace"), "traced from", &items);
-            for (w, place) in ["volume", "csg"].iter().zip(&run.places) { px.note(format!("trace:{w}"), *place); }
-            if let Some(i) = run.clicked { st.apply_arg("trace", if i == 0 { "volume" } else { "csg" }); }
-            if now == Trace::Csg {
-                // when the volume is read after all
-                let why = if st.layer_count() > 1 { Some("reads the volume while there are several layers") }
-                    else if st.layer_sculpt(0).is_some_and(|s| !s.is_empty()) { Some("a grid part while the surface studio is on: read from the volume the studio has shaped") }
-                    else if gf_core::material::bubbles(&st.p).is_some() { Some("reads the volume while the material has bubbles") }
-                    else { None };
-                if let Some(why) = why {
-                    gap(ui, 2.0);
-                    paragraph(ui, why, mono(SMALL), FAINT, LINE, INSET);
-                }
-            }
-        }
-    }
-    gap(ui, 4.0);
 }
 
 /// A knob that is a choice between a few named things (a model drawn as it was found, as a solid or as

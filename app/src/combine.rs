@@ -413,7 +413,7 @@ impl Engine {
 
     /// The volume the tracer reads: the one shape's, or the layers combined.
     pub fn scene_volume(&self) -> Option<&Volume> {
-        if self.layers.combined { self.layers.combiner.volume() } else if let Some(v) = self.csg.volume() { Some(v) } else { self.baker.layer_volume(0) }
+        if self.state.empty { self.csg.empty_vol.as_ref() } else if self.layers.combined { self.layers.combiner.volume() } else if let Some(v) = self.csg.volume() { Some(v) } else { self.baker.layer_volume(0) }
     }
 
     /// Build what has changed of the layers, this carefully, combine them, and point the tracer at the result.
@@ -430,7 +430,8 @@ impl Engine {
             // A layer's volume will do if it holds the shape as it stands; for a full build it must also
             // be the full size and exact. (While something else moves, a still layer keeps its fine volume.)
             let place = self.state.stack.layers[i].place;
-            let in_place = self.layers.in_place && place.size == 1.0 && !place.is_identity() && self.state.layer_family(i).kind == gf_core::presets::Kind::Curve;
+            // (not an object with a tree: its tree is measured into a volume of its own, in its own frame)
+            let in_place = self.layers.in_place && place.size == 1.0 && !place.is_identity() && self.state.layer_family(i).kind == gf_core::presets::Kind::Curve && !self.state.has_tree(i);
             let mut key = self.state.layer_key(i);
             if in_place { key.push_str(&format!("|at{:?}{:?}", place.pos, place.rot)); }
             let res = self.state.layer_res(i, mode);
@@ -532,7 +533,8 @@ impl Engine {
             };
             // (a sculpted layer's wide volume would be of the shape before the studio: it goes without)
             let sculpted = self.state.layer_sculpt(i).is_some_and(|s| !s.is_empty());
-            if self.layers.no_wide || sculpted || c.reach(i) <= to || b.key.contains("|at") { continue; }
+            // (an object with a tree is read from the tree's volume: its own tube's wide volume is not the tree)
+            if self.layers.no_wide || sculpted || c.reach(i) <= to || b.key.contains("|at") || self.state.has_tree(i) { continue; }
             let (res, built_as, wide) = (b.res, b.mode, b.wide);
             let wres = wide_res(res);
             if wide != Some(wres) {
@@ -562,9 +564,22 @@ impl Engine {
                 c.scale[i] = 1.0;
             }
         }
+        // Each object with a tree: the tree measured into a volume of its own stands for it in the combining
+        // step (made again only when the object or its tree has changed).
+        let mut trees = vec![false; n];
+        for i in 0..n {
+            if let Some(made) = self.csg_layer_volume(i, rebuilt.contains(&i), mode)? {
+                trees[i] = true;
+                if made && !rebuilt.contains(&i) { rebuilt.push(i); }
+            }
+        }
+        self.csg_grids_done(mode);
         // the combining step, unless nothing at all has changed since the last one
         let res = self.state.scene_res(mode);
-        let vols: Vec<&Volume> = (0..n).map(|i| self.baker.layer_volume(i).ok_or_else(|| format!("layer {} has no volume", i + 1))).collect::<R<_>>()?;
+        let vols: Vec<&Volume> = (0..n).map(|i| {
+            let tree = if trees[i] { self.csg.layer_vols.get(i).and_then(|v| v.as_ref()).map(|v| &v.1) } else { None };
+            tree.or_else(|| self.baker.layer_volume(i)).ok_or_else(|| format!("layer {} has no volume", i + 1))
+        }).collect::<R<_>>()?;
         let wides: Vec<Option<(&Volume, WideUse)>> = (0..n).map(|i| uses[i].and_then(|u| self.baker.wide_volume(i).map(|v| (v, u)))).collect();
         let sizes: Vec<u32> = vols.iter().map(|v| v.res).collect();
         let same = self.layers.combined && rebuilt.is_empty() && !self.layers.force && self.layers.last.as_ref().is_some_and(|l| l.0 == c && l.1 == res && l.2 == sizes && l.3 == uses)

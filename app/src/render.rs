@@ -1568,6 +1568,10 @@ impl Renderer {
         if cut || (moving && !taa) {
             self.accum_n = 0;
             weight = 1.0;
+            // (and adaptive refining's counts start afresh: carried on, the pixels it held certain would be
+            // left out of the trace and keep what they showed before, which a cut makes useless: an object
+            // taken away, or a new one made, left its old picture where nothing is now)
+            if cut { self.adapt.valid = false; }
         } else if taa {
             weight = 1.0 - look.smooth as f64;
             self.accum_n = ((1.0 / weight + 0.5).floor() as u32).saturating_sub(1);      // then carry on averaging from here

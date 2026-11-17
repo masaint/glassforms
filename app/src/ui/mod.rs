@@ -212,6 +212,13 @@ pub struct Panels {
     pub right_at: Option<Rect>,
     /// the family and shape the picker last showed lit (when it changes, the list scrolls to it)
     pub lit_shape: Option<(usize, usize)>,
+    /// the right panel's tab, volume (false) or csg (true), when it is not the selected object's kind: picking a
+    /// shape then makes a new object of the tab's kind (right.rs). Put back to the object's kind whenever the
+    /// selection changes (	ab_seen: the selected object, how many there are, and its kind, as last seen)
+    pub tab: Option<bool>,
+    pub tab_seen: (usize, usize, bool),
+    /// the family shown while making a new object (the selected object's family is left as it is)
+    pub browse_fam: usize,
     /// scroll a panel to here on the next frame: [left, right]
     pub scroll_to: [Option<f32>; 2],
     /// the most height a panel's contents may take before it scrolls, and the height each one's take: [left, right]
@@ -227,7 +234,7 @@ impl Panels {
         Self {
             store, hide_left: false, hide_right: false, help_open: false, bright: false, light: 0, handles: handles::Handles::default(), nav: tools::Nav::default(), lamp: 0, mat_group: None, lit_mat: None, combo_open: None, meets_open: [false; 2], joined: None, sculpted: None, sculpt_size: 0.0, sculpt_error: None, sculpt_layer: Some(0), lighting: Lighting::default(), model: Model::default(), casting: Casting::default(), aspect: 16.0 / 9.0, last_fstop: 4.0, perf: String::new(), bench: Bench::Idle, rendering: false, ffmpeg: false,
             video_text: String::new(), file_text: String::new(), loop_text: String::new(), requests: Vec::new(), place: "", record: false, rects: BTreeMap::new(),
-            left_at: None, right_at: None, lit_shape: None, scroll_to: [None, None], room_h: 600.0, needs: [0.0; 2], right_rest: 0.0,
+            left_at: None, right_at: None, lit_shape: None, tab: None, tab_seen: (0, 1, false), browse_fam: 0, scroll_to: [None, None], room_h: 600.0, needs: [0.0; 2], right_rest: 0.0,
         }
     }
 

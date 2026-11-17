@@ -865,7 +865,7 @@ impl Engine {
         // (the box the scene's volume spans: grown when the layers are placed far out)
         self.bubbler.hb = if self.layers.combined { self.state.scene_hb() } else { gf_core::HB };
         // (the volume the tracer reads: the one shape's, or the layers combined)
-        let scene = if self.layers.combined { self.layers.combiner.volume() } else if let Some(v) = self.csg.volume() { Some(v) } else { self.baker.layer_volume(0) };
+        let scene = if self.state.empty { self.csg.empty_vol.as_ref() } else if self.layers.combined { self.layers.combiner.volume() } else if let Some(v) = self.csg.volume() { Some(v) } else { self.baker.layer_volume(0) };
         if let Some(vol) = scene {
             let vol = match &bubbles {
                 Some(b) => self.bubbler.carve(vol, b),
@@ -1080,6 +1080,8 @@ impl Engine {
         // (models first: a file's path tidied, its smoothing put on its slider, before anything is built from them)
         self.model_upkeep();
         self.sculptor.footprint = self.sculpt_footprint();
+        // (no object: nothing to build)
+        if self.state.empty { return self.build_empty(); }
         if !self.state.plain() { return self.bake_layers(mode); }
         // The surface studio: when only it has changed (or it evolves while the shape stands still), it
         // runs again on the shape kept from before, and the shape is not built again.
@@ -1191,7 +1193,7 @@ impl Engine {
         if tree {
             self.renderer.set_gem(None);
             // the grid parts' volumes (baked now where what they are made from has changed)
-            let grids = self.csg_grids(&mut parts, mode);
+            let grids = self.csg_grids(0, &mut parts, mode);
             tree = !parts.is_empty();
             self.renderer.set_grids(&grids, &self.csg.lists, &self.csg.table);
             if !tree { self.renderer.set_sdf(None); }
@@ -1229,7 +1231,7 @@ impl Engine {
             // (traced coarsely: from the volume the parts are measured into, alone)
             // (and so is a tree with grid parts on a device whose tracer cannot read their volumes)
             let readable = !kinds.contains(&gf_core::csg::GRID_KIND) || crate::render::grids_fit(&self.gpu);
-            if !tree || self.state.csg.coarse || !readable {
+            if !tree || self.state.csg_coarse() || !readable {
                 self.renderer.set_sdf(None);
             } else {
                 let decl = (self.renderer.sdf_key() != Some(key.as_str())).then(|| gf_core::csg::wgsl_tree(fams, &kinds, gf_core::sdf::BINDING, false, plain));
@@ -1237,12 +1239,13 @@ impl Engine {
             }
             if tree {
                 let src = if unbuilt { None } else { Some(self.baker.volume().ok_or("no volume")?) };
-                self.csg.merge(src, job.res, &key, || gf_core::csg::wgsl_tree(fams, &kinds, 0, true, plain), &numbers, &grids);
+                self.csg.merge(None, src, job.res, &key, || gf_core::csg::wgsl_tree(fams, &kinds, 0, true, plain), &numbers, &grids);
             }
             // (timed to the end when builds are timed)
             if self.time_bakes { self.gpu.wait(); }
             self.csg.last_ms = t_csg.elapsed().as_secs_f64() * 1e3;
         }
+        self.csg_grids_done(mode);
         let fam = &self.state.families[job.family];
         match &job.shape {
             _ if tree => {}
@@ -1262,6 +1265,14 @@ impl Engine {
         // through further pieces (not for a reshaped shape or a tree: docs/cache_bounces.md)
         self.renderer.cut = fam.thr_cut;
         self.renderer.leave_cut = sculpt.is_some() || fam.id == "trees";
+        // A tree marches as carefully as the most careful of its parts' families: no part's volume or formula
+        // is stepped through faster than its own family steps through it (a model's far field may read a
+        // little more than the distance, which its family's shorter step covers: tests/grid_safe.rs).
+        let (step, out, inn, layers) = if tree {
+            parts.iter().map(|p| &self.state.families[p.fam]).fold((step, out, inn, layers), |m, f| (m.0.min(f.step_scale), m.1.max(f.steps_out), m.2.max(f.steps_in), m.3.max(f.layers)))
+        } else {
+            (step, out, inn, layers)
+        };
         self.renderer.set_scene(&self.lights_view, vol, step, out, inn, layers);
         let meta = &mut self.state.shapes[job.family].meta;
         meta.res = job.res;

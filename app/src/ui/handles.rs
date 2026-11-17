@@ -341,7 +341,7 @@ fn values(st: &State, t: Target) -> [f64; 8] {
 
 fn exists(st: &State, t: Target) -> bool {
     match t {
-        Target::Layer(i) => i < st.layer_count(),
+        Target::Layer(i) => i < st.object_count(),
         Target::Lamp(i) => i < st.lamps.len(),
         Target::Part(i) => i < st.csg.parts.len(),
         Target::Whole => !st.csg.parts.is_empty(),
@@ -377,7 +377,8 @@ impl Handles {
         // (a part selected in the tree's list: it is what the handles move)
         if let Some(i) = st.csg.sel.filter(|i| *i < st.csg.parts.len() && st.plain()) { return Some(Target::Part(i)); }
         if st.csg.whole && !st.csg.parts.is_empty() && st.plain() { return Some(Target::Whole); }
-        (st.stack.sel < st.layer_count()).then_some(Target::Layer(st.stack.sel))
+        // (with no object there is nothing to move)
+        (st.stack.sel < st.object_count()).then_some(Target::Layer(st.stack.sel))
     }
 
     /// Show or hide them (G). Shown, they are on whatever is selected.

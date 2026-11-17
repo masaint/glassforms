@@ -232,6 +232,9 @@ pub struct Csg {
     /// the parts are traced from the volume they are measured into, not from their formulas: several
     /// times faster with many parts, as fine as the volume's voxels
     pub coarse: bool,
+    /// the tree belongs to a volume object made from a csg object ("convert to volume"): it is measured into
+    /// a volume and traced from that, its first part the object's shape
+    pub baked: bool,
 }
 
 /// The parts as text for a command line: `family/preset@x,y,z@rx,ry,rz@size@op@smooth@level@res` joined by
@@ -623,6 +626,8 @@ fn csgNormal(p: vec3f, near: f32) -> vec3f {{
       dpm = mat3x3f(P.inv0.xyz * s2, P.inv1.xyz * s2, P.inv2.xyz * s2);
     }}
   }}
+  // (no slope at all, where the reading is flat: none here; the caller reads the volume's)
+  if (dot(g, g) < 1e-30) {{ return vec3f(0.0); }}
   if (i >= 0) {{
     // (the part's frame to the scene's: the transpose of the way back, whose rows are inv0..2)
     let P = csgU.parts[i];
@@ -955,24 +960,113 @@ impl crate::state::State {
         (out, joined)
     }
 
+    // ---- objects: volume objects and csg objects ------------------------------------------------------
+    /// The tree of the object at this place in the list (the selected one's is `csg`).
+    pub fn layer_csg(&self, layer: usize) -> &Csg {
+        static NONE: std::sync::OnceLock<Csg> = std::sync::OnceLock::new();
+        if layer == self.stack.sel { return &self.csg; }
+        self.parked.get(layer).and_then(|p| p.as_ref()).map_or_else(|| NONE.get_or_init(Csg::default), |p| &p.csg)
+    }
+    /// The same, to change.
+    pub fn layer_csg_mut(&mut self, layer: usize) -> Option<&mut Csg> {
+        if layer == self.stack.sel { return Some(&mut self.csg); }
+        self.parked.get_mut(layer).and_then(|p| p.as_mut()).map(|p| &mut p.csg)
+    }
+    /// Is the object at this place a csg object (its kind, fixed when it was made)?
+    pub fn is_csg_object(&self, layer: usize) -> bool {
+        self.layer_shape(layer).is_some_and(|st| st.trace == crate::sdf::Trace::Csg)
+    }
+    /// Is the object at this place read as a tree (a csg object; a volume object made from one; or, from setups
+    /// of before, a volume object with parts beside it)?
+    pub fn has_tree(&self, layer: usize) -> bool {
+        let c = self.layer_csg(layer);
+        self.is_csg_object(layer) || c.baked || !c.parts.is_empty()
+    }
+    /// Are the selected tree's parts traced from the volume they are measured into (asked for, or a volume
+    /// object made from a tree)?
+    pub fn csg_coarse(&self) -> bool {
+        self.csg.coarse || self.csg.baked
+    }
+    /// How many objects there are (none: the scene shows the backdrop and the floor alone).
+    pub fn object_count(&self) -> usize {
+        if self.empty { 0 } else { self.layer_count() }
+    }
+    /// Make an object of this shape, of this kind (a csg object: a tree whose first part is the shape, exact
+    /// if it has a formula and a grid part otherwise; else a volume object), and select it. With no objects it
+    /// is the first; otherwise it is added (None when there are as many as there may be).
+    pub fn create_object(&mut self, fam: usize, preset: usize, csg: bool) -> Option<usize> {
+        if fam >= self.families.len() || preset >= self.families[fam].presets.len() { return None; }
+        let kind = if csg { crate::sdf::Trace::Csg } else { crate::sdf::Trace::Volume };
+        let i = if self.empty {
+            // (the scene's one layer, hidden while there was nothing, becomes the object)
+            self.empty = false;
+            self.stack.layers[0] = crate::layers::Layer::default();
+            self.set_scene(fam);
+            self.choose(preset);
+            0
+        } else {
+            self.add_layer_of(fam, preset)?
+        };
+        self.shape_mut().trace = kind;
+        self.csg = Csg::default();
+        self.cut = true;
+        self.want = Some(crate::state::Detail::Full);
+        Some(i)
+    }
+    /// Take the object at this place away. The last one leaves the scene empty (its layer stays, hidden,
+    /// for the next object made to take up).
+    pub fn delete_object(&mut self, layer: usize) -> bool {
+        if self.empty || layer >= self.layer_count() { return false; }
+        if self.layer_count() > 1 { return self.remove_layer(layer); }
+        self.empty = true;
+        self.stack.layers[0].show = false;
+        self.csg = Csg::default();
+        self.shape_mut().trace = crate::sdf::Trace::Volume;
+        self.cut = true;
+        self.want = Some(crate::state::Detail::Full);
+        true
+    }
+    /// The selected csg object made a volume object: its tree is measured into a volume, as "parts traced:
+    /// volume" does, and traced from that; it keeps its placement and its material. False if it is not a csg
+    /// object.
+    pub fn convert_to_volume(&mut self) -> bool {
+        if self.empty || !self.is_csg_object(self.stack.sel) { return false; }
+        self.shape_mut().trace = crate::sdf::Trace::Volume;
+        // (a lone shape, moved nowhere, is simply its own volume; anything more is the tree baked)
+        self.csg.baked = !self.csg.parts.is_empty() || !self.csg.place.is_identity();
+        self.csg.sel = None;
+        self.csg.whole = false;
+        self.cut = true;
+        self.want = Some(crate::state::Detail::Full);
+        true
+    }
+
     /// The same, and how many grid parts were left out of it (past `MAX_GRIDS`, or past `GRID_BUDGET`).
     /// The shape up is a part when it is traced as "csg": from its formula; or, when it has none (curves, a
     /// model) or the surface studio has reshaped it, as a grid part reading its own volume (the studio's
     /// work included). Grid parts are given their volumes in order.
     pub fn csg_tree_counted(&self) -> (Vec<Resolved>, bool, usize) {
         if !self.plain() { return (Vec::new(), false, 0); }
+        self.csg_tree_layer(0)
+    }
+
+    /// The tree of the object at this place in the list, wherever it stands among others (what
+    /// `csg_tree_counted` gives for one object alone). Its shape is its first part when it is a csg object,
+    /// or a volume object made from one (`Csg::baked`).
+    pub fn csg_tree_layer(&self, layer: usize) -> (Vec<Resolved>, bool, usize) {
         let mut out = Vec::new();
-        let up = self.layer_shape(0).filter(|st| st.trace == crate::sdf::Trace::Csg);
+        let csg = self.layer_csg(layer);
+        let up = self.layer_shape(layer).filter(|st| st.trace == crate::sdf::Trace::Csg || csg.baked);
         if let Some(st) = up {
-            let sculpt = self.layer_sculpt(0).filter(|s| !s.is_empty());
-            let formula = matches!(support(self.layer_family(0), self.layer_preset(0)), Support::Formula { .. }) && sculpt.is_none();
+            let sculpt = self.layer_sculpt(layer).filter(|s| !s.is_empty());
+            let formula = matches!(support(self.layer_family(layer), self.layer_preset(layer)), Support::Formula { .. }) && sculpt.is_none();
             let grid = (!formula).then(|| Grid {
                 slot: 0, res: st.res, from: GridFrom::Up,
-                sig: format!("up|{}|{}", self.layer_key(0), sculpt.map(|s| serde_json::to_string(s).unwrap_or_default()).unwrap_or_default()),
+                sig: format!("up{layer}|{}|{}", self.layer_key(layer), sculpt.map(|s| serde_json::to_string(s).unwrap_or_default()).unwrap_or_default()),
             });
-            out.push(Resolved { fam: self.layer_fam(0), preset: st.preset, vals: st.vals.clone(), puff: if grid.is_some() { 0.0 } else { st.puff }, place: Placement::default(), op: Op::Union, smooth: 0.0, smooth_rel: false, level: 0, grid });
+            out.push(Resolved { fam: self.layer_fam(layer), preset: st.preset, vals: st.vals.clone(), puff: if grid.is_some() { 0.0 } else { st.puff }, place: Placement::default(), op: Op::Union, smooth: 0.0, smooth_rel: false, level: 0, grid });
         }
-        for (i, p) in self.csg.parts.iter().enumerate() {
+        for (i, p) in csg.parts.iter().enumerate() {
             if let Some(mut r) = p.resolve(&self.families) {
                 if let Some(g) = &mut r.grid { g.from = GridFrom::Part(i); }
                 out.push(r);
@@ -999,7 +1093,7 @@ impl crate::state::State {
 
     /// The video memory the tree's grid parts take for volumes of their own, and how many there are.
     pub fn csg_grid_bytes(&self) -> (u64, usize) {
-        let (tree, _, _) = self.csg_tree_counted();
+        let (tree, _, _) = self.csg_tree_layer(self.stack.sel);
         let own: Vec<&Grid> = tree.iter().filter_map(|p| p.grid.as_ref()).filter(|g| g.from != GridFrom::Up).collect();
         (own.iter().map(|g| grid_bytes(g.res)).sum(), own.len())
     }

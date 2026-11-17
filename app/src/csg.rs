@@ -103,9 +103,16 @@ pub struct CsgWork {
     gpu: Gpu,
     u: wgpu::Buffer,
     layout: Option<wgpu::BindGroupLayout>,
-    /// the pass for the kinds of parts last asked for, under their key
-    pipe: Option<(String, wgpu::ComputePipeline)>,
+    /// the passes for the kinds of parts asked for, under their keys
+    pipes: std::collections::HashMap<String, wgpu::ComputePipeline>,
     vol: Option<Volume>,
+    /// in a scene of several objects, each csg object's tree measured into a volume of its own (by layer),
+    /// with what it was made from
+    pub layer_vols: Vec<Option<(String, Volume)>>,
+    /// the grid parts' volumes used by the build under way (csg_grids_done)
+    pub grids_used: Vec<String>,
+    /// what the tracer reads while there is no object: a small volume with nothing in it
+    pub empty_vol: Option<Volume>,
     /// the merged volume is what the scene reads
     pub active: bool,
     /// the parts' boxes (what lets the tracer pass parts by)
@@ -134,7 +141,7 @@ impl CsgWork {
             entries.extend(tree_entries(grid_binding(0), c, true));
             gpu.bind_layout("csg merge", &entries)
         });
-        Self { gpu: gpu.clone(), u: gpu.uniform_buffer("csg merge", (gf_core::csg::UNIFORM_FLOATS * 4) as u64), layout, pipe: None, vol: None, active: false, ext: Extents::new(gpu), grids: Vec::new(), stand_in: GridStandIn::new(gpu), note: None, lists: lists_buffer(gpu), lists_key: Vec::new(), last_ms: 0.0, table: table_buffer(gpu) }
+        Self { gpu: gpu.clone(), u: gpu.uniform_buffer("csg merge", (gf_core::csg::UNIFORM_FLOATS * 4) as u64), layout, pipes: Default::default(), vol: None, layer_vols: Vec::new(), grids_used: Vec::new(), empty_vol: None, active: false, ext: Extents::new(gpu), grids: Vec::new(), stand_in: GridStandIn::new(gpu), note: None, lists: lists_buffer(gpu), lists_key: Vec::new(), last_ms: 0.0, table: table_buffer(gpu) }
     }
 
     /// Can this device merge the parts into a volume?
@@ -171,22 +178,41 @@ impl CsgWork {
     /// Measure the tree (`text`: gf_core::csg::wgsl of its kinds, under `key`; `numbers`: its uniforms)
     /// into a volume `res` voxels a side, joined to `src` when the numbers say so (None: the shape up was not built, and nothing is joined); `grids`: the grid parts'
     /// volumes by slot. Returns the volume.
-    pub fn merge(&mut self, src: Option<&Volume>, res: u32, key: &str, text: impl FnOnce() -> String, numbers: &[f32], grids: &[Option<wgpu::TextureView>]) -> Option<&Volume> {
+    /// `layer`: None for the one object alone (the scene reads it while `active`); Some(i) for object i of
+    /// several (into its own volume, which the layers' combining step reads), kept under `made` (what it was
+    /// made from).
+    #[allow(clippy::too_many_arguments)]
+    pub fn merge(&mut self, layer: Option<(usize, &str)>, src: Option<&Volume>, res: u32, key: &str, text: impl FnOnce() -> String, numbers: &[f32], grids: &[Option<wgpu::TextureView>]) -> Option<&Volume> {
         let layout = self.layout.as_ref()?;
-        if self.pipe.as_ref().is_none_or(|p| p.0 != key) {
+        if !self.pipes.contains_key(key) {
             let t0 = std::time::Instant::now();
             let module = self.gpu.shader("csg merge", &format!("{}{MAIN}", text()), true);
             let pl = self.gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("csg merge"), bind_group_layouts: &[Some(layout)], immediate_size: 0 });
             let pipe = self.gpu.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("csg merge"), layout: Some(&pl), module: &module, entry_point: Some("cs"), compilation_options: Default::default(), cache: None });
             if std::env::var_os("GLASSFORMS_LOG_COMPILE").is_some() { eprintln!("[compile] csg merge: {:.0} ms", t0.elapsed().as_secs_f64() * 1e3); }
-            self.pipe = Some((key.to_string(), pipe));
+            if self.pipes.len() > 16 { self.pipes.clear(); }
+            self.pipes.insert(key.to_string(), pipe);
         }
-        if self.vol.as_ref().is_none_or(|v| v.res != res) {
-            self.vol = None;
-            self.vol = Some(Volume::new(&self.gpu, res, true));
-        }
+        let dst = match layer {
+            None => {
+                if self.vol.as_ref().is_none_or(|v| v.res != res) {
+                    self.vol = None;
+                    self.vol = Some(Volume::new(&self.gpu, res, true));
+                }
+                self.vol.as_ref().unwrap()
+            }
+            Some((i, made)) => {
+                if self.layer_vols.len() <= i { self.layer_vols.resize_with(i + 1, || None); }
+                if self.layer_vols[i].as_ref().is_none_or(|v| v.1.res != res) {
+                    self.layer_vols[i] = None;
+                    self.layer_vols[i] = Some((String::new(), Volume::new(&self.gpu, res, true)));
+                }
+                let slot = self.layer_vols[i].as_mut().unwrap();
+                slot.0 = made.to_string();
+                &slot.1
+            }
+        };
         self.gpu.queue.write_buffer(&self.u, 0, bytemuck::cast_slice(numbers));
-        let dst = self.vol.as_ref().unwrap();
         let mut entries = vec![
             wgpu::BindGroupEntry { binding: 0, resource: self.u.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(src.map_or(&self.stand_in.none, |s| &s.view)) },
@@ -197,13 +223,23 @@ impl CsgWork {
         let mut enc = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("csg merge") });
         {
             let mut c = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("csg merge"), timestamp_writes: None });
-            c.set_pipeline(&self.pipe.as_ref().unwrap().1);
+            c.set_pipeline(&self.pipes[key]);
             c.set_bind_group(0, &g, &[]);
             c.dispatch_workgroups(res.div_ceil(8), res.div_ceil(8), res.div_ceil(4));
         }
         self.gpu.queue.submit([enc.finish()]);
-        self.active = true;
-        self.vol.as_ref()
+        match layer {
+            None => {
+                self.active = true;
+                self.vol.as_ref()
+            }
+            Some((i, _)) => self.layer_vols.get(i).and_then(|v| v.as_ref()).map(|v| &v.1),
+        }
+    }
+
+    /// Object i's tree as last measured into a volume of its own, if it was made from `made`.
+    pub fn layer_volume(&self, i: usize, made: &str) -> Option<&Volume> {
+        self.layer_vols.get(i).and_then(|v| v.as_ref()).filter(|v| v.0 == made).map(|v| &v.1)
     }
 }
 
@@ -348,7 +384,7 @@ impl crate::engine::Engine {
     /// move a part that must be baked again is baked coarser (at most 192 a side), and finely when they
     /// stop. A grid part that cannot be baked yet (a model still being read) is taken out of `parts`.
     /// Volumes no part uses now are let go.
-    pub(crate) fn csg_grids(&mut self, parts: &mut Vec<gf_core::csg::Resolved>, mode: gf_core::state::Detail) -> Vec<Option<wgpu::TextureView>> {
+    pub(crate) fn csg_grids(&mut self, layer: usize, parts: &mut Vec<gf_core::csg::Resolved>, mode: gf_core::state::Detail) -> Vec<Option<wgpu::TextureView>> {
         use gf_core::csg::GridFrom;
         let mut views: Vec<Option<wgpu::TextureView>> = vec![None; MAX_GRIDS];
         let mut used: Vec<String> = Vec::new();
@@ -358,12 +394,12 @@ impl crate::engine::Engine {
             let Some(g) = &mut r.grid else { continue };
             match g.from {
                 GridFrom::Up => {
-                    let Some(v) = self.baker.layer_volume(0) else { gone.push(pi); continue };
+                    let Some(v) = self.baker.layer_volume(layer) else { gone.push(pi); continue };
                     g.res = v.res;
                     views[g.slot] = Some(v.view.clone());
                 }
                 GridFrom::Part(i) => {
-                    let Some(part) = self.state.csg.parts.get(i).cloned() else { gone.push(pi); continue };
+                    let Some(part) = self.state.layer_csg(layer).parts.get(i).cloned() else { gone.push(pi); continue };
                     let full = part.grid_res();
                     let want = |res: u32| format!("{}|{res}", g.sig);
                     // (while things move: the fine volume if it is there, else a coarse one)
@@ -384,10 +420,81 @@ impl crate::engine::Engine {
             }
         }
         for i in gone.into_iter().rev() { parts.remove(i); }
-        // (while things move the fine volumes are kept too, to go back to)
-        if !moving { self.csg.grids.retain(|g| used.contains(&g.key)); }
-        else if self.csg.grids.len() > 2 * MAX_GRIDS { self.csg.grids.retain(|g| used.contains(&g.key)); }
+        // (what this build uses: the rest are let go once every object has been built, `csg_grids_done`)
+        self.csg.grids_used.extend(used);
         views
+    }
+
+    /// Every object's grid parts have been given their volumes for this build: the volumes none used are let
+    /// go (while things move the fine ones are kept too, to go back to, unless there are too many).
+    pub(crate) fn csg_grids_done(&mut self, mode: gf_core::state::Detail) {
+        let used = std::mem::take(&mut self.csg.grids_used);
+        let moving = matches!(mode, gf_core::state::Detail::Anim | gf_core::state::Detail::Quick);
+        if !moving || self.csg.grids.len() > 2 * MAX_GRIDS * gf_core::layers::MAX_LAYERS {
+            self.csg.grids.retain(|g| used.contains(&g.key));
+        }
+    }
+
+    /// No object at all: the tracer reads a small volume with nothing in it (the backdrop, the floor and the
+    /// lights are drawn as ever), and nothing of the objects there were is read by anything.
+    pub(crate) fn build_empty(&mut self) -> Result<(), String> {
+        let fam = self.state.layer_family(0);
+        let (step, out, inn, layers) = (fam.step_scale, fam.steps_out, fam.steps_in, fam.layers);
+        if self.csg.empty_vol.is_none() {
+            self.csg.empty_vol = Some(Volume::from_data(&self.gpu, 8, &vec![half::f16::from_f32(1.0); 8 * 8 * 8]));
+        }
+        self.csg.active = false;
+        self.layers.combined = false;
+        self.renderer.set_bodies(None);
+        self.renderer.set_gem(None);
+        self.renderer.set_sdf(None);
+        let vol = self.csg.empty_vol.as_ref().expect("just made");
+        self.renderer.set_scene(&self.lights_view, vol, step, out, inn, layers);
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Object `layer` of several, when it has a tree: the tree measured into a volume of its own, the size of
+    /// the object's own volume, for the layers' combining step to read in its place (traced from that volume,
+    /// as "parts traced: volume" is: a scene of several objects is put together from volumes). Made again only
+    /// when what it is made from has changed (`fresh`: the object's own volume was just built). Some(true) if
+    /// it was made now, Some(false) if the one kept will do, None if the object has no tree.
+    pub(crate) fn csg_layer_volume(&mut self, layer: usize, fresh: bool, mode: gf_core::state::Detail) -> Result<Option<bool>, String> {
+        let (mut parts, joined, _) = self.state.csg_tree_layer(layer);
+        if parts.is_empty() || !self.csg.available() { return Ok(None); }
+        let res = self.baker.layer_volume(layer).ok_or_else(|| format!("layer {} has no volume", layer + 1))?.res;
+        let c = self.state.layer_csg(layer);
+        let made = format!("{}|{}|{:?}|{res}", self.state.layer_key(layer), serde_json::to_string(&c.parts).unwrap_or_default(), c.place);
+        if !fresh && self.csg.layer_volume(layer, &made).is_some() {
+            // (its grid parts' volumes are still in use)
+            let _ = self.csg_grids(layer, &mut parts, mode);
+            return Ok(Some(false));
+        }
+        let grids = self.csg_grids(layer, &mut parts, mode);
+        if parts.is_empty() { return Ok(None); }
+        let fams = &self.state.families;
+        let kinds = gf_core::csg::kinds(&parts);
+        let plain = gf_core::csg::plain(&parts);
+        let key = gf_core::csg::key_tree(fams, &kinds, plain);
+        let object = self.state.layer_csg(layer).place;
+        let sigs: Vec<String> = parts.iter().map(|p| p.sig()).collect();
+        let extents = if !self.csg.ext.knows(&sigs, matches!(mode, gf_core::state::Detail::Anim)) {
+            let (unboxed, lists) = gf_core::csg::numbers(fams, &parts, &kinds, res, joined, &[], &object);
+            self.csg.set_lists(&lists);
+            self.csg.set_table(&unboxed);
+            self.csg.ext.measure(&key, || gf_core::csg::wgsl_tree(fams, &kinds, 0, false, plain), &unboxed, &sigs, matches!(mode, gf_core::state::Detail::Anim), &grids, &self.csg.stand_in, &self.csg.lists, &self.csg.table)
+        } else {
+            self.csg.ext.known(&sigs)
+        };
+        let (numbers, lists) = gf_core::csg::numbers(fams, &parts, &kinds, res, joined, &extents, &object);
+        self.csg.set_lists(&lists);
+        self.csg.set_table(&numbers);
+        // (the lists of the object alone, if there is one again, are worked out afresh)
+        self.csg.lists_key = Vec::new();
+        let src = if joined { self.baker.layer_volume(layer) } else { None };
+        self.csg.merge(Some((layer, &made)), src, res, &key, || gf_core::csg::wgsl_tree(fams, &kinds, 0, true, plain), &numbers, &grids)
+            .ok_or("the tree could not be measured into a volume")?;
+        Ok(Some(true))
     }
 
     /// Bake one grid part (`key`: what it is made from and its size) into a volume of its own.

@@ -39,16 +39,18 @@ fn title(st: &State, p: &Part) -> String {
 
 fn parts(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     let n = st.csg.parts.len();
-    if n == 0 && st.layer_count() > 1 { return; }
     let r = row(ui, 14.0);
     text_in(ui, r, Align2::LEFT_CENTER, "csg parts", mono(10.0), FAINT);
-    if st.layer_count() > 1 {
-        text_in(ui, r, Align2::RIGHT_CENTER, "off while there are several layers", mono(10.0), HINT);
+    if st.csg.baked {
+        text_in(ui, r, Align2::RIGHT_CENTER, "baked into this volume object", mono(10.0), HINT);
+    } else if st.layer_count() > 1 {
+        text_in(ui, r, Align2::RIGHT_CENTER, "traced from its volume among others", mono(10.0), HINT);
     } else if st.shape().trace == Trace::Volume && n > 0 {
         text_in(ui, r, Align2::RIGHT_CENTER, "joined to the shape up", mono(10.0), HINT);
     }
     gap(ui, 3.0);
-    if n > 0 {
+    // (among other objects a tree is always traced from its volume: nothing to choose)
+    if n > 0 && st.layer_count() == 1 && !st.csg.baked {
         // how the parts are traced: from their formulas, or (faster with many) from the volume they are measured into
         let coarse = st.csg.coarse;
         let items = [
@@ -95,6 +97,16 @@ fn parts(ui: &mut Ui, st: &mut State, px: &mut Panels) {
         px.note("csg add", at);
         if resp.on_hover_text("a part of the shape up's kind (a ball when the shape up has no formula), beside the others").clicked() {
             add(st, px);
+        }
+    }
+    // a csg object made a volume object: its tree baked into a volume, traced from that (the tab then shows it
+    // as the volume object it is)
+    if st.is_csg_object(st.stack.sel) {
+        let (resp, at) = wide_button(ui, Id::unique("csg convert"), "convert to volume", false);
+        px.note("csg convert", at);
+        if resp.on_hover_text("bake this tree into a volume object: traced from its volume, with its placement and material").clicked() {
+            st.convert_to_volume();
+            px.handles.pick(None);
         }
     }
     // the grid parts' video memory, and the cap on them

@@ -159,6 +159,9 @@ fn setups_keep_the_tree() {
     // a volume object with parts: they are joined to it
     let att = st.families.iter().position(|f| f.id == "attractors").unwrap();
     st.set_scene(att);
+    // (the object's kind goes with it to another family: a volume object is asked for here)
+    assert_eq!(st.shape().trace, gf_core::sdf::Trace::Csg);
+    assert!(st.apply_arg("trace", "volume"));
     assert!(st.apply_arg("csgGrid", "5:studio/capsule"));
     let (tree, joined) = st.csg_tree();
     assert_eq!(tree.len(), 5);
@@ -342,4 +345,102 @@ fn undo_puts_a_grid_part_back() {
     assert_eq!(st.csg.sel, Some(0));
     assert!(h.redo(&mut st) && h.redo(&mut st));
     assert_eq!((st.csg.parts[0].res, st.csg.parts[0].thick), (512, Some(2.0)));
+}
+// ---- objects of two kinds (the right panel's tabs): made, taken away down to none, converted, undone, kept
+
+fn fam_preset(st: &gf_core::state::State, fam: &str, preset: &str) -> (usize, usize) {
+    let f = st.families.iter().position(|x| x.id == fam).unwrap();
+    (f, st.families[f].presets.iter().position(|p| p.id == preset).unwrap())
+}
+
+#[test]
+fn objects_are_made_taken_away_converted_and_undone() {
+    let mut st = gf_core::state::State::new();
+    let mut h = gf_core::history::History::default();
+    h.settle(&mut st);
+    // the last object taken away: none, and the scene holds no tree
+    assert!(st.delete_object(0));
+    assert_eq!(st.object_count(), 0);
+    assert!(st.csg_tree().0.is_empty());
+    h.settle(&mut st);
+    // a csg object made from the csg tab: the first object, a tree whose first part is its shape
+    let (f, p) = fam_preset(&st, "studio", "block");
+    assert_eq!(st.create_object(f, p, true), Some(0));
+    assert!(st.is_csg_object(0) && st.object_count() == 1);
+    assert!(st.apply_arg("csg", "studio/sphere@0.4,0,0@0,0,0@0.5@subtract@0.05"));
+    assert_eq!(st.csg_tree().0.len(), 2);
+    h.settle(&mut st);
+    // a volume object beside it, made from the volume tab: the csg object keeps its tree
+    let (f2, p2) = fam_preset(&st, "attractors", "thomas");
+    assert_eq!(st.create_object(f2, p2, false), Some(1));
+    assert!(!st.is_csg_object(1) && st.is_csg_object(0));
+    assert_eq!(st.layer_csg(0).parts.len(), 1);
+    assert!(st.layer_csg(1).parts.is_empty());
+    // its tree is read among the others too (from its own volume)
+    assert_eq!(st.csg_tree_layer(0).0.len(), 2);
+    h.settle(&mut st);
+    // the csg object converted: a volume object made from its tree
+    st.select_layer(0);
+    assert!(st.convert_to_volume());
+    assert!(!st.is_csg_object(0) && st.csg.baked && st.csg_coarse());
+    assert_eq!(st.csg_tree_layer(0).0.len(), 2, "the volume made from the tree is the whole tree");
+    h.settle(&mut st);
+    // undo: back to a csg object; again: the volume object gone; again: the csg object (made with its part in
+    // one gesture) gone, the scene empty; again: the first object back
+    assert!(h.undo(&mut st));
+    assert!(st.is_csg_object(0) && !st.layer_csg(0).baked && st.object_count() == 2);
+    assert!(h.undo(&mut st));
+    assert_eq!(st.object_count(), 1);
+    assert!(st.is_csg_object(0) && st.csg.parts.len() == 1);
+    assert!(h.undo(&mut st));
+    assert_eq!(st.object_count(), 0);
+    assert!(h.undo(&mut st));
+    assert_eq!(st.object_count(), 1);
+    assert_eq!(st.family().id, "attractors");
+    // and redo goes forward again to the volume object made from the tree
+    for _ in 0..4 { assert!(h.redo(&mut st)); }
+    assert!(st.layer_csg(0).baked && st.object_count() == 2);
+}
+
+#[test]
+fn setups_keep_every_object_and_its_kind() {
+    let mut st = gf_core::state::State::new();
+    let (f, p) = fam_preset(&st, "studio", "block");
+    let (f2, p2) = fam_preset(&st, "knots", "trefoil");
+    // a volume object first, then two csg objects, each with a tree of its own
+    let thomas = st.layer_family(0).id;
+    assert!(st.create_object(f, p, true).is_some());
+    assert!(st.apply_arg("csg", "studio/sphere@0.4,0,0@0,0,0@0.5@subtract@0.05"));
+    assert!(st.create_object(f2, p2, true).is_some());
+    assert!(st.apply_arg("csg", "gems/brilliant@0,0.5,0; studio/capsule"));
+    st.csg.place.pos = [0.1, 0.0, 0.0];
+    let text = serde_json::to_string(&st.setup()).unwrap();
+    let mut other = gf_core::state::State::new();
+    other.apply_setup(&serde_json::from_str(&text).unwrap()).unwrap();
+    assert_eq!(other.object_count(), 3);
+    assert_eq!(other.layer_family(0).id, thomas);
+    assert!(!other.is_csg_object(0) && other.is_csg_object(1) && other.is_csg_object(2));
+    for i in 0..3 {
+        assert_eq!(other.layer_csg(i).parts, st.layer_csg(i).parts, "object {}", i + 1);
+        assert_eq!(other.layer_csg(i).place, st.layer_csg(i).place, "object {}", i + 1);
+    }
+    // an empty scene is kept as one
+    let mut none = gf_core::state::State::new();
+    assert!(none.delete_object(0));
+    let t = serde_json::to_string(&none.setup()).unwrap();
+    assert!(t.contains("\"empty\":true"));
+    let mut back = gf_core::state::State::new();
+    back.apply_setup(&serde_json::from_str(&t).unwrap()).unwrap();
+    assert_eq!(back.object_count(), 0);
+    // a setup of before with trace=csg loads as a csg object; one without, as a volume object (and its text
+    // carries none of the new members)
+    let mut old = gf_core::state::State::new();
+    let alg = old.families.iter().position(|f| f.id == "algebraic").unwrap();
+    old.set_scene(alg);
+    assert!(old.apply_arg("trace", "csg"));
+    let t = serde_json::to_string(&old.setup()).unwrap();
+    assert!(!t.contains("empty") && !t.contains("csg_baked"));
+    let mut back = gf_core::state::State::new();
+    back.apply_setup(&serde_json::from_str(&t).unwrap()).unwrap();
+    assert!(back.is_csg_object(0));
 }

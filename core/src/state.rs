@@ -148,6 +148,8 @@ impl ShapeState {
 pub struct Parked {
     pub fam: usize,
     pub shapes: Vec<ShapeState>,
+    /// its tree of parts (csg.rs), when it is a csg object
+    pub csg: crate::csg::Csg,
 }
 
 /// What the GPU side has to build.
@@ -336,6 +338,8 @@ pub struct State {
     pub lamps_rev: u64,
     /// the tree of formula parts joined to the scene, and the object that places it (csg.rs): none unless added
     pub csg: crate::csg::Csg,
+    /// there is no object: the one layer that stays is hidden, and stands for nothing (csg.rs `delete_object`)
+    pub empty: bool,
     /// the ten camera slots (history.rs): stored views, kept in a setup
     pub views: Vec<Option<crate::history::ViewSlot>>,
     /// the environment picture in use: its path, as given (one that is not absolute is looked for in the
@@ -377,7 +381,7 @@ impl State {
         let mut s = Self {
             families, fam, shapes, stack: Stack::new(), parked: vec![None], p: Settings::default(), render: RenderOpts::default(),
             r0: I3, theta: 0.0, r: I3, lphi: 0.0, playing: false, clock: 0.0, tracks: BTreeMap::new(), moved: BTreeMap::new(), rest: BTreeMap::new(),
-            rendering: false, want: None, cut: true, flash_planes: false, rigs, lights_rev: 0, lamps: Vec::new(), lamps_rev: 0, csg: Default::default(), views: Vec::new(), hdri: None, body_mats: Default::default(),
+            rendering: false, want: None, cut: true, flash_planes: false, rigs, lights_rev: 0, lamps: Vec::new(), lamps_rev: 0, csg: Default::default(), empty: false, views: Vec::new(), hdri: None, body_mats: Default::default(),
             first_scene: true, args: args.to_vec(), auto,
         };
         s.set_scene(fam);
@@ -466,10 +470,12 @@ impl State {
         // started again on the new one)
         let was_playing = self.playing;
         if self.playing { self.set_playing(false); }
-        // (the surface studio belongs to the layer: it goes with it to the new family's shape)
-        let sculpt = self.shapes[self.fam].sculpt.clone();
+        // (the surface studio belongs to the layer: it goes with it to the new family's shape; so does what
+        // kind of object it is, volume or csg, fixed when it was made)
+        let (sculpt, trace) = (self.shapes[self.fam].sculpt.clone(), self.shapes[self.fam].trace);
         self.fam = idx.min(self.families.len() - 1);
         self.shapes[self.fam].sculpt = sculpt;
+        self.shapes[self.fam].trace = trace;
         if self.stack.sel != 0 {
             // only the first layer's family decides the settings, the view and the lights
             self.cut = true;

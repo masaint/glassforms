@@ -135,6 +135,10 @@ const SDF_NEAR: f32 = 1.5;
       n += o * mapNVolume(po + e * o);
     }
   }
+  // (a reading flat all about p, which only a march that gave up inside the glass meets, where the tree's
+  // volume is held to how near the parts left out of a cell come: a normal, not none, so that no sample of
+  // the picture is spoilt)
+  if (dot(n, n) < 1e-30) { n = vec3f(0.0, 1.0, 0.0); }
   return normalize(n.x * vec3f(u.obj0.x, u.obj1.x, u.obj2.x) + n.y * vec3f(u.obj0.y, u.obj1.y, u.obj2.y) + n.z * vec3f(u.obj0.z, u.obj1.z, u.obj2.z));
 ";
     let src = settle_loops(src).replace("u32(sdfU.pad)", "u32(csgU.info2.y)");

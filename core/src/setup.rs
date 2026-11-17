@@ -131,6 +131,12 @@ pub struct Setup {
     pub csg_place: crate::layers::Placement,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub csg_coarse: bool,
+    /// the first object is a volume object made from a csg object's tree (Csg::baked)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub csg_baked: bool,
+    /// there is no object at all (the scene shows the backdrop and the floor alone)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub empty: bool,
 }
 
 impl State {
@@ -154,9 +160,12 @@ impl State {
             hdri: self.hdri.clone(),
             lamps: self.lamps.clone(),
             views: if self.views.iter().any(|v| v.is_some()) { self.views.clone() } else { Vec::new() },
-            csg: self.csg.parts.clone(),
-            csg_place: self.csg.place,
-            csg_coarse: self.csg.coarse,
+            // (the first object's tree: another's is kept with its layer)
+            csg: self.layer_csg(0).parts.clone(),
+            csg_place: self.layer_csg(0).place,
+            csg_coarse: self.layer_csg(0).coarse,
+            csg_baked: self.layer_csg(0).baked,
+            empty: self.empty,
             layers: self.layers_setup(),
             bodies: (1..self.body_mats.len())
                 .filter_map(|l| self.body_mats[l].as_ref().map(|m| ((l + 1).to_string(), crate::material::body_names().filter_map(|n| m.get(n).map(|v| (n.to_string(), v))).collect())))
@@ -193,7 +202,14 @@ impl State {
         st.model = sh.model.clone();
         st.trace = sh.trace;
         st.sculpt = sh.sculpt.clone().unwrap_or_default();
+        // (the first object's tree and object; which part the panel has selected stays, if there still is one)
+        let sel = self.csg.sel.filter(|i| *i < s.csg.len());
+        let whole = self.csg.whole && !s.csg.is_empty();
+        self.csg = crate::csg::Csg { parts: s.csg.iter().take(crate::csg::MAX_PARTS).cloned().collect(), place: s.csg_place, coarse: s.csg_coarse, baked: s.csg_baked, sel, whole };
         if let Some(l) = &s.layers { self.apply_layers_setup(l); }
+        // (no object: the one layer is hidden, standing for nothing)
+        self.empty = s.empty;
+        if s.empty { self.stack.layers[0].show = false; }
         match &s.rig {
             Some(r) => *self.rig_mut() = Rig::from(r),
             None => self.reset_rig(),
@@ -201,10 +217,6 @@ impl State {
         self.set_hdri(s.hdri.clone());
         self.lamps = s.lamps.iter().take(crate::lamps::MAX_LAMPS).copied().collect();
         self.views = s.views.iter().take(crate::history::SLOTS).cloned().collect();
-        // (the tree's parts and object; which part the panel has selected stays, if there still is one)
-        let sel = self.csg.sel.filter(|i| *i < s.csg.len());
-        let whole = self.csg.whole && !s.csg.is_empty();
-        self.csg = crate::csg::Csg { parts: s.csg.iter().take(crate::csg::MAX_PARTS).cloned().collect(), place: s.csg_place, coarse: s.csg_coarse, sel, whole };
         self.lamps_rev += 1;
         self.p = s.settings.clone();
         crate::camera::sync(&mut self.p);

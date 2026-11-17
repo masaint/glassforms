@@ -78,7 +78,7 @@ impl State {
         let views = std::mem::take(&mut self.views);
         let cur = self.undo_snapshot();
         let same_scene = cur.family == s.family && cur.preset == s.preset && cur.values == s.values && cur.shape == s.shape
-            && cur.layers == s.layers && cur.bodies == s.bodies && cur.hdri == s.hdri;
+            && cur.layers == s.layers && cur.bodies == s.bodies && cur.hdri == s.hdri && cur.empty == s.empty;
         if same_scene {
             self.p = s.settings.clone();
             crate::camera::sync(&mut self.p);
@@ -95,12 +95,16 @@ impl State {
             self.cut = true;
             // the tree of formula parts (csg.rs): put back by itself, and built again (which part the panel
             // has selected stays, if there still is one)
-            if cur.csg != s.csg || cur.csg_place != s.csg_place || cur.csg_coarse != s.csg_coarse {
-                self.csg.parts = s.csg.iter().take(crate::csg::MAX_PARTS).cloned().collect();
-                self.csg.place = s.csg_place;
-                self.csg.coarse = s.csg_coarse;
-                if self.csg.sel.is_some_and(|i| i >= self.csg.parts.len()) { self.csg.sel = None; }
-                if self.csg.parts.is_empty() { self.csg.whole = false; }
+            // (a setup's own tree is the first object's: the others' are with their layers, above)
+            if cur.csg != s.csg || cur.csg_place != s.csg_place || cur.csg_coarse != s.csg_coarse || cur.csg_baked != s.csg_baked {
+                if let Some(c) = self.layer_csg_mut(0) {
+                    c.parts = s.csg.iter().take(crate::csg::MAX_PARTS).cloned().collect();
+                    c.place = s.csg_place;
+                    c.coarse = s.csg_coarse;
+                    c.baked = s.csg_baked;
+                    if c.sel.is_some_and(|i| i >= c.parts.len()) { c.sel = None; }
+                    if c.parts.is_empty() { c.whole = false; }
+                }
                 self.want = Some(crate::state::Detail::Full);
             }
         } else {

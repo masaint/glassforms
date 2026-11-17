@@ -1097,6 +1097,15 @@ pub struct LayerShape {
     pub preset: String,
     pub values: BTreeMap<String, f64>,
     pub shape: ShapeSetup,
+    /// its tree of parts, when it is a csg object (or a volume object made from one): each absent while unused
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub csg: Vec<crate::csg::Part>,
+    #[serde(skip_serializing_if = "Placement::is_identity")]
+    pub csg_place: Placement,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub csg_coarse: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub csg_baked: bool,
 }
 
 /// Everything about the layers that a setup file holds beyond its first shape.
@@ -1250,7 +1259,8 @@ impl State {
         let Some(p) = self.parked[layer].take() else { return };
         let fam = std::mem::replace(&mut self.fam, p.fam);
         let shapes = std::mem::replace(&mut self.shapes, p.shapes);
-        self.parked[was] = Some(Parked { fam, shapes });
+        let csg = std::mem::replace(&mut self.csg, p.csg);
+        self.parked[was] = Some(Parked { fam, shapes, csg });
         self.stack.sel = layer;
     }
     /// Select a layer: the shape picker and the shape's sliders now act on it.
@@ -1300,7 +1310,7 @@ impl State {
         }
         shapes[fam].preset = preset;
         shapes[fam].vals = self.families[fam].presets[preset].defaults();
-        self.parked.push(Some(Parked { fam, shapes }));
+        self.parked.push(Some(Parked { fam, shapes, csg: Default::default() }));
         self.swap_to(i);
         self.default_tracks();
         self.cut = true;
@@ -1536,6 +1546,15 @@ impl State {
             let f = self.layer_family(i);
             m = (m.0.min(f.step_scale), m.1.max(f.steps_out), m.2.max(f.steps_in), m.3.max(f.layers));
         }
+        // (and of every object's tree, its parts' families: no part is marched faster than its own family
+        // marches it)
+        for i in 0..self.layer_count() {
+            for p in &self.layer_csg(i).parts {
+                if let Some(f) = self.families.iter().find(|f| f.id == p.family) {
+                    m = (m.0.min(f.step_scale), m.1.max(f.steps_out), m.2.max(f.steps_in), m.3.max(f.layers));
+                }
+            }
+        }
         let steep = self.stack.combine().slope_bound();
         // (in twentieths, so that a slider that changes the bound a little does not ask for a new tracer each time)
         let step = (((m.0 / steep) * 20.0 + 1e-9).floor() / 20.0).max(0.3);
@@ -1661,6 +1680,10 @@ impl State {
             preset: p.id.to_string(),
             values: p.params.iter().zip(&st.vals).map(|(d, v)| (d.id.to_string(), *v)).collect(),
             shape: ShapeSetup { thick: st.thick, len: st.len, melt: st.melt, puff: st.puff, travel: st.travel, beads: st.beads, bead_period: st.bead_period, res: st.res, anim_res: st.anim_res, model: st.model.clone(), trace: st.trace, sculpt: (!st.sculpt.is_empty() || !st.sculpt.layers.is_empty()).then(|| st.sculpt.clone()) },
+            csg: self.layer_csg(layer).parts.clone(),
+            csg_place: self.layer_csg(layer).place,
+            csg_coarse: self.layer_csg(layer).coarse,
+            csg_baked: self.layer_csg(layer).baked,
         }
     }
     /// What a setup holds about the layers, beyond the first shape. None for one plain layer, so that a
@@ -1707,7 +1730,10 @@ impl State {
         for m in &l.more {
             let Some(fam) = self.families.iter().position(|f| f.id == m.family) else { continue };
             let Some(preset) = self.families[fam].presets.iter().position(|p| p.id == m.preset) else { continue };
-            if self.add_layer_of(fam, preset).is_some() { self.apply_shape_setup(&m.values, &m.shape); }
+            if self.add_layer_of(fam, preset).is_some() {
+                self.apply_shape_setup(&m.values, &m.shape);
+                self.csg = crate::csg::Csg { parts: m.csg.iter().take(crate::csg::MAX_PARTS).cloned().collect(), place: m.csg_place, coarse: m.csg_coarse, baked: m.csg_baked, ..Default::default() };
+            }
         }
         let mut st = Stack::from_setup(&l.stack);
         if st.len() != self.stack.len() { return; }

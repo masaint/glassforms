@@ -124,14 +124,15 @@ pub fn strip(ui: &mut Ui, st: &mut State, px: &mut Panels) {
         if seen.on_hover_text(if shown { "hide this layer (it still cuts and masks the others)" } else { "show this layer" }).clicked() { toggle = Some(i); }
 
         // the cross, on the selected layer when it is not the only one
-        if chosen && n > 1 {
+        // (the last object too: the scene is then empty, and an object is made again from either tab)
+        if chosen {
             px.note(format!("layer:{}:x", i + 1), cross);
             let gone = ui.interact(cross, Id::unique(("layer cross", i)), Sense::click());
             let hot = gone.hovered();
             if hot { ui.ctx().set_cursor_icon(CursorIcon::PointingHand); }
             let (c, d, ink) = (cross.center(), 3.2, if hot { Color32::WHITE } else { DIM });
             for s in [1.0, -1.0] { ui.painter().line_segment([c + egui::vec2(-d, -d * s), c + egui::vec2(d, d * s)], Stroke::new(1.3, ink)); }
-            if gone.on_hover_text("take this layer away, with its joins").clicked() { remove = Some(i); }
+            if gone.on_hover_text(if n > 1 { "take this object away, with its joins" } else { "take this object away: the scene is left empty" }).clicked() { remove = Some(i); }
         }
     }
 
@@ -173,7 +174,7 @@ pub fn strip(ui: &mut Ui, st: &mut State, px: &mut Panels) {
         px.combo_open = None;
     }
     if let Some(i) = remove {
-        st.remove_layer(i);
+        st.delete_object(i);
         px.combo_open = None;
     }
     gap(ui, 4.0);
@@ -183,7 +184,10 @@ pub fn strip(ui: &mut Ui, st: &mut State, px: &mut Panels) {
 /// that how the two are combined is the first thing seen.
 pub fn add(st: &mut State, px: &mut Panels) {
     let was = st.stack.sel;
+    // (of the kind the tab says: the selected object's, unless the other tab is up)
+    let csg = px.tab.unwrap_or_else(|| st.is_csg_object(was));
     if let Some(i) = st.add_layer() {
+        st.shape_mut().trace = if csg { gf_core::sdf::Trace::Csg } else { gf_core::sdf::Trace::Volume };
         px.combo_open = Some(mask_of(&[was, i]));
         if px.store.is_closed("joins") { px.store.fold("joins"); }
     }

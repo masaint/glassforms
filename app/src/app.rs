@@ -1548,8 +1548,9 @@ impl App {
                 st.sculpt_changed(false);
             }
             Act::RemoveLayer(i) => {
-                if i >= st.layer_count() || st.layer_count() < 2 { return Err(format!("remove-layer: there is no layer {} to take away", i + 1)); }
-                st.remove_layer(i);
+                // (the last object too, as its cross does: the scene is then empty)
+                if i >= st.object_count() { return Err(format!("remove-layer: there is no object {} to take away", i + 1)); }
+                st.delete_object(i);
                 self.px.combo_open = None;
             }
             Act::SelectLayer(i) => {
