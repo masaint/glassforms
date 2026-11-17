@@ -222,10 +222,11 @@ fn trace_row(ui: &mut Ui, st: &mut State, px: &mut Panels) {
                 Item::new("volume", true).tip("the shape baked into a grid of distances, which the tracer reads: as fine as its voxels"),
                 Item::new("sdf", false).tip(format!("not for this shape: {why}")),
             ];
-            let run = named_run(ui, Id::unique("trace"), "traced from", &items);
+            // drawn greyed and not clickable, so it does not look like a button that does nothing
+            let run = ui.add_enabled_ui(false, |ui| named_run(ui, Id::unique("trace"), "traced from", &items)).inner;
             for (w, place) in ["volume", "sdf"].iter().zip(&run.places) { px.note(format!("trace:{w}"), *place); }
             gap(ui, 2.0);
-            paragraph(ui, &format!("sdf: {why}"), mono(SMALL), FAINT, LINE, INSET);
+            paragraph(ui, &format!("sdf is only for shapes with a formula: {why}"), mono(SMALL), FAINT, LINE, INSET);
         }
         Support::Formula { .. } => {
             let items = [
