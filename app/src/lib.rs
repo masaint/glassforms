@@ -11,6 +11,7 @@ pub mod denoise;
 pub mod dlss;
 pub mod dof;
 pub mod engine;
+pub mod export;
 pub mod frost;
 pub mod glare;
 pub mod gpu;

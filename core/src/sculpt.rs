@@ -224,6 +224,11 @@ pub struct Layer {
     /// the picture of an image layer: a PNG file's path
     #[serde(skip_serializing_if = "String::is_empty")]
     pub image: String,
+    /// Its sizes (`scale`, `depth`, `soft`, and a thickness mask's `mask_at` and `mask_width`) are shares
+    /// of the shape's own size (`Sculpt::size_of`) rather than lengths in the scene: the same layer is then
+    /// as coarse on a thin tube as on a fat solid. New layers are made so; a layer saved before there was
+    /// a choice has no such word and reads as lengths, as it always meant.
+    pub relative: bool,
 }
 
 impl Default for Layer {
@@ -258,12 +263,41 @@ impl Layer {
         Self {
             kind, on: true, opacity: 1.0, scale, depth, seed: 1.0, stretch: 1.0, yaw: 0.0, pitch: 90.0, mode, blend,
             soft: 0.01, mask: Mask::None, mask_at: 0.0, mask_width: 0.3, mask_invert: false, evolve: 0.0,
-            a: ex[0].map_or(0.0, |e| e.value), b: ex[1].map_or(0.0, |e| e.value), image: String::new(),
+            a: ex[0].map_or(0.0, |e| e.value), b: ex[1].map_or(0.0, |e| e.value), image: String::new(), relative: false,
         }
+    }
+    /// A new layer of this kind as the studio makes one: its sizes shares of the shape's (`relative`), so
+    /// that on a shape of `SIZE_REF` it is the layer `of` makes.
+    pub fn new_relative(kind: Kind) -> Self {
+        let mut l = Self::of(kind);
+        l.set_relative(true, SIZE_REF);
+        l
+    }
+    /// Its sizes as lengths in the scene, for a shape of this size.
+    pub fn resolved(&self, size: f64) -> Self {
+        let mut l = self.clone();
+        l.set_relative(false, size);
+        l
+    }
+    /// Make its sizes shares of the shape's size, or lengths, without changing what they come to on a shape
+    /// of this size.
+    pub fn set_relative(&mut self, relative: bool, size: f64) {
+        if relative == self.relative { return; }
+        let k = if relative { 1.0 / size.max(1e-6) } else { size };
+        self.scale *= k;
+        self.depth *= k;
+        self.soft *= k;
+        if self.mask == Mask::Thick {
+            self.mask_at *= k;
+            self.mask_width *= k;
+        }
+        self.relative = relative;
     }
     /// Give it another kind, keeping what the two kinds share (opacity, seed, direction, mask, blend).
     pub fn change_kind(&mut self, kind: Kind) {
         let mut n = Self::of(kind);
+        // (the new kind's sizes, said the way this layer says its own)
+        if self.relative { n.set_relative(true, SIZE_REF); }
         n.on = self.on;
         n.opacity = self.opacity;
         n.seed = self.seed;
@@ -324,6 +358,12 @@ impl Layer {
     }
 }
 
+/// The size of shape on which a layer's sizes as shares (`Layer::relative`) and as lengths come to the
+/// same: about the size `Sculpt::size_of` finds for a plain solid filling the view (the superellipsoid
+/// measures 0.59, the teapot 0.45; a Thomas tube 0.041, a tree 0.017). The slider ranges and a new layer's
+/// sizes are kept as they were for such a shape.
+pub const SIZE_REF: f64 = 0.6;
+
 /// The surface studio of one shape: its layers and the cleanups of the whole stack.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -341,15 +381,46 @@ pub struct Sculpt {
     /// detail finer than about two pixels at the present view is left out (see `footprint`)
     #[serde(default = "yes")]
     pub prefilter: bool,
+    /// `round`, `wall` and `crumbs` are shares of the shape's own size, as a layer's sizes may be
+    /// (`Layer::relative`); a stack saved before there was a choice reads them as lengths
+    pub relative: bool,
 }
 
 impl Default for Sculpt {
     fn default() -> Self {
-        Self { on: true, layers: Vec::new(), round: 0.0, wall: 0.0, crumbs: 0.0, prefilter: true }
+        Self { on: true, layers: Vec::new(), round: 0.0, wall: 0.0, crumbs: 0.0, prefilter: true, relative: false }
     }
 }
 
 impl Sculpt {
+    /// A shape's own size, which sizes given as shares are shares of: the typical radius of its body,
+    /// three times the mean depth below the surface of the points inside it (`mean_depth`). Three makes it
+    /// the radius of a long round tube (a tube's inside lies a third of its radius deep on average); a
+    /// ball comes to three quarters of its radius, a slab to one and a half times its half-thickness.
+    pub fn size_of(mean_depth: f64) -> f64 {
+        if mean_depth.is_finite() && mean_depth > 0.0 { 3.0 * mean_depth } else { SIZE_REF }
+    }
+    /// The whole stack with every size a length in the scene, for a shape of this size.
+    pub fn resolved(&self, size: f64) -> Self {
+        let mut s = self.clone();
+        s.layers = self.layers.iter().map(|l| l.resolved(size)).collect();
+        s.set_relative(false, size);
+        s
+    }
+    /// Make the cleanups' sizes shares of the shape's size, or lengths, without changing what they come to
+    /// on a shape of this size (the layers keep their own choice).
+    pub fn set_relative(&mut self, relative: bool, size: f64) {
+        if relative == self.relative { return; }
+        let k = if relative { 1.0 / size.max(1e-6) } else { size };
+        self.round *= k;
+        self.wall *= k;
+        self.crumbs *= k;
+        self.relative = relative;
+    }
+    /// Does anything in it depend on the shape's size?
+    pub fn any_relative(&self) -> bool {
+        self.relative || self.layers.iter().any(|l| l.relative)
+    }
     /// Nothing to do: no layer that changes anything and no cleanup (the shape is built as if the studio
     /// were not there at all).
     pub fn is_empty(&self) -> bool {
@@ -449,6 +520,30 @@ impl Sculpt {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sizes_as_shares_come_to_lengths_by_the_shapes_size() {
+        // a new layer made by the studio is relative, and on a shape of SIZE_REF it is the old layer exactly
+        let l = Layer::new_relative(Kind::Cells);
+        assert!(l.relative);
+        let back = l.resolved(SIZE_REF);
+        assert!(!back.relative);
+        assert!((back.scale - Layer::of(Kind::Cells).scale).abs() < 1e-12 && (back.depth - Layer::of(Kind::Cells).depth).abs() < 1e-12);
+        // on a shape a tenth the size it is a tenth as large
+        let thin = l.resolved(0.1 * SIZE_REF);
+        assert!((thin.scale - 0.1 * Layer::of(Kind::Cells).scale).abs() < 1e-12);
+        // a layer saved before the choice existed has no word for it, and stays lengths
+        let old: Layer = serde_json::from_str(r#"{"kind":"cells","scale":0.14,"depth":0.1}"#).unwrap();
+        assert!(!old.relative && old.resolved(0.05).scale == 0.14);
+        let old: Sculpt = serde_json::from_str(r#"{"layers":[{"kind":"foam"}],"round":0.01}"#).unwrap();
+        assert!(!old.relative && old.resolved(0.05).round == 0.01);
+        // switching keeps the look on the shape it is switched on
+        let mut a = Layer::of(Kind::Foam);
+        a.set_relative(true, 0.2);
+        assert!((a.resolved(0.2).scale - Layer::of(Kind::Foam).scale).abs() < 1e-12);
+        // and it says so when saved
+        assert!(serde_json::to_string(&l).unwrap().contains("\"relative\":true"));
+    }
 
     #[test]
     fn an_empty_studio_is_nothing() {

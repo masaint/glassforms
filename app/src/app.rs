@@ -402,6 +402,8 @@ struct App {
     drag: Option<Drag>,
     video: Option<VideoJob>,
     last_video: Option<VideoResult>,
+    /// a mesh being written (crate::export)
+    exporting: Option<crate::export::Exporting>,
     /// frames until the benchmark runs (its button says "running..." for a frame first)
     bench_in: u8,
     /// the picture is held as it is (a screenshot is being taken)
@@ -492,7 +494,7 @@ impl App {
         px.record = opts.scripted;
         Ok(App {
             engine, rs, shown: None, preview: None, px, seeking: opts.size_px, canvas: (0, 0), full: Rect::ZERO, last: None, rested: false, fly_at: None, history: Default::default(), input_at: Instant::now(), unsettled: true, quiet_frames: 0, called_off: false, fps: 0.0, drawn: (0, Instant::now()), stat_at: Instant::now(),
-            drag: None, video: None, last_video: None, bench_in: 0, frozen: false, test, inject: Vec::new(), dropped: Vec::new(), model_asked: None, model_said: String::new(), adding: None, model_refused: None, failure, store_path,
+            drag: None, video: None, last_video: None, exporting: None, bench_in: 0, frozen: false, test, inject: Vec::new(), dropped: Vec::new(), model_asked: None, model_said: String::new(), adding: None, model_refused: None, failure, store_path,
             saved: store, changed_at: None, frames: Arc::new(AtomicU64::new(0)), passes: 0, ffmpeg_checked: Instant::now(), opts,
         })
     }
@@ -719,7 +721,7 @@ impl App {
                     self.save_still(&path, false);
                 }
                 // a script cannot answer a dialog
-                Request::SaveSetup | Request::LoadSetup | Request::SaveStillAs if self.test.is_some() => {
+                Request::SaveSetup | Request::LoadSetup | Request::SaveStillAs | Request::ExportMesh if self.test.is_some() => {
                     self.px.file_text = "a scripted run opens no dialogs".into();
                 }
                 Request::LoadPicture | Request::LoadModel if self.test.is_some() => {}
@@ -748,6 +750,27 @@ impl App {
                     let dir = here.unwrap_or_else(|| crate::hdri::home().join("hdri"));
                     let dialog = rfd::FileDialog::new().set_title("Environment picture").add_filter("Panoramas (.exr, .hdr)", &["exr", "hdr"]).set_parent(frame);
                     if let Some(path) = in_folder(dialog, &dir).pick_file() { self.engine.state.set_hdri(Some(path.display().to_string())); }
+                }
+                Request::ExportMesh => {
+                    if let Some(x) = &self.exporting {
+                        self.px.file_text = format!("a mesh is being written already: {}", x.path);
+                        continue;
+                    }
+                    let dir = self.px.store.setups_folder();
+                    let _ = std::fs::create_dir_all(&dir);
+                    let name = format!("{}.obj", self.engine.state.preset().id);
+                    let dialog = rfd::FileDialog::new().set_title("Save the shape as a mesh").set_file_name(name).add_filter("OBJ mesh", &["obj"]).add_filter("STL mesh (binary)", &["stl"]).set_parent(frame);
+                    if let Some(path) = in_folder(dialog, &dir).save_file() {
+                        let path = path.display().to_string();
+                        let path = if path.to_ascii_lowercase().ends_with(".stl") || path.to_ascii_lowercase().ends_with(".obj") { path } else { format!("{path}.obj") };
+                        match self.engine.export_mesh(&path) {
+                            Ok(x) => {
+                                self.px.file_text = format!("writing the mesh: {path}");
+                                self.exporting = Some(x);
+                            }
+                            Err(e) => self.px.file_text = format!("the mesh was not written: {e}"),
+                        }
+                    }
                 }
                 Request::SaveSetup => {
                     let dir = self.px.store.setups_folder();
@@ -1088,6 +1111,15 @@ impl App {
             loading: self.engine.hdri_loading(),
         };
         self.px.sculpted = (self.engine.sculptor.last.res > 0).then(|| (self.engine.sculptor.last.res, self.engine.sculptor.last.ms));
+        // a mesh being written: what it came to, once it has
+        if let Some(r) = self.exporting.as_ref().and_then(|x| x.poll()) {
+            self.exporting = None;
+            self.px.file_text = match r {
+                Ok(d) => format!("mesh: {}", crate::export::says(&d)),
+                Err(e) => format!("the mesh was not written: {e}"),
+            };
+        }
+        self.px.sculpt_size = self.engine.sculptor.sizes.get(self.engine.state.stack.sel).copied().unwrap_or(0.0);
         self.px.sculpt_error = self.engine.sculptor.image_error.clone().or_else(|| (!self.engine.sculptor.available()).then(|| "the surface studio needs a graphics device that can write volumes by compute shader".to_owned()));
         self.px.joined = if self.engine.layers.combined { self.engine.scene_volume().map(|v| (v.res, self.engine.layers.combine_ms)) } else { None };
         self.px.model = self.model_told();

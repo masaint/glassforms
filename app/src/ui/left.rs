@@ -128,6 +128,11 @@ fn file(ui: &mut Ui, px: &mut Panels) {
         Some(_) => px.requests.push(Request::LoadSetup),
         None => {}
     }
+    // the shape's surface for other programs: what is drawn, at the detail set (the mesh is never read back)
+    let mesh = [Item::new("save as…", false).tip("the shape's surface as a mesh, OBJ or STL, for other programs: every layer and the surface studio as drawn, at the detail set (finer detail, finer mesh). It is made while you carry on.")];
+    if named_run(ui, Id::unique("file mesh"), "mesh", &mesh).clicked.is_some() {
+        px.requests.push(Request::ExportMesh);
+    }
     if !px.file_text.is_empty() {
         gap(ui, 2.0);
         paragraph(ui, &px.file_text.clone(), mono(SMALL), BUTTON, LINE, 0.0);

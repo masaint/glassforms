@@ -2,6 +2,8 @@
 //!
 //!   glassforms [name=value ...]                       the live app
 //!   glassforms --still out.png [name=value ...]       render a still and exit
+//!   glassforms --export-mesh out.obj [name=value ...] write the shape's surface as a mesh (.obj or .stl) at
+//!                                                     the detail res= sets, and exit
 //!   glassforms --video out.mp4 [name=value ...]       render one whole loop to a video and exit
 //!                                                     (fps, samples, lensRays, shutter, frames, codec=h264|h265|prores, crf)
 //!   glassforms --bench [name=value ...]               time frames of a turning view and exit
@@ -299,6 +301,23 @@ fn run() -> Result<(), String> {
         println!("{}", glassforms::camera::readout_json(&state, aspect));
         return Ok(());
     }
+    if let Some(out) = args.flag("export-mesh") {
+        // the shape's surface as a mesh, at the detail res= sets (gf_core::export; never read back)
+        let out = out.clone().unwrap_or_else(|| "shape.obj".into());
+        let mut e = headless(&args)?;
+        if let Some(t) = args.num("anim") {
+            e.state.clock = t;
+            e.state.apply_clock(true);
+            e.bake(Detail::Hq)?;
+            e.state.want = None;
+        }
+        let d = e.export_mesh(&out)?.wait()?;
+        println!(
+            "{{\"scene\":\"{}\",\"preset\":\"{}\",\"res\":{},\"points\":{},\"triangles\":{},\"openEdges\":{},\"sharedEdges\":{},\"volume\":{:.5},\"ms\":{:.0},\"out\":\"{}\"}}",
+            e.state.family().id, e.state.preset().id, d.res, d.check.points, d.check.tris, d.check.open, d.check.shared, d.check.volume, d.ms, out.replace('\\', "/")
+        );
+        return Ok(());
+    }
     if let Some(out) = args.flag("still") {
         let out = out.clone().unwrap_or_else(|| "still.png".into());
         let t0 = Instant::now();
@@ -409,8 +428,8 @@ fn run() -> Result<(), String> {
         }
         let m = &e.state.shape().meta;
         println!(
-            "{{\"scene\":\"{}\",\"preset\":\"{}\",\"adapter\":\"{}\",\"size\":[{w},{h}],\"frames\":{frames},\"msPerFrame\":{per:.3},\"setupMs\":{setup:.0},\"volume\":{},\"volumeMs\":{:.1},\"segments\":{}{},\"out\":\"{}\",{}}}",
-            e.state.family().id, e.state.preset().id, e.gpu.name, m.res, m.ms, m.segments, format!("{}{}", e.layers_json(), e.cast_json()), out.replace('\\', "/"), hdri_json(&e)
+            "{{\"scene\":\"{}\",\"preset\":\"{}\",\"adapter\":\"{}\",\"size\":[{w},{h}],\"frames\":{frames},\"msPerFrame\":{per:.3},\"setupMs\":{setup:.0},\"volume\":{},\"volumeMs\":{:.1},\"segments\":{}{},\"studioSize\":{:.4},\"out\":\"{}\",{}}}",
+            e.state.family().id, e.state.preset().id, e.gpu.name, m.res, m.ms, m.segments, format!("{}{}", e.layers_json(), e.cast_json()), e.sculptor.last.size, out.replace('\\', "/"), hdri_json(&e)
         );
         return Ok(());
     }

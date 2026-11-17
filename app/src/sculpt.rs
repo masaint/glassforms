@@ -74,6 +74,28 @@ struct Pristine {
     key: String,
     /// when it was last kept (to keep only the newest of a size)
     age: u64,
+    /// the shape's own size (`gf_core::sculpt::Sculpt::size_of`), once a stack with sizes as shares of it
+    /// has needed it
+    size: Option<f64>,
+}
+
+/// How deep below the surface the points inside a shape lie, on average (scene units): from eight slices
+/// of its volume read back (cheaply enough; it is done once for a shape, not for every change of the
+/// studio). NaN if nothing of it is inside.
+fn mean_depth(gpu: &Gpu, vol: &Volume) -> f64 {
+    let (mut sum, mut count) = (0.0f64, 0u64);
+    for i in 0..8 {
+        let z = (((i as f64 + 0.5) / 8.0) * vol.res as f64) as u32;
+        let Ok(bytes) = gpu.read(&vol.tex, 0, 0, z.min(vol.res - 1), vol.res, vol.res, 2) else { continue };
+        for h in bytemuck::cast_slice::<u8, half::f16>(&bytes) {
+            let d = h.to_f32();
+            if d < 0.0 {
+                sum -= d as f64;
+                count += 1;
+            }
+        }
+    }
+    if count > 0 { sum / count as f64 } else { f64::NAN }
 }
 
 /// What the last run came to (for the window and the timings).
@@ -84,6 +106,8 @@ pub struct Ran {
     pub layers: usize,
     pub cleaned: bool,
     pub pieces: bool,
+    /// the shape's own size, which sizes given as shares are taken of
+    pub size: f64,
 }
 
 /// The studio's pipelines and what they read, made the first time the studio runs (a program that never
@@ -125,6 +149,8 @@ pub struct Sculptor {
     pub footprint: f64,
     /// counts the shapes kept aside
     age: u64,
+    /// each layer's shape's own size, as last measured (0: not yet)
+    pub sizes: Vec<f64>,
 }
 
 fn compute_pipe(gpu: &Gpu, label: &str, module: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout, entry: &str) -> wgpu::ComputePipeline {
@@ -134,7 +160,7 @@ fn compute_pipe(gpu: &Gpu, label: &str, module: &wgpu::ShaderModule, layout: &wg
 
 impl Sculptor {
     pub fn new(gpu: &Gpu) -> Self {
-        Self { gpu: gpu.clone(), ok: gpu.storage16, pipes: None, work: Vec::new(), pristine: Vec::new(), applied: Vec::new(), last: Ran::default(), image_error: None, footprint: 0.0, age: 0 }
+        Self { gpu: gpu.clone(), ok: gpu.storage16, pipes: None, work: Vec::new(), pristine: Vec::new(), applied: Vec::new(), last: Ran::default(), image_error: None, footprint: 0.0, age: 0, sizes: Vec::new() }
     }
 }
 
@@ -299,11 +325,13 @@ impl Sculptor {
         let i = match self.pristine.iter().position(|p| p.key == key && p.vol.res == res) {
             Some(i) => i,
             None => {
-                self.pristine.push(Pristine { vol: Volume::new(&gpu, res, false), key: key.to_string(), age: 0 });
+                self.pristine.push(Pristine { vol: Volume::new(&gpu, res, false), key: key.to_string(), age: 0, size: None });
                 self.pristine.len() - 1
             }
         };
         self.pristine[i].age = self.age;
+        // (kept afresh: the shape may be another, so its size is measured again when next wanted)
+        self.pristine[i].size = None;
         let mut enc = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sculpt keep") });
         copy_volume(&mut enc, &vol.tex, &self.pristine[i].vol.tex, res);
         gpu.queue.submit([enc.finish()]);
@@ -364,6 +392,21 @@ impl Sculptor {
         let pieces = s.crumbs > 0.0 && !moving;
         if pieces { self.cc_for(wi); }
         let pi = self.pristine.iter().position(|p| p.key == key && p.vol.res == res).ok_or("the shape before the studio is not kept")?;
+        // The shape's own size, as it is before the studio (measured once for a shape, and kept for the
+        // window, which switches a layer between the two ways of giving sizes without changing its look);
+        // sizes given as shares of it become lengths.
+        let size = match self.pristine[pi].size {
+            Some(v) => v,
+            None => {
+                let v = Sculpt::size_of(mean_depth(&gpu, &self.pristine[pi].vol));
+                self.pristine[pi].size = Some(v);
+                v
+            }
+        };
+        if self.sizes.len() <= layer { self.sizes.resize(layer + 1, 0.0); }
+        self.sizes[layer] = size;
+        let resolved = s.any_relative().then(|| s.resolved(size));
+        let s = resolved.as_ref().unwrap_or(s);
         self.applied_slot(layer);
         let src = &self.pristine[pi].vol;
         let w = &self.work[wi];
@@ -466,7 +509,7 @@ impl Sculptor {
         gpu.queue.submit([enc.finish()]);
         if timed { gpu.wait(); }
         if let Some(a) = self.applied.get_mut(layer) { *a = format!("{key}#{}", s.key(phases, self.footprint)); }
-        self.last = Ran { res, ms: t0.elapsed().as_secs_f64() * 1e3, layers: s.live().count(), cleaned: open > 0.0 || s.round > 0.0, pieces };
+        self.last = Ran { res, ms: t0.elapsed().as_secs_f64() * 1e3, layers: s.live().count(), cleaned: open > 0.0 || s.round > 0.0, pieces, size };
         Ok(self.last)
     }
 

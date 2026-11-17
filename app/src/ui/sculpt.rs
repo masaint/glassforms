@@ -8,7 +8,7 @@
 //! cleanups of the whole stack.
 
 use eframe::egui::{self, Align2, Id, Pos2, Rect, Ui};
-use gf_core::sculpt::{Kind, Layer, Mask, Sculpt, BLENDS, KINDS, MASKS, MAX_LAYERS, MODES};
+use gf_core::sculpt::{Kind, Layer, Mask, Sculpt, BLENDS, KINDS, MASKS, MAX_LAYERS, MODES, SIZE_REF};
 use gf_core::state::State;
 
 use super::theme::*;
@@ -65,6 +65,22 @@ fn changed(st: &mut State) {
     st.sculpt_changed(false);
 }
 
+/// The shape's own size to switch sizes between shares of it and lengths by: as measured when the studio
+/// last ran on this layer, or SIZE_REF before it has.
+fn shape_size(px: &Panels) -> f64 {
+    if px.sculpt_size > 0.0 { px.sculpt_size } else { SIZE_REF }
+}
+
+/// The choice between sizes as shares of the shape's own size and as lengths in the scene. Returns the
+/// choice made, if one was.
+fn sizes_row(ui: &mut Ui, id: Id, relative: bool, size: f64) -> Option<bool> {
+    let items = [
+        Item::new("of the shape", relative).tip(format!("sizes are shares of the shape's own size (now {size:.3}: about the radius of its body), so the same layer looks alike on a thin tube and a fat solid")),
+        Item::new("in the scene", !relative).tip("sizes are lengths in the scene, whatever the shape"),
+    ];
+    named_run(ui, id, "sizes", &items).clicked.map(|k| k == 0)
+}
+
 /// The studio on or off, and what it cost the last time it ran.
 fn head(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     gap(ui, 4.0);
@@ -79,6 +95,11 @@ fn head(ui: &mut Ui, st: &mut State, px: &mut Panels) {
         Some((res, ms)) if !st.sculpt().is_empty() => format!("last made in {ms:.0} ms, {res} voxels a side"),
         _ if !st.sculpt().is_empty() => "being made…".to_owned(),
         _ => "add a layer with the menu below".to_owned(),
+    };
+    // (with sizes as shares of the shape's, the shape's size too: shorter, to fit)
+    let says = match px.sculpted {
+        Some((res, ms)) if !st.sculpt().is_empty() && st.sculpt().any_relative() && px.sculpt_size > 0.0 => format!("made in {ms:.0} ms at {res} · shape size {:.3}", px.sculpt_size),
+        _ => says,
     };
     let r = row(ui, 14.0);
     text_in(ui, r, Align2::LEFT_CENTER, &says, mono(10.0), HINT);
@@ -132,7 +153,10 @@ fn layers(ui: &mut Ui, st: &mut State, px: &mut Panels) {
         let r = row(ui, 22.0);
         if let Some(i) = select(ui, r, Id::unique("sculpt add"), &names, 0, mono(SIZE)) {
             if i > 0 {
-                st.sculpt_mut().layers.push(Layer::of(KINDS[i - 1].0));
+                // (a new layer gives its sizes as shares of the shape's; and so does a new stack its cleanups)
+                let fresh = st.sculpt().layers.is_empty() && st.sculpt().round == 0.0 && st.sculpt().wall == 0.0 && st.sculpt().crumbs == 0.0;
+                if fresh { st.sculpt_mut().relative = true; }
+                st.sculpt_mut().layers.push(Layer::new_relative(KINDS[i - 1].0));
                 st.sculpt_mut().on = true;
                 px.sculpt_layer = Some(n);
                 changed(st);
@@ -202,9 +226,18 @@ fn layer_rows(ui: &mut Ui, st: &mut State, px: &mut Panels, i: usize) {
         }
     }
 
+    // its sizes: shares of the shape's own size, or lengths
+    if let Some(r) = sizes_row(ui, Id::unique(("sculpt sizes", i)), l.relative, shape_size(px)) {
+        let size = shape_size(px);
+        st.sculpt_mut().layers[i].set_relative(r, size);
+        changed(st);
+        return;
+    }
+    // (as shares, the sliders reach what they reach as lengths on a shape of SIZE_REF)
+    let k = if l.relative { 1.0 / SIZE_REF } else { 1.0 };
     // its size and how far it reaches
     let size_label = if l.kind == Kind::Image { "picture size" } else { "size" };
-    let m = knob::value_row(ui, px, &key("scale"), size_label, l.scale, 0.02, if l.kind == Kind::Image { 3.0 } else { 1.0 }, 0.005);
+    let m = knob::value_row(ui, px, &key("scale"), size_label, l.scale, 0.02 * k, if l.kind == Kind::Image { 3.0 } else { 1.0 } * k, 0.005 * k.min(1.0));
     after(st, &m, |s, v| s.layers[i].scale = v);
     let depth_label = match (l.kind, l.kind.solid(), l.mode) {
         (Kind::Warp, _, _) => "amount",
@@ -212,7 +245,7 @@ fn layer_rows(ui: &mut Ui, st: &mut State, px: &mut Panels, i: usize) {
         (_, true, _) => "reach",
         _ => "depth",
     };
-    let m = knob::value_row(ui, px, &key("depth"), depth_label, l.depth, 0.0, if l.kind.solid() || l.kind == Kind::Warp { 0.4 } else { 0.1 }, 0.001);
+    let m = knob::value_row(ui, px, &key("depth"), depth_label, l.depth, 0.0, if l.kind.solid() || l.kind == Kind::Warp { 0.4 } else { 0.1 } * k, 0.001);
     after(st, &m, |s, v| s.layers[i].depth = v);
     // its own two sliders
     for (j, e) in l.kind.extras().iter().enumerate() {
@@ -222,7 +255,7 @@ fn layer_rows(ui: &mut Ui, st: &mut State, px: &mut Panels, i: usize) {
         after(st, &m, |s, v| if j == 0 { s.layers[i].a = v } else { s.layers[i].b = v });
     }
     if l.kind != Kind::Warp {
-        let m = knob::value_row(ui, px, &key("soft"), "softness", l.soft, 0.001, 0.08, 0.001);
+        let m = knob::value_row(ui, px, &key("soft"), "softness", l.soft, 0.001, 0.08 * k, 0.001);
         after(st, &m, |s, v| s.layers[i].soft = v);
     }
     let m = knob::value_row(ui, px, &key("seed"), "seed", l.seed, 1.0, 99.0, 1.0);
@@ -254,9 +287,9 @@ fn layer_rows(ui: &mut Ui, st: &mut State, px: &mut Panels, i: usize) {
     }
     if l.mask == Mask::Thick {
         // (a radius, and how gradually the layer comes in about it: sizes of branches, not of the scene)
-        let m = knob::value_row(ui, px, &key("mask at"), "thicker than", l.mask_at, 0.0, 0.3, 0.001);
+        let m = knob::value_row(ui, px, &key("mask at"), "thicker than", l.mask_at, 0.0, 0.3 * k, 0.001);
         after(st, &m, |s, v| s.layers[i].mask_at = v);
-        let m = knob::value_row(ui, px, &key("mask width"), "edge", l.mask_width, 0.001, 0.1, 0.001);
+        let m = knob::value_row(ui, px, &key("mask width"), "edge", l.mask_width, 0.001, 0.1 * k, 0.001);
         after(st, &m, |s, v| s.layers[i].mask_width = v);
     }
     if l.mask != Mask::None {
@@ -289,11 +322,17 @@ fn picture_row(ui: &mut Ui, st: &mut State, px: &mut Panels, i: usize, l: &Layer
 fn cleanup(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     section(ui, "cleanup", "the whole stack");
     let s = st.sculpt().clone();
-    let m = knob::value_row(ui, px, "sculpt:round", "round edges", s.round, 0.0, 0.05, 0.001);
+    if let Some(r) = sizes_row(ui, Id::unique("sculpt cleanup sizes"), s.relative, shape_size(px)) {
+        let size = shape_size(px);
+        st.sculpt_mut().set_relative(r, size);
+        changed(st);
+    }
+    let k = if s.relative { 1.0 / SIZE_REF } else { 1.0 };
+    let m = knob::value_row(ui, px, "sculpt:round", "round edges", s.round, 0.0, 0.05 * k, 0.001);
     after(st, &m, |s, v| s.round = v);
-    let m = knob::value_row(ui, px, "sculpt:wall", "thinnest wall", s.wall, 0.0, 0.1, 0.001);
+    let m = knob::value_row(ui, px, "sculpt:wall", "thinnest wall", s.wall, 0.0, 0.1 * k, 0.001);
     after(st, &m, |s, v| s.wall = v);
-    let m = knob::value_row(ui, px, "sculpt:crumbs", "drop crumbs", s.crumbs, 0.0, 0.3, 0.005);
+    let m = knob::value_row(ui, px, "sculpt:crumbs", "drop crumbs", s.crumbs, 0.0, 0.3 * k, 0.005);
     after(st, &m, |s, v| s.crumbs = v);
     let items = [Item::new("on", s.prefilter).tip("detail finer than about two pixels at this view is left out, so it cannot turn into speckle; made again when the zoom or the picture size changes by about 40%"), Item::new("off", !s.prefilter).tip("every detail is made, however small it is on the screen")];
     if let Some(k) = named_run(ui, Id::unique("sculpt prefilter"), "pixel filter", &items).clicked {

@@ -6,6 +6,7 @@ pub mod camera;
 pub mod cast;
 pub mod curve;
 pub mod env;
+pub mod export;
 pub mod field;
 pub mod history;
 pub mod sdf;

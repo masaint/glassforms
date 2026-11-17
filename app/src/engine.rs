@@ -888,6 +888,15 @@ impl Engine {
         (count > 0).then(|| 5.0 * sum / count as f64)
     }
 
+    /// Start writing the shape as a mesh to `path` (.obj or .stl): the volume the tracer draws, every layer
+    /// and the surface studio in it, at its own resolution (the detail setting). It is made on a thread
+    /// of its own (crate::export).
+    pub fn export_mesh(&self, path: &str) -> R<crate::export::Exporting> {
+        let vol = self.scene_volume().ok_or("there is no shape built to export")?;
+        let hb = if self.layers.combined { self.state.scene_hb() } else { gf_core::HB };
+        Ok(crate::export::start(&self.gpu, vol, hb, path))
+    }
+
     fn draw_preview(&mut self) {
         let p = &self.state.p;
         let m = rows(&self.state.light_m());
