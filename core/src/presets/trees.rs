@@ -93,7 +93,7 @@ fn params() -> Vec<ParamDef> {
         ParamDef::labelled("trunk", "trunk thickness", 0.03, 0.01, 0.07, 0.0005),
         ParamDef::labelled("flare", "flare", 0.7, 0.0, 2.0, 0.01),
         ParamDef::labelled("roots", "roots", 5.0, 0.0, 9.0, 1.0),
-        ParamDef::labelled("leaves", "leaves", 0.0, 0.0, 1.0, 0.01),
+        ParamDef::labelled("leaves", "leaves", 0.0, 0.0, 0.6, 0.01),
         ParamDef::labelled("leaf", "leaf size", 1.0, 0.3, 2.5, 0.01),
     ]
 }
@@ -303,7 +303,7 @@ impl Sliders {
             trunk: g(TRUNK, 0.03).clamp(0.002, 0.2),
             flare: g(FLARE, 0.7).clamp(0.0, 3.0),
             roots: g(ROOTS, 5.0).round().clamp(0.0, 16.0) as usize,
-            leaves: g(LEAVES, 0.0).clamp(0.0, 1.0),
+            leaves: g(LEAVES, 0.0).clamp(0.0, 0.6),
             leaf: g(LEAF, 1.0).clamp(0.1, 4.0),
         };
         // the forms' own rules, laid over the sliders
@@ -882,7 +882,7 @@ fn leaf_len(s: &Sliders, role: Role) -> f64 {
 }
 
 /// The tree as `grow` shows it: lines and their radii, and its leaves.
-fn draw(g: &Grown, s: &Sliders, grow: f64) -> RawCurve {
+fn draw(g: &Grown, s: &Sliders, grow: f64, quick: bool) -> RawCurve {
     let n = g.p.len();
     // When each node appears, from 0 to 1: the trunk rises in the first TRUNK_TIME, the crown spreads out
     // over the rest, every shoot lengthening at the same pace.
@@ -972,21 +972,27 @@ fn draw(g: &Grown, s: &Sliders, grow: f64) -> RawCurve {
         radii.push(r);
     }
     let mut raw = RawCurve { lines, closed: false, radii, frame: g.frame.clone(), ground: Some(0.0), blades: Vec::new() };
-    leaves(g, s, &part, &has_kid, &at, &mut raw);
+    leaves(g, s, &part, &has_kid, &at, quick, &mut raw);
     raw
 }
 
 /// The leaves of the tree as it is grown so far, into `raw`: blades with stalks near the ends of the
 /// shoots; along a weeping tree's whips, narrow blades all the way; a palm's leaflets down both sides of
 /// every frond; a conifer's needles in brushes along every twig.
-fn leaves(g: &Grown, s: &Sliders, part: &[f64], has_kid: &[bool], at: &dyn Fn(usize) -> V, raw: &mut RawCurve) {
+///
+/// Each node's leaves come from a generator of its own, so that they stay where they are while the tree
+/// grows. `quick` (while something moves, or the tree grows as the animation plays): the leaves of only
+/// one node in three, so that rebuilding every frame stays quick; all of them again once it is still.
+fn leaves(g: &Grown, s: &Sliders, part: &[f64], has_kid: &[bool], at: &dyn Fn(usize) -> V, quick: bool, raw: &mut RawCurve) {
     let n = g.p.len();
     let palm = s.form == PALM;
     if s.leaves <= 0.0 && !palm { return; }
-    let mut rng = Rng::new(s.seed ^ 0x51ab);
     let dir = |i: usize| if g.parent[i] == NONE { UP } else { unit(sub(g.p[i], g.p[g.parent[i] as usize])) };
     for i in 0..n {
         if part[i] <= 0.0 { continue; }
+        let mut rng = Rng::new(s.seed ^ 0x51ab ^ (i as u64).wrapping_mul(0x2545f4914f6cdd1d));
+        // (needles, and a columnar tree's crowded leaves: one node in six, there being so many more)
+        if quick && rng.next() > if matches!(s.form, CONIFER | COLUMNAR) { 1.0 / 6.0 } else { 1.0 / 3.0 } { continue; }
         let grown = part[i].min(1.0);
         let q = at(i);
         let d = dir(i);
@@ -1009,7 +1015,8 @@ fn leaves(g: &Grown, s: &Sliders, part: &[f64], has_kid: &[bool], at: &dyn Fn(us
             (CONIFER, _) => {
                 // needles: a brush round every twig, a few to each step
                 if g.carry[i] > 6.0 || has_kid[i] && g.from_tip[i] > 30 { continue; }
-                let count = (1.0 + 3.0 * s.leaves).round() as usize;
+                // (one to two to a step: more costs more than the 11.1 ms a frame allows at 4K)
+                let count = (1.0 + s.leaves).round() as usize;
                 let l = leaf_len(s, Role::Wood) * grown;
                 let side0 = across(d);
                 let side1 = cross(d, side0);
@@ -1017,8 +1024,9 @@ fn leaves(g: &Grown, s: &Sliders, part: &[f64], has_kid: &[bool], at: &dyn Fn(us
                     let a = 2.0 * PI * (k as f64 + rng.next()) / count as f64;
                     let out = unit(add(add(mul(side0, a.cos()), mul(side1, a.sin())), mul(d, 0.7)));
                     let base = add(q, mul(d, STEP * rng.next()));
-                    raw.lines.push([base, add(base, mul(out, l))].concat());
-                    raw.radii.push(vec![0.0007, 0.0005]);
+                    // (a needle is a blade narrower than it is thick: a fine stick, one piece for the baker
+                    // where a tube would be cut into several)
+                    blade(raw, base, out, side0, l, 0.06, 0.0);
                 }
             }
             (_, Role::Whip) => {
@@ -1032,7 +1040,8 @@ fn leaves(g: &Grown, s: &Sliders, part: &[f64], has_kid: &[bool], at: &dyn Fn(us
             _ => {
                 // broad leaves on stalks, on the last few steps of every shoot
                 if has_kid[i] && g.from_tip[i] > 3 { continue; }
-                if rng.next() > s.leaves { continue; }
+                // (a columnar tree has so many shoots that fewer of them bear leaves)
+                if rng.next() > s.leaves * if s.form == COLUMNAR { 0.6 } else { 1.0 } { continue; }
                 let count = 1 + (2.5 * s.leaves * rng.next()).round() as usize;
                 let l = leaf_len(s, Role::Wood) * grown * (0.8 + 0.4 * rng.next());
                 for _ in 0..count {
@@ -1067,7 +1076,7 @@ fn blade(raw: &mut RawCurve, base: V, dir: V, side: V, long: f64, wide: f64, cup
 /// Trees grown lately, by their sliders (all but `grow`): moving `grow` only cuts one of them.
 static GROWN: Mutex<Vec<(Vec<u64>, Arc<Grown>)>> = Mutex::new(Vec::new());
 
-fn tree(v: &[f64], _o: &CurveOpts) -> RawCurve {
+fn tree(v: &[f64], o: &CurveOpts) -> RawCurve {
     let s = Sliders::read(v);
     let key: Vec<u64> = v.iter().enumerate().filter(|&(i, _)| i != GROW).map(|(_, x)| x.to_bits()).collect();
     let found = GROWN.lock().ok().and_then(|c| c.iter().find(|(k, _)| *k == key).map(|(_, g)| g.clone()));
@@ -1082,7 +1091,7 @@ fn tree(v: &[f64], _o: &CurveOpts) -> RawCurve {
             g
         }
     };
-    draw(&g, &s, v.get(GROW).copied().unwrap_or(1.0))
+    draw(&g, &s, v.get(GROW).copied().unwrap_or(1.0), o.quick)
 }
 
 /// The names of the `form` slider's settings.
@@ -1154,7 +1163,7 @@ mod tests {
             let s = Sliders::read(&v);
             let g = grow_tree(&s);
             assert!(g.tips > 5, "{}: {} tips", FORMS[f], g.tips);
-            let raw = draw(&g, &s, 1.0);
+            let raw = draw(&g, &s, 1.0, false);
             assert_eq!(raw.lines.len(), raw.radii.len());
             let r0 = raw.radii[0].iter().copied().fold(0.0, f64::max);
             assert!(raw.radii.iter().skip(1).all(|r| r.iter().all(|&x| x <= r0)), "{}", FORMS[f]);
@@ -1178,15 +1187,15 @@ mod tests {
         let mut v = of_form(BROADLEAF);
         v[LEAVES] = 0.6;
         let s = Sliders::read(&v);
-        assert!(draw(&grow_tree(&s), &s, 1.0).blades.len() > 50);
+        assert!(draw(&grow_tree(&s), &s, 1.0, false).blades.len() > 50);
         let s = Sliders::read(&of_form(PALM));
-        assert!(draw(&grow_tree(&s), &s, 1.0).blades.len() > 100, "a palm always has its leaflets");
+        assert!(draw(&grow_tree(&s), &s, 1.0, false).blades.len() > 100, "a palm always has its leaflets");
         let mut v = of_form(CONIFER);
         v[LEAVES] = 0.5;
         let s = Sliders::read(&v);
         let g = grow_tree(&s);
-        let (bare, needled) = (draw(&g, &Sliders::read(&of_form(CONIFER)), 1.0), draw(&g, &s, 1.0));
-        assert!(needled.lines.len() > bare.lines.len() + 500);
+        let (bare, needled) = (draw(&g, &Sliders::read(&of_form(CONIFER)), 1.0, false), draw(&g, &s, 1.0, false));
+        assert!(needled.blades.len() > bare.blades.len() + 500);
     }
 
     #[test]
@@ -1194,7 +1203,7 @@ mod tests {
         let v = defaults();
         let s = Sliders::read(&v);
         let g = grow_tree(&s);
-        let (half, whole) = (draw(&g, &s, 0.5), draw(&g, &s, 1.0));
+        let (half, whole) = (draw(&g, &s, 0.5, false), draw(&g, &s, 1.0, false));
         let count = |r: &RawCurve| r.lines.iter().map(|l| l.len()).sum::<usize>();
         assert!(count(&half) < count(&whole));
         assert_eq!(half.frame, whole.frame);

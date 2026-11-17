@@ -28,7 +28,13 @@ CASES = [
     ('columnar', ['p.form=2', 'p.seed=3', 'p.bole=0.2']),
     ('weeping', ['p.form=3', 'p.seed=4', 'p.bole=0.4', 'p.width=1.6']),
     ('weeping leaves 0.6', ['p.form=3', 'p.seed=4', 'p.bole=0.4', 'p.width=1.6', 'p.leaves=0.6']),
+    ('weeping leaves 1', ['p.form=3', 'p.seed=4', 'p.bole=0.4', 'p.width=1.6', 'p.leaves=1']),
+    ('broadleaf leaves 0.8', ['p.form=0', 'p.seed=2', 'p.leaves=0.8']),
+    ('columnar leaves 0.6', ['p.form=2', 'p.seed=3', 'p.bole=0.2', 'p.leaves=0.6']),
+    ('columnar leaves 0.8', ['p.form=2', 'p.seed=3', 'p.bole=0.2', 'p.leaves=0.8']),
+    ('columnar leaves 1', ['p.form=2', 'p.seed=3', 'p.bole=0.2', 'p.leaves=1']),
     ('palm', ['p.form=4', 'p.seed=1', 'p.bole=2', 'p.lean=0.4', 'p.trunk=0.02', 'p.roots=0']),
+    ('palm leaves 1', ['p.form=4', 'p.seed=1', 'p.bole=2', 'p.lean=0.4', 'p.trunk=0.02', 'p.roots=0', 'p.leaves=1']),
 ]
 
 
