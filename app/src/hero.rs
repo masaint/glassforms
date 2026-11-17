@@ -34,6 +34,13 @@ impl Hero {
     pub fn asked(mode: Option<f64>, k: Option<f64>) -> Hero {
         Hero { mode: mode.map_or(0, |m| m.clamp(0.0, 2.0) as u8), k: k.map_or(1, |k| k.clamp(1.0, 3.0) as u8), clamp: 0, seq: 0, every: 6, taa: 0 }
     }
+    /// The speed-up as the setting heroSettle has it: one wavelength inside while settling, a whole-comb
+    /// frame in seven (a period with no factor in common with adaptive refining's recheck of 8: with 6, a
+    /// settled pixel's rechecks met whole-comb frames in the wrong share, measured -0.57 red on hammered)
+    /// keeping the settled picture today's (heroClamp 5), the hashed sequence (heroSeq 3).
+    pub fn settling(on: bool) -> Hero {
+        if on { Hero { mode: 2, k: 1, clamp: 5, seq: 3, every: 7, taa: 0 } } else { Hero::default() }
+    }
     /// With the experiment's further choices (`heroClamp`, `heroSeq`).
     pub fn with(mut self, clamp: Option<f64>, seq: Option<f64>, every: Option<f64>, taa: Option<f64>) -> Hero {
         if let Some(t) = taa { self.taa = t.clamp(0.0, 1.0) as u8; }

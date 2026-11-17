@@ -267,6 +267,8 @@ pub struct Engine {
     pub refine_most: u32,
     /// adaptive refining: leave pixels whose mean is certain out of the refining passes (adapt.rs)
     pub adapt: bool,
+    /// the spectral speed-up of the renderer (hero.rs) is set from the command line, not from the setting
+    pub hero_forced: bool,
 }
 
 fn rows(m: &[f64; 9]) -> [[f32; 4]; 3] {
@@ -287,7 +289,7 @@ impl Engine {
             maker: Arc::new(OnceLock::new()), picture: None, picture_no: 0, glass: None, glass_from: None, hdri_seen: None, loading: None, next: None, building: false, hdri_error: None, hdri_wait: auto,
             show_wanted: Cell::new(false), show: None, shown: None, lighting_no: 0, last_lu: None,
             dirty: true, cut: true, last_tu: None, last_look: None,
-            planes_until: None, planes_shown: false, size_override: None, auto, averaging: false, error: None, last_bake_ms: 0.0, last_bake_parts: [0.0; 3], time_bakes: false, refine_n: 1, refine_part: 0.0, refine_count: 0, refine_most: REFINE_MOST, adapt: crate::adapt::enabled(), thick_last: None, thick_later: None, bake_done: Arc::default(), spans: [0.0; 4], warmed_for: String::new(),
+            planes_until: None, planes_shown: false, size_override: None, auto, averaging: false, error: None, last_bake_ms: 0.0, last_bake_parts: [0.0; 3], time_bakes: false, refine_n: 1, refine_part: 0.0, refine_count: 0, refine_most: REFINE_MOST, adapt: crate::adapt::enabled(), thick_last: None, thick_later: None, bake_done: Arc::default(), spans: [0.0; 4], warmed_for: String::new(), hero_forced: false,
         };
         e.paint_lights();
         e
@@ -1374,6 +1376,8 @@ impl Engine {
 
     /// Draw one frame with things as they are (no clock, no resize).
     pub fn draw(&mut self, skip_post: bool) {
+        // the spectral speed-up while settling, as the setting says (unless the command line set it)
+        if !self.hero_forced { self.renderer.hero = crate::hero::Hero::settling(self.state.p.hero_settle > 0.5); }
         self.bake_wanted();
         self.light_upkeep();
         if std::mem::take(&mut self.state.cut) { self.cut = true; self.dirty = true; }

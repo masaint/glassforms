@@ -40,6 +40,7 @@ pub fn setting(name: &str) -> Option<(f64, f64)> {
         "nb" => (0.0, 32.0),
         "ns" => (1.0, 32.0),
         "nw" => (1.0, 32.0),
+        "heroSettle" => (0.0, 1.0),
         "lensN" => (1.0, 64.0),
         "exposure" => (0.0, 1000.0),
         "bloom" => (0.0, 10.0),

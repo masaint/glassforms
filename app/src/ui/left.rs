@@ -53,6 +53,7 @@ pub fn show(ui: &mut Ui, st: &mut State, px: &mut Panels) {
         if px.group(ui, "quality", "quality", &says) {
             for name in ["smooth", "scale", "ns", "nw", "nb"] { knob::knob_row(ui, st, k(name), px); }
             denoise(ui, st, px);
+            spectral(ui, st, px);
             let samples: Vec<(u32, String)> = vec![(8, "8 (draft)".into()), (16, "16".into()), (32, "32".into()), (64, "64".into()), (128, "128 (slow)".into())];
             if let Some(v) = pick_value(ui, "video samples", "video samples", &samples, &st.render.samples) { st.render.samples = v; }
             gap(ui, 3.0);
@@ -100,6 +101,18 @@ fn denoise(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     px.note("denoise", r);
     let tip = "Cleans the grain of light followed by chance (true scattering, roughness by sampling) while the view moves and in the first frames of a still one, and switches itself off as the picture settles. \"Clear glass too\": also clear glass and gems in motion, which keeps their brightness.";
     ui.interact(egui::Rect::from_min_size(r.min, egui::vec2(label_width(ui), r.height())), Id::unique("denoise name"), egui::Sense::hover()).on_hover_text(tip);
+}
+
+/// The spectral speed-up while settling (hero.rs): one wavelength inside clear dispersive glass a frame.
+fn spectral(ui: &mut Ui, st: &mut State, px: &mut Panels) {
+    let now = usize::from(st.p.get("heroSettle").unwrap_or(1.0) > 0.5);
+    let names: Vec<String> = ["every wavelength", "faster while settling"].iter().map(|n| n.to_string()).collect();
+    let at = ui.cursor().min;
+    if let Some(i) = pick(ui, Id::unique("heroSettle"), "spectrum", &names, now) { st.p.set("heroSettle", i as f64); }
+    let r = egui::Rect::from_min_max(at, egui::pos2(at.x + ui.available_width(), ui.cursor().top()));
+    px.note("heroSettle", r);
+    let tip = "While a still picture settles, clear glass with dispersion sends one of its wavelengths inside a frame instead of all of them, and every few frames all of them, so the settled picture is the same: it settles about twice as fast. Moving pictures are drawn as ever.";
+    ui.interact(egui::Rect::from_min_size(r.min, egui::vec2(label_width(ui), r.height())), Id::unique("heroSettle name"), egui::Sense::hover()).on_hover_text(tip);
 }
 
 /// The head of the output group: the picture saved as a still, and the whole setup kept in a file and

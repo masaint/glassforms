@@ -163,7 +163,11 @@ fn headless(args: &Args) -> Result<Engine, String> {
     if let Some(m) = args.num("refineMost") { e.refine_most = m.max(1.0) as u32; }
     if upscale.is_some() { e.renderer.set_upscale(upscale); }
     // heroInside=1|2 heroK=K: K wavelengths inside the glass, always or only while settling (hero.rs)
-    e.renderer.hero = glassforms::hero::Hero::asked(args.num("heroInside"), args.num("heroK")).with(args.num("heroClamp"), args.num("heroSeq"), args.num("heroEvery"), args.num("heroTaa"));
+    // (given, any of these overrides the setting heroSettle)
+    if ["heroInside", "heroK", "heroClamp", "heroSeq", "heroEvery", "heroTaa"].iter().any(|k| args.num(k).is_some()) {
+        e.renderer.hero = glassforms::hero::Hero::asked(args.num("heroInside"), args.num("heroK")).with(args.num("heroClamp"), args.num("heroSeq"), args.num("heroEvery"), args.num("heroTaa"));
+        e.hero_forced = true;
+    }
     // adapt=0: no adaptive refining (every pixel traced every pass); adaptTol=: how uncertain a mean may be
     // and count as certain, in levels of an 8-bit screen; adaptMin=: samples before it may (adapt.rs)
     if let Some(a) = args.num("adapt") { e.adapt = a >= 0.5; }

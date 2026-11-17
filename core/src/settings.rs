@@ -56,6 +56,10 @@ settings! {
     /// rays per pixel, and wavelengths carried by each
     ns, "ns", 1.0;
     nw, "nw", 3.0;
+    /// while a still picture settles, clear dispersive glass sends one of the `nw` wavelengths inside the
+    /// body a frame instead of all of them (with a whole-comb frame now and then that keeps the settled
+    /// picture what it was): about twice as fast to settle (app/src/hero.rs). 0 = off
+    hero_settle, "heroSettle", 1.0;
     exposure, "exposure", 1.0;
     bloom, "bloom", 0.25;
     /// what the bloom is: 0 = the lens's glare (its diffraction and veil, mixed in so that light is kept:
