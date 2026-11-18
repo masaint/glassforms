@@ -51,7 +51,7 @@ fn hasB(k: i32, bit: u32) -> bool {
 
 //#if HOLLOW
 // (whether the body in hand is a thin wall around air: its film then thins to black film)
-fn isHollow() -> bool { return mb.kind[cb] > 2.5; }
+fn isHollow() -> bool { return wallB(cb); }
 //#endif
 
 //#if SSS
@@ -142,10 +142,43 @@ fn opaqueB(k: i32) -> bool {
   if (k < 0) { return false; }
   return mb.kind[k] > 0.5 && mb.kind[k] < 1.5;
 }
+// a thin wall of glass round air
+fn wallB(k: i32) -> bool {
+  if (k < 0) { return false; }
+  return mb.kind[k] > 2.5 && mb.kind[k] < 3.5;
+}
+// A fired or painted body (a ceramic that lets next to nothing through: lacquer, stoneware, porcelain):
+// light stops at its surface. Alone it is lit by the surface pass; among several bodies, and wherever it
+// is seen through another, it is lit here (paintB).
+fn paintB(k: i32) -> bool {
+  if (k < 0) { return false; }
+  return mb.kind[k] > 3.5;
+}
+// What such a body sends back along -rd from p (n: its outward normal): its glaze's reflection, softened
+// by the glaze's haze, over the coloured body lit by the room and the lights as a matte surface gathers
+// them (the lights' map spread about a radian about the normal), darkened in the folds and where another
+// body stands close over it (the scene's distances along the normal: the shell round it, a neighbour).
+fn paintB_seen(k: i32, p: vec3f, n_in: vec3f, rd: vec3f) -> vec3f {
+  var n = n_in;
+  if (dot(n, rd) > 0.0) { n = -n; }
+  let c = clamp(-dot(rd, n), 0.0, 1.0);
+  let nc = max(mb.b[k].surf.z, 1.45);
+  let F = fresnel(c, 1.0, nc);
+  let haze = mb.b[k].tab[30].w;
+  let refl = seenB(reflect(rd, n), haze);
+  var shut = 0.0;
+  for (var i = 0; i < 4; i++) {
+    let h = 0.015 + 0.045 * f32(i);
+    shut += max(h - abs(mapW(p + n * h)), 0.0) / h;
+  }
+  let ao = clamp(1.0 - 0.3 * shut, 0.0, 1.0);
+  let lit = envL(n, 0.9) * ao;
+  return F * refl * mix(1.0, ao, 0.5) + (1.0 - F) * mb.b[k].body.rgb * lit;
+}
 // the index of what a place is made of, at a wavelength (air, and the air inside a thin wall: 1)
 fn iorB(k: i32, lam: f32) -> f32 {
   if (k < 0) { return 1.0; }
-  if (mb.kind[k] > 2.5) { return 1.0; }
+  if (wallB(k)) { return 1.0; }
   return mb.ior[k] + mb.disp[k] * (1.0e6 / (lam * lam) - 3.3058) / 4.2092;
 }
 
@@ -193,7 +226,7 @@ fn surfB(a: i32, b: i32, c: f32, q: vec3f, n: vec3f, lam: f32) -> vec3f {
 //#if FILM
       under = filmRGB(cc, d, na, nb);
 //#endif
-    } else if (mb.kind[o] > 2.5) {
+    } else if (wallB(o)) {
       // a thin wall of glass: both its faces together
       let F = fresnel(c, 1.0, mb.b[o].sss.w);
       under = vec3f(2.0 * F / (1.0 + F));
@@ -532,6 +565,7 @@ fn beyondB(ro_in: vec3f, rd_in: vec3f, m0: i32, lam: f32, sg0: f32) -> vec3f {
     }
     var c = -dot(rd, nq);
     if (c < 0.0) { nq = -nq; c = -c; }      // nq now faces the ray
+    if (paintB(b)) { return col + thr * paintB_seen(b, q, nq, rd); }
     let o = max(m, b);
     let R = surfB(m, b, c, q, nq, lam);
     let alpha = mb.b[o].surf.x;
@@ -565,7 +599,7 @@ fn beyondB(ro_in: vec3f, rd_in: vec3f, m0: i32, lam: f32, sg0: f32) -> vec3f {
     // (only what is sent back into the air is added, as for plain glass: reflections inside are let go)
     if (m < 0) { col += thr * R * (seenB(mir, sqrt(sg2 + 2.0 * alpha * alpha)) + skyFarB(o, mir)); }
     thr *= 1.0 - R;
-    if (mb.kind[o] > 2.5) { thr *= mb.b[o].axis.xyz; }      // through a thin wall: its tint, once
+    if (wallB(o)) { thr *= mb.b[o].axis.xyz; }      // through a thin wall: its tint, once
     sg2 += widenB(alpha, na, c, nb, od, nq);
     rd = od;
     ro = q - nq * 0.006;
@@ -582,6 +616,7 @@ fn shadeB(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
   var k = mediumOf(dist4(p - n * 0.004));
   if (k < 0) { k = nearestOf(dist4(p)); }
   cb = k;
+  if (paintB(k)) { return paintB_seen(k, p, n, rd); }
   let alpha = mb.b[k].surf.x;
   let sigR = 1.41421 * alpha;
   let mir = reflect(rd, n);
@@ -591,6 +626,10 @@ fn shadeB(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
 //#if ROUGH
   if (alpha > 0.0) { envR = frTop(rd, n, xi, cosi); }
 //#endif
+  // Under a clear coat the roughness is the body's, below the coat: the coat itself is polished and
+  // mirrors its surroundings sharp, as a single coated body's does (shadeM: the coat's reflection is
+  // sharp whatever lies under it). Frosted glass under a coat: glossy reflections over a frosted body.
+  if (alpha > 0.0 && mb.b[k].surf.z > 1.001) { envR = sharpEnv(mir, p, n, cosi); }
 //#if FILM
   if (mb.b[k].film.x > 0.0 && alpha <= 0.0) { envR = mirrorEnv(mir, mirrorLod(p, n, cosi)); }
 //#endif
@@ -685,7 +724,7 @@ fn shadeB(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
     var pos = p - n * 0.004;
     var m = k;
     var att = 1.0 - R0;
-    if (mb.kind[k] > 2.5) { att *= mb.b[k].axis.xyz; }
+    if (wallB(k)) { att *= mb.b[k].axis.xyz; }
     var L = vec3f(0.0);
     // Surfaces met inside are of two sorts. Where the ray is sent back (by the air outside, a metal) it
     // has bounced, and bounces are counted as plain glass counts them. Where another clear or milky
@@ -735,6 +774,11 @@ fn shadeB(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
       L += throughB(m, pos, d0, s, &att, &sg2);
       var c = -dot(dir, nq);
       if (c < 0.0) { nq = -nq; c = -c; }
+      if (paintB(nx)) {
+        // a painted body met from inside a clear one: seen, and the path ends there
+        L += att * paintB_seen(nx, q, nq, dir);
+        break;
+      }
       let o = max(m, nx);
       var R = surfB(m, nx, c, q, nq, lam);
       let al = mb.b[o].surf.x;
@@ -768,14 +812,17 @@ fn shadeB(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
           L += att * (fw.x * we) * frDeep(s) * frAll(nq);
           through = vec3f(1.0 - fw.x);
           R = vec3f(fw.x * (1.0 - we));
-          od = frExit(dir, nq, nq, fw, na);
-          wide = frVout(sg2, fw, dot(od, nq), na, vec2f(0.0));
+          // (frExit and frVout take the wall's outward normal, the way the light is heading; nq here faces
+          // the ray. Given nq, the light that left was sent straight back the way it came: a rough
+          // body among several showed nothing of what lay behind or inside it)
+          od = frExit(dir, -nq, -nq, fw, na);
+          wide = frVout(sg2, fw, dot(od, -nq), na, vec2f(0.0));
           next = frNext(sg2, vec2f(0.0));
         }
 //#endif
         if (dot(od, od) > 0.5) {
           var X = att * through;
-          if (mb.kind[o] > 2.5) { X *= mb.b[o].axis.xyz; }
+          if (wallB(o)) { X *= mb.b[o].axis.xyz; }
           if (nx >= 0) {
             // on into the next body; what this surface sends back is taken as lit by what lies that way
             L += att * R * (seenB(mir, sqrt(sg2 + 2.0 * al * al)) + skyFarB(o, mir));

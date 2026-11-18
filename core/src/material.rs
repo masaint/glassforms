@@ -1262,7 +1262,9 @@ pub fn body_variant(p: &Settings) -> Variant {
 /// 2 milky, 3 a thin wall around air.
 pub fn body_kind(p: &Settings) -> f32 {
     let v = Variant::of(p);
-    if v.metal { 1.0 } else if v.sss { 2.0 } else if v.hollow { 3.0 } else { 0.0 }
+    // (4: a fired or painted body that lets next to nothing through, lit at its surface, as it casts:
+    // cast.rs, optics_of)
+    if v.metal { 1.0 } else if v.ceramic && p.ceramic_through < 0.3 { 4.0 } else if v.sss { 2.0 } else if v.hollow { 3.0 } else { 0.0 }
 }
 
 /// What else a body has, as the tracer of several bodies reads it (bits of `MB.has`, one number a
