@@ -30,3 +30,12 @@ cargo test --release
 ```
 
 The GPU tests need a Vulkan device.
+
+## Licence
+
+Dual-licensed under either of
+
+- the [MIT licence](LICENSE-MIT), or
+- the [Apache License, Version 2.0](LICENSE-APACHE),
+
+at your option. Unless you explicitly state otherwise, any contribution you intentionally submit for inclusion in this work, as defined in the Apache-2.0 licence, is dual-licensed as above, without any additional terms or conditions.

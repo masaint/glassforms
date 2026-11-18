@@ -2,6 +2,7 @@
 name = "glassforms"
 version.workspace = true
 edition.workspace = true
+license = "MIT OR Apache-2.0"
 description = "Glass Forms: shapes defined by mathematics, rendered live as dispersive glass."
 
 [lib]

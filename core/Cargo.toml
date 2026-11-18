@@ -2,6 +2,7 @@
 name = "gf-core"
 version.workspace = true
 edition.workspace = true
+license = "MIT OR Apache-2.0"
 description = "Glass Forms: everything that needs no GPU. Shapes, curves, animation, settings."
 
 [dependencies]
