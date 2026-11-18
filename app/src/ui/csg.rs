@@ -193,11 +193,14 @@ fn selected(ui: &mut Ui, st: &mut State, px: &mut Panels, i: usize) {
         }
     });
     if let Some((fi, pi, file)) = pick {
+        // (a path part takes the path up now, if the shape up is a path)
+        let paths = gf_core::presets::paths::FAMILY;
+        let up_path = (st.families[fi].id == paths && st.family().id == paths).then(|| st.shape().model.clone());
         let part = &mut st.csg.parts[i];
         part.family = st.families[fi].id.to_string();
         part.preset = st.families[fi].presets[pi].id.to_string();
         part.values.clear();
-        part.model = if file { up_model.unwrap_or_default() } else { String::new() };
+        part.model = if file { up_model.unwrap_or_default() } else { up_path.unwrap_or_default() };
         st.want = Some(Detail::Full);
     }
     // a grid part: its volume's voxels a side (and memory), and a tube's thickness, melt and length

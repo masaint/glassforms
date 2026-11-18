@@ -698,7 +698,7 @@ impl State {
         if !self.plain() { return None; }
         let (f, p) = (self.family(), self.preset());
         // (a tree is not one tube: its thickness is measured)
-        (f.kind == Kind::Curve && f.id != crate::presets::trees::FAMILY).then(|| 2.0 * p.tube.unwrap_or(f.tube) * self.shape().thick)
+        (f.kind == Kind::Curve && f.id != crate::presets::trees::FAMILY && f.id != crate::presets::paths::FAMILY).then(|| 2.0 * p.tube.unwrap_or(f.tube) * self.shape().thick)
     }
     /// A material given as text: its id (`gold`), or its position in the list.
     fn material_arg(&mut self, v: &str) -> bool {
@@ -789,7 +789,9 @@ impl State {
         for (i, d) in p.params.iter().enumerate() {
             add(d.id, d.label, d.lo, d.hi, d.step, KnobRef::Param(i));
         }
-        if f.kind == Kind::Curve {
+        // (a path's profile has sizes of its own, and its stretches meet exactly: nothing more to set)
+        if f.id == crate::presets::paths::FAMILY {
+        } else if f.kind == Kind::Curve {
             add("@thick", "thickness", 0.4, 3.0, 0.02, KnobRef::Thick);
             add("@melt", "melt", 0.0, 0.03, 0.0005, KnobRef::Melt);
             if !p.fixed_length { add("@len", "length", 0.1, 3.0, 0.02, KnobRef::Len); }
@@ -1345,7 +1347,7 @@ impl State {
             curve_shape => {
                 let tube = p.tube.unwrap_or(fam.tube) * st.thick;
                 // a melt wider than the tube would dissolve it
-                let melt = st.melt.min(0.45 * tube);
+                let melt = if fam.id == crate::presets::paths::FAMILY { 0.0 } else { st.melt.min(0.45 * tube) };
                 let mut place = PlaceOpts { centre: p.centre, fit: p.fit, axes: p.axes, align: p.align.unwrap_or(fam.align), e: None };
                 // while animating, do not let the face-on turn swing about
                 if moving { place.e = st.e; }
@@ -1516,6 +1518,15 @@ impl State {
                 true
             }
             "model" => self.set_model(value),
+            // the path of the paths' shapes (kept as their shape's `model`: `path::Path::text`)
+            "path" => match self.families.iter().position(|f| f.id == crate::presets::paths::FAMILY) {
+                Some(f) => {
+                    self.shapes[f].model = value.to_string();
+                    self.want = Some(Detail::Full);
+                    true
+                }
+                None => false,
+            },
             // the words of the 3D text (kept as its shape's `model`)
             "text" => match self.families.iter().position(|f| f.id == crate::presets::text3d::FAMILY) {
                 Some(f) => {

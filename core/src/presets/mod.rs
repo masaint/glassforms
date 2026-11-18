@@ -20,6 +20,7 @@ pub mod knots;
 pub mod links;
 pub mod models;
 pub mod orbitals;
+pub mod paths;
 pub mod polyhedra;
 pub mod snowflakes;
 pub mod solids;
@@ -121,6 +122,13 @@ pub enum Term {
     /// band's), `edges` need hold only those within `margin` of the band (with every edge that crosses
     /// it), and no distance beyond `margin` is told. A margin of 0: the whole outline, no band.
     Glyph { o: [f64; 3], ux: [f64; 3], uy: [f64; 3], depth: f64, round: f64, band: [f64; 3], edges: Vec<[f64; 4]> },
+    /// a stretch of a profile swept along a path (`path::sweep`): a rounded rectangle from `a` to `c`, its
+    /// half-sizes (across, through) `size_a` at a and `size_c` at c, its across direction `side_a` and
+    /// `side_c` (square to the stretch, or nearly), its corners rounded by `round`; cut at a by the plane
+    /// through a across `n0` and at c by the plane through c across `n1` (both pointing along the stretch).
+    /// `ends`: which of those cuts is an open end of the path. A cut between two stretches only shares out
+    /// the space between them; inside the solid it is no surface, so the depth there is not measured to it.
+    Sweep { a: [f64; 3], c: [f64; 3], side_a: [f64; 3], side_c: [f64; 3], size_a: [f64; 2], size_c: [f64; 2], round: f64, n0: [f64; 3], n1: [f64; 3], ends: [bool; 2] },
 }
 
 /// A flat leaf: from `base` to `tip` along its midrib; `side` a unit vector across it in its plane; its
@@ -281,6 +289,6 @@ impl Family {
 pub fn families() -> Vec<Family> {
     vec![
         attractors::family(), knots::family(), surfaces::family(), algebraic::family(), gems::family(), solids::family(), forms::family(), studio::family(), fractals::family(), topology::family(), orbitals::family(), polyhedra::family(), trees::family(), models::family(),
-        links::family(), braids::family(), fieldlines::family(), crystals::family(), foam::family(), branching::family(), snowflakes::family(), text3d::family(),
+        links::family(), braids::family(), fieldlines::family(), crystals::family(), foam::family(), branching::family(), snowflakes::family(), text3d::family(), paths::family(),
     ]
 }

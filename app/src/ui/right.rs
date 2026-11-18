@@ -77,6 +77,8 @@ pub fn show(ui: &mut Ui, st: &mut State, px: &mut Panels) {
         maths(ui, st, px);
         words(ui, st, px);
         sliders(ui, st, px);
+        // (a path: the builder, under the profile's sliders)
+        super::paths::panel(ui, st, px);
         // (and, from setups of before, a volume object with parts beside it; not one baked from a tree)
         if st.is_csg_object(st.stack.sel) || (!st.csg.baked && !st.csg.parts.is_empty()) { super::csg::show(ui, st, px); }
         layers::placement(ui, st, px);
@@ -397,7 +399,7 @@ fn sliders(ui: &mut Ui, st: &mut State, px: &mut Panels) {
         if st.knob_choices(k).is_some() { continue; }
         if model { model_slider(ui, st, px, k) } else { knob::knob_row(ui, st, k, px) }
     }
-    if st.family().kind == Kind::Curve {
+    if st.family().kind == Kind::Curve && st.family().id != gf_core::presets::paths::FAMILY {
         let pace = st.shape().bead_period;
         if let Some(v) = knob::plain_row(ui, Id::unique("bead pace"), "bead pace s", pace, 0.3, 10.0, 0.1).value {
             st.shape_mut().bead_period = v;

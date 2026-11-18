@@ -1753,6 +1753,8 @@ pub fn piece_len(pts: &[f32], i: usize) -> usize {
 ///     5 hex column tag (5, r, h)      (c), (axis), (u)
 ///     6 outline    tag (6, edges, depth, round)  (o, scale), (ux), (uy), (band y0, y1, margin), then
 ///                  (x0, y0, x1, y1) per edge
+///     7 sweep      tag (7, round)     (a, half-width at a), (c, half-width at c), (side at a, half-height
+///                  at a), (side at c, half-height at c), (cut at a, 1 if an end), (cut at c, 1 if an end)
 /// The piece is everything inside all of its terms. The baker draws only the segment from its first
 /// point to its second (`bake_curve.wgsl` `piece_dist`), into its box.
 /// `thick` (the thickness slider) scales the walls of shells and slabs; `ds` is the curve's step: no wall
@@ -1819,6 +1821,19 @@ pub fn add_pieces(c: &mut Curve, pieces: &[crate::presets::Piece], thick: f64, d
                     put(y[0] / s, y[1] / s, y[2] / s, 0.0);
                     put(band[0], band[1], band[2], 0.0);
                     for e in edges { put(e[0], e[1], e[2], e[3]); }
+                }
+                Term::Sweep { a, c, side_a, side_c, size_a, size_c, round, n0, n1, ends } => {
+                    // (the sizes are the thickness slider's to scale, and never thinner than a wall holds)
+                    let k = sc * thick;
+                    let s = |v: f64| (v * k).max(thin);
+                    let (qa, qc, sa, scd, m0, m1) = (place(a), place(c), dir(side_a), dir(side_c), dir(n0), dir(n1));
+                    put(7.0, round * k, 0.0, 0.0);
+                    put(qa[0], qa[1], qa[2], s(size_a[0]));
+                    put(qc[0], qc[1], qc[2], s(size_c[0]));
+                    put(sa[0], sa[1], sa[2], s(size_a[1]));
+                    put(scd[0], scd[1], scd[2], s(size_c[1]));
+                    put(m0[0], m0[1], m0[2], if ends[0] { 1.0 } else { 0.0 });
+                    put(m1[0], m1[1], m1[2], if ends[1] { 1.0 } else { 0.0 });
                 }
             }
         }
@@ -1890,6 +1905,18 @@ impl Curve {
                         let w = rot(&self.pts[at..]);
                         set(&mut self.pts[at..], moved(w));
                         j += 2;
+                    }
+                    7 => {
+                        // a swept stretch: two positions, then four directions
+                        for k in [1, 2] {
+                            let w = rot(&self.pts[(j + k) * 4..]);
+                            set(&mut self.pts[(j + k) * 4..], moved(w));
+                        }
+                        for k in 3..=6 {
+                            let w = rot(&self.pts[(j + k) * 4..]);
+                            set(&mut self.pts[(j + k) * 4..], w);
+                        }
+                        j += 7;
                     }
                     _ => {
                         // a hex column or an outline: a position, then two directions

@@ -316,6 +316,8 @@ enum Gesture {
     Roll,
     /// one of the handles over the picture has been taken hold of
     Handle,
+    /// a part of the path drawn over the picture (ui/paths.rs)
+    Path,
 }
 struct Drag {
     kind: Gesture,
@@ -835,8 +837,13 @@ impl App {
         if down && self.drag.is_none() {
             let (right, middle) = ctx.input(|i| (i.pointer.button_down(PointerButton::Secondary), i.pointer.button_down(PointerButton::Middle)));
             // (a press on one of the handles takes hold of it, whatever keys are held: they mean steps or finely)
-            let handle = if right || middle { None } else { at.and_then(|p| self.px.handles.hit(st, self.full, p)) };
-            let kind = if let (Some(part), Some(p)) = (handle, at) {
+            // (the path's joints and handles first: they are small and lie on the shape, the layer's handles round it)
+            let path_hit = if right || middle { None } else { at.and_then(|p| self.px.paths.hit(st, self.full, p)) };
+            let handle = if right || middle || path_hit.is_some() { None } else { at.and_then(|p| self.px.handles.hit(st, self.full, p)) };
+            let kind = if let (Some(hit), Some(p)) = (path_hit, at) {
+                self.px.paths.begin(st, p, hit);
+                Gesture::Path
+            } else if let (Some(part), Some(p)) = (handle, at) {
                 self.px.handles.begin(st, self.full, p, part);
                 Gesture::Handle
             } else if self.px.nav.fly && !mods.shift && !mods.ctrl && !middle {
@@ -861,6 +868,7 @@ impl App {
                         Gesture::Pan => st.drag_pan(dx, dy, self.full.height() as f64),
                         Gesture::Roll => st.drag_roll(dx),
                         Gesture::Handle => self.px.handles.drag(st, self.full, d.at, mods.ctrl, mods.shift),
+                        Gesture::Path => self.px.paths.drag(st, self.full, d.at, mods.ctrl, mods.shift),
                     }
                 }
             } else {
@@ -872,6 +880,8 @@ impl App {
                 let focus = st.p.aperture > 0.0 && (mods.alt || self.px.handles.tool() == crate::ui::handles::Tool::Camera);
                 if d.kind == Gesture::Handle {
                     self.px.handles.end(st);
+                } else if d.kind == Gesture::Path {
+                    self.px.paths.end(st);
                 } else if click && focus {
                     self.engine.pick_focus(fx, fy);
                 } else if click && !mods.alt {
@@ -900,7 +910,7 @@ impl App {
         if picture.double_clicked() { st.reset_view(); }
         if let Some(d) = &self.drag {
             ctx.set_cursor_icon(if d.kind == Gesture::Pan { CursorIcon::Move } else { CursorIcon::Grabbing });
-        } else if picture.hovered() && self.px.handles.hover.is_some() {
+        } else if picture.hovered() && (self.px.handles.hover.is_some() || self.px.paths.hover.is_some()) {
             ctx.set_cursor_icon(CursorIcon::PointingHand);
         } else if picture.hovered() {
             ctx.set_cursor_icon(CursorIcon::Grab);
@@ -1094,7 +1104,7 @@ impl App {
                 // is open, the handles, what is chosen, otherwise the fullscreen
                 // (a gesture called off is put back once, and what the held button goes on doing is ignored
                 // until it is let go: drags are stopped, and the picture takes no more of them)
-                Escape if self.px.handles.cancel(st) => {
+                Escape if self.px.paths.cancel(st) || self.px.handles.cancel(st) => {
                     self.called_off = true;
                     self.let_go_at = Some(ctx.input(|i| i.pointer.latest_pos()).unwrap_or_default());
                 }
@@ -2206,7 +2216,9 @@ impl eframe::App for App {
         if self.video.is_none() {
             let pointer = ctx.input(|i| i.pointer.hover_pos());
             self.px.handles.paint(ui.painter(), &self.engine.state, self.full, pointer);
+            self.px.paths.paint(ui.painter(), &self.engine.state, self.full, pointer);
             if self.px.record {
+                for (name, at) in self.px.paths.spots.clone() { self.px.note(name, Rect::from_center_size(at, egui::vec2(2.0, 2.0))); }
                 // (where the handles and the lamps are on the picture, for tests that take hold of them)
                 for (name, at) in self.px.handles.spots.clone() { self.px.note(name, Rect::from_center_size(at, egui::vec2(2.0, 2.0))); }
                 let st = &self.engine.state;

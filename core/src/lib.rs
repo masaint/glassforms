@@ -18,6 +18,7 @@ pub mod layers;
 pub mod material;
 pub mod math;
 pub mod mesh;
+pub mod path;
 pub mod presets;
 pub mod room;
 pub mod scatter;
