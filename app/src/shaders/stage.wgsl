@@ -49,9 +49,40 @@ fn stageBackdrop(rd: vec3f) -> vec3f { return backdropAt(toRoom(rd)); }
 
 //#mirror // The shape as a glossy floor mirrors it: the ray is followed from the floor to the shape and the shape
 //#mirror // shaded there as the camera would see it; where it misses, the floor mirrors the lighting.
-//#mirror fn stageMirror(ro: vec3f, rd: vec3f, xi: f32, W: i32, fc: vec2f) -> vec3f {
+//#mirror // A floor whose finish is not a mirror's (su.tint.w: its facets' GGX alpha) sends each frame's ray off one
+//#mirror // facet drawn at random (a sequence that covers the facets evenly frame by frame), so a still view
+//#mirror // settles to the blurred image: sharp where the shape touches the floor, softer the higher it stands, as
+//#mirror // on lacquer, acrylic or polished stone.
+//#mirror fn floorHash(i: vec2u) -> u32 {
+//#mirror   var v = i.x * 747796405u + i.y * 2891336453u + 12345u;
+//#mirror   v = ((v >> ((v >> 28u) + 4u)) ^ v) * 277803737u;
+//#mirror   return (v >> 22u) ^ v;
+//#mirror }
+//#mirror fn floorFacet(rd: vec3f, fc: vec2f) -> vec3f {
+//#mirror   let a = su.tint.w;
+//#mirror   if (a <= 0.0) { return rd; }
+//#mirror   let n = vec3f(su.room0.y, su.room1.y, su.room2.y);
+//#mirror   let tx = vec3f(su.room0.x, su.room1.x, su.room2.x);
+//#mirror   let tz = cross(tx, n);
+//#mirror   let h = floorHash(vec2u(fc));
+//#mirror   let o = vec2f(f32(h >> 8u), f32((h * 1664525u + 1013904223u) >> 8u)) / 16777216.0;
+//#mirror   let r = fract(o + vec2f(0.7548777, 0.5698403) * f32(u.frame % 4096));
+//#mirror   // (GGX's slopes: radius a sqrt(u / (1 - u)); the farthest few hundredths of its tail left out: fireflies)
+//#mirror   let u1 = min(r.x, 0.92);
+//#mirror   let s = a * sqrt(u1 / (1.0 - u1));
+//#mirror   let ph = 6.2831853 * r.y;
+//#mirror   let m = normalize(n + tx * (s * cos(ph)) + tz * (s * sin(ph)));
+//#mirror   // (the ray from the camera, back from its mirror image; off the facet; a facet that would send it into
+//#mirror   // the floor is taken as the floor itself)
+//#mirror   let i = rd - 2.0 * dot(rd, n) * n;
+//#mirror   let d = i - 2.0 * dot(i, m) * m;
+//#mirror   if (dot(d, n) <= 0.01) { return rd; }
+//#mirror   return d;
+//#mirror }
+//#mirror fn stageMirror(ro: vec3f, rd_in: vec3f, xi: f32, W: i32, fc: vec2f) -> vec3f {
 //#mirror   var tg: f32;
 //#mirror   var g: f32;
+//#mirror   let rd = floorFacet(rd_in, fc);
 //#mirror   let t = primary(ro, rd, &tg, &g);
 //#mirror   let sky = env(rd);
 //#mirror   if (t <= 0.0) { return sky; }

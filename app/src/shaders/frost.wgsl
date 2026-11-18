@@ -165,13 +165,20 @@ fn seen(rd: vec3f, sig: f32) -> vec3f {
 //#endif
 }
 // The light from all round: what light that has been scattered every way inside the body, or by a
-// further piece of it, comes to. (The lights' softest copy, read at its middle, where both its halves
-// meet; with an environment picture, its softest level towards d.)
+// further piece of it, comes to, at a wall facing d. Scattered every way inside, it still came in
+// through the surface round that wall, from the lights that surface faces: a copy of the lights spread
+// about as widely as a matte surface gathers them (about a radian), read towards d. (It was the lights'
+// softest copy, the same everywhere: a frosted body then glowed evenly all over, lit from nowhere, and
+// read as a coloured filter, not as a body the light comes through from one side.) With an environment
+// picture, its softest level towards d.
+const FR_ALL_LOD: f32 = 7.3;
 fn frAll(d: vec3f) -> vec3f {
+  let e = toEnv(d);
+  let uv = vec2f(atan2(e.z, e.x) * 0.15915494 + 0.5, acos(clamp(e.y, -1.0, 1.0)) * 0.31830989);
 //#if PICTURE
-  return textureSampleLevel(softTex, softSmp, vec2f(0.5, 0.5), 9.0).rgb + textureSampleLevel(pictureTex, pictureSmp, toEnv(d), mu.pic.w).rgb * mu.pic.x;
+  return textureSampleLevel(softTex, softSmp, uv, FR_ALL_LOD).rgb + textureSampleLevel(pictureTex, pictureSmp, e, mu.pic.w).rgb * mu.pic.x;
 //#else
-  return textureSampleLevel(softTex, softSmp, vec2f(0.5, 0.5), 9.0).rgb;
+  return textureSampleLevel(softTex, softSmp, uv, FR_ALL_LOD).rgb;
 //#endif
 }
 //#if !BODIES

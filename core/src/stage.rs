@@ -166,6 +166,8 @@ pub struct Floor {
     pub gloss: f64,
     /// the shape itself is reflected in a glossy floor
     pub mirror: bool,
+    /// how rough its finish is (GGX alpha of its facets): the image of the shape blurs with its height
+    pub blur: f64,
 }
 
 /// The share of `Floor::fade` up to which the floor is wholly floor; the melt runs from there to `fade`.
@@ -185,6 +187,7 @@ impl Floor {
             fade: p.floor_fade.max(0.5),
             gloss: p.floor_gloss.clamp(0.0, 1.0),
             mirror: p.floor_mirror > 0.5 && p.floor_gloss > 0.0,
+            blur: p.floor_blur.clamp(0.0, 0.5),
         })
     }
 
@@ -504,6 +507,7 @@ pub const KNOBS: &[(&str, &str, f64, f64, f64, bool)] = &[
     ("floorB", "floor blue", 0.0, 1.0, 0.005, true),
     ("floorFade", "floor reach", 2.0, 60.0, 0.1, true),
     ("floorGloss", "floor gloss", 0.0, 1.0, 0.01, true),
+    ("floorBlur", "floor blur", 0.0, 0.5, 0.005, true),
     ("wbTemp", "warmth", -1.0, 1.0, 0.01, true),
     ("wbTint", "tint", -1.0, 1.0, 0.01, true),
     ("contrast", "contrast", 0.5, 2.0, 0.01, true),
@@ -514,7 +518,7 @@ pub const KNOBS: &[(&str, &str, f64, f64, f64, bool)] = &[
 pub const NAMES: &[&str] = &[
     "backdrop", "backShow", "backGain", "backSpread", "backWrap", "backHigh", "backTopR", "backTopG", "backTopB", "backMidR", "backMidG", "backMidB",
     "backLowR", "backLowG", "backLowB", "backGlow", "backGlowR", "backGlowG", "backGlowB", "backGlowAz", "backGlowEl", "backGlowSize",
-    "floor", "floorAuto", "floorY", "floorR", "floorG", "floorB", "floorGain", "floorMatch", "floorFade", "floorGloss", "floorMirror",
+    "floor", "floorAuto", "floorY", "floorR", "floorG", "floorB", "floorGain", "floorMatch", "floorFade", "floorGloss", "floorMirror", "floorBlur",
     "elev", "azim", "tone", "wbTemp", "wbTint", "contrast", "saturation",
 ];
 
@@ -659,7 +663,9 @@ pub const STUDIOS_MORE: &[Studio] = &[
             ("backTopR", 0.55), ("backTopG", 0.56), ("backTopB", 0.6),
             ("backMidR", 0.16), ("backMidG", 0.16), ("backMidB", 0.17),
             ("backLowR", 0.02), ("backLowG", 0.02), ("backLowB", 0.022),
-            ("floor", 1.0), ("floorFade", 10.0),
+            // (a satin-gloss floor that mirrors the shape, softly and more so the higher above it: a metal
+            // on a matte floor floated; on this it stands, as on a product photographer's acrylic sheet)
+            ("floor", 1.0), ("floorFade", 10.0), ("floorGloss", 0.35), ("floorMirror", 1.0), ("floorBlur", 0.05),
             ("tone", 1.0), ("exposure", 1.0), ("bloom", 0.1), ("vignette", 0.25), ("saturation", 1.0),
         ],
     },

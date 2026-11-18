@@ -94,7 +94,7 @@ impl StageU {
         if let Some(f) = &stage.floor {
             u.low[3] = f.fade as f32;
             (u.floor[0], u.floor[1], u.floor[2], u.room[0][3]) = (light.base[0] as f32, light.base[1] as f32, light.base[2] as f32, f.gloss as f32);
-            u.tint = [light.tint[0] as f32, light.tint[1] as f32, light.tint[2] as f32, 0.0];
+            u.tint = [light.tint[0] as f32, light.tint[1] as f32, light.tint[2] as f32, if f.mirror { f.blur as f32 } else { 0.0 }];
             // an image in a perfectly glossy floor does not fade; in a duller one it is gone a shape's height up
             (u.k[0], u.k[1]) = ((FADE_FROM * f.fade) as f32, (2.2 * (1.0 - f.gloss)) as f32);
         }

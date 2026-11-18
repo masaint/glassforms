@@ -359,6 +359,9 @@ pub fn floor(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     }
     if st.p.get("floorGloss").unwrap_or(0.0) > 0.0 {
         switch(ui, st, px, "floorMirror", "mirror shape", ["off", "on"], ["a glossy floor mirrors the room", "the shape itself is mirrored in the floor too (costs a second shading where it shows)"]);
+        if st.p.get("floorMirror").unwrap_or(0.0) > 0.5 {
+            knob::knob_row(ui, st, &gf_core::state::Knob { label: "blur".into(), ..State::engine_knob("floorBlur") }, px);
+        }
     }
     gap(ui, 2.0);
 }

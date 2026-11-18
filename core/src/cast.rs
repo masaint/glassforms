@@ -139,8 +139,15 @@ pub fn optics_of(p: &Settings, scale: f64) -> Optics {
     if v.metal {
         return Optics { kind: Kind::Metal, ior: 1.0, disp: 0.0, absorb: [0.0; 3], tint: body, rough };
     }
+    // A fired or painted body (a ceramic that lets little of its inner light through: stoneware,
+    // porcelain, lacquer) stops light at its surface: its shadow is a solid one, not the pale coloured
+    // shadow of a milky body. (A coloured shadow under an orange lacquered pot read at once as a sweet
+    // made of coloured wax.) Milk glass, which lets a good share through, stays milky.
+    if v.sss && v.ceramic && p.ceramic_through < 0.3 {
+        return Optics { kind: Kind::Matte, ior: p.ior, disp: 0.0, absorb: [0.0; 3], tint: body, rough: 1.0 };
+    }
     if v.sss {
-        let sc = material::scatter(body, p.sss_depth * crate::material::sss_fit(scale), p.sss);
+        let sc =material::scatter(body, p.sss_depth * crate::material::sss_fit(scale), p.sss);
         return Optics { kind: Kind::Milky, ior: p.ior, disp: 0.0, absorb: sc.kappa, tint: body, rough };
     }
     if v.hollow {

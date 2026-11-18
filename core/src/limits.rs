@@ -187,7 +187,7 @@ pub fn setting(name: &str) -> Option<(f64, f64)> {
         "backGlowEl" => (-90.0, 90.0),
         "backGlowSize" => (0.1, 360.0),
         "floorY" => (-1000.0, 1000.0),
-        "floorMatch" | "floorGloss" => SHARE,
+        "floorMatch" | "floorGloss" | "floorBlur" => SHARE,
         // (how far the floor reaches before it melts into the backdrop: the fade is divided by it)
         "floorFade" => (0.1, 10000.0),
         "tone" => (0.0, 3.0),

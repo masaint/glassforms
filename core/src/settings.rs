@@ -431,6 +431,10 @@ settings! {
     /// 0 = a matte floor, up to 1 = a glossy one; and 1 = the shape itself is mirrored in a glossy floor
     floor_gloss, "floorGloss", 0.0;
     floor_mirror, "floorMirror", 0.0;
+    /// how rough a glossy floor's finish is: 0 = a mirror; above, the shape's image in it softens the
+    /// further it stands from the floor, as on lacquer, acrylic or polished stone (traced by chance: it
+    /// settles over the frames of a still view)
+    floor_blur, "floorBlur", 0.0;
     /// the tone curve: 0 = filmic (the one the program has always had), 1 = neutral, 2 = soft, 3 = none
     tone, "tone", 0.0;
     /// white balance: warmer (above 0) or cooler; more magenta (above 0) or greener
