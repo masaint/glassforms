@@ -2,7 +2,7 @@ r"""Stills of the surface studio, for judging by eye, and a contact sheet of the
 
     python tools/studio_shots.py [out dir] [w h frames] [only shapes,..] [only stacks,..]
 
-Every still goes through the shared GPU queue (D:\glassforms\native\tools\gpu_run.py), with this copy's
+Every still goes through the shared GPU queue (tools/gpu_run.py), with this copy's
 program. The sheet is <out dir>/studio_sheet.png: a row a shape, a column a stack (the first column is
 the shape with no studio).
 """
@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 HERE = os.path.dirname(os.path.abspath(__file__))
 NATIVE = os.path.dirname(HERE)
 EXE = os.path.join(NATIVE, 'target', 'release', 'glassforms.exe')
-QUEUE = r'D:\glassforms\native\tools\gpu_run.py'
+QUEUE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gpu_run.py')
 SHAPES = [
     ('sphere', ['scene=solids', 'preset=superellipsoid']),
     ('thomas', ['scene=attractors', 'preset=thomas']),

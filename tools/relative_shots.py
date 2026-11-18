@@ -3,7 +3,7 @@ on a fat solid, a thin attractor, a tree and the teapot, and a contact sheet of 
 
     python tools/relative_shots.py [out dir] [w h frames]
 
-Every still goes through the shared GPU queue (D:\glassforms\native\tools\gpu_run.py), with this copy's
+Every still goes through the shared GPU queue (tools/gpu_run.py), with this copy's
 program. The relative stacks are the absolute ones with every size divided by SIZE_REF (0.6, core
 sculpt.rs), so that on a shape of that size the two are the same. Each still's line says the shape's size
 the program measured (studioSize).
@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 HERE = os.path.dirname(os.path.abspath(__file__))
 NATIVE = os.path.dirname(HERE)
 EXE = os.path.join(NATIVE, 'target', 'release', 'glassforms.exe')
-QUEUE = r'D:\glassforms\native\tools\gpu_run.py'
+QUEUE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gpu_run.py')
 SIZE_REF = 0.6
 SHAPES = [
     ('superellipsoid', ['scene=solids', 'preset=superellipsoid', 'clay=1']),

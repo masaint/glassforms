@@ -3,7 +3,7 @@ sliders' keys and typed values in a scripted window.
 
     python tools/limits_probe.py [out dir] [stills|window|all]
 
-Every run goes through the shared GPU queue (D:\glassforms\native\tools\gpu_run.py) with this copy's program.
+Every run goes through the shared GPU queue (tools/gpu_run.py) with this copy's program.
 A still is a failure if the program ends badly, writes crash.log, or draws nothing; a still that comes out
 black is listed for a look (some settings are meant to give black). The window part drives the sliders
 with the keys held (alt, alt+shift, ctrl+alt+shift), types values into them, and checks what the
@@ -19,7 +19,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 NATIVE = os.path.dirname(HERE)
 EXE = os.path.join(NATIVE, 'target', 'release', 'glassforms.exe')
 CRASH = os.path.join(os.path.dirname(EXE), 'crash.log')
-QUEUE = r'D:\glassforms\native\tools\gpu_run.py'
+QUEUE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gpu_run.py')
 
 MILKY = ['sss=1', 'bodyR=0.9', 'bodyG=0.9', 'bodyB=0.9']
 CAST = ['cast=2', 'floor=1']

@@ -10,8 +10,8 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-EXE = 'D:/glassforms/_r4_ceramic/native/target/release/glassforms.exe'
-REFS = 'D:/glassforms/docs/refs/'
+EXE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'target', 'release', 'glassforms.exe')
+REFS = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'docs', 'refs') + os.sep
 KEY = ['rig=100,30,5,5,8,8,8,0.5:-60,20,20,30,1,1,1.1,0.9', 'ambient=0.005,0.005,0.006']
 BACK = ['rig=0,15,12,12,10,10,10,0.5:-120,30,30,30,0.4,0.4,0.42,0.9', 'ambient=0.005,0.005,0.006']
 PHOTO = ['rig=-45,35,10,10,10,10,10,0.6:80,15,30,30,0.25,0.25,0.27,0.9', 'ambient=0.01,0.01,0.011']

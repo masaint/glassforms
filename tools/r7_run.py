@@ -13,7 +13,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 NATIVE = os.path.dirname(HERE)
 EXE = os.path.join(NATIVE, 'target', 'release', 'glassforms.exe')
-QUEUE = r'D:\glassforms\native\tools\gpu_run.py'
+QUEUE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gpu_run.py')
 HAMMERED = {'layers': [{'kind': 'hammered', 'scale': 0.09, 'depth': 0.012, 'a': 1.2, 'b': 0.85, 'mode': 'carve'}]}
 CELLS = {'layers': [{'kind': 'cells', 'scale': 0.14, 'depth': 0.1, 'a': 0.75, 'b': 0.9, 'mode': 'carve'}], 'round': 0.012, 'crumbs': 0.06}
 SCENES = {

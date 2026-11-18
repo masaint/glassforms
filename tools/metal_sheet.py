@@ -8,7 +8,7 @@ import sys
 from PIL import Image, ImageDraw
 
 S = 360
-SBS = 'D:/glassforms/native/out/photo/sbs/metal_after.png'
+SBS = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'out', 'photo', 'sbs', 'metal_after.png')
 # (crops of metal_after.png's left column: chrome, gold ring, satin steel, satin gold)
 PH = {'chrome': (0, 0, 298, 300), 'gold': (0, 318, 406, 618), 'steel': (0, 636, 384, 936), 'sgold': (0, 954, 400, 1254)}
 ROWS = [

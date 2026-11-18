@@ -14,7 +14,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 EXE = os.path.join(os.path.dirname(HERE), 'target', 'release', 'glassforms.exe')
-QUEUE = r'D:\glassforms\native\tools\gpu_run.py'
+QUEUE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gpu_run.py')
 XMAS = ['p.form=1', 'p.seed=5', 'p.bole=0.12', 'p.width=0.8']
 CASES = [
     ('default', ['p.form=0', 'p.seed=1']),

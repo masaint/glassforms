@@ -3,7 +3,7 @@
 usage: python tools/math_shots.py <family> [--preset=id,id] [--modes=glass,clay,csg,csgclay] [--set "k=v k=v"]
                                   [--tag=name] [--w=1280] [--h=720] [--jobs=3] [--exe=path] [--list]
 
-Every still goes through main's GPU queue (D:/glassforms/native/tools/gpu_run.py). Stills land in
+Every still goes through main's GPU queue (tools/gpu_run.py). Stills land in
 <repo>/../shots/<family>/<tag>/<preset>_<mode>.png, a contact sheet of them all in
 <repo>/../shots/<family>/sheet_<tag>.png, and one line per still is printed: the preset, the mode, the
 volume's build time, how much of the picture is glass, and a warning when the picture is empty, blown or
@@ -22,7 +22,7 @@ from PIL import Image, ImageDraw
 HERE = os.path.dirname(os.path.abspath(__file__))
 NATIVE = os.path.dirname(HERE)
 ROOT = os.path.dirname(NATIVE)
-QUEUE = r'D:\glassforms\native\tools\gpu_run.py'
+QUEUE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gpu_run.py')
 MODES = {'glass': [], 'clay': ['clay=1'], 'csg': ['trace=csg'], 'csgclay': ['trace=csg', 'clay=1']}
 
 

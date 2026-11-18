@@ -2,7 +2,7 @@ r"""Stills of the tree generator, for judging by eye, and a contact sheet of the
 
     python tools/tree_shots.py <out dir> <set> [w h frames] [only names,..]
 
-Every still goes through the shared GPU queue (D:\glassforms\native\tools\gpu_run.py), with this copy's
+Every still goes through the shared GPU queue (tools/gpu_run.py), with this copy's
 program. The sheet is <out dir>/trees_sheet.png. The sets of shots are written here only: the program
 ships one tree and its sliders, no named kinds of tree.
 """
@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 HERE = os.path.dirname(os.path.abspath(__file__))
 NATIVE = os.path.dirname(HERE)
 EXE = os.path.join(NATIVE, 'target', 'release', 'glassforms.exe')
-QUEUE = r'D:\glassforms\native\tools\gpu_run.py'
+QUEUE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gpu_run.py')
 T = ['scene=trees', 'preset=tree']
 
 # a bark stack: long grooves up the wood, and a fine roughness

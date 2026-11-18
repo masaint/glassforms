@@ -27,7 +27,8 @@ import threading
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-QUEUE = os.path.join(ROOT, '_gpu_queue')
+# GF_GPU_QUEUE points every copy of the tools at one shared queue folder
+QUEUE = os.environ.get('GF_GPU_QUEUE') or os.path.join(ROOT, '_gpu_queue')
 QUIET = os.path.join(ROOT, '_gpu_quiet.json')
 SLOTS = 3            # ordinary jobs that may run at once
 BEAT = 5.0           # seconds between a ticket's refreshes
