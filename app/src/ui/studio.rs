@@ -91,7 +91,7 @@ pub fn casting(ui: &mut Ui, st: &mut State, px: &mut Panels) {
         let mut line = format!("{} light{} followed", px.casting.lights, if px.casting.lights == 1 { "" } else { "s" });
         if let Some((res, bytes)) = px.casting.caustics { line += &format!(" · caustics {res}³, {:.0} MB", bytes as f64 / 1048576.0); }
         gap(ui, 2.0);
-        paragraph(ui, &line, mono(10.0), DIM, LINE, 0.0);
+        paragraph(ui, &line, mono(10.0), pal().dim, LINE, 0.0);
     }
     gap(ui, 2.0);
 }
@@ -245,7 +245,7 @@ pub fn surroundings(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     }
     match around(st) {
         Around::Nothing => {
-            if let Some(why) = px.lighting.error.clone() { paragraph(ui, &why, sans(SMALL), ERROR_TEXT, 1.4, 0.0); }
+            if let Some(why) = px.lighting.error.clone() { paragraph(ui, &why, sans(SMALL), pal().error_text, 1.4, 0.0); }
         }
         Around::Studio => {
             // the studios, each with its own lights, backdrop, floor and tone
@@ -286,7 +286,7 @@ pub fn surroundings(ui: &mut Ui, st: &mut State, px: &mut Panels) {
             }
             if let Some(why) = px.lighting.error.clone() {
                 gap(ui, 2.0);
-                paragraph(ui, &why, sans(SMALL), ERROR_TEXT, 1.4, 0.0);
+                paragraph(ui, &why, sans(SMALL), pal().error_text, 1.4, 0.0);
                 gap(ui, 2.0);
             }
             let name = match (&px.lighting.picture, px.lighting.loading) {
@@ -297,7 +297,7 @@ pub fn surroundings(ui: &mut Ui, st: &mut State, px: &mut Panels) {
             if !name.is_empty() {
                 let r = row(ui, 16.0);
                 let shown = tail(ui, &name, &mono(SMALL), r.width());
-                text_in(ui, r, Align2::LEFT_CENTER, &shown, mono(SMALL), BUTTON);
+                text_in(ui, r, Align2::LEFT_CENTER, &shown, mono(SMALL), pal().button);
                 if shown != name { ui.interact(r, Id::unique("picture name"), egui::Sense::hover()).on_hover_text(name.as_str()); }
                 gap(ui, 2.0);
             }
@@ -349,7 +349,7 @@ pub fn floor(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     knob::knob_row(ui, st, &gf_core::state::Knob { label: label.into(), ..k }, px);
     if let Some(h) = px.casting.floor {
         let r = row(ui, 14.0);
-        text_in(ui, Rect::from_min_max(Pos2::new(r.left() + label_width(ui) + COL_GAP, r.top()), Pos2::new(r.right() - COL_WAVE - COL_GAP, r.bottom())), Align2::RIGHT_CENTER, &format!("stands {h:+.3} from the middle"), mono(10.0), DIM);
+        text_in(ui, Rect::from_min_max(Pos2::new(r.left() + label_width(ui) + COL_GAP, r.top()), Pos2::new(r.right() - COL_WAVE - COL_GAP, r.bottom())), Align2::RIGHT_CENTER, &format!("stands {h:+.3} from the middle"), mono(10.0), pal().dim);
     }
     knob::knob_row_with(ui, st, &gf_core::state::Knob { label: "as backdrop".into(), ..State::engine_knob("floorMatch") }, px, knob::Extra { tip: "1: the backdrop's sweep carried on underfoot, one surface with it; 0: the light that falls on it", ..Default::default() });
     colour(ui, st, px, "tint", ["floorR", "floorG", "floorB"], 1.0);

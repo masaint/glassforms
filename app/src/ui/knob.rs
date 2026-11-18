@@ -92,7 +92,7 @@ pub fn plain_row(ui: &mut Ui, id: Id, label: &str, value: f64, lo: f64, hi: f64,
     let c = cols(ui, r);
     name(ui, c.label, id.with("name"), label, SIZE, "");
     let hard = gf_core::limits::widen(lo, hi);
-    let mut out = slider_to(ui, c.slot, id, value, lo, hi, step, ACCENT, hard);
+    let mut out = slider_to(ui, c.slot, id, value, lo, hi, step, pal().accent, hard);
     value_end(ui, c.value, id, &mut out, value, lo, hi, step, hard, SIZE);
     out
 }
@@ -106,7 +106,7 @@ pub fn value_row(ui: &mut Ui, px: &mut Panels, key: &str, label: &str, value: f6
     px.note(format!("{}slot:{key}", px.whose()), c.slot);
     name(ui, c.label, id.with("name"), label, SIZE, "");
     let hard = gf_core::limits::widen(lo, hi);
-    let mut out = slider_to(ui, c.slot, id, value, lo, hi, step, ACCENT, hard);
+    let mut out = slider_to(ui, c.slot, id, value, lo, hi, step, pal().accent, hard);
     value_end(ui, c.value, id, &mut out, value, lo, hi, step, hard, SIZE);
     out
 }
@@ -121,7 +121,7 @@ pub fn hue_row(ui: &mut Ui, px: &mut Panels, key: &str, label: &str, hue: f64, s
     name(ui, c.label, id.with("name"), label, SIZE, "");
     let out = hue_slider(ui, c.slot, id, hue, strength);
     let shown = out.value.unwrap_or(hue);
-    text_in(ui, c.value, Align2::RIGHT_CENTER, &format!("{shown:.0}"), mono(SIZE), BRIGHT);
+    text_in(ui, c.value, Align2::RIGHT_CENTER, &format!("{shown:.0}"), mono(SIZE), pal().bright);
     let swatch = Rect::from_center_size(c.wave.center(), egui::vec2(12.0, 12.0));
     ui.painter().rect(swatch, 3, shown_colour(hue_rgb(shown, strength)), egui::Stroke::new(1.0, white(0.25)), egui::StrokeKind::Outside);
     out
@@ -203,7 +203,7 @@ pub fn knob_row_with(ui: &mut Ui, st: &mut State, k: &Knob, px: &mut Panels, ext
             if out.released { st.after_user(k, false); }
         }
         None => {
-            let out = slider_to(ui, c.slot, id.with("slider"), value, k.lo, k.hi, k.step, ACCENT, hard);
+            let out = slider_to(ui, c.slot, id.with("slider"), value, k.lo, k.hi, k.step, pal().accent, hard);
             finer = out.finer;
             if let Some(v) = out.value { st.user_set(k, v, true); }
             if out.released { st.after_user(k, false); }
@@ -222,7 +222,7 @@ pub fn knob_row_with(ui: &mut Ui, st: &mut State, k: &Knob, px: &mut Panels, ext
         // (a value in words, a focal length for a slider that zooms by doublings: typed as the slider's own
         // number is not what it shows, so it is not typed into; past the ends it still shows)
         let past = value < k.lo - 1e-12 || value > k.hi + 1e-12;
-        text_in(ui, c.value, Align2::RIGHT_CENTER, extra.shown, mono(SIZE), if past { PAST } else { BRIGHT });
+        text_in(ui, c.value, Align2::RIGHT_CENTER, extra.shown, mono(SIZE), if past { pal().past } else { pal().bright });
     }
     if k.wave {
         let lit = track.is_some();
@@ -252,22 +252,22 @@ fn track_rows(ui: &mut Ui, st: &mut State, k: &Knob, id: Id, digits: usize) {
 
     // the two stops, in the order the trip takes them
     let (label, rest) = part(row(ui, 16.0));
-    text_in(ui, label, Align2::LEFT_CENTER, "between", mono(SMALL), DIM);
+    text_in(ui, label, Align2::LEFT_CENTER, "between", mono(SMALL), pal().dim);
     let stops = format!("{:.digits$} and {:.digits$}", tr.from, tr.to);
-    text_in(ui, Rect::from_min_max(rest.min, Pos2::new(rest.right() - COL_WAVE - COL_GAP, rest.bottom())), Align2::RIGHT_CENTER, &stops, mono(SMALL), BUTTON);
+    text_in(ui, Rect::from_min_max(rest.min, Pos2::new(rest.right() - COL_WAVE - COL_GAP, rest.bottom())), Align2::RIGHT_CENTER, &stops, mono(SMALL), pal().button);
 
     let r = row(ui, 17.0);
     let c = cols(ui, r);
-    text_in(ui, part(Rect::from_min_max(Pos2::new(left, c.label.top()), c.label.max)).0, Align2::LEFT_CENTER, "every s", mono(SMALL), DIM);
+    text_in(ui, part(Rect::from_min_max(Pos2::new(left, c.label.top()), c.label.max)).0, Align2::LEFT_CENTER, "every s", mono(SMALL), pal().dim);
     // (a trip of no time at all would divide by nothing; one of an hour is as slow as anything wants)
     let hard = (0.1, 3600.0);
-    let mut out = slider_to(ui, c.slot, id.with("every"), tr.period, 1.0, 120.0, 0.5, ACCENT_MINI, hard);
+    let mut out = slider_to(ui, c.slot, id.with("every"), tr.period, 1.0, 120.0, 0.5, pal().accent_mini, hard);
     let shown = out.value.unwrap_or(tr.period);
     if let Some(v) = value_text(ui, c.value, id.with("every value"), shown, digits_for(shown, 2), 2, 1.0, 120.0, SMALL) { out.value = Some(gf_core::limits::hold(v, hard)); }
     if let Some(v) = out.value { set_period(st, k, gf_core::limits::hold(v, hard)); }
 
     let (label, rest) = part(row(ui, 22.0));
-    text_in(ui, label, Align2::LEFT_CENTER, "ease", mono(SMALL), DIM);
+    text_in(ui, label, Align2::LEFT_CENTER, "ease", mono(SMALL), pal().dim);
     let w = (rest.width() - COL_GAP) / 2.0;
     let place = |i: f32| Rect::from_min_size(Pos2::new(rest.left() + i * (w + COL_GAP), rest.center().y - 9.5), egui::vec2(w, 19.0));
     let kinds: Vec<String> = std::iter::once("as all".to_owned()).chain(EASES.iter().map(|e| e.to_string())).collect();

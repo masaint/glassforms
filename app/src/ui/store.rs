@@ -67,12 +67,21 @@ pub struct Store {
     pub still_folder: Option<String>,
     /// stills are written with 16 bits a channel
     pub still_16: bool,
+    /// the settings: the look ("dark", "light", or "system": as Windows has it), how frosted the panels
+    /// are ("off", "subtle", "full"), the size of everything over the picture (none: as Windows sets it;
+    /// otherwise that many times it), and whether the settings window is open and where
+    pub theme: String,
+    pub frost: String,
+    pub ui_scale: Option<f32>,
+    pub settings_open: bool,
+    pub settings_at: Option<[f32; 2]>,
 }
 impl Default for Store {
     fn default() -> Self {
         Self {
             arrangement: ARRANGEMENT, closed: FOLDED_AT_FIRST.iter().map(|g| g.to_string()).collect(), window: None, maximized: false,
             room_open: false, room_at: None, lab_open: false, lab_at: None, camera_open: false, camera_at: None, sculpt_open: false, sculpt_at: None, video: RenderOpts::default(), folder: None, setup_folder: None, still_folder: None, still_16: false,
+            theme: "dark".into(), frost: "full".into(), ui_scale: None, settings_open: false, settings_at: None,
         }
     }
 }
@@ -171,6 +180,8 @@ mod tests {
         assert_eq!(s.closed, vec!["animate".to_string()]);
         assert_eq!((s.video.fps, s.video.samples, s.window, s.room_open, s.room_at), (24, RenderOpts::default().samples, None, false, None));
         assert_eq!((s.lab_open, s.lab_at), (false, None));
+        // a file from before the settings were remembered: the dark look, fully frosted, the usual size
+        assert_eq!((s.theme.as_str(), s.frost.as_str(), s.ui_scale, s.settings_open), ("dark", "full", None, false));
         let again = Store::read(&serde_json::to_string(&s).unwrap());
         assert_eq!(again, s);
         assert!(s.video_folder().ends_with("renders") && s.setups_folder().ends_with("setups") && s.stills_folder().ends_with("stills"));

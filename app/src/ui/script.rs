@@ -57,6 +57,8 @@
 //!   cancel                      cancel the video
 //!   bench                       press the benchmark button
 //!   hide:<left|right|both|none> which panels are hidden (the H key hides or shows both)
+//!   ui:<name>=<value>           a setting of the settings window: ui:theme=dark|light|system, ui:frost=off|subtle|full,
+//!                               ui:scale=auto|<times>, ui:settings=open|close
 //!   scroll:<left|right>=<y>     scroll a panel
 //!   wait:<frames>               let frames go by
 //!   shot:<file.png>             save a picture of the whole window now
@@ -156,6 +158,8 @@ pub enum Act {
     Cancel,
     Bench,
     Hide(String),
+    /// a setting of the settings window, by name
+    Ui(String, String),
     Scroll(String, f32),
     Wait(u32),
     Shot(String),
@@ -285,6 +289,11 @@ pub fn parse(text: &str) -> Result<Vec<Act>, String> {
             "cancel" => Act::Cancel,
             "bench" => Act::Bench,
             "hide" => Act::Hide(arg.into()),
+            "ui" => {
+                let (k, v) = named(name, arg)?;
+                if !["theme", "frost", "scale", "settings"].contains(&k) { return Err(format!("ui: \"{k}\" is not theme, frost, scale or settings")); }
+                Act::Ui(k.into(), v.into())
+            }
             "scroll" => { let (k, v) = named(name, arg)?; Act::Scroll(k.into(), num(name, v)?) }
             "wait" => Act::Wait(num(name, arg)?),
             "shot" => Act::Shot(arg.into()),

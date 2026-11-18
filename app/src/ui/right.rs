@@ -66,7 +66,7 @@ pub fn show(ui: &mut Ui, st: &mut State, px: &mut Panels) {
         families_new(ui, st, px);
         let list = shapes_new(ui, st, px);
         let what = if px.tab.unwrap_or(false) { "a csg object: a tree whose first part is this shape, its formula traced exactly, or a grid of it" } else { "a volume object: the shape baked into a grid of distances" };
-        paragraph(ui, &format!("a shape picked here makes {what}"), mono(SMALL), FAINT, LINE, INSET);
+        paragraph(ui, &format!("a shape picked here makes {what}"), mono(SMALL), pal().faint, LINE, INSET);
         gap(ui, 6.0);
         list
     } else {
@@ -142,7 +142,7 @@ fn shapes_new(ui: &mut Ui, st: &mut State, px: &mut Panels) -> f32 {
     let fam = px.browse_fam.min(st.families.len() - 1);
     let n = st.families[fam].presets.len();
     let r = row(ui, 13.0);
-    text_in(ui, r, Align2::LEFT_CENTER, &format!("{n} shapes"), mono(10.0), HINT);
+    text_in(ui, r, Align2::LEFT_CENTER, &format!("{n} shapes"), mono(10.0), pal().hint);
     gap(ui, 5.0);
     let (width, pad, font) = (ui.available_width(), egui::vec2(8.0, 3.0), mono(SIZE));
     let line = button_size(ui, "x", &font, pad).y + RUN_SPACE;
@@ -164,7 +164,7 @@ fn shapes_new(ui: &mut Ui, st: &mut State, px: &mut Panels) -> f32 {
     }
     if st.object_count() >= gf_core::layers::MAX_LAYERS {
         gap(ui, 3.0);
-        paragraph(ui, &format!("{} objects at most: take one away to make another", gf_core::layers::MAX_LAYERS), mono(SMALL), HINT, LINE, INSET);
+        paragraph(ui, &format!("{} objects at most: take one away to make another", gf_core::layers::MAX_LAYERS), mono(SMALL), pal().hint, LINE, INSET);
     }
     shown.height()
 }
@@ -187,8 +187,8 @@ fn shapes(ui: &mut Ui, st: &mut State, px: &mut Panels) -> f32 {
     // how many there are, and how to step through them
     let r = row(ui, 13.0);
     let n = st.family().presets.len();
-    text_in(ui, r, Align2::LEFT_CENTER, &format!("{n} shapes"), mono(10.0), HINT);
-    text_in(ui, r, Align2::RIGHT_CENTER, "← → to step", mono(10.0), HINT);
+    text_in(ui, r, Align2::LEFT_CENTER, &format!("{n} shapes"), mono(10.0), pal().hint);
+    text_in(ui, r, Align2::RIGHT_CENTER, "← → to step", mono(10.0), pal().hint);
     gap(ui, 5.0);
 
     let chosen = st.shape().preset;
@@ -236,21 +236,21 @@ fn model_lines(ui: &mut Ui, st: &State, px: &mut Panels) {
     let m = px.model.clone();
     let top = ui.cursor().top();
     if let Some(name) = &m.reading {
-        paragraph(ui, &format!("reading {name}…"), mono(SMALL), BRIGHT, LINE, INSET);
+        paragraph(ui, &format!("reading {name}…"), mono(SMALL), pal().bright, LINE, INSET);
     } else if st.needs_file(st.stack.sel) {
-        paragraph(ui, "no file yet: load one, or drop one on the window", mono(SMALL), DIM, LINE, INSET);
+        paragraph(ui, "no file yet: load one, or drop one on the window", mono(SMALL), pal().dim, LINE, INSET);
     } else if m.known {
-        paragraph(ui, &m.file, mono(SMALL), BRIGHT, LINE, INSET);
+        paragraph(ui, &m.file, mono(SMALL), pal().bright, LINE, INSET);
         gap(ui, 3.0);
-        paragraph(ui, &m.line, sans(SMALL), TEXT, 1.4, INSET);
+        paragraph(ui, &m.line, sans(SMALL), pal().text, 1.4, INSET);
     }
     if !m.said.is_empty() {
         gap(ui, 3.0);
-        paragraph(ui, &m.said, sans(SMALL), DIM, 1.4, INSET);
+        paragraph(ui, &m.said, sans(SMALL), pal().dim, 1.4, INSET);
     }
     if let Some(why) = &m.error {
         gap(ui, 3.0);
-        paragraph(ui, why, mono(SMALL), ERROR_TEXT, LINE, INSET);
+        paragraph(ui, why, mono(SMALL), pal().error_text, LINE, INSET);
     }
     let at = Rect::from_min_max(Pos2::new(ui.cursor().left(), top), Pos2::new(ui.cursor().left() + ui.available_width(), ui.cursor().top()));
     px.note("model lines", at);
@@ -272,17 +272,17 @@ fn maths(ui: &mut Ui, st: &State, px: &mut Panels) {
             // (and one much too long is broken, at the smallest of those sizes)
             let size = [11.5, 11.0, 10.5, 10.0].into_iter().find(|s| text_width(ui, line, &mono(*s)) <= room).unwrap_or(10.0);
             // whatever its size, a line stands as tall as the others
-            paragraph(ui, line, mono(size), BRIGHT, 11.5 * LINE / size, INSET);
+            paragraph(ui, line, mono(size), pal().bright, 11.5 * LINE / size, INSET);
         }
         // the word about the shape: shown while it is the only one (with several layers the room goes to
         // the joins; hovering over the equations still says it)
         if !note.is_empty() && st.layer_count() < 2 {
             gap(ui, 4.0);
-            paragraph(ui, note, sans(SMALL), FAINT, 1.4, INSET);
+            paragraph(ui, note, sans(SMALL), pal().faint, 1.4, INSET);
         }
         if !info.is_empty() {
             gap(ui, 4.0);
-            paragraph(ui, info, mono(SMALL), DIM, LINE, INSET);
+            paragraph(ui, info, mono(SMALL), pal().dim, LINE, INSET);
         }
         if model {
             gap(ui, 5.0);
@@ -409,9 +409,9 @@ fn sliders(ui: &mut Ui, st: &mut State, px: &mut Panels) {
 pub fn detail_rows(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     let (still, moving) = (st.shape().res, st.shape().anim_res);
     let r = row(ui, 14.0);
-    text_in(ui, r, Align2::LEFT_CENTER, "shape detail, voxels a side", mono(10.0), FAINT);
+    text_in(ui, r, Align2::LEFT_CENTER, "shape detail, voxels a side", mono(10.0), pal().faint);
     let name = |ui: &Ui, r: Rect, text: &str| {
-        text_in(ui, Rect::from_min_size(r.min, egui::vec2(DETAIL_INDENT, r.height())), Align2::LEFT_CENTER, text, mono(SIZE), DIM);
+        text_in(ui, Rect::from_min_size(r.min, egui::vec2(DETAIL_INDENT, r.height())), Align2::LEFT_CENTER, text, mono(SIZE), pal().dim);
     };
     let names: Vec<String> = DETAIL_STILL.iter().map(|r| r.to_string()).collect();
     let items: Vec<Item> = DETAIL_STILL
@@ -435,7 +435,7 @@ pub fn detail_rows(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     name(ui, run.rect, "in motion");
     if let Some(i) = run.clicked { st.set_anim_detail(DETAIL_MOVING[i]); }
     gap(ui, 3.0);
-    paragraph(ui, &built_text(st, px.joined), mono(SMALL), DIM, LINE, 0.0);
+    paragraph(ui, &built_text(st, px.joined), mono(SMALL), pal().dim, LINE, 0.0);
     gap(ui, 1.0);
 }
 

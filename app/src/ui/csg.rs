@@ -40,13 +40,13 @@ fn title(st: &State, p: &Part) -> String {
 fn parts(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     let n = st.csg.parts.len();
     let r = row(ui, 14.0);
-    text_in(ui, r, Align2::LEFT_CENTER, "csg parts", mono(10.0), FAINT);
+    text_in(ui, r, Align2::LEFT_CENTER, "csg parts", mono(10.0), pal().faint);
     if st.csg.baked {
-        text_in(ui, r, Align2::RIGHT_CENTER, "baked into this volume object", mono(10.0), HINT);
+        text_in(ui, r, Align2::RIGHT_CENTER, "baked into this volume object", mono(10.0), pal().hint);
     } else if st.layer_count() > 1 {
-        text_in(ui, r, Align2::RIGHT_CENTER, "traced from its volume among others", mono(10.0), HINT);
+        text_in(ui, r, Align2::RIGHT_CENTER, "traced from its volume among others", mono(10.0), pal().hint);
     } else if st.shape().trace == Trace::Volume && n > 0 {
-        text_in(ui, r, Align2::RIGHT_CENTER, "joined to the shape up", mono(10.0), HINT);
+        text_in(ui, r, Align2::RIGHT_CENTER, "joined to the shape up", mono(10.0), pal().hint);
     }
     gap(ui, 3.0);
     // (among other objects a tree is always traced from its volume: nothing to choose)
@@ -119,7 +119,7 @@ fn parts(ui: &mut Ui, st: &mut State, px: &mut Panels) {
             if left > 0 {
                 say += &format!(". {left} left out: at most {} grid parts and {} at once", gf_core::csg::MAX_GRIDS, mib(gf_core::csg::GRID_BUDGET));
             }
-            paragraph(ui, &say, mono(SMALL), if left > 0 { HINT } else { FAINT }, LINE, INSET);
+            paragraph(ui, &say, mono(SMALL), if left > 0 { pal().hint } else { pal().faint }, LINE, INSET);
         }
     }
     gap(ui, 4.0);
@@ -223,7 +223,7 @@ fn selected(ui: &mut Ui, st: &mut State, px: &mut Panels, i: usize) {
                     }
                 }
             }
-            paragraph(ui, "a grid part: baked into a volume of its own, as fine as its voxels; the surface studio works on the shape up only", mono(SMALL), FAINT, LINE, INSET);
+            paragraph(ui, "a grid part: baked into a volume of its own, as fine as its voxels; the surface studio works on the shape up only", mono(SMALL), pal().faint, LINE, INSET);
         }
     }
     // its sliders

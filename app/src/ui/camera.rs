@@ -143,7 +143,7 @@ fn lens(ui: &mut Ui, st: &mut State, px: &mut Panels) {
         Some(h) => format!("shows {} top to bottom", length_text(h)),
         None => format!("takes in {:.0}° × {:.0}°", r.field_v, r.field_h),
     };
-    aside(ui, &field, DIM);
+    aside(ui, &field, pal().dim);
 
     // the kind of lens, and the sensor (the picture is as tall as the sensor)
     let kinds: Vec<String> = Projection::ALL.iter().map(|p| p.name().to_owned()).collect();
@@ -190,8 +190,8 @@ fn focus(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     // what that comes to, in a photographer's words; and anything no real lens would do, said plainly
     let r = st.camera().readout(px.aspect);
     let to = if r.sharp_to_mm.is_finite() { length_text(r.sharp_to_mm) } else { "∞".to_owned() };
-    paragraph(ui, &format!("sharp from {} to {} · {:.2}× life size", length_text(r.sharp_from_mm), to, r.magnification), mono(10.0), DIM, LINE, 0.0);
-    for line in &r.notes { paragraph(ui, line, sans(SMALL), COSTLY, 1.35, 0.0); }
+    paragraph(ui, &format!("sharp from {} to {} · {:.2}× life size", length_text(r.sharp_from_mm), to, r.magnification), mono(10.0), pal().dim, LINE, 0.0);
+    for line in &r.notes { paragraph(ui, line, sans(SMALL), pal().costly, 1.35, 0.0); }
     let font = mono(SIZE);
     let size = button_size(ui, "one plane", &font, egui::vec2(7.0, 2.0));
     let row_r = row(ui, size.y + 2.0);
@@ -276,7 +276,7 @@ fn out_of_focus(ui: &mut Ui, st: &mut State, px: &mut Panels) {
 fn framing(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     // (orbiting or flying is chosen on the camera's bar over the picture, or with V; looking from a side,
     // with the cube beside it: one home each)
-    paragraph(ui, if px.nav.fly { "flying: V, or the camera's bar over the picture, to orbit" } else { "orbiting: V, or the camera's bar over the picture, to fly" }, mono(10.0), HINT, LINE, 0.0);
+    paragraph(ui, if px.nav.fly { "flying: V, or the camera's bar over the picture, to orbit" } else { "orbiting: V, or the camera's bar over the picture, to fly" }, mono(10.0), pal().hint, LINE, 0.0);
     let r = st.camera().readout(px.aspect);
     worded(ui, st, px, "dist", &length_text(r.distance_mm), "from the lens to the middle of the shape, along the way it looks");
     let tip = "where the camera stands beside the line through the middle of the shape, across and up as it sees it (flying and framing move it; 0 looks at the middle)";
@@ -337,10 +337,10 @@ fn exposure(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     let slot = Rect::from_min_max(Pos2::new(label_r.right() + COL_GAP, r.center().y - 6.0), Pos2::new(r.right() - COL_WAVE - 2.0 * COL_GAP - 76.0, r.center().y + 6.0));
     px.note(format!("{}slot:shutter", px.whose()), slot);
     // (a shutter open longer than the whole frame means nothing: no further with alt either)
-    let moved = slider_to(ui, slot, Id::unique(("shutter", px.place)), angle, 0.0, 360.0, 5.0, ACCENT, (0.0, 360.0));
+    let moved = slider_to(ui, slot, Id::unique(("shutter", px.place)), angle, 0.0, 360.0, 5.0, pal().accent, (0.0, 360.0));
     if let Some(v) = moved.value { st.render.shutter = gf_core::camera::shutter_of_angle(v); }
     let words = if angle <= 0.0 { "off".to_owned() } else { format!("{angle:.0}° · 1/{speed:.0} s") };
-    text_in(ui, Rect::from_min_max(Pos2::new(slot.right() + COL_GAP, r.top()), Pos2::new(r.right() - COL_WAVE - COL_GAP, r.bottom())), Align2::RIGHT_CENTER, &words, mono(SIZE), BRIGHT);
+    text_in(ui, Rect::from_min_max(Pos2::new(slot.right() + COL_GAP, r.top()), Pos2::new(r.right() - COL_WAVE - COL_GAP, r.bottom())), Align2::RIGHT_CENTER, &words, mono(SIZE), pal().bright);
     knob::knob_row_with(ui, st, &called("bloom", "glare"), px, knob::Extra { tip: "bloom: a soft glow round what is bright, as a lens and the air in front of it give", ..Default::default() });
     let tone = (js_round(st.p.get("tone").unwrap_or(0.0)).max(0.0) as usize).min(TONES.len() - 1);
     // the tone curve, from a menu (each says what it is for when hovered in the light of its name)

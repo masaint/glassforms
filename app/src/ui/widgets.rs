@@ -70,7 +70,7 @@ pub fn paragraph(ui: &mut Ui, text: &str, font: FontId, color: Color32, line: f3
 /// A few words of explanation under some controls.
 pub fn note(ui: &mut Ui, text: &str) {
     gap(ui, 3.0);
-    paragraph(ui, text, sans(SMALL), FAINT, 1.4, 0.0);
+    paragraph(ui, text, sans(SMALL), pal().faint, 1.4, 0.0);
     gap(ui, 2.0);
 }
 
@@ -89,7 +89,7 @@ pub fn label_width(ui: &Ui) -> f32 {
 /// long cut short. Returns true if it was cut.
 pub fn name_in(ui: &Ui, rect: Rect, text: &str, size: f32) -> bool {
     let fits = [size, size - 0.5, size - 1.0].into_iter().find(|s| text_width(ui, text, &mono(*s)) <= rect.width());
-    text_in(ui, rect, Align2::LEFT_CENTER, text, mono(fits.unwrap_or(size - 1.0)), DIM)
+    text_in(ui, rect, Align2::LEFT_CENTER, text, mono(fits.unwrap_or(size - 1.0)), pal().dim)
 }
 
 /// The name of a control, in the column for names at the left of its row.
@@ -116,11 +116,11 @@ fn button_box(ui: &mut Ui, rect: Rect, id: Id, on: bool) -> (Response, Color32) 
     if hot { ui.ctx().set_cursor_icon(CursorIcon::PointingHand); }
     let down = live && resp.is_pointer_button_down_on();
     let (fill, line, ink) = if on {
-        (if hot { Color32::WHITE } else { BRIGHT }, BRIGHT, INK)
+        (if hot { pal().hot } else { pal().lit }, pal().lit, pal().ink)
     } else if hot {
-        (white(if down { 0.12 } else { 0.05 }), white(0.3), Color32::WHITE)
+        (white(if down { 0.12 } else { 0.05 }), white(0.3), pal().hot)
     } else {
-        (white(0.05), white(0.1), BUTTON)
+        (white(0.05), white(0.1), pal().button)
     };
     ui.painter().rect(rect, BUTTON_RADIUS, fill, Stroke::new(1.0, line), StrokeKind::Inside);
     (resp, ink)
@@ -207,7 +207,7 @@ pub fn dot(ui: &Ui, centre: Pos2, colour: Color32, on_bright: bool) {
 pub fn costly_mark(ui: &Ui, centre: Pos2) {
     let d = 3.2;
     let points = vec![centre + egui::vec2(0.0, -d), centre + egui::vec2(d, 0.0), centre + egui::vec2(0.0, d), centre + egui::vec2(-d, 0.0)];
-    ui.painter().add(Shape::convex_polygon(points, COSTLY, Stroke::NONE));
+    ui.painter().add(Shape::convex_polygon(points, pal().costly, Stroke::NONE));
 }
 
 /// The name of a costly control keeps this much of its column free for the mark.
@@ -367,14 +367,14 @@ pub fn select(ui: &mut Ui, rect: Rect, id: Id, options: &[String], current: usiz
     let name = options.get(current).map_or("", |s| s.as_str());
     let fits = text_width(ui, name, &font) <= words.width();
     let brief = if fits { name } else { name.split(" (").next().unwrap_or(name) };
-    text_in(ui, words, Align2::LEFT_CENTER, brief, font.clone(), BRIGHT);
+    text_in(ui, words, Align2::LEFT_CENTER, brief, font.clone(), pal().bright);
     // the little arrow that says "this opens"
     let c = Pos2::new(rect.right() - 9.0, rect.center().y + 0.5);
-    ui.painter().add(Shape::convex_polygon(vec![c + egui::vec2(-3.5, -2.0), c + egui::vec2(3.5, -2.0), c + egui::vec2(0.0, 2.5)], if hot || open { BRIGHT } else { DIM }, Stroke::NONE));
+    ui.painter().add(Shape::convex_polygon(vec![c + egui::vec2(-3.5, -2.0), c + egui::vec2(3.5, -2.0), c + egui::vec2(0.0, 2.5)], if hot || open { pal().bright } else { pal().dim }, Stroke::NONE));
 
     let mut chosen = None;
     let mut places = Vec::new();
-    let frame = egui::Frame::new().fill(MENU_FILL).stroke(Stroke::new(1.0, white(0.16))).corner_radius(BUTTON_RADIUS).inner_margin(3);
+    let frame = egui::Frame::new().fill(pal().menu_fill).stroke(Stroke::new(1.0, ui.visuals().window_stroke.color)).corner_radius(BUTTON_RADIUS + 2).inner_margin(3).shadow(ui.visuals().popup_shadow);
     let shown = egui::Popup::menu(&resp).frame(frame).gap(2.0).width(rect.width().max(92.0) - 8.0).show(|ui| {
         let w = (rect.width().max(92.0) - 8.0).max(options.iter().map(|o| text_width(ui, o, &font) + 14.0).fold(0.0, f32::max));
         ui.set_width(w);
@@ -382,13 +382,13 @@ pub fn select(ui: &mut Ui, rect: Rect, id: Id, options: &[String], current: usiz
             let (r, item) = ui.allocate_exact_size(egui::vec2(w, 19.0), Sense::click());
             places.push(r);
             if item.hovered() {
-                ui.painter().rect_filled(r, 3, fade(ACCENT, 0.22));
+                ui.painter().rect_filled(r, 3, fade(pal().accent, 0.22));
                 ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
             }
-            let ink = if item.hovered() { Color32::WHITE } else if i == current { BRIGHT } else { BUTTON };
+            let ink = if item.hovered() { pal().hot } else if i == current { pal().bright } else { pal().button };
             text_in(ui, r.shrink2(egui::vec2(6.0, 0.0)), Align2::LEFT_CENTER, o, font.clone(), ink);
             if i == current {
-                ui.painter().circle_filled(Pos2::new(r.right() - 7.0, r.center().y), 1.6, ACCENT);
+                ui.painter().circle_filled(Pos2::new(r.right() - 7.0, r.center().y), 1.6, pal().accent);
             }
             if item.clicked() {
                 chosen = Some(i);
@@ -577,7 +577,7 @@ pub fn slider_to(ui: &mut Ui, rect: Rect, id: Id, value: f64, lo: f64, hi: f64, 
     let p = ui.painter();
     p.rect_filled(Rect::from_min_max(Pos2::new(rect.left(), y - 1.5), Pos2::new(rect.right(), y + 1.5)), 2, white(0.16));
     p.rect_filled(Rect::from_min_max(Pos2::new(rect.left(), y - 1.5), Pos2::new(x, y + 1.5)), 2, fade(accent, 0.8));
-    p.circle_filled(Pos2::new(x, y), if hot { 5.5 } else { 5.0 }, if hot { BRIGHT } else { accent });
+    p.circle_filled(Pos2::new(x, y), if hot { 5.5 } else { 5.0 }, if hot { pal().bright } else { accent });
     out
 }
 
@@ -618,7 +618,7 @@ pub fn value_text(ui: &mut Ui, rect: Rect, id: Id, value: f64, digits: usize, le
         // (the field reaches over the end of the slider: a typed number may be longer than a shown one)
         let field = Rect::from_min_max(Pos2::new(rect.right() - 74.0, rect.center().y - 9.0), Pos2::new(rect.right() + 2.0, rect.center().y + 9.0));
         let edit_id = id.with("field");
-        let edit = egui::TextEdit::singleline(&mut t.text).id(edit_id).font(mono(size)).text_color(BRIGHT).margin(egui::Margin::symmetric(4, 1)).align(Align2::RIGHT_CENTER).desired_width(field.width());
+        let edit = egui::TextEdit::singleline(&mut t.text).id(edit_id).font(mono(size)).text_color(pal().bright).margin(egui::Margin::symmetric(4, 1)).align(Align2::RIGHT_CENTER).desired_width(field.width());
         let resp = ui.put(field, edit);
         if !t.focused {
             // (the whole of the old value chosen, so that what is typed takes its place)
@@ -644,7 +644,7 @@ pub fn value_text(ui: &mut Ui, rect: Rect, id: Id, value: f64, digits: usize, le
     let resp = ui.interact(rect, id.with("value"), Sense::click());
     let hot = ui.is_enabled() && resp.hovered();
     if hot { ui.ctx().set_cursor_icon(CursorIcon::Text); }
-    let ink = if past { PAST } else if hot { Color32::WHITE } else { BRIGHT };
+    let ink = if past { pal().past } else if hot { pal().hot } else { pal().bright };
     text_in(ui, rect, Align2::RIGHT_CENTER, &shown, mono(size), ink);
     let tip = if past { format!("past this slider's ends ({lo} to {hi})\n{VALUE_TIP}") } else { VALUE_TIP.to_owned() };
     let resp = resp.on_hover_text(tip);
@@ -698,7 +698,7 @@ pub fn hue_slider(ui: &mut Ui, rect: Rect, id: Id, hue: f64, strength: f64) -> M
         let ink = shown_colour(hue_rgb((i as f64 + 0.5) / parts as f64 * 360.0, strength.max(0.35)));
         p.rect_filled(Rect::from_min_max(Pos2::new(a, y - 2.0), Pos2::new(b + 0.5, y + 2.0)), 0, fade(ink, if ui.is_enabled() { 0.9 } else { 0.4 }));
     }
-    p.circle_filled(Pos2::new(x, y), if hot { 6.0 } else { 5.5 }, if hot { Color32::WHITE } else { BRIGHT });
+    p.circle_filled(Pos2::new(x, y), if hot { 6.0 } else { 5.5 }, if hot { pal().hot } else { pal().bright });
     p.circle_filled(Pos2::new(x, y), 3.5, shown_colour(hue_rgb(out.value.unwrap_or(hue), strength)));
     out
 }
@@ -712,7 +712,7 @@ pub fn colour_bar(ui: &mut Ui, rect: Rect, id: Id, colour: Color32, open: bool) 
     ui.painter().rect(rect, 4, colour, Stroke::new(1.0, white(if hot || open { 0.55 } else { 0.22 })), StrokeKind::Outside);
     // the arrow is dark on a pale colour and pale on a dark one
     let light = 0.299 * colour.r() as f32 + 0.587 * colour.g() as f32 + 0.114 * colour.b() as f32;
-    let ink = if light > 140.0 { Color32::from_black_alpha(190) } else { white(0.8) };
+    let ink = if light > 140.0 { Color32::from_black_alpha(190) } else { Color32::from_white_alpha(204) };
     let c = Pos2::new(rect.right() - 9.0, rect.center().y + 0.5);
     let arrow = if open {
         vec![c + egui::vec2(-3.5, 2.0), c + egui::vec2(0.0, -2.5), c + egui::vec2(3.5, 2.0)]
@@ -817,11 +817,11 @@ pub fn range(ui: &mut Ui, rect: Rect, id: Id, from: f64, to: f64, now: f64, lo: 
     let (xa, xb) = (rail.at(from), rail.at(to));
     let p = ui.painter();
     p.rect_filled(Rect::from_min_max(Pos2::new(rect.left(), y - 1.5), Pos2::new(rect.right(), y + 1.5)), 2, white(0.16));
-    p.rect_filled(Rect::from_min_max(Pos2::new(xa.min(xb), y - 3.5), Pos2::new(xa.max(xb), y + 3.5)), 2, fade(ACCENT, if hot[2] { 0.75 } else { 0.55 }));
-    p.rect_filled(handle(xa), 3, if hot[0] { Color32::WHITE } else { BRIGHT });
-    p.rect_filled(handle(xb), 3, if hot[1] { ACCENT } else { HANDLE_TO });
+    p.rect_filled(Rect::from_min_max(Pos2::new(xa.min(xb), y - 3.5), Pos2::new(xa.max(xb), y + 3.5)), 2, fade(pal().accent, if hot[2] { 0.75 } else { 0.55 }));
+    p.rect_filled(handle(xa), 3, if hot[0] { pal().hot } else { pal().bright });
+    p.rect_filled(handle(xb), 3, if hot[1] { pal().accent } else { pal().handle_to });
     let xn = rail.at(now);
-    p.rect_filled(Rect::from_min_max(Pos2::new(xn - 1.0, y - 6.0), Pos2::new(xn + 1.0, y + 6.0)), 1, Color32::WHITE);
+    p.rect_filled(Rect::from_min_max(Pos2::new(xn - 1.0, y - 6.0), Pos2::new(xn + 1.0, y + 6.0)), 1, pal().hot);
     out
 }
 
@@ -834,7 +834,7 @@ pub fn group_title(ui: &mut Ui, id: Id, title: &str, closed: bool, says: &str) -
     let resp = ui.interact(r, id, Sense::click());
     let hot = resp.hovered();
     if hot { ui.ctx().set_cursor_icon(CursorIcon::PointingHand); }
-    let ink = if hot { BRIGHT } else { FAINT };
+    let ink = if hot { pal().bright } else { pal().faint };
     let c = Pos2::new(r.left() + 3.5, r.center().y);
     let arrow = if closed {
         vec![c + egui::vec2(-1.5, -3.5), c + egui::vec2(2.5, 0.0), c + egui::vec2(-1.5, 3.5)]
@@ -848,7 +848,7 @@ pub fn group_title(ui: &mut Ui, id: Id, title: &str, closed: bool, says: &str) -
     ui.painter().galley(at, g, ink);
     if !says.is_empty() {
         let room = Rect::from_min_max(Pos2::new(end + 12.0, r.top()), r.max);
-        text_in(ui, room, Align2::RIGHT_CENTER, says, mono(10.0), if hot { DIM } else { HINT });
+        text_in(ui, room, Align2::RIGHT_CENTER, says, mono(10.0), if hot { pal().dim } else { pal().hint });
     }
     gap(ui, 3.0);
     (resp.clicked(), r)
@@ -859,7 +859,7 @@ pub fn group_title(ui: &mut Ui, id: Id, title: &str, closed: bool, says: &str) -
 pub fn group_heading(ui: &mut Ui, text: &str) -> Rect {
     gap(ui, 6.0);
     let r = row(ui, 14.0);
-    text_in(ui, r, Align2::LEFT_CENTER, text, mono(10.0), FAINT);
+    text_in(ui, r, Align2::LEFT_CENTER, text, mono(10.0), pal().faint);
     gap(ui, 1.0);
     r
 }
@@ -873,7 +873,7 @@ pub fn fold_heading(ui: &mut Ui, id: Id, title: &str, closed: bool, says: &str) 
     let resp = ui.interact(r, id, Sense::click());
     let hot = resp.hovered();
     if hot { ui.ctx().set_cursor_icon(CursorIcon::PointingHand); }
-    let ink = if hot { BRIGHT } else { FAINT };
+    let ink = if hot { pal().bright } else { pal().faint };
     let c = Pos2::new(r.left() + 4.5, r.center().y);
     let tip = if closed {
         vec![c + egui::vec2(-1.3, -3.0), c + egui::vec2(2.3, 0.0), c + egui::vec2(-1.3, 3.0)]
@@ -884,7 +884,7 @@ pub fn fold_heading(ui: &mut Ui, id: Id, title: &str, closed: bool, says: &str) 
     let w = text_width(ui, title, &mono(10.5));
     text_in(ui, Rect::from_min_max(Pos2::new(r.left() + 13.0, r.top()), r.max), Align2::LEFT_CENTER, title, mono(10.5), ink);
     if !says.is_empty() {
-        text_in(ui, Rect::from_min_max(Pos2::new(r.left() + 13.0 + w + 12.0, r.top()), r.max), Align2::RIGHT_CENTER, says, mono(10.0), if hot { DIM } else { HINT });
+        text_in(ui, Rect::from_min_max(Pos2::new(r.left() + 13.0 + w + 12.0, r.top()), r.max), Align2::RIGHT_CENTER, says, mono(10.0), if hot { pal().dim } else { pal().hint });
     }
     gap(ui, 1.0);
     (resp.clicked(), r)
@@ -895,11 +895,11 @@ pub fn fold_heading(ui: &mut Ui, id: Id, title: &str, closed: bool, says: &str) 
 pub fn section(ui: &mut Ui, title: &str, says: &str) -> Rect {
     gap(ui, 9.0);
     let r = row(ui, 15.0);
-    let g = spaced(ui, title, 10.0, FAINT);
+    let g = spaced(ui, title, 10.0, pal().faint);
     let end = r.left() + g.size().x;
-    ui.painter().galley(Pos2::new(r.left(), r.center().y - g.size().y / 2.0), g, FAINT);
+    ui.painter().galley(Pos2::new(r.left(), r.center().y - g.size().y / 2.0), g, pal().faint);
     if !says.is_empty() {
-        text_in(ui, Rect::from_min_max(Pos2::new(end + 12.0, r.top()), r.max), Align2::RIGHT_CENTER, says, mono(10.0), HINT);
+        text_in(ui, Rect::from_min_max(Pos2::new(end + 12.0, r.top()), r.max), Align2::RIGHT_CENTER, says, mono(10.0), pal().hint);
     }
     gap(ui, 3.0);
     r
@@ -907,7 +907,7 @@ pub fn section(ui: &mut Ui, title: &str, says: &str) -> Rect {
 
 /// A bar down the left of a block (the equations of a shape, the extra rows of an animated slider).
 pub fn side_bar(ui: &Ui, x: f32, top: f32, bottom: f32, alpha: f32) {
-    ui.painter().rect_filled(Rect::from_min_max(Pos2::new(x, top), Pos2::new(x + 2.0, bottom)), 0, fade(ACCENT, alpha));
+    ui.painter().rect_filled(Rect::from_min_max(Pos2::new(x, top), Pos2::new(x + 2.0, bottom)), 0, fade(pal().accent, alpha));
 }
 
 /// A path with its beginning cut off if it does not fit in `width`: the end is the part worth reading.
@@ -929,7 +929,7 @@ fn close_button(ui: &mut Ui, rect: Rect, id: Id) -> Response {
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
         ui.painter().rect_filled(rect, BUTTON_RADIUS, white(0.1));
     }
-    let (c, d, ink) = (rect.center(), 3.5, if hot { Color32::WHITE } else { DIM });
+    let (c, d, ink) = (rect.center(), 3.5, if hot { pal().hot } else { pal().dim });
     for s in [1.0, -1.0] {
         ui.painter().line_segment([c + egui::vec2(-d, -d * s), c + egui::vec2(d, d * s)], Stroke::new(1.3, ink));
     }
@@ -951,22 +951,17 @@ pub struct Floated {
 /// the program's window, and scrolls if it is taller than `max_h`. `first`: where its top left corner is
 /// when it first appears in a run (after that it stays where it is put).
 pub fn floating(ctx: &egui::Context, name: &str, title: &str, width: f32, first: Pos2, max_h: f32, body: impl FnOnce(&mut Ui)) -> Floated {
-    let frame = egui::Frame::new()
-        .fill(float_fill())
-        .stroke(Stroke::new(1.0, white(0.16)))
-        .corner_radius(PANEL_RADIUS)
-        .shadow(egui::Shadow { offset: [0, 6], blur: 18, spread: 0, color: Color32::from_black_alpha(110) })
-        .inner_margin(egui::Margin { left: 12, right: 2, top: 9, bottom: 10 });
+    let margin = egui::Margin { left: 12, right: 2, top: 9, bottom: 10 };
     let id = Id::unique(("floating", name));
     let (mut bar, mut cross, mut closed) = (Rect::ZERO, Rect::ZERO, false);
     let shown = egui::Area::new(id).order(egui::Order::Foreground).movable(true).constrain(true).fade_in(false).default_pos(first).show(ctx, |ui| {
-        frame.show(ui, |ui| {
+        glass_frame(ui, margin, PANEL_RADIUS, Lift::Float, false, |ui| {
             ui.set_width(width + 10.0);
             let head = Rect::from_min_size(ui.cursor().min, egui::vec2(width, 18.0));
             ui.scope_builder(egui::UiBuilder::new().max_rect(head), |ui| {
                 bar = row(ui, 18.0);
-                let g = spaced(ui, title, 10.5, BRIGHT);
-                ui.painter().galley(Pos2::new(bar.left(), bar.center().y - g.size().y / 2.0), g, BRIGHT);
+                let g = spaced(ui, title, 10.5, pal().bright);
+                ui.painter().galley(Pos2::new(bar.left(), bar.center().y - g.size().y / 2.0), g, pal().bright);
                 cross = Rect::from_center_size(Pos2::new(bar.right() - 8.0, bar.center().y), egui::vec2(18.0, 18.0));
                 closed = close_button(ui, cross, id.with("close")).on_hover_text("close").clicked();
             });

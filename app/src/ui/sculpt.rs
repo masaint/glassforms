@@ -103,7 +103,7 @@ fn head(ui: &mut Ui, st: &mut State, px: &mut Panels) {
         _ => says,
     };
     let r = row(ui, 14.0);
-    text_in(ui, r, Align2::LEFT_CENTER, &says, mono(10.0), HINT);
+    text_in(ui, r, Align2::LEFT_CENTER, &says, mono(10.0), pal().hint);
     if let Some(e) = &px.sculpt_error {
         note(ui, e);
     }
@@ -204,7 +204,7 @@ fn layer_rows(ui: &mut Ui, st: &mut State, px: &mut Panels, i: usize) {
         return;
     }
     let r = row(ui, 13.0);
-    text_in(ui, beside_label(ui, r, 13.0), Align2::LEFT_CENTER, KINDS[l.kind.index()].2, mono(9.5), HINT);
+    text_in(ui, beside_label(ui, r, 13.0), Align2::LEFT_CENTER, KINDS[l.kind.index()].2, mono(9.5), pal().hint);
 
     if l.kind == Kind::Image { picture_row(ui, st, px, i, &l); }
 
@@ -278,7 +278,7 @@ fn layer_rows(ui: &mut Ui, st: &mut State, px: &mut Panels, i: usize) {
         changed(st);
     }
     let r = row(ui, 13.0);
-    text_in(ui, beside_label(ui, r, 13.0), Align2::LEFT_CENTER, MASKS[now].2, mono(9.5), HINT);
+    text_in(ui, beside_label(ui, r, 13.0), Align2::LEFT_CENTER, MASKS[now].2, mono(9.5), pal().hint);
     if matches!(l.mask, Mask::Height | Mask::Radial) {
         let (lo, hi) = if l.mask == Mask::Height { (-1.5, 1.5) } else { (0.0, 1.5) };
         let m = knob::value_row(ui, px, &key("mask at"), "from", l.mask_at, lo, hi, 0.01);
@@ -311,7 +311,7 @@ fn picture_row(ui: &mut Ui, st: &mut State, px: &mut Panels, i: usize, l: &Layer
     let b = Rect::from_min_max(Pos2::new(slot.right() - 62.0, slot.top()), slot.max);
     let words = Rect::from_min_max(slot.min, Pos2::new(b.left() - 6.0, slot.bottom()));
     let name = if l.image.is_empty() { "none chosen (PNG)".to_owned() } else { tail(ui, &l.image, &mono(10.0), words.width()) };
-    text_in(ui, words, Align2::LEFT_CENTER, &name, mono(10.0), if l.image.is_empty() { HINT } else { BRIGHT });
+    text_in(ui, words, Align2::LEFT_CENTER, &name, mono(10.0), if l.image.is_empty() { pal().hint } else { pal().bright });
     if super::widgets::button(ui, b, Id::unique(("sculpt picture", i)), "choose…", false, mono(10.5)).on_hover_text("a PNG picture: its light parts raise or carve the surface").clicked() {
         px.requests.push(Request::LoadSculptPicture(i));
     }

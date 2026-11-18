@@ -79,10 +79,10 @@ pub fn strip(ui: &mut Ui, st: &mut State, px: &mut Panels) {
         // the row: brighter when it is the selected one; lined when another is about to be dropped on it
         let fill = if chosen { white(0.14) } else if hot { white(0.08) } else { white(0.04) };
         ui.painter().rect_filled(r.shrink(1.0), 4, fill);
-        if aimed { ui.painter().rect_stroke(r.shrink(1.0), 4, Stroke::new(1.0, ACCENT), StrokeKind::Inside); }
-        if chosen { ui.painter().rect_filled(Rect::from_min_max(Pos2::new(r.left() + 1.0, r.top() + 5.0), Pos2::new(r.left() + 3.0, r.bottom() - 5.0)), 1, ACCENT); }
-        let ink = if !shown { HINT } else if chosen { BRIGHT } else { BUTTON };
-        text_in(ui, Rect::from_min_max(Pos2::new(r.left() + 9.0, r.top()), Pos2::new(r.left() + 22.0, r.bottom())), Align2::LEFT_CENTER, &format!("{}", i + 1), mono(10.0), if chosen { ACCENT } else { DIM });
+        if aimed { ui.painter().rect_stroke(r.shrink(1.0), 4, Stroke::new(1.0, pal().accent), StrokeKind::Inside); }
+        if chosen { ui.painter().rect_filled(Rect::from_min_max(Pos2::new(r.left() + 1.0, r.top() + 5.0), Pos2::new(r.left() + 3.0, r.bottom() - 5.0)), 1, pal().accent); }
+        let ink = if !shown { pal().hint } else if chosen { pal().bright } else { pal().button };
+        text_in(ui, Rect::from_min_max(Pos2::new(r.left() + 9.0, r.top()), Pos2::new(r.left() + 22.0, r.bottom())), Align2::LEFT_CENTER, &format!("{}", i + 1), mono(10.0), if chosen { pal().accent } else { pal().dim });
         let cross = Rect::from_center_size(Pos2::new(r.right() - 12.0, r.center().y), egui::vec2(16.0, 16.0));
         let lid = Rect::from_center_size(Pos2::new(cross.left() - 12.0, r.center().y), egui::vec2(18.0, 18.0));
         // (every name starts clear of the dot that a body's first row carries: see below)
@@ -120,7 +120,7 @@ pub fn strip(ui: &mut Ui, st: &mut State, px: &mut Panels) {
         px.note(format!("layer:{}:eye", i + 1), lid);
         let seen = ui.interact(lid, Id::unique(("layer eye", i)), Sense::click());
         if seen.hovered() { ui.ctx().set_cursor_icon(CursorIcon::PointingHand); }
-        eye(ui, lid, shown, if seen.hovered() { Color32::WHITE } else if shown { BUTTON } else { HINT });
+        eye(ui, lid, shown, if seen.hovered() { pal().hot } else if shown { pal().button } else { pal().hint });
         if seen.on_hover_text(if shown { "hide this layer (it still cuts and masks the others)" } else { "show this layer" }).clicked() { toggle = Some(i); }
 
         // the cross, on the selected layer when it is not the only one
@@ -130,7 +130,7 @@ pub fn strip(ui: &mut Ui, st: &mut State, px: &mut Panels) {
             let gone = ui.interact(cross, Id::unique(("layer cross", i)), Sense::click());
             let hot = gone.hovered();
             if hot { ui.ctx().set_cursor_icon(CursorIcon::PointingHand); }
-            let (c, d, ink) = (cross.center(), 3.2, if hot { Color32::WHITE } else { DIM });
+            let (c, d, ink) = (cross.center(), 3.2, if hot { pal().hot } else { pal().dim });
             for s in [1.0, -1.0] { ui.painter().line_segment([c + egui::vec2(-d, -d * s), c + egui::vec2(d, d * s)], Stroke::new(1.3, ink)); }
             if gone.on_hover_text(if n > 1 { "take this object away, with its joins" } else { "take this object away: the scene is left empty" }).clicked() { remove = Some(i); }
         }
@@ -225,17 +225,17 @@ fn combo_title(ui: &mut Ui, id: Id, st: &State, mask: u8, open: bool, dim: bool)
     let resp = ui.interact(r, id, Sense::click());
     let hot = resp.hovered();
     if hot { ui.ctx().set_cursor_icon(CursorIcon::PointingHand); }
-    let ink = if dim { HINT } else if hot || open { BRIGHT } else { BUTTON };
+    let ink = if dim { pal().hint } else if hot || open { pal().bright } else { pal().button };
     arrow(ui, Pos2::new(r.left() + 5.5, r.center().y), open, ink);
     let numbers = members(mask).iter().map(|i| (i + 1).to_string()).collect::<Vec<_>>().join("+");
     let numbers_w = text_width(ui, &numbers, &mono(10.0));
-    text_in(ui, Rect::from_min_max(Pos2::new(r.left() + 14.0, r.top()), Pos2::new(r.left() + 14.0 + numbers_w, r.bottom())), Align2::LEFT_CENTER, &numbers, mono(10.0), if dim { HINT } else { ACCENT_MINI });
+    text_in(ui, Rect::from_min_max(Pos2::new(r.left() + 14.0, r.top()), Pos2::new(r.left() + 14.0 + numbers_w, r.bottom())), Align2::LEFT_CENTER, &numbers, mono(10.0), if dim { pal().hint } else { pal().accent_mini });
     // the options at the right; the names take what room is left, cut short if need be
     let says = brief(st, mask);
     let says_w = text_width(ui, &says, &mono(10.0)) + 8.0;
     let title = st.combo_title(mask);
     text_in(ui, Rect::from_min_max(Pos2::new(r.left() + 20.0 + numbers_w, r.top()), Pos2::new(r.right() - says_w, r.bottom())), Align2::LEFT_CENTER, &title, mono(SIZE), ink);
-    text_in(ui, Rect::from_min_max(Pos2::new(r.right() - says_w, r.top()), r.max), Align2::RIGHT_CENTER, &says, mono(10.0), HINT);
+    text_in(ui, Rect::from_min_max(Pos2::new(r.right() - says_w, r.top()), r.max), Align2::RIGHT_CENTER, &says, mono(10.0), pal().hint);
     (resp.on_hover_text(format!("{title}: {}", st.combo_summary(mask))).clicked(), r)
 }
 
@@ -246,10 +246,10 @@ fn meets_title(ui: &mut Ui, id: Id, text: &str, count: usize, open: bool) -> (bo
     let resp = ui.interact(r, id, Sense::click());
     let hot = resp.hovered();
     if hot { ui.ctx().set_cursor_icon(CursorIcon::PointingHand); }
-    let ink = if hot { BRIGHT } else { FAINT };
+    let ink = if hot { pal().bright } else { pal().faint };
     arrow(ui, Pos2::new(r.left() + 5.5, r.center().y), open, ink);
     text_in(ui, Rect::from_min_max(Pos2::new(r.left() + 14.0, r.top()), r.max), Align2::LEFT_CENTER, text, mono(10.0), ink);
-    text_in(ui, r, Align2::RIGHT_CENTER, &format!("{count}"), mono(10.0), HINT);
+    text_in(ui, r, Align2::RIGHT_CENTER, &format!("{count}"), mono(10.0), pal().hint);
     (resp.clicked(), r)
 }
 
@@ -257,13 +257,13 @@ fn meets_title(ui: &mut Ui, id: Id, text: &str, count: usize, open: bool) -> (bo
 fn heading(ui: &mut Ui, text: &str) {
     gap(ui, 3.0);
     let r = row(ui, 14.0);
-    text_in(ui, r, Align2::LEFT_CENTER, text, mono(10.0), FAINT);
+    text_in(ui, r, Align2::LEFT_CENTER, text, mono(10.0), pal().faint);
 }
 
 /// A line of plain words among a combination's controls.
 fn words(ui: &mut Ui, text: &str) {
     gap(ui, 2.0);
-    paragraph(ui, text, sans(SMALL), FAINT, 1.4, 0.0);
+    paragraph(ui, text, sans(SMALL), pal().faint, 1.4, 0.0);
     gap(ui, 3.0);
 }
 
@@ -336,7 +336,7 @@ fn combo_body(ui: &mut Ui, st: &mut State, px: &mut Panels, mask: u8) {
                     .collect();
                 // (a short name and three short words: one line, whatever the width of the names' column)
                 let run = button_run(ui, Id::unique(("join profile", mask)), 46.0, &items, egui::vec2(7.0, 2.0), &mono(SIZE), 24.0);
-                text_in(ui, Rect::from_min_size(run.rect.min, egui::vec2(42.0, run.rect.height())), Align2::LEFT_CENTER, "seam", mono(SIZE), DIM);
+                text_in(ui, Rect::from_min_size(run.rect.min, egui::vec2(42.0, run.rect.height())), Align2::LEFT_CENTER, "seam", mono(SIZE), pal().dim);
                 for (p, place) in Profile::ALL.iter().zip(&run.places) { px.note(format!("join:{key}:{}", p.id()), *place); }
                 if let Some(i) = run.clicked { st.set_pair_profile(mask, Profile::ALL[i]); }
             }

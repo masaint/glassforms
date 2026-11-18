@@ -359,14 +359,14 @@ fn recipe_line(ui: &mut Ui, st: &mut State, px: &mut Panels, reset: bool) {
         px.note(format!("{}recipe:{i}", px.whose()), at);
         ui.painter().rect(at, 10, white(0.045), Stroke::new(1.0, white(0.13)), StrokeKind::Inside);
         let words = Rect::from_min_max(Pos2::new(at.left() + 8.0, at.top()), Pos2::new(at.right() - 6.0, at.bottom()));
-        text_in(ui, words, Align2::LEFT_CENTER, &part.words, font.clone(), if *shows { BRIGHT } else { FAINT });
+        text_in(ui, words, Align2::LEFT_CENTER, &part.words, font.clone(), if *shows { pal().bright } else { pal().faint });
         if part.off.is_empty() { continue; }
         let button = Rect::from_min_max(Pos2::new(at.right() - cross - 7.0, at.top()), at.max);
         px.note(format!("{}recipe:{i}:x", px.whose()), button);
         let resp = ui.interact(button, Id::unique(("recipe off", px.place, i)), Sense::click());
         let hot = ui.is_enabled() && resp.hovered();
         if hot { ui.ctx().set_cursor_icon(CursorIcon::PointingHand); }
-        let (c, d, ink) = (Pos2::new(button.center().x + 1.0, button.center().y), 2.6, if hot { Color32::WHITE } else { DIM });
+        let (c, d, ink) = (Pos2::new(button.center().x + 1.0, button.center().y), 2.6, if hot { pal().hot } else { pal().dim });
         for turn in [1.0, -1.0] {
             ui.painter().line_segment([c + egui::vec2(-d, -d * turn), c + egui::vec2(d, d * turn)], Stroke::new(1.2, ink));
         }
@@ -505,13 +505,13 @@ fn name_line(ui: &mut Ui, st: &State, px: &mut Panels, spare: f32, folds: Option
     let r = row(ui, 17.0);
     px.note(format!("{}mat-name", px.whose()), r);
     let mut pressed = false;
-    let mut ink = BRIGHT;
+    let mut ink = pal().bright;
     if let Some(open) = folds {
         let resp = ui.interact(r, Id::unique(("material named", px.place)), Sense::click());
         let hot = ui.is_enabled() && resp.hovered();
         if hot {
             ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
-            ink = Color32::WHITE;
+            ink = pal().hot;
         }
         // the little arrow of something that opens, at the end of the line
         let c = Pos2::new(r.right() - 8.0, r.center().y + 0.5);
@@ -520,7 +520,7 @@ fn name_line(ui: &mut Ui, st: &State, px: &mut Panels, spare: f32, folds: Option
         } else {
             vec![c + egui::vec2(-3.5, -2.0), c + egui::vec2(3.5, -2.0), c + egui::vec2(0.0, 2.5)]
         };
-        ui.painter().add(Shape::convex_polygon(arrow, if hot { BRIGHT } else { DIM }, Stroke::NONE));
+        ui.painter().add(Shape::convex_polygon(arrow, if hot { pal().bright } else { pal().dim }, Stroke::NONE));
         pressed = resp.on_hover_text(if open { "fold the list of materials away" } else { "choose another material" }).clicked();
     }
     dot(ui, Pos2::new(r.left() + 5.5, r.center().y), swatches(ui, st)[now], false);
@@ -541,7 +541,7 @@ fn name_line(ui: &mut Ui, st: &State, px: &mut Panels, spare: f32, folds: Option
 fn legend(ui: &mut Ui) {
     let r = row(ui, 15.0);
     costly_mark(ui, Pos2::new(r.left() + 4.5, r.center().y));
-    text_in(ui, Rect::from_min_max(Pos2::new(r.left() + 13.0, r.top()), r.max), Align2::LEFT_CENTER, "costly: every frame takes longer", mono(10.0), HINT);
+    text_in(ui, Rect::from_min_max(Pos2::new(r.left() + 13.0, r.top()), r.max), Align2::LEFT_CENTER, "costly: every frame takes longer", mono(10.0), pal().hint);
 }
 
 /// The chooser of named materials: their groups as a block of buttons, and the materials of the group
@@ -897,7 +897,7 @@ pub fn lab(ctx: &egui::Context, st: &mut State, px: &mut Panels, full: Rect, bel
         // which material it is (words only: it is chosen in the panel)
         let r = row(ui, 17.0);
         dot(ui, Pos2::new(r.left() + 5.5, r.center().y), swatches(ui, st)[chosen(st)], false);
-        text_in(ui, Rect::from_min_max(Pos2::new(r.left() + 16.0, r.top()), r.max), Align2::LEFT_CENTER, NAMED[chosen(st)].name, mono(SIZE), DIM);
+        text_in(ui, Rect::from_min_max(Pos2::new(r.left() + 16.0, r.top()), r.max), Align2::LEFT_CENTER, NAMED[chosen(st)].name, mono(SIZE), pal().dim);
         px.note("lab/mat-name", r);
         let mine = own(st);
         if !mine { note(ui, "Made of the first body's material: give it a material of its own (own material, in the panel) to change it here."); }

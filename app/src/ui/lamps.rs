@@ -38,7 +38,7 @@ pub fn lamps(ui: &mut Ui, st: &mut State, px: &mut Panels) {
         gap(ui, 4.0);
     } else {
         let r = row(ui, 16.0);
-        text_in(ui, r, Align2::LEFT_CENTER, "lights standing in the scene, at a place", mono(SMALL), FAINT);
+        text_in(ui, r, Align2::LEFT_CENTER, "lights standing in the scene, at a place", mono(SMALL), pal().faint);
     }
 
     // more of them, fewer of them

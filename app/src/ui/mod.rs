@@ -45,6 +45,7 @@ pub mod overlay;
 pub mod right;
 pub mod room;
 pub mod script;
+pub mod settings;
 pub mod sculpt;
 pub mod store;
 pub mod studio;

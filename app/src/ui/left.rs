@@ -168,7 +168,7 @@ fn file(ui: &mut Ui, px: &mut Panels) {
     }
     if !px.file_text.is_empty() {
         gap(ui, 2.0);
-        paragraph(ui, &px.file_text.clone(), mono(SMALL), BUTTON, LINE, 0.0);
+        paragraph(ui, &px.file_text.clone(), mono(SMALL), pal().button, LINE, 0.0);
     }
 }
 
@@ -209,13 +209,13 @@ fn video(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     let folder = px.store.video_folder().display().to_string();
     let r = row(ui, 16.0);
     let shown = tail(ui, &folder, &mono(SMALL), r.width());
-    text_in(ui, r, Align2::LEFT_CENTER, &shown, mono(SMALL), DIM);
+    text_in(ui, r, Align2::LEFT_CENTER, &shown, mono(SMALL), pal().dim);
     if shown != folder {
         ui.interact(r, Id::unique("video folder path"), egui::Sense::hover()).on_hover_text(folder);
     }
 
     gap(ui, 5.0);
-    paragraph(ui, &frames_text(st), mono(SMALL), BUTTON, LINE, 0.0);
+    paragraph(ui, &frames_text(st), mono(SMALL), pal().button, LINE, 0.0);
     if px.ffmpeg || locked {
         let caption = if locked { "cancel" } else { "render video" };
         let (resp, at) = wide_button(ui, Id::unique("render video"), caption, false);
@@ -225,10 +225,10 @@ fn video(ui: &mut Ui, st: &mut State, px: &mut Panels) {
         }
     } else {
         gap(ui, 6.0);
-        paragraph(ui, "ffmpeg was not found, so videos cannot be made. Put ffmpeg.exe beside the program (or on the PATH, and start again).", sans(SMALL), ERROR_TEXT, 1.4, 0.0);
+        paragraph(ui, "ffmpeg was not found, so videos cannot be made. Put ffmpeg.exe beside the program (or on the PATH, and start again).", sans(SMALL), pal().error_text, 1.4, 0.0);
     }
     if !px.video_text.is_empty() {
         gap(ui, 4.0);
-        paragraph(ui, &px.video_text.clone(), mono(SMALL), BUTTON, LINE, 0.0);
+        paragraph(ui, &px.video_text.clone(), mono(SMALL), pal().button, LINE, 0.0);
     }
 }

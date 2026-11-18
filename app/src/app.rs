@@ -436,6 +436,11 @@ struct App {
     /// system was late asking for a frame (as it may be for a window nobody can see)
     passes: u64,
     ffmpeg_checked: Instant,
+    /// the frosted copy of the picture the panels are drawn on (crate::backdrop): the picture it was last
+    /// made from, and how egui knows it (with the copy's generation, to know when to tell egui again)
+    backdrop: crate::backdrop::Backdrop,
+    backdrop_from: Option<wgpu::Texture>,
+    backdrop_id: Option<(egui::TextureId, u64)>,
 }
 
 impl App {
@@ -468,6 +473,7 @@ impl App {
             if upscale.is_some() && rs.adapter.get_info().backend == wgpu::Backend::Vulkan { gpu.dlss_adapter = Some(rs.adapter.clone()); }
             gpu
         };
+        let backdrop = crate::backdrop::Backdrop::new(&gpu);
         let mut engine = Engine::new(gpu, state, false);
         if upscale.is_some() { engine.renderer.set_upscale(upscale); }
         theme::install_fonts(&cc.egui_ctx);
@@ -501,6 +507,7 @@ impl App {
             engine, rs, shown: None, preview: None, px, seeking: opts.size_px, canvas: (0, 0), full: Rect::ZERO, last: None, rested: false, fly_at: None, history: Default::default(), input_at: Instant::now(), unsettled: true, quiet_frames: 0, called_off: false, let_go_at: None, put_back: false, fps: 0.0, drawn: (0, Instant::now()), stat_at: Instant::now(),
             drag: None, video: None, last_video: None, exporting: None, bench_in: 0, frozen: false, test, inject: Vec::new(), dropped: Vec::new(), model_asked: None, model_said: String::new(), adding: None, model_refused: None, failure, store_path,
             saved: store, changed_at: None, frames: Arc::new(AtomicU64::new(0)), passes: 0, ffmpeg_checked: Instant::now(), opts,
+            backdrop, backdrop_from: None, backdrop_id: None,
         })
     }
 
@@ -1122,11 +1129,10 @@ impl App {
     fn panels(&mut self, ctx: &egui::Context) {
         let st = &self.engine.state;
         self.px.bright = st.hdri.is_some() && st.p.hdri_show > 0.5 && self.engine.hdri_info().is_some();
-        let frame = egui::Frame::new()
-            .fill(theme::panel_fill(self.px.bright))
-            .stroke(theme::panel_stroke())
-            .corner_radius(theme::PANEL_RADIUS)
-            .inner_margin(egui::Margin { left: 12, right: 2, top: 10, bottom: 9 });
+        // the panels are frosted glass over the picture (theme::glass)
+        let margin = egui::Margin { left: 12, right: 2, top: 10, bottom: 9 };
+        let bright = self.px.bright;
+        let frame = |ui: &mut egui::Ui, body: &mut dyn FnMut(&mut egui::Ui) -> f32| theme::glass_frame(ui, margin, theme::PANEL_RADIUS, theme::Lift::Panel, bright, body);
         // a panel taller than the window scrolls; its scroll bar sits in the margin at its right
         // (as far from the foot of the window as from its top: the box around it adds 21 points to its height)
         let max_h = (self.full.height() - 2.0 * EDGE - 21.0).max(60.0);
@@ -1194,7 +1200,7 @@ impl App {
             let to = px.scroll_to[0].take();
             let shown = egui::Area::new(Id::unique("left panel")).order(egui::Order::Middle).fixed_pos(Pos2::new(EDGE, EDGE)).constrain(false).fade_in(false).show(ctx, |ui| {
                 px.place = "left";
-                frame.show(ui, |ui| scroller(ui, LEFT_W, to, "left", &mut |ui| left::show(ui, st, px))).inner
+                frame(ui, &mut |ui| scroller(ui, LEFT_W, to, "left", &mut |ui| left::show(ui, st, px))).inner
             });
             px.needs[0] = shown.inner;
             px.left_at = Some(shown.response.rect);
@@ -1204,7 +1210,7 @@ impl App {
             let to = px.scroll_to[1].take();
             let shown = egui::Area::new(Id::unique("right panel")).order(egui::Order::Middle).anchor(Align2::RIGHT_TOP, egui::vec2(-EDGE, EDGE)).constrain(false).fade_in(false).show(ctx, |ui| {
                 px.place = "right";
-                frame.show(ui, |ui| scroller(ui, RIGHT_W, to, "right", &mut |ui| right::show(ui, st, px))).inner
+                frame(ui, &mut |ui| scroller(ui, RIGHT_W, to, "right", &mut |ui| right::show(ui, st, px))).inner
             });
             px.needs[1] = shown.inner;
             px.right_at = Some(shown.response.rect);
@@ -1217,6 +1223,7 @@ impl App {
             material::lab(ctx, st, px, self.full, below);
             crate::ui::sculpt::show(ctx, st, px, self.full);
             overlay::help(ctx, px, st.families.len(), self.full);
+            crate::ui::settings::show(ctx, px, self.full, self.opts.scale.is_some());
         }
         // something went wrong building the shape: say so over the picture (the shape before stays up).
         // A model's file that could not be used is said there too, for a while, when the shape that is up
@@ -1229,16 +1236,51 @@ impl App {
             let width = (self.full.width() - LEFT_W - RIGHT_W - 150.0).clamp(240.0, 640.0);
             egui::Area::new(Id::unique("error")).order(egui::Order::Foreground).anchor(Align2::CENTER_TOP, egui::vec2(0.0, EDGE)).interactable(false).fade_in(false).show(ctx, |ui| {
                 egui::Frame::new()
-                    .fill(theme::ERROR_FILL.gamma_multiply(0.94))
-                    .stroke(egui::Stroke::new(1.0, theme::ERROR_TEXT.gamma_multiply(0.45)))
+                    .fill(theme::pal().error_fill.gamma_multiply(0.94))
+                    .stroke(egui::Stroke::new(1.0, theme::pal().error_text.gamma_multiply(0.45)))
                     .corner_radius(theme::PANEL_RADIUS)
                     .inner_margin(egui::Margin::symmetric(16, 12))
                     .show(ui, |ui| {
                         ui.set_width(width);
-                        widgets::paragraph(ui, err, theme::mono(12.0), theme::ERROR_TEXT, theme::LINE, 0.0);
+                        widgets::paragraph(ui, err, theme::mono(12.0), theme::pal().error_text, theme::LINE, 0.0);
                     });
             });
         }
+    }
+
+    // ---- the look ------------------------------------------------------------------------------
+    /// Put the look chosen in the settings in use (dark, light or as Windows has it; how frosted), and tell
+    /// the panels where the frosted copy of the picture is, if there is one to draw them on.
+    fn look(&mut self, ctx: &egui::Context) {
+        theme::set_mode(ctx, theme::mode_named(&self.px.store.theme, ctx.system_theme()));
+        theme::set_frost(theme::frost_named(&self.px.store.frost));
+        let on = self.video.is_none() && theme::frost() != theme::Frost::Off;
+        theme::set_backdrop(self.backdrop_id.filter(|_| on && self.backdrop.texture().is_some()).map(|(id, _)| (id, self.full)));
+    }
+
+    /// Make the frosted copy of the picture, if the picture or the look has changed since it was last made,
+    /// and tell egui about it if it is a new texture. `drew`: the engine drew the picture this frame.
+    fn frost(&mut self, drew: bool) {
+        if self.video.is_some() { return; }
+        let Some(look) = theme::frost_look(self.px.bright, self.canvas.1) else { return };
+        let Some(screen) = self.engine.renderer.screen().cloned() else { return };
+        let fresh = drew || self.backdrop.look != Some(look) || self.backdrop_from.as_ref() != Some(&screen);
+        if !fresh { return; }
+        if !self.backdrop.make(&screen, &look) { return; }
+        self.backdrop_from = Some(screen);
+        let generation = self.backdrop.generation;
+        if self.backdrop_id.is_some_and(|(_, g)| g == generation) { return; }
+        let Some(tex) = self.backdrop.texture() else { return };
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut renderer = self.rs.renderer.write();
+        let id = match self.backdrop_id {
+            Some((id, _)) => {
+                renderer.update_egui_texture_from_wgpu_texture(&self.rs.device, &view, wgpu::FilterMode::Linear, id);
+                id
+            }
+            None => renderer.register_native_texture(&self.rs.device, &view, wgpu::FilterMode::Linear),
+        };
+        self.backdrop_id = Some((id, generation));
     }
 
     // ---- the picture ---------------------------------------------------------------------------
@@ -1753,6 +1795,12 @@ impl App {
                 self.px.requests.push(Request::Benchmark);
                 steps = vec![Step::Frames(4)];
             }
+            Act::Ui(name, value) => match name.as_str() {
+                "theme" => self.px.store.theme = value,
+                "frost" => self.px.store.frost = value,
+                "scale" => self.px.store.ui_scale = if value == "auto" { None } else { Some(value.trim().parse::<f32>().map_err(|_| format!("ui:scale: \"{value}\" is not a number"))?) },
+                _ => self.px.store.settings_open = value == "open",
+            },
             Act::Hide(which) => {
                 (self.px.hide_left, self.px.hide_right) = match which.as_str() {
                     "left" => (true, false),
@@ -2047,7 +2095,12 @@ impl eframe::App for App {
         self.script(&ctx);
         if let Some(s) = self.opts.scale {
             if (ctx.pixels_per_point() - s).abs() > 1e-3 { ctx.set_pixels_per_point(s); }
+        } else {
+            // the size chosen in the settings, as so many times the one Windows sets
+            let z = self.px.store.ui_scale.unwrap_or(1.0).clamp(0.5, 3.0);
+            if (ctx.zoom_factor() - z).abs() > 1e-3 { ctx.set_zoom_factor(z); }
         }
+        self.look(&ctx);
         // the picture is as large as the window's inside, counted in real pixels
         let ppp = ctx.pixels_per_point();
         self.canvas = match frame.winit_window() {
@@ -2104,6 +2157,7 @@ impl eframe::App for App {
 
         // ... and the engine draws what the state now says
         let mut again = false;
+        let mut drew = false;
         let ready = self.canvas.0 >= 2 && self.canvas.1 >= 2 && self.seeking.is_none();
         if self.video.is_none() && !self.frozen && ready {
             let now = Instant::now();
@@ -2113,6 +2167,7 @@ impl eframe::App for App {
             self.last = Some(now);
             let t_frame = Instant::now();
             let did = self.engine.frame(self.canvas.0, self.canvas.1, dt);
+            drew = did.drew;
             perf_log(&self.engine, did.drew, t_frame.elapsed().as_secs_f64() * 1e3);
             // frames a second: those drawn over the last fifth of a second or more, counted
             if did.drew { self.drawn.0 += 1; }
@@ -2133,6 +2188,8 @@ impl eframe::App for App {
             self.perf();
         }
 
+        // the frosted copy of it the panels were drawn on
+        self.frost(drew);
         // the picture: pixel for pixel, or a frame of the video fitted into the window
         let rendering = self.video.is_some();
         if let Some(id) = self.texture(rendering) {

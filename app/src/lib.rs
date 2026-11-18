@@ -1,6 +1,7 @@
 //! Glass Forms: the renderer as a library. Nothing here needs a window.
 
 pub mod adapt;
+pub mod backdrop;
 pub mod app;
 pub mod bake;
 pub mod camera;

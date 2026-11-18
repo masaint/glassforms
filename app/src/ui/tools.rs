@@ -152,9 +152,9 @@ fn icon(p: &Painter, r: Rect, which: Icon, ink: Color32) {
 /// moves, while another tool is in use).
 fn icon_button(ui: &mut Ui, rect: Rect, id: Id, which: Icon, on: bool, mark: bool) -> Response {
     let resp = button(ui, rect, id, "", on, mono(SIZE));
-    let ink = if on { INK } else if resp.hovered() { Color32::WHITE } else { BUTTON };
+    let ink = if on { pal().ink } else if resp.hovered() { pal().hot } else { pal().button };
     icon(ui.painter(), rect, which, ink);
-    if mark && !on { ui.painter().circle_filled(Pos2::new(rect.center().x, rect.bottom() - 3.0), 1.6, fade(BRIGHT, 0.8)); }
+    if mark && !on { ui.painter().circle_filled(Pos2::new(rect.center().x, rect.bottom() - 3.0), 1.6, fade(pal().bright, 0.8)); }
     resp
 }
 
@@ -209,14 +209,13 @@ pub fn bars(ctx: &egui::Context, st: &mut State, px: &mut Panels, full: Rect) {
 fn camera_bar(ctx: &egui::Context, st: &mut State, px: &mut Panels, full: Rect) {
     let at = camera_at(px, full);
     let font = mono(SIZE);
-    let fill = panel_fill(px.bright);
     let shown = egui::Area::new(Id::unique("camera bar")).order(egui::Order::Middle).fixed_pos(at).constrain(false).fade_in(false).show(ctx, |ui| {
         let pad = 5.0;
         let w = CAMERA_W;
         let frame_w = FRAME_W;
         let _ = w;
         let (_, whole) = ui.allocate_space(egui::vec2(w, B + 2.0 * pad));
-        ui.painter().rect(whole, PANEL_RADIUS, fill, panel_stroke(), StrokeKind::Inside);
+        ui.painter().add(glass(whole, PANEL_RADIUS, Lift::Bar, px.bright));
         let mut x = whole.left() + pad;
         let y = whole.top() + pad;
         let mut place = |wd: f32, gap: f32| {
@@ -262,9 +261,9 @@ fn camera_bar(ctx: &egui::Context, st: &mut State, px: &mut Panels, full: Rect) 
             let hot = resp.hovered();
             if hot { ui.ctx().set_cursor_icon(CursorIcon::PointingHand); }
             let c = Pos2::new(r.center().x, r.center().y - 4.0);
-            let ink = if hot { Color32::WHITE } else if stored { BRIGHT } else { HINT };
+            let ink = if hot { pal().hot } else if stored { pal().bright } else { pal().hint };
             if stored { ui.painter().circle_filled(c, 3.2, ink); } else { ui.painter().circle_stroke(c, 2.8, Stroke::new(1.0, ink)); }
-            ui.painter().text(Pos2::new(r.center().x, r.bottom() - 5.0), Align2::CENTER_CENTER, format!("{n}"), mono(8.5), if hot { BRIGHT } else if stored { DIM } else { HINT });
+            ui.painter().text(Pos2::new(r.center().x, r.bottom() - 5.0), Align2::CENTER_CENTER, format!("{n}"), mono(8.5), if hot { pal().bright } else if stored { pal().dim } else { pal().hint });
             let tip = if stored { format!("view {n}: click to go to it (shift+{n}) · ctrl+click stores this view in its place (ctrl+{n})") } else { format!("no view in {n} yet: ctrl+click (or ctrl+{n}) stores this view there") };
             if resp.on_hover_text(tip).clicked() {
                 if ctrl {
@@ -286,7 +285,6 @@ fn camera_bar(ctx: &egui::Context, st: &mut State, px: &mut Panels, full: Rect) 
 /// snapping.
 fn object_bar(ctx: &egui::Context, st: &mut State, px: &mut Panels, full: Rect) {
     let font = mono(SIZE);
-    let fill = panel_fill(px.bright);
     let words = [if px.handles.local { "local" } else { "world" }, "snap"];
     let pad = 5.0;
     // (laid out from the right end leftwards: the words' buttons are as wide as the wider word could want)
@@ -296,7 +294,7 @@ fn object_bar(ctx: &egui::Context, st: &mut State, px: &mut Panels, full: Rect) 
     let shown = egui::Area::new(Id::unique("tool bar")).order(egui::Order::Middle).fixed_pos(at).constrain(false).fade_in(false).show(ctx, |ui| {
         let tool = px.handles.tool();
         let (_, whole) = ui.allocate_space(egui::vec2(w, B + 2.0 * pad));
-        ui.painter().rect(whole, PANEL_RADIUS, fill, panel_stroke(), StrokeKind::Inside);
+        ui.painter().add(glass(whole, PANEL_RADIUS, Lift::Bar, px.bright));
         let mut x = whole.left() + pad;
         let y = whole.top() + pad;
         let mut place = |wd: f32, gap: f32| {
@@ -348,14 +346,14 @@ pub fn words(ctx: &egui::Context, px: &mut Panels, full: Rect) {
         if age < Duration::from_millis(1600) {
             let a = if age < Duration::from_millis(1100) { 1.0 } else { 1.0 - (age.as_secs_f32() - 1.1) / 0.5 };
             let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, Id::unique("tool bar words")));
-            let g = p.layout_no_wrap(words.clone(), mono(SMALL), fade(BRIGHT, 0.85 * a));
+            let g = p.layout_no_wrap(words.clone(), mono(SMALL), fade(pal().bright, 0.85 * a));
             let at = if px.nav.said_by_objects {
                 Pos2::new(object_end(px, full) - 6.0 - g.size().x, full.top() + EDGE + B + 16.0)
             } else {
                 camera_at(px, full) + egui::vec2(6.0, B + 16.0)
             };
-            p.rect_filled(Rect::from_min_size(at - egui::vec2(5.0, 2.0), g.size() + egui::vec2(10.0, 4.0)), BUTTON_RADIUS, Color32::from_black_alpha((110.0 * a) as u8));
-            p.galley(at, g, BRIGHT);
+            p.rect_filled(Rect::from_min_size(at - egui::vec2(5.0, 2.0), g.size() + egui::vec2(10.0, 4.0)), BUTTON_RADIUS, fade(bed(px.bright), a));
+            p.galley(at, g, pal().bright);
             ctx.request_repaint_after(Duration::from_millis(40));
         } else {
             px.nav.said = None;
@@ -407,14 +405,13 @@ pub fn frame(st: &mut State, px: &mut Panels) {
 /// one of its ends looks from that side (the one home for "look from the left").
 pub fn cube(ctx: &egui::Context, st: &mut State, px: &mut Panels, full: Rect) {
     let at = camera_at(px, full) + egui::vec2(CAMERA_W + 10.0, 0.0);
-    let fill = panel_fill(px.bright);
     let shown = egui::Area::new(Id::unique("view cube")).order(egui::Order::Middle).fixed_pos(at).constrain(false).fade_in(false).show(ctx, |ui| {
         let (_, sq) = ui.allocate_space(egui::vec2(CUBE, CUBE));
         let c = sq.center();
         let rad = CUBE * 0.5 - 2.0;
         let resp = ui.interact(sq, Id::unique("view cube"), Sense::click());
         let p = ui.painter();
-        p.circle(c, rad, fill, panel_stroke());
+        p.add(glass(Rect::from_center_size(c, egui::vec2(2.0 * rad, 2.0 * rad)), rad as u8, Lift::Bar, px.bright));
         // the room's axes as the camera sees them: (across, up on the screen, towards the camera)
         let m = st.room_m();
         let reach = rad - 11.0;
@@ -442,10 +439,10 @@ pub fn cube(ctx: &egui::Context, st: &mut State, px: &mut Panels, full: Rect) {
             let col = fade(AXIS_INK[k], dim);
             if pos { p.line_segment([c, q], Stroke::new(1.6, col)); }
             if pos {
-                p.circle(q, 7.5, if hot { Color32::WHITE } else { col }, Stroke::new(1.0, Color32::from_black_alpha(90)));
-                p.text(q, Align2::CENTER_CENTER, ["x", "y", "z"][k], mono(10.0), INK);
+                p.circle(q, 7.5, if hot { pal().hot } else { col }, Stroke::new(1.0, Color32::from_black_alpha(90)));
+                p.text(q, Align2::CENTER_CENTER, ["x", "y", "z"][k], mono(10.0), pal().ink);
             } else {
-                p.circle(q, 5.5, fade(AXIS_INK[k], 0.22 * dim), Stroke::new(1.2, if hot { Color32::WHITE } else { col }));
+                p.circle(q, 5.5, fade(AXIS_INK[k], 0.22 * dim), Stroke::new(1.2, if hot { pal().hot } else { col }));
             }
         }
         let names = [("right", "left"), ("top", "under"), ("front", "back")];

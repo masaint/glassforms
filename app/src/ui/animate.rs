@@ -69,14 +69,14 @@ pub fn show(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     // the play button, and beside it what it sets moving
     let caption = if st.playing { "❚❚  pause" } else { "▶  animate" };
     let size = button_size(ui, caption, &mono(SIZE), egui::vec2(12.0, 4.0));
-    let words = wrapped(ui, &moves_text(st), mono(SMALL), DIM, ui.available_width() - size.x - 9.0, 1.3);
+    let words = wrapped(ui, &moves_text(st), mono(SMALL), pal().dim, ui.available_width() - size.x - 9.0, 1.3);
     let r = row(ui, size.y.max(words.size().y));
     let place = Rect::from_min_size(Pos2::new(r.left(), r.center().y - size.y / 2.0), size);
     px.note("play", place);
     if button(ui, place, Id::unique("play"), caption, st.playing, mono(SIZE)).on_hover_text("key P").clicked() {
         st.set_playing(!st.playing);
     }
-    ui.painter().galley(Pos2::new(r.left() + size.x + 9.0, r.center().y - words.size().y / 2.0), words, DIM);
+    ui.painter().galley(Pos2::new(r.left() + size.x + 9.0, r.center().y - words.size().y / 2.0), words, pal().dim);
     gap(ui, 5.0);
 
     // where in the loop the animation is: it follows the clock while playing, and can be dragged
@@ -110,7 +110,7 @@ pub fn show(ui: &mut Ui, st: &mut State, px: &mut Panels) {
         if !ui.memory(|m| m.has_focus(id)) {
             px.loop_text = if st.p.loop_len > 0.0 { format!("{}", st.p.loop_len) } else { String::new() };
         }
-        let edit = egui::TextEdit::singleline(&mut px.loop_text).id(id).hint_text("auto").font(mono(SIZE)).text_color(BRIGHT).margin(egui::Margin::symmetric(5, 2)).align(Align2::LEFT_CENTER).desired_width(field.width());
+        let edit = egui::TextEdit::singleline(&mut px.loop_text).id(id).hint_text("auto").font(mono(SIZE)).text_color(pal().bright).margin(egui::Margin::symmetric(5, 2)).align(Align2::LEFT_CENTER).desired_width(field.width());
         if ui.put(field, edit).changed() {
             let v = px.loop_text.trim().parse::<f64>().ok().filter(|v| v.is_finite() && *v > 0.0);
             st.p.loop_len = v.unwrap_or(0.0);
@@ -119,7 +119,7 @@ pub fn show(ui: &mut Ui, st: &mut State, px: &mut Panels) {
             st.p.lock = i as f64;
         }
         gap(ui, 3.0);
-        paragraph(ui, &plan_text(st), mono(SMALL), BUTTON, LINE, 0.0);
+        paragraph(ui, &plan_text(st), mono(SMALL), pal().button, LINE, 0.0);
     });
     gap(ui, 1.0);
 }

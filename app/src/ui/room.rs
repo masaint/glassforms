@@ -132,7 +132,7 @@ fn preview(ui: &mut Ui, st: &mut State, px: &mut Panels) {
             for d in [egui::vec2(1.0, 1.0), egui::vec2(-1.0, 0.0)] {
                 clip.text(label.left_center() + d, Align2::LEFT_CENTER, format!("{}", i + 1), mono(9.0), Color32::from_black_alpha(190));
             }
-            clip.text(label.left_center(), Align2::LEFT_CENTER, format!("{}", i + 1), mono(9.0), if chosen { Color32::WHITE } else { BUTTON });
+            clip.text(label.left_center(), Align2::LEFT_CENTER, format!("{}", i + 1), mono(9.0), if chosen { Color32::WHITE } else { pal().button });
         }
     }
     gap(ui, 1.0);
@@ -171,7 +171,7 @@ fn lights(ui: &mut Ui, st: &mut State, px: &mut Panels) {
         let tip = format!("light {}: at {:.0}°, {:.0}° up", i + 1, l.az, l.el);
         if chip(ui, place, Id::unique(("light chip", i)), &format!("{}", i + 1), light_ink(l), i == px.light).on_hover_text(tip).clicked() { choose = Some(i); }
     }
-    if n == 0 { text_in(ui, r, Align2::LEFT_CENTER, "no lights", mono(SIZE), FAINT); }
+    if n == 0 { text_in(ui, r, Align2::LEFT_CENTER, "no lights", mono(SIZE), pal().faint); }
     if let Some(i) = choose { px.light = i; }
     gap(ui, 4.0);
 
@@ -235,7 +235,7 @@ fn lights(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     // the light that comes from everywhere, however the lights stand
     gap(ui, 6.0);
     let r = row(ui, 14.0);
-    text_in(ui, r, Align2::LEFT_CENTER, "from everywhere", mono(SMALL), FAINT);
+    text_in(ui, r, Align2::LEFT_CENTER, "from everywhere", mono(SMALL), pal().faint);
     if let Some(rgb) = knob::colour_rows(ui, px, "ambient", st.rig().ambient, 0.5, 0.001) { st.rig_mut().ambient = rgb; }
 
     // all of it brighter or dimmer together
@@ -269,7 +269,7 @@ fn turning(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     // beside the ball: what the lighting is fixed to, and how to read the ball
     let beside = Rect::from_min_max(Pos2::new(ball.right() + 12.0, r.top()), r.max);
     let fixed = js_round(st.p.lights) as usize;
-    text_in(ui, Rect::from_min_size(beside.min, egui::vec2(beside.width(), 16.0)), Align2::LEFT_CENTER, "fixed to", mono(SIZE), DIM);
+    text_in(ui, Rect::from_min_size(beside.min, egui::vec2(beside.width(), 16.0)), Align2::LEFT_CENTER, "fixed to", mono(SIZE), pal().dim);
     let (pad, font) = (egui::vec2(7.0, 2.0), mono(SIZE));
     let mut x = beside.left();
     for (i, (name, tip)) in [("the room", "the shape turns in front of lighting that stays where it is"), ("the shape", "the lighting goes round with the shape")].into_iter().enumerate() {
