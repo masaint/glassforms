@@ -67,6 +67,19 @@ const EXACT_PRESETS: &[&str] = &[
     "solids/tetrahedron", "solids/cube", "solids/octahedron", "solids/dodecahedron", "solids/icosahedron",
     "solids/cuboctahedron", "solids/football", "solids/frame",
     "solids/stellaoctangula", "solids/stardodecahedron", "solids/staricosahedron",
+    // fractals: the Menger sponge (smooth unions and cuts of exact distances, never more than the distance) and
+    // the Apollonian packing (every ball near the point found in the packing's tree and measured exactly)
+    "fractals/menger", "fractals/apollonian",
+    // topology: walls about surfaces whose `raw` is the distance to the nearest point of the surface found by a
+    // search (Dini's and the Calabi-Yau slice to first order: read as distances, as their bake reads them)
+    "topology/kleinbottle", "topology/enneper", "topology/dini", "topology/kuen", "topology/breather", "topology/calabiyau", "topology/costa",
+    // the polyhedra: the three planes a point lies farthest beyond, measured to exactly (exact inside, never
+    // more than the distance outside); a compound is the smooth union of such members
+    "polyhedra/squarepyramid", "polyhedra/pentpyramid", "polyhedra/tricupola", "polyhedra/pentcupola", "polyhedra/rotunda",
+    "polyhedra/gyrobicupola", "polyhedra/gyrobipyramid", "polyhedra/bidiminished", "polyhedra/augdodeca",
+    "polyhedra/fivecubes", "polyhedra/fivetetra", "polyhedra/tentetra", "polyhedra/fiveocta", "polyhedra/cubeocta", "polyhedra/dodecaicosa",
+    "polyhedra/rhombicdodeca", "polyhedra/triacontahedron", "polyhedra/truncoct", "polyhedra/enneacontahedron",
+    "polyhedra/truncicosidodeca", "polyhedra/polarzono",
 ];
 
 /// Can this family's preset be traced from its formula?

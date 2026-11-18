@@ -180,6 +180,30 @@ fn gem_walk() -> String {
     WALK.replace(LOOP, FAR)
 }
 
+/// A line a preset's text may hold to say that its `raw` is a distance inside and never more than one
+/// outside, as a cut stone's is: far voxels are then not walked (`gem_walk`).
+pub const BOUND_MARK: &str = "// raw: exact inside, never more than the distance outside";
+
+/// What a preset puts in its text to say that its `raw` is a distance already (exact, or never more than
+/// one): see `distance_walk`.
+pub const DISTANCE_MARK: &str = "// raw: a distance";
+
+/// The walk for a preset whose `raw` is a distance already: none at all, the value read as it is. This is
+/// what a wall about a surface with no sides needs (topology.rs: the Klein bottle, Costa, Enneper...): its
+/// `raw` is a distance that is never negative, with a crease along the surface itself, and a voxel whose
+/// four readings straddle the crease finds no slope there, takes the longest step the walk allows and
+/// stores a distance far too large; on an axis-aligned stretch of surface whole rows of voxels do, and the
+/// wall shows slots.
+fn distance_walk() -> String {
+    const LOOP: &str = "  for (var i = 0; i < 8; i++) {";
+    const READ: &str = "  // a distance already: read, not walked
+  v0 = raw(p);
+  x = p + vec3f(abs(v0), 0.0, 0.0);
+  for (var i = 0; i < 0; i++) {";
+    assert_eq!(WALK.matches(LOOP).count(), 1, "the walk's loop is not where the reading goes");
+    WALK.replace(LOOP, READ)
+}
+
 /// `bake_shader` with one more entry point, `cs`, which works out the whole volume in one dispatch and
 /// writes it straight into a 16-bit float 3D texture.
 pub fn bake_shader_compute(p: &Preset) -> String {
@@ -204,7 +228,7 @@ pub fn bake_shader(p: &Preset) -> String {
          var<private> pr: Pr;\n\n\
          {HELPERS}\n{wgsl}\n\n{VERTEX}{walk}{shell}{WALK_SHELL_TO_CLIP}{clip}{WALK_END}",
         name = p.name, pr = pr.join(", "),
-        walk = if wgsl.contains("fn gem_fold(") { gem_walk() } else { WALK.to_string() },
+        walk = if wgsl.contains("fn gem_fold(") || wgsl.contains(BOUND_MARK) { gem_walk() } else if wgsl.contains(DISTANCE_MARK) { distance_walk() } else { WALK.to_string() },
     )
 }
 

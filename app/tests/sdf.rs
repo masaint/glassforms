@@ -108,7 +108,8 @@ fn every_formula_is_a_part() {
     let m = March { step_scale: 0.9, steps_out: 220, steps_in: 56, layers: 2 };
     let plain = tracer_source(&m, Variant::default(), false);
     let all = formulas(&fams);
-    assert_eq!(all.len(), 77);
+    // 77, and the mathematical families: 6 fractals, 12 topology, 16 hydrogen orbitals, 23 polyhedra
+    assert_eq!(all.len(), 134);
     for &k in &all {
         let name = format!("{}/{}", fams[k.0].id, fams[k.0].presets[k.1].id);
         let src = glassforms::sdf::weave(&plain, &gf_core::csg::wgsl(&fams, &[k], gf_core::sdf::BINDING, false));

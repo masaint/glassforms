@@ -27,16 +27,16 @@
 use super::*;
 
 /// How far from the centre the farthest point of each shape lies.
-const FIT: f64 = 1.22;
+pub(crate) const FIT: f64 = 1.22;
 /// No clipping: these shapes are their own bound, and a clip would only round their corners.
 const NO_CLIP: &str = "-1.0";
 // The least rounding any edge gets: two voxels of the volume being built.
-const FINE: &str = "fn fine() -> f32 { return 4.0 * u.hb / u.res; }\n";
+pub(crate) const FINE: &str = "fn fine() -> f32 { return 4.0 * u.hb / u.res; }\n";
 
 // ---------------------------------------------------------------------------------------- kaleidoscope
 
 // The three mirrors, the fold into the chamber between them, and the generating point.
-const KALEIDOSCOPE: &str = "
+pub(crate) const KALEIDOSCOPE: &str = "
 // The kaleidoscope: three mirrors through the centre, the planes x = 0, y = 0 and the one with normal nc,
 // meeting at angles pi/2, pi/3 and pi/n. For n = 3, 4, 5 their reflections are the symmetries of the
 // tetrahedron, of the cube and octahedron, and of the dodecahedron and icosahedron.
@@ -284,7 +284,7 @@ pub const ORDER_STEPS: usize = 16;
 // edge, the walk that measures distances cannot tell which of the two faces is nearer, and where such
 // planes run exactly through the centres of voxels (as the planes x = y and the like do) every voxel on
 // them is affected, which shows as saw-toothed edges. Turned, only a scattering of voxels is.
-const TURN: [[f64; 3]; 3] = [
+pub(crate) const TURN: [[f64; 3]; 3] = [
     [0.8044187403, -0.2849119348, 0.5212827253],
     [0.4437075685, 0.8716242528, -0.2083140795],
     [-0.3950114985, 0.3988688399, 0.8275684652],

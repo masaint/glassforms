@@ -14,15 +14,19 @@ pub mod crystals;
 pub mod fieldlines;
 pub mod foam;
 pub mod forms;
+pub mod fractals;
 pub mod gems;
 pub mod knots;
 pub mod links;
 pub mod models;
+pub mod orbitals;
+pub mod polyhedra;
 pub mod snowflakes;
 pub mod solids;
 pub mod studio;
 pub mod surfaces;
 pub mod text3d;
+pub mod topology;
 pub mod trees;
 pub mod geo;
 
@@ -276,7 +280,7 @@ impl Family {
 /// Every family: the four the web version has, in the order it shows them, then the newer ones.
 pub fn families() -> Vec<Family> {
     vec![
-        attractors::family(), knots::family(), surfaces::family(), algebraic::family(), gems::family(), solids::family(), forms::family(), studio::family(), trees::family(), models::family(),
+        attractors::family(), knots::family(), surfaces::family(), algebraic::family(), gems::family(), solids::family(), forms::family(), studio::family(), fractals::family(), topology::family(), orbitals::family(), polyhedra::family(), trees::family(), models::family(),
         links::family(), braids::family(), fieldlines::family(), crystals::family(), foam::family(), branching::family(), snowflakes::family(), text3d::family(),
     ]
 }
