@@ -30,7 +30,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 # GF_GPU_QUEUE points every copy of the tools at one shared queue folder
 QUEUE = os.environ.get('GF_GPU_QUEUE') or os.path.join(ROOT, '_gpu_queue')
 QUIET = os.path.join(ROOT, '_gpu_quiet.json')
-SLOTS = 3            # ordinary jobs that may run at once
+SLOTS = 1            # ordinary jobs that may run at once (was 3; 2026-11-22: a GPU memory-paging bugcheck while several large 4K jobs overlapped)
 BEAT = 5.0           # seconds between a ticket's refreshes
 DEAD = 45.0          # a ticket not refreshed for this long belongs to nobody
 SETTLE = 5.0         # seconds a timing job waits after getting the GPU, for stragglers outside the queue
@@ -107,6 +107,18 @@ def reserved_by_other(me):
         return False
 
 
+def joblog(what, name, text):
+    """Append-only record of every job start and end (flushed to disk), so after a crash the last START
+    without an END names the job that was running. One file, written only by this tool."""
+    try:
+        with open(os.path.join(QUEUE, 'jobs.log'), 'a', encoding='utf-8') as f:
+            f.write('%s %-5s %-14s %s\n' % (time.strftime('%Y-%m-%d %H:%M:%S'), what, name, text[:600]))
+            f.flush()
+            os.fsync(f.fileno())
+    except OSError:
+        pass
+
+
 def reserve(name, seconds):
     put(QUIET, {'name': name, 'until': time.time() + seconds, 'said': time.strftime('%H:%M:%S')})
 
@@ -181,7 +193,10 @@ def main(argv):
             print('[gpu queue] %s has the GPU alone' % name, file=sys.stderr, flush=True)
         env = dict(os.environ)
         env[HELD] = '1'
-        return subprocess.call(cmd, env=env)
+        joblog('START', name, ' '.join(cmd))
+        code = subprocess.call(cmd, env=env)
+        joblog('END', name, 'exit %s' % code)
+        return code
     finally:
         alive = False
         if timing:

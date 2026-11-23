@@ -398,7 +398,7 @@ impl Stack {
         let nodes = leaves
             .saturating_mul(2)
             .saturating_sub(self.layers.len() as u64);
-        let slots = nodes.saturating_mul(5).saturating_add(4);
+        let slots = nodes.saturating_mul(5).saturating_add(self.layers.len().max(4) as u64);
         if slots > 1 << 24 || slots.saturating_mul(16) > byte_limit {
             return Err(format!(
                 "World array of {leaves} occurrences exceeds the instance table capacity"
@@ -679,8 +679,9 @@ pub fn occurrence_table(layers: &[Vec<Placement>]) -> Vec<[f32; 4]> {
         }
         out[at][3] = out.len() as f32;
     }
-    let mut out = vec![[0.; 4]; 4];
-    for (i, layer) in layers.iter().take(4).enumerate() {
+    // (one header entry per scene layer, at least the four a single pass reads; the shader's node offsets are absolute)
+    let mut out = vec![[0.; 4]; layers.len().max(4)];
+    for (i, layer) in layers.iter().enumerate() {
         if layer.is_empty() {
             continue;
         }
@@ -694,6 +695,18 @@ pub fn occurrence_table(layers: &[Vec<Placement>]) -> Vec<[f32; 4]> {
 mod tests {
     use super::*;
     use crate::{groups::Hierarchy, mods::Axes};
+    #[test]
+    fn occurrence_table_has_a_header_entry_for_every_layer() {
+        let p = Placement::default();
+        let layers: Vec<Vec<Placement>> = (0..8).map(|_| vec![p, p]).collect();
+        let t = occurrence_table(&layers);
+        for (g, h) in t[..8].iter().enumerate() {
+            assert!(h[0] >= 8.0 && h[1] > h[0], "layer {g}: {h:?}");
+        }
+        let small = occurrence_table(&layers[..2]);
+        assert_eq!(small.len() >= 4, true);
+        assert!(small[0][0] >= 4.0 && small[2] == [0.; 4]);
+    }
     #[test]
     fn five_hundred_instances_survive_save_without_copying_definitions() {
         let mut stack = Stack::new();

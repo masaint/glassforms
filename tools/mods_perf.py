@@ -9,6 +9,7 @@ it. Results go to out/perf/mods_<time>.json.
 import json
 import os
 import subprocess
+import gf_common
 import sys
 import time
 
@@ -54,7 +55,7 @@ SCENES = [
 
 def run(args, frames):
     cmd = [sys.executable, QUEUE, '--name', 'mods_perf', '--timing', '--', EXE, '--session', str(frames), 'w=3840', 'h=2160'] + args
-    r = subprocess.run(cmd, capture_output=True, text=True, cwd=NATIVE)
+    r = gf_common.run(cmd, cwd=NATIVE)
     line = next((l for l in r.stdout.splitlines() if l.startswith('{') and '"all"' in l), None)
     if r.returncode != 0 or line is None:
         return {'error': (r.stderr or r.stdout)[-800:]}

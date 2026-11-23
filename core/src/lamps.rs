@@ -119,6 +119,19 @@ impl Lamp {
             _ => self.soft = v.clamp(0.0, 1.0),
         }
     }
+    /// Every number held to the lamp knobs' limits (a lamp read from a file may hold anything).
+    pub fn hold(&mut self) {
+        let mut v = [0.0; 13];
+        v[..3].copy_from_slice(&self.pos);
+        v[3..6].copy_from_slice(&self.rot);
+        v[6..8].copy_from_slice(&self.size);
+        v[8] = self.power;
+        v[9..12].copy_from_slice(&self.rgb);
+        v[12] = self.soft;
+        for (c, (_, _, lo, hi, _)) in LAMP_KNOBS.iter().enumerate() {
+            self.set(c, crate::limits::hold(v[c], (*lo, *hi)));
+        }
+    }
     /// Its radiance, by colour.
     pub fn radiance(&self) -> [f64; 3] {
         self.rgb.map(|c| c * self.power)

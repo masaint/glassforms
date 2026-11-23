@@ -26,6 +26,12 @@ fn inside(e: &Engine) -> usize {
     bits.iter().filter(|b| half::f16::from_bits(**b).to_f32() < 0.0).count()
 }
 
+/// A GPU test that cannot get a device must say so loudly (cargo would still report "ok"); GF_REQUIRE_GPU=1 makes it fail instead.
+fn skipped(why: &str) {
+    eprintln!("**** NOT TESTED (skipped): {why}; set GF_REQUIRE_GPU=1 to fail instead ****");
+    if std::env::var_os("GF_REQUIRE_GPU").is_some() { panic!("GF_REQUIRE_GPU is set and {why}"); }
+}
+
 #[test]
 fn a_group_shell_hollows_the_join_after_internal_faces_disappear() {
     use gf_core::{groups::{DropAt, Item}, mods::{Kind, Modifier}};
@@ -103,7 +109,7 @@ fn window_middle(e: &mut Engine, frames: usize) -> f64 {
 #[test]
 fn an_empty_scene_draws_nothing_in_the_window() {
     let Ok(gpu) = Gpu::headless("vulkan") else {
-        eprintln!("no graphics device: skipped");
+        skipped("no graphics device");
         return;
     };
     let mut e = engine(&gpu, &[("scene", "attractors"), ("preset", "thomas"), ("res", "128")]);
@@ -133,7 +139,7 @@ fn hiding_the_only_layer_draws_nothing_in_the_window() {
 #[test]
 fn objects_are_made_taken_away_and_converted() {
     let Ok(gpu) = Gpu::headless("vulkan") else {
-        eprintln!("no graphics device: skipped");
+        skipped("no graphics device");
         return;
     };
     let mut e = engine(&gpu, &[("scene", "attractors"), ("preset", "thomas"), ("res", "128")]);

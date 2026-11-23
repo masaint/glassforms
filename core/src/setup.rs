@@ -269,7 +269,9 @@ fn material_projection(base: &Settings, exported: &Settings) -> Settings {
 
 fn effective_base<'a>(owner: &'a CanonicalMaterials, bodies: &[Vec<usize>], layer: usize) -> &'a MaterialSpec {
     let first = bodies.iter().find(|body| body.contains(&layer)).and_then(|body| body.first()).copied().unwrap_or(0);
-    if first == 0 { &owner.scene } else { owner.bodies[first].as_deref().unwrap_or(&owner.scene) }
+    // (only the first MAX_BODIES layers can carry a material of their own, as `body_material_spec` refuses the rest: the shader reads at most
+    // MAX_BODIES bodies, so a body that starts at a later layer inherits the scene's material rather than indexing past the array)
+    if first == 0 { &owner.scene } else { owner.bodies.get(first).and_then(|b| b.as_deref()).unwrap_or(&owner.scene) }
 }
 
 fn clear_legacy_node_materials(nodes: &mut [crate::construction::Node]) {
@@ -558,10 +560,12 @@ impl State {
         self.rig_family = None;
         self.set_scene(fam);
         self.choose(preset);
-        let ids: Vec<&'static str> = self.preset().params.iter().map(|d| d.id).collect();
+        let ids: Vec<(&'static str, f64, f64)> = self.preset().params.iter().map(|d| (d.id, d.lo, d.hi)).collect();
         let st = self.shape_mut();
-        for (i, id) in ids.iter().enumerate() {
-            if let Some(v) = s.values.get(*id) { st.vals[i] = *v; }
+        for (i, (id, lo, hi)) in ids.iter().enumerate() {
+            if let Some(v) = s.values.get(*id) {
+                st.vals[i] = crate::limits::hold(*v, crate::limits::widen(*lo, *hi));
+            }
         }
         let sh = &s.shape;
         st.thick = sh.thick;
@@ -571,6 +575,7 @@ impl State {
         st.travel = sh.travel;
         st.beads = sh.beads;
         st.bead_period = sh.bead_period;
+        st.hold();
         st.res = crate::state::valid_res(sh.res as f64);
         st.anim_res = crate::state::valid_res(sh.anim_res as f64);
         st.model = sh.model.clone();
@@ -592,6 +597,7 @@ impl State {
         }
         self.set_hdri(s.hdri.clone());
         self.lamps = s.lamps.iter().take(crate::lamps::MAX_LAMPS).copied().collect();
+        for l in &mut self.lamps { l.hold(); }
         self.views = s.views.iter().take(crate::history::SLOTS).cloned().collect();
         self.view = s.view.clone();
         self.view.hold();
@@ -629,6 +635,7 @@ impl State {
         }
         self.render = s.render.clone();
         self.tracks = s.tracks.clone();
+        for t in self.tracks.values_mut() { t.hold(); }
         self.playing = false;
         self.clock = s.clock;
         self.lphi = s.light_turn;
@@ -751,5 +758,19 @@ impl State {
     pub fn apply_setup_json(&mut self, text: &str) -> Result<(), String> {
         let s: Setup = serde_json::from_str(text).map_err(|e| format!("not a setup file: {e}"))?;
         self.apply_setup(&s)
+    }
+}
+
+#[cfg(test)]
+mod effective_base_tests {
+    use super::*;
+
+    #[test]
+    fn a_body_starting_past_the_last_material_slot_inherits_the_scene() {
+        let owner = CanonicalMaterials::new(MaterialSpec::default());
+        let bodies = vec![vec![0], vec![5, 6], vec![7]];
+        for layer in 0..8 {
+            assert!(std::ptr::eq(effective_base(&owner, &bodies, layer), &owner.scene), "layer {layer}");
+        }
     }
 }

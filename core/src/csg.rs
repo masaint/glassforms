@@ -1380,8 +1380,10 @@ pub fn numbers_with(fams: &[Family], parts: &[Resolved], kinds: &[(usize, usize)
 pub const PATH_AT: usize = crate::mods::TABLE_ENTRIES;
 /// How many records the paths' blocks may take in all (a path past them is left out: it reads as nothing).
 pub const PATH_RECORDS: usize = 16384;
-/// Absolute vec4 offset after the area reserved for path records.
-pub const FORMULA_AT: usize = (PATH_AT + PATH_RECORDS) * PART_FLOATS / 4;
+/// Absolute vec4 offset after the area reserved for path records and, behind them, the profile rows
+/// (`mods::PROFILE_AT`, `PROFILE_ROWS` records): the two regions must not overlap.
+pub const FORMULA_AT: usize = (PATH_AT + PATH_RECORDS + crate::mods::PROFILE_ROWS) * PART_FLOATS / 4;
+const _: () = assert!(FORMULA_AT * 4 >= (crate::mods::PROFILE_AT + crate::mods::PROFILE_ROWS) * PART_FLOATS);
 
 /// The paths of a tree: their blocks of the table, one after another from `PATH_AT` (as numbers, from the
 /// record at `PATH_AT`), and for each part where its block starts (None: not a path).

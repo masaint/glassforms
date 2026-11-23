@@ -422,6 +422,9 @@ impl PartsVolume {
         gf_core::parts::accepts(state).map_err(|e| format!("refused: {e}"))
     }
 
+    /// Half the side of the stage the volume spans.
+    pub fn hb(&self) -> f64 { self.hb }
+
     /// The memory a build of a scene at `res` would hold, about (3 volumes, the cells' buffers for `pieces` pieces).
     pub fn estimate(res: u32, pieces: usize) -> u64 {
         3 * (res as u64).pow(3) * 2 + (64u64.pow(3)) * 12 + pieces as u64 * 128 * 2 + (pieces as u64 * 24 * 4).max(1 << 20)
@@ -862,6 +865,7 @@ impl PartsVolume {
         self.refine.moved = Some(idx.clone());
         self.refine_region(q0, f0, false);
         self.refine_region(q1, f1, true);
+        self.refine_upload(); // (a box with no extent uploads nothing above: the unmasked page still goes up)
         self.refine.moved = None;
         self.gpu.wait();
         self.old_box = None;
@@ -883,13 +887,16 @@ impl PartsVolume {
         let all: Vec<usize> = (0..self.scene.pieces.len()).collect();
         let fresh = self.scene.derive(state, &all).map_err(|e| format!("refused: {e}"))?;
         let changed: Vec<usize> = all.iter().copied().filter(|&i| fresh[i].rec != self.scene.recs[i] || fresh[i].ball != self.scene.balls[i]).collect();
+        // (the live pass cuts the whole rest, which holds every object; the bake cuts an object's own parts only (its running value per
+        // object). So a dragged cut, with several objects standing apart, is not drawn live: the box is baked, exactly, instead)
+        let cuts_apart = self.scene.pair.is_none() && self.scene.objs_at.len() > 1 && changed.iter().any(|&i| (1.5..2.5).contains(&self.scene.pieces[i].a[2]));
         if !self.live.is_empty() {
-            if draft && changed.iter().all(|i| self.live.contains(i)) { return self.run_live(state); }
+            if draft && !cuts_apart && changed.iter().all(|i| self.live.contains(i)) { return self.run_live(state); }
             self.fold(state)?;
             return self.reshape(state);
         }
         if changed.is_empty() { return Ok(()); }
-        if draft && changed.len() <= 16 { return self.start(state, &changed); }
+        if draft && !cuts_apart && changed.len() <= 16 { return self.start(state, &changed); }
         self.reshape(state)
     }
 
@@ -1023,7 +1030,7 @@ impl PartsVolume {
         self.refine.nb = n + 2;
         let brick_bytes = (self.refine.nb as u64).pow(3) * 2;
         let budget = (self.refine.budget_mb * 1048576.0 / brick_bytes as f64) as u32;
-        let cap = (want + want / 2 + 256).min(budget).max(1);
+        let cap = (want + want / 2 + 256).min(budget).min(65_534).max(1); // (the page holds slot + 1 as a u16)
         let side = (cap as f64).cbrt().ceil() as u32;
         let z = cap.div_ceil(side * side);
         self.refine.per = [side, side, z];

@@ -497,6 +497,8 @@ impl Handles {
         self.construction_origin = false;
         self.pivot = None;
         self.grab = None;
+        // (editing the origin only moves it: the turn and size handles would do nothing)
+        if t != Tool::Move { self.move_origin = false; }
         match t {
             Tool::All | Tool::Move | Tool::Turn | Tool::Size => {
                 self.mode = match t { Tool::All => Mode::All, Tool::Move => Mode::Move, Tool::Turn => Mode::Turn, _ => Mode::Size };
@@ -1113,6 +1115,19 @@ pub fn pick_occurrence(e: &crate::engine::Engine, fx: f64, fy: f64) -> Option<Oc
 mod tests {
     use super::*;
     use gf_core::{groups::Item, layers::Placement, world_transform::Reference};
+
+    #[test]
+    fn a_stale_origin_edit_is_dropped_by_the_turn_and_size_tools() {
+        let mut handles = Handles::starting();
+        handles.move_origin = true;
+        handles.set_tool(Tool::Move);
+        assert!(handles.move_origin);
+        for t in [Tool::Turn, Tool::Size, Tool::All, Tool::Select, Tool::Camera] {
+            handles.move_origin = true;
+            handles.set_tool(t);
+            assert!(!handles.move_origin, "{t:?}");
+        }
+    }
 
     #[test]
     fn snapped_local_arrow_follows_the_same_line_under_the_pointer() {

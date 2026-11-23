@@ -1,0 +1,7 @@
+target/
+out/
+__pycache__/
+*.pyc
+*.exe
+*.dll
+nvngx*

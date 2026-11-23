@@ -124,6 +124,17 @@ impl ShapeState {
             _ => 0.0,
         }
     }
+    /// Every number held to its limits (a shape read from a file may hold anything), as `apply_arg` holds them.
+    pub fn hold(&mut self) {
+        use crate::limits::{hold, THICK, LEN, MELT, PUFF, BEADS, BEAD_PERIOD};
+        self.thick = hold(self.thick, THICK);
+        self.len = hold(self.len, LEN);
+        self.melt = hold(self.melt, MELT);
+        self.puff = hold(self.puff, PUFF);
+        self.travel = hold(self.travel, (0.0, TRAVEL));
+        self.beads = hold(self.beads, BEADS);
+        self.bead_period = hold(self.bead_period, BEAD_PERIOD);
+    }
     pub fn set_knob(&mut self, r: &KnobRef, v: f64) {
         match r {
             KnobRef::Param(i) => { if let Some(x) = self.vals.get_mut(*i) { *x = v; } }
@@ -322,6 +333,8 @@ pub struct State {
     /// Last evaluated modifier positions in geometry coordinates, for viewport editing.
     pub world_modifier_target: Option<crate::groups::Item>,
     pub construction_pivots: std::collections::HashMap<(usize,u64,usize), [f64;3]>,
+    /// The parts engine (tier=live) is drawing the scene: the memory model counts its three volumes and no others (`memory_scene`). Set by the app's engine.
+    pub parts_engine: bool,
     pub modifier_pivots: std::collections::HashMap<(crate::groups::Item, usize), [f64; 3]>,
     pub(crate) parked: Vec<Option<Parked>>,
     pub p: Settings,
@@ -410,7 +423,7 @@ impl State {
         let fam = arg(args, "scene").and_then(|id| families.iter().position(|f| f.id == id)).or(model).unwrap_or(0);
         let rigs = families.iter().map(|f| Rig { lights: f.lights.clone(), ambient: f.ambient }).collect();
         let mut s = Self {
-            families, fam, shapes, stack: Stack::new(), selected_group: None, edit_scope: Default::default(), modifier_pivots: Default::default(), construction_pivots: Default::default(), world_modifier_target: None, parked: vec![None], p: Settings::default(), render: RenderOpts::default(),
+            families, fam, shapes, stack: Stack::new(), selected_group: None, edit_scope: Default::default(), modifier_pivots: Default::default(), construction_pivots: Default::default(), parts_engine: false, world_modifier_target: None, parked: vec![None], p: Settings::default(), render: RenderOpts::default(),
             r0: I3, theta: 0.0, r: I3, lphi: 0.0, playing: false, clock: 0.0, tracks: BTreeMap::new(), moved: BTreeMap::new(), rest: BTreeMap::new(),
             rendering: false, build: None, anim_cap: None, cut: true, flash_planes: false, rigs, rig_family: None, lights_rev: 0, lamps: Vec::new(), lamps_rev: 0, csg: Default::default(), empty: false, views: Vec::new(), view: Default::default(), hdri: None, body_mats: Default::default(), canonical: None,
             first_scene: true, args: args.to_vec(),
@@ -730,7 +743,7 @@ impl State {
         let bodies = self.bodies();
         // (a pressure glow that is animated counts while it is at nothing too: the way of drawing does not
         // change back and forth as it pulses)
-        let pressed = self.p.piezo > 0.0 || self.tracks.get("piezo").is_some_and(|t| t.on);
+        let pressed = self.p.piezo > 0.0 || self.tracks.get("P.piezo").is_some_and(|t| t.on);
         if bodies.len() < 2 { return None; }
         let painted_cuts = || bodies.iter().flatten().any(|&i| self.layer_csg(i).construction.as_ref().is_some_and(|tree| tree.has_material()));
         if !(pressed || bodies.iter().any(|b| self.body_own(b[0])) || painted_cuts()) { return None; }

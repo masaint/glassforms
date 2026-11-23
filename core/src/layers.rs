@@ -1841,7 +1841,7 @@ impl State {
         self.budget_scale_of(mode, &self.memory_scene())
     }
     fn budget_scale_of(&self, mode: Detail, model: &crate::budget::Scene) -> f64 {
-        if self.plain() { return 1.0; }
+        if self.plain() || self.parts_engine { return 1.0; }
         let (asked, scene) = self.asked_sizes(mode);
         let vox = |r: u32| 2.0 * f64::from(r).powi(3);
         let mut bytes = 0.0;
@@ -1884,7 +1884,7 @@ impl State {
             body_channels: if self.plain() { 0 } else { match bodies { 0 | 1 => 0, 2 => 2, _ => 4 } },
             studio_layers,
             world_fields,
-            parts_volumes: 0,
+            parts_volumes: if self.parts_engine { 3 } else { 0 },
         }
     }
     /// What the memory budget lowered for a build this careful, if anything (for the window to say).

@@ -19,10 +19,7 @@
 //! level's features would be thinner than about two voxels, and every edge is rounded to two voxels at
 //! the least (`fine()`, as the geometric solids do).
 use super::*;
-use super::solids::{FINE, TURN};
-
-/// How far from the centre each shape reaches at most.
-const FIT: f64 = 1.22;
+use super::solids::{FINE, FIT, TURN};
 
 type V = [f64; 3];
 use crate::math::{dot, scale, sub, unit};

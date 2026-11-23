@@ -14,6 +14,12 @@ fn check(name: &str, src: &str) {
     v.validate(&module).unwrap_or_else(|e| panic!("{name} is not valid:\n{}", e.emit_to_string(src)));
 }
 
+/// A GPU test that cannot get a device must say so loudly (cargo would still report "ok"); GF_REQUIRE_GPU=1 makes it fail instead.
+fn skipped(why: &str) {
+    eprintln!("**** NOT TESTED (skipped): {why}; set GF_REQUIRE_GPU=1 to fail instead ****");
+    if std::env::var_os("GF_REQUIRE_GPU").is_some() { panic!("GF_REQUIRE_GPU is set and {why}"); }
+}
+
 #[test]
 fn the_model_shaders_are_valid_both_ways() {
     // whole (with the compute shaders that write volumes directly), and the part that draws slice by slice
@@ -77,7 +83,7 @@ fn settle(e: &mut Engine) -> u32 {
 #[test]
 fn a_model_arrives_without_stopping_the_picture_and_a_bad_file_changes_nothing() {
     let Ok(gpu) = Gpu::headless("vulkan") else {
-        eprintln!("no graphics device: skipped");
+        skipped("no graphics device");
         return;
     };
     let dir = folder();
@@ -175,7 +181,7 @@ fn a_model_arrives_without_stopping_the_picture_and_a_bad_file_changes_nothing()
 #[test]
 fn a_model_that_cannot_be_read_as_the_program_starts_does_not_stop_it() {
     let Ok(gpu) = Gpu::headless("vulkan") else {
-        eprintln!("no graphics device: skipped");
+        skipped("no graphics device");
         return;
     };
     // started with a file that is not there: nothing has been drawn yet, so there is nothing to keep

@@ -510,15 +510,23 @@ fn load(path: &Path) -> R<Loaded> {
     let ex = mesh::examine(&read).map_err(|e| format!("{file}: {e}"))?;
     let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let mut canonical = None;
-    let surface = asset.appearance.map(|a| {
+    let mut appearance_notice = asset.appearance_notice;
+    // (a conversion error is the same as a reader error: the model loads as geometry only, with a notice)
+    let surface = asset.appearance.and_then(|a| {
         let fit = mesh::solid::Fit::of(&ex.surface, false);
         let source_id = path.to_string_lossy();
-        let (import, words) = a.canonical_shader_words(&source_id, &read, &fit)
-            .map_err(|error| format!("{file}: {error}"))?;
-        canonical = Some(Arc::new(import));
-        Ok::<_, String>(Arc::new(words))
-    }).transpose()?;
-    Ok(Loaded { ex, canonical, surface, appearance_notice: asset.appearance_notice, file, bytes, read_ms, examine_ms: t.elapsed().as_secs_f64() * 1e3 })
+        match a.canonical_shader_words(&source_id, &read, &fit) {
+            Ok((import, words)) => {
+                canonical = Some(Arc::new(import));
+                Some(Arc::new(words))
+            }
+            Err(error) => {
+                appearance_notice.get_or_insert(format!("{file}: {error}"));
+                None
+            }
+        }
+    });
+    Ok(Loaded { ex, canonical, surface, appearance_notice, file, bytes, read_ms, examine_ms: t.elapsed().as_secs_f64() * 1e3 })
 }
 
 /// Everything that needs no GPU: read and examine the file (unless that has been done), and prepare
@@ -952,6 +960,19 @@ mod surface_tests {
         let repeated = load(&path).unwrap();
         assert_eq!(repeated.canonical.as_deref(), Some(canonical.as_ref()));
         assert_eq!(repeated.surface.as_deref(), Some(words.as_ref()));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_out_of_spec_gltf_factor_loads_as_geometry_only() {
+        let dir = std::env::temp_dir().join(format!("glassforms-rough-factor-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = write_loader_gltf(&dir, json!({
+            "pbrMetallicRoughness": {"roughnessFactor": 2.0, "metallicFactor": 0.5}
+        }), false);
+        let loaded = load(&path).expect("the model loads");
+        // (either the factor is accepted, or the model is geometry only with a notice: never a refusal)
+        assert!(loaded.surface.is_some() || loaded.appearance_notice.is_some());
         std::fs::remove_dir_all(dir).unwrap();
     }
 

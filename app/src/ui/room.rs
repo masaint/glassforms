@@ -18,7 +18,8 @@ use super::widgets::*;
 use super::{gizmo, knob, studio, Panels};
 
 /// The most lights the room lets a family have.
-pub const MOST_LIGHTS: usize = 16;
+///(the shading and the cast follow no more: lights past it would only look like lights)
+pub const MOST_LIGHTS: usize = gf_core::cast::MAX_LIGHTS;
 /// How near a mark on the picture of the lighting a press must be to take hold of its light, in points.
 const REACH: f32 = 13.0;
 
@@ -306,4 +307,10 @@ fn turning(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     for name in ["lyaw", "lpitch", "lroll", "lspin"] {
         if let Some(k) = knobs.iter().find(|k| k.id == name) { knob::knob_row(ui, st, k, px); }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn the_room_cap_is_what_the_engine_draws() {
+    assert_eq!(MOST_LIGHTS, crate::surface::MAX_LIGHTS);
 }

@@ -26,6 +26,12 @@ fn same_as_live(e: &Engine, what: &str) {
     assert!(e.renderer.text_with(&m, v, lens, sdf.as_ref()) == text, "{what}: text");
 }
 
+/// A GPU test that cannot get a device must say so loudly (cargo would still report "ok"); GF_REQUIRE_GPU=1 makes it fail instead.
+fn skipped(why: &str) {
+    eprintln!("**** NOT TESTED (skipped): {why}; set GF_REQUIRE_GPU=1 to fail instead ****");
+    if std::env::var_os("GF_REQUIRE_GPU").is_some() { panic!("GF_REQUIRE_GPU is set and {why}"); }
+}
+
 #[test]
 fn warmed_tracers_are_the_live_ones() {
     let scenes: &[(&str, &[(&str, &str)])] = &[
@@ -38,7 +44,7 @@ fn warmed_tracers_are_the_live_ones() {
         ("milk", &[("scene", "solids"), ("preset", "superellipsoid"), ("material", "milk")]),
     ];
     for (name, args) in scenes {
-        let Some(e) = engine(args) else { eprintln!("no graphics device: skipped"); return };
+        let Some(e) = engine(args) else { skipped("no graphics device"); return };
         same_as_live(&e, name);
     }
 }
@@ -46,7 +52,7 @@ fn warmed_tracers_are_the_live_ones() {
 #[test]
 fn a_switch_uses_the_tracer_made_beforehand() {
     let base = [("scene", "solids"), ("preset", "superellipsoid")];
-    let Some(mut e) = engine(&base) else { eprintln!("no graphics device: skipped"); return };
+    let Some(mut e) = engine(&base) else { skipped("no graphics device"); return };
     let (m, v, lens, sdf) = e.renderer.live_tracer().expect("a tracer");
     assert!(sdf.is_none());
     // the camera off the centre line
@@ -82,7 +88,7 @@ fn a_switch_uses_the_tracer_made_beforehand() {
 #[test]
 fn reduced_resolution_keeps_drawing_while_its_pipeline_is_prepared() {
     let Some(mut e) = engine(&[("scene", "studio"), ("preset", "sphere"), ("denoise", "0"), ("smooth", "0.9")]) else {
-        eprintln!("no graphics device: skipped");
+        skipped("no graphics device");
         return;
     };
     e.auto = false;

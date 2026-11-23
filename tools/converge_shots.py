@@ -13,6 +13,7 @@ import json
 import os
 import re
 import subprocess
+import gf_common
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -26,7 +27,7 @@ FRAMES = [8, 32, 128]
 
 
 def run(args):
-    r = subprocess.run([sys.executable, QUEUE, '--name', 'studio', '--timing', '--', EXE] + args, capture_output=True, text=True)
+    r = gf_common.run([sys.executable, QUEUE, '--name', 'studio', '--timing', '--', EXE] + args)
     m = re.search(r'refine: (\d+) frames in ([\d.]+) s, (\d+) rays', r.stderr + r.stdout)
     return m.groups() if m else None
 

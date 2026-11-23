@@ -13,6 +13,8 @@ pub const TOTAL_MAX: u64 = 16_000_000_000;
 /// ones (a draft at half the detail holds an eighth as much) and the picture's own targets
 /// (`State::budget_scale`). Kept volumes past the budget are let go at run time all the same.
 pub const HEADROOM: f64 = 0.1;
+/// The sizes (a side) the parts engine builds its volumes at: the scene's detail, within these (app `Engine::build_parts`).
+pub const PARTS_RES: (u32, u32) = (256, 512);
 
 /// What a scene holds at one detail, in bytes per voxel of that detail.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -39,8 +41,9 @@ pub struct Scene {
     /// objects whose world modifiers are measured into a field of their own: two 64-bit (four 16-bit
     /// channel) volumes and a 16-bit warped copy each
     pub world_fields: usize,
-    /// volumes the parts engine holds at the scene's detail (the scene's, the rest and the one shown while dragging: 3 when it draws the
-    /// scene; its cells and pool are small beside them). TODO: `State::memory_scene` leaves it 0 until the engine's choice is known to the state.
+    /// volumes the parts engine holds while it draws the scene (the scene's, the rest and the one shown while dragging: 3; its cells and pool
+    /// are small beside them), 0 otherwise. They are made at the scene's detail clamped to `PARTS_RES` (the engine's own limit), and then the
+    /// layers', combined and bodies' volumes are not built at all: the model counts these and nothing else (`State::parts_engine`).
     pub parts_volumes: usize,
 }
 
@@ -69,6 +72,10 @@ impl Scene {
 
     /// Bytes at `res` voxels a side: the largest single allocation, and the sum.
     pub fn bytes(&self, res: u32) -> (u64, u64) {
+        if self.parts_volumes > 0 {
+            let one = 2 * u64::from(res.clamp(PARTS_RES.0, PARTS_RES.1)).pow(3);
+            return (one, one * self.parts_volumes as u64);
+        }
         let n = f64::from(res).powi(3);
         let need = self.needs();
         ((need.single * n) as u64, (need.total * n) as u64)
@@ -76,6 +83,8 @@ impl Scene {
 
     /// The finest detail (a multiple of 8, at most `res`) at which this scene fits the budget.
     pub fn fit(&self, res: u32) -> u32 {
+        // (the parts engine clamps its own size, and three volumes of at most 512 are 0.8 GB: nothing to lower)
+        if self.parts_volumes > 0 { return res; }
         let need = self.needs();
         let most = (SINGLE_MAX as f64 / need.single).min(TOTAL_MAX as f64 / need.total).cbrt();
         let fit = ((most.floor() as u32) / 8 * 8).max(64);
@@ -97,6 +106,14 @@ pub fn note(asked: u32, held: u32, scene: &Scene) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_parts_engine_counts_three_clamped_volumes_and_nothing_else() {
+        let s = Scene { layers: 5, combined: true, parts_volumes: 3, ..Default::default() };
+        assert_eq!(s.bytes(768), (2 * 512u64.pow(3), 6 * 512u64.pow(3)));
+        assert_eq!(s.bytes(128).1, 6 * 256u64.pow(3));
+        assert_eq!(s.fit(768), 768);
+    }
 
     #[test]
     fn one_plain_object_fits_up_to_1536() {

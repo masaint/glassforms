@@ -135,7 +135,7 @@ fn parts(ui: &mut Ui, st: &mut State, px: &mut Panels, headed: bool) {
         }
         if chosen { gap(ui, 3.0); selected(ui, st, px, i); gap(ui, 6.0); }
     }
-    if n < MAX_PARTS {
+    if n + 1 < MAX_PARTS {
         let (resp, at) = wide_button(ui, Id::unique("csg add"), "add part", false);
         px.note("csg add", at);
         if resp.on_hover_text("a new part where it shows: a ball (a block beside a ball), on the right of the shape as it is seen now, selected, with its handles").clicked() {

@@ -10,6 +10,7 @@ Steps (one window each): a probe (where the buttons are), then `live` (press Liv
 import json
 import os
 import subprocess
+import gf_common
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -28,7 +29,7 @@ os.makedirs(OUT, exist_ok=True)
 def run(cmd, label):
     full = [sys.executable, '-I', GPU_RUN, '--name', 'wp6b', '--'] + cmd
     open(os.path.join(OUT, '_last_gpu_job.txt'), 'w', encoding='utf-8').write(' '.join(full) + '\n')
-    done = subprocess.run(full, capture_output=True, text=True, cwd=NATIVE, env={**os.environ, 'GF_GPU_QUEUE': r'D:\glassforms\_gpu_queue'}, timeout=420)
+    done = gf_common.run(full, cwd=NATIVE, env={**os.environ, 'GF_GPU_QUEUE': r'D:\glassforms\_gpu_queue'}, timeout=420)
     if done.returncode != 0:
         print(label, 'FAILED', (done.stderr or done.stdout)[-400:])
         return False

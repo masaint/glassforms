@@ -106,6 +106,13 @@ mod imp {
         uuid::Uuid::parse_str(PROJECT).expect("a valid UUID")
     }
 
+    /// The device's limits as everywhere, with room for the draft's guide pass (four targets, 52 bytes a pixel; the default is 32).
+    fn limits(adapter: &wgpu::Adapter) -> wgpu::Limits {
+        let mut l = wanted_limits(adapter);
+        l.max_color_attachment_bytes_per_sample = adapter.limits().max_color_attachment_bytes_per_sample.min(64).max(l.max_color_attachment_bytes_per_sample);
+        l
+    }
+
     /// The device opened through dlss_wgpu, which adds the Vulkan extensions NVIDIA's runtime needs.
     pub fn open() -> R<Gpu> {
         let (_, adapter, device, queue) = open_parts()?;
@@ -128,12 +135,12 @@ mod imp {
         let dd = wgpu::DeviceDescriptor {
             label: Some("glassforms"),
             required_features: wanted_features(&adapter),
-            required_limits: wanted_limits(&adapter),
+            required_limits: limits(&adapter),
             experimental_features: wgpu::ExperimentalFeatures::disabled(),
             memory_hints: wgpu::MemoryHints::Performance,
             trace: wgpu::Trace::Off,
         };
-        let (device, queue) = dlss_wgpu::request_device(project(), &adapter, &dd, &mut support, Some(wanted_limits(&adapter))).map_err(|e| format!("could not open the graphics device: {e}"))?;
+        let (device, queue) = dlss_wgpu::request_device(project(), &adapter, &dd, &mut support, Some(limits(&adapter))).map_err(|e| format!("could not open the graphics device: {e}"))?;
         crate::dlss_rr::note_support(support.ray_reconstruction_supported);
         if !support.super_resolution_supported {
             return Err("DLSS Super Resolution is not supported on this device".into());

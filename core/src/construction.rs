@@ -349,7 +349,7 @@ impl Csg {
         parent: &[usize],
         mut part: Part,
     ) -> Option<Vec<usize>> {
-        if self.parts.len() >= crate::csg::MAX_PARTS
+        if self.parts.len() + 1 >= crate::csg::MAX_PARTS
             || self.construction_tree().children(parent).is_none()
         {
             return None;

@@ -55,10 +55,16 @@ fn worst(res: usize, v: &[f32], stride: usize, exact: impl Fn([f64; 3]) -> f64) 
     (over, wrong, n, ratio)
 }
 
+/// A GPU test that cannot get a device must say so loudly (cargo would still report "ok"); GF_REQUIRE_GPU=1 makes it fail instead.
+fn skipped(why: &str) {
+    eprintln!("**** NOT TESTED (skipped): {why}; set GF_REQUIRE_GPU=1 to fail instead ****");
+    if std::env::var_os("GF_REQUIRE_GPU").is_some() { panic!("GF_REQUIRE_GPU is set and {why}"); }
+}
+
 #[test]
 fn a_tube_volume_never_says_the_surface_is_further_than_it_is() {
     let Ok(gpu) = Gpu::headless("vulkan") else {
-        eprintln!("no graphics device: skipped");
+        skipped("no graphics device");
         return;
     };
     // a knot of one radius, not melted (a melt is a smooth union, its surface not the tube's), at two sizes
@@ -106,7 +112,7 @@ fn a_tube_volume_never_says_the_surface_is_further_than_it_is() {
 #[test]
 fn a_model_volume_never_says_the_surface_is_further_than_it_is() {
     let Ok(gpu) = Gpu::headless("vulkan") else {
-        eprintln!("no graphics device: skipped");
+        skipped("no graphics device");
         return;
     };
     let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("out").join("models").join("grid_safe");

@@ -19,10 +19,8 @@
 //!
 //! The orbital is turned a few degrees inside the formula: a nodal plane through the centre of every voxel
 //! (x = y for d x²−y², say) would leave the walk a level ridge with no slope at all, read as a surface.
+use super::solids::FIT;
 use super::*;
-
-/// How far from the centre the farthest point of every orbital lies.
-const FIT: f64 = 1.22;
 
 /// The real spherical harmonic (l, m) as a homogeneous polynomial in c, in the order l·l + l + m.
 fn y_poly(c: [f64; 3], i: usize) -> f64 {

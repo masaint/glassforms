@@ -182,6 +182,9 @@ pub struct Panels {
     pub tier_phase: crate::tier::PhaseTracker,
     pub tier_frame: u64,
     pub tier_note: Option<String>,
+    /// why the draft cannot draw this scene just now (render.rs `draft_blocked`), and the selected part's place the frame before
+    pub draft_skip: Option<String>,
+    pub draft_part: Option<(usize, [f64; 3])>,
     pub hide_left: bool,
     pub hide_right: bool,
     /// the help (what the mouse and the keys do) is open
@@ -317,7 +320,7 @@ pub struct Panels {
 impl Panels {
     pub fn new(store: store::Store) -> Self {
         Self {
-            store, tier_cache: None, tier_menu: false, tier_menu_at: None, tier_cfg: Default::default(), tier_times: Default::default(), tier_drawing: None, tier_all: false, tier_phase: Default::default(), tier_frame: 0, tier_note: None, hide_left: false, hide_right: false, help_open: false, bright: false, light: 0, handles: handles::Handles::starting(), draw_cut: Default::default(), paths: paths::PathEdit::default(), nav: tools::Nav::default(), lamp: 0, lit_mat: None, lab_node: None, canonical_added: BTreeSet::new(), canonical_error: None, combo_open: None, meets_open: [false; 2], joined: None, sculpted: None, sculpt_size: 0.0, sculpt_error: None, matcap_error: None, matcap_thumbs: Vec::new(), sculpt_layer: Some(0), mods_sel: None, mods_adding: false, mods_frame: false, mods_note: None, mods_drag: None, mods_slide: Vec::new(), mods_ctrl_h: 0.0, strokes_open: false, lighting: Lighting::default(), model: Model::default(), casting: Casting::default(), aspect: 16.0 / 9.0, last_fstop: 4.0, perf: String::new(), settle: None, message: None, restore: None, keep_says: String::new(), bench: Bench::Idle, rendering: false, ffmpeg: false,
+            store, tier_cache: None, tier_menu: false, tier_menu_at: None, tier_cfg: Default::default(), tier_times: Default::default(), tier_drawing: None, tier_all: false, tier_phase: Default::default(), tier_frame: 0, tier_note: None, draft_skip: None, draft_part: None, hide_left: false, hide_right: false, help_open: false, bright: false, light: 0, handles: handles::Handles::starting(), draw_cut: Default::default(), paths: paths::PathEdit::default(), nav: tools::Nav::default(), lamp: 0, lit_mat: None, lab_node: None, canonical_added: BTreeSet::new(), canonical_error: None, combo_open: None, meets_open: [false; 2], joined: None, sculpted: None, sculpt_size: 0.0, sculpt_error: None, matcap_error: None, matcap_thumbs: Vec::new(), sculpt_layer: Some(0), mods_sel: None, mods_adding: false, mods_frame: false, mods_note: None, mods_drag: None, mods_slide: Vec::new(), mods_ctrl_h: 0.0, strokes_open: false, lighting: Lighting::default(), model: Model::default(), casting: Casting::default(), aspect: 16.0 / 9.0, last_fstop: 4.0, perf: String::new(), settle: None, message: None, restore: None, keep_says: String::new(), bench: Bench::Idle, rendering: false, ffmpeg: false,
             video_text: String::new(), file_text: String::new(), loop_text: String::new(), requests: Vec::new(), place: "", record: false, rects: BTreeMap::new(),
             left_at: None, right_at: None, lit_shape: None, tab: None, tab_seen: (0, 1, false), browse_fam: 0, adding: false, anim_h: 120.0, right_scroll: None, clip: None, controls_max: 0.0, scroll_to: [None, None], room_h: 600.0, needs: [0.0; 2], right_rest: 0.0, full: Rect::ZERO, costly_shown: false, picker: picker::Picker::default(), palette: outline::Palette::default(),
         }

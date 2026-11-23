@@ -144,7 +144,7 @@ pub fn run(pairs: Vec<(String, String)>, flags: Vec<(String, Option<String>)>) -
     let native = eframe::NativeOptions {
         viewport,
         renderer: eframe::Renderer::Wgpu,
-        wgpu_options: wgpu_options(opts.pair("backend").unwrap_or("auto"), opts.pair("vsync") != Some("0"), crate::dlss::window_parts(opts.pair("upscale") == Some("dlss"))),
+        wgpu_options: wgpu_options(opts.pair("backend").unwrap_or("auto"), opts.pair("vsync") != Some("0"), crate::dlss::window_parts(opts.pair("upscale") == Some("dlss") || (crate::dlss::BUILT && opts.pair("backend") != Some("dx12") && std::env::var_os("GLASSFORMS_NO_DRAFT").is_none()))),
         persist_window: false,
         dithering: false,
         centered: !opts.scripted || opts.show,
@@ -519,7 +519,10 @@ impl App {
         #[cfg(feature = "dlss")]
         let gpu = {
             let mut gpu = gpu;
-            if upscale.is_some() && rs.adapter.get_info().backend == wgpu::Backend::Vulkan { gpu.dlss_adapter = Some(rs.adapter.clone()); }
+            if rs.adapter.get_info().backend == wgpu::Backend::Vulkan && (upscale.is_some() || (opts.pair("backend") != Some("dx12") && std::env::var_os("GLASSFORMS_NO_DRAFT").is_none())) {
+                gpu.dlss_adapter = Some(rs.adapter.clone());
+                crate::dlss_rr::note_device(&rs.adapter.get_info());
+            }
             gpu
         };
         let backdrop = crate::backdrop::Backdrop::new(&gpu);
@@ -1555,22 +1558,77 @@ impl App {
         let frame = self.px.tier_frame;
         let st = &self.engine.state;
         let choice = self.px.store.tiers;
-        let avail = crate::ui::tiers::avail(st, &mut self.px, frame);
+        let mut avail = crate::ui::tiers::avail(st, &mut self.px, frame);
+        // (the engine's own gate also wants 16-bit float volume storage: without it the button is dimmed, with the reason, and Auto never asks)
+        if !self.engine.gpu.storage16 && avail.live.is_ok() {
+            avail.live = Err("this device cannot write 16-bit float volumes".into());
+            if let Some((_, c)) = &mut self.px.tier_cache { c.live = avail.live.clone(); }
+        }
         // the geometry: Live asks for the parts engine itself; under Auto the scene's weight does (plan 1.4: more than one object, or
         // more than 16 parts), and only where it accepts the scene. A phase never changes it.
         let heavy = st.csg.parts.len() > 16 || (st.stack.layers.len() > 1 && !st.csg.parts.is_empty());
-        let want = choice.rest == Tier::Live || (choice.auto && heavy && avail.live.is_ok());
-        self.engine.set_parts_wanted(want);
+        let live_ok = avail.live.is_ok();
         // the phase: something is being dragged (the picture, a handle, a slider) or playing
         let st = &self.engine.state;
         let moving = self.drag.is_some() || ctx.dragged_id().is_some() || st.playing || st.p.spin > 0.0;
         let phase = self.px.tier_phase.next(moving);
         let mut c = choice;
         if st.view.mode == ViewMode::Matcap { c.rest = Tier::Matcap; }
-        // (the draft is not drawn by this build yet: the engine has no Ray Reconstruction pass)
+        // The draft (Ray Reconstruction, dlss_rr.rs): its context and tracer are made as soon as it is chosen, or Auto may use it, so that
+        // the first moving frame does not wait for NVIDIA's runtime; it draws only when it is ready.
+        // what the selected part did since the frame before (scene units): a dragged part, told to the draft's motion vectors
+        #[cfg(feature = "dlss")]
+        let moved = {
+            let st = &self.engine.state;
+            let sel = st.csg.sel.filter(|i| *i < st.csg.parts.len());
+            match sel {
+                Some(i) => {
+                    let pos = st.csg.parts[i].place.pos;
+                    let by = match self.px.draft_part {
+                        Some((k, last)) if k == i => [(pos[0] - last[0]) as f32, (pos[1] - last[1]) as f32, (pos[2] - last[2]) as f32],
+                        _ => [0.0; 3],
+                    };
+                    self.px.draft_part = Some((i, pos));
+                    by
+                }
+                None => { self.px.draft_part = None; [0.0; 3] }
+            }
+        };
+        #[cfg(feature = "dlss")]
+        let draft_ready = {
+            let may = avail.draft.is_ok() && (c.rest == Tier::Draft || (c.auto && c.motion == tier::Motion::Draft));
+            let cfg = self.px.tier_cfg.clone();
+            let want = crate::render::DraftWant {
+                on: false, prepare: may, scale: crate::dlss_rr::SCALES[cfg.draft_pixels.min(1)], bounces: cfg.draft_bounces.clamp(1, 3) as i32,
+                motion: if moved.iter().any(|v| v.abs() > 1e-9) { crate::dlss_rr::Motion::Correspondence } else { crate::dlss_rr::Motion::Surface },
+            };
+            self.engine.renderer.set_draft(want);
+            may && self.engine.renderer.draft_ready()
+        };
+        #[cfg(not(feature = "dlss"))]
+        let draft_ready = false;
         let mut av = avail;
-        av.draft = Err("the draft is not drawn by this build yet".into());
-        let d = tier::decide(&c, &av, &Frame { phase, prev: self.px.tier_drawing, settled: false, draft_ready: false, pop: Default::default() });
+        #[cfg(feature = "dlss")]
+        {
+            if let Some(why) = self.engine.renderer.draft.failed.clone() { av.draft = Err(why); }
+            // (a scene or setting the draft cannot draw: the row's button is dimmed with the reason and the full path draws)
+            let skip = if av.draft.is_ok() { self.engine.renderer.draft_blocked() } else { None };
+            av.draft_skip = skip.clone();
+            if std::env::var_os("GLASSFORMS_DLSS_SAY").is_some() && skip != self.px.draft_skip { eprintln!("dlss: the draft button: {:?}", skip); }
+            self.px.draft_skip = skip;
+            self.engine.renderer.draft_drag(moved);
+        }
+        let d = tier::decide(&c, &av, &Frame { phase, prev: self.px.tier_drawing, settled: false, draft_ready, pop: Default::default() });
+        #[cfg(feature = "dlss")]
+        {
+            let mut want = self.engine.renderer.draft.want;
+            want.on = d.tier == Tier::Draft;
+            self.engine.renderer.set_draft(want);
+        }
+        // the geometry is the REST tier's choice (a phase never changes it): Live asks for the parts engine, and so does a draft that cannot
+        // run (it falls back to Live); under Auto the scene's weight does (plan 1.4)
+        let (rest, _) = tier::rest_tier(&c, &av);
+        self.engine.set_parts_wanted(rest == Tier::Live || (choice.auto && heavy && live_ok));
         self.px.tier_drawing = Some(d.tier);
         self.px.tier_note = d.fallback.map(|f| f.0);
         if d.tier == Tier::Matcap && self.engine.state.view.mode != ViewMode::Matcap {
@@ -2537,10 +2595,11 @@ impl eframe::App for App {
             self.keep_sync(dt);
             let t_frame = Instant::now();
             let put_back = self.tier_step(&ctx);
+            self.engine.tier_tag = self.px.tier_drawing.map_or(0, |t| t.at() as u32);
             let did = self.engine.frame(self.canvas.0, self.canvas.1, dt);
             if let Some(mode) = put_back { self.engine.state.view.mode = mode; }
-            if let Some(t) = self.px.tier_drawing {
-                for (phase, ms) in std::mem::take(&mut self.engine.gpu_ms) { self.px.tier_times.push(t, phase == crate::autoscale::Phase::Moving, ms); }
+            for (phase, tier, ms) in std::mem::take(&mut self.engine.gpu_ms) {
+                if let Some(t) = crate::tier::TIERS.get(tier as usize) { self.px.tier_times.push(*t, phase == crate::autoscale::Phase::Moving, ms); }
             }
             drew = did.drew;
             // (a build that ran out of video memory: the edit that asked for it is put back, as Esc does,

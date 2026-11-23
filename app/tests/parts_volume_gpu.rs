@@ -106,8 +106,14 @@ fn compare(app: &[f32], mine: &[f32], h: f64, near: f64) -> Diff {
     d
 }
 
+/// A GPU test that cannot get a device must say so loudly (cargo would still report "ok"); GF_REQUIRE_GPU=1 makes it fail instead.
+fn skipped(why: &str) {
+    eprintln!("**** NOT TESTED (skipped): {why}; set GF_REQUIRE_GPU=1 to fail instead ****");
+    if std::env::var_os("GF_REQUIRE_GPU").is_some() { panic!("GF_REQUIRE_GPU is set and {why}"); }
+}
+
 fn gpu_or_skip() -> Option<Gpu> {
-    match Gpu::headless("vulkan") { Ok(g) if g.storage16 => Some(g), _ => { eprintln!("no GPU that writes r16f volumes: skipped"); None } }
+    match Gpu::headless("vulkan") { Ok(g) if g.storage16 => Some(g), _ => { skipped("no GPU that writes r16f volumes"); None } }
 }
 
 #[test]

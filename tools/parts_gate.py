@@ -27,6 +27,7 @@ import hashlib
 import json
 import os
 import subprocess
+import gf_common
 import sys
 import time
 
@@ -150,7 +151,7 @@ def main(argv):
             os.makedirs(OUT, exist_ok=True)
             open(os.path.join(OUT, '_last_gpu_job.txt'), 'w', encoding='utf-8').write(' '.join(full) + '\n')
             print(f'{name} {size}: running ...', flush=True)
-            r = subprocess.run(full, capture_output=True, text=True, cwd=NATIVE)
+            r = gf_common.run(full, cwd=NATIVE)
             line = next((l for l in r.stdout.splitlines() if l.startswith('{') and '"returncode"' in l), None)
             if not line:
                 print(f'{name}: no result: {(r.stderr or r.stdout)[-400:]}')

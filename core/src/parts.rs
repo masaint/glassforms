@@ -330,6 +330,7 @@ pub fn objects(state: &State) -> Result<Vec<Object>, String> {
         if joined || parts.is_empty() {
             let st = state.layer_shape(i).ok_or("a layer without a shape")?;
             parts.insert(0, bare(state.layer_fam(i), st.preset, st.vals.clone()));
+            parts.truncate(crate::csg::MAX_PARTS);
         }
         out.push(Object { layer: i, place: layer.place, parts });
     }
@@ -667,8 +668,22 @@ impl PartsScene {
     /// mutable); that is enough to accept or refuse a scene.
     pub fn plan(state: &State) -> Result<PartsScene, Refusal> {
         if state.body_materials().is_some() { return Err("per-body materials need the bodies' volume, which the parts engine does not keep".into()); }
+        if state.stack.has_world_modifiers() { return Err("a World modifier (an array of the whole scene) is not drawn by the parts engine".into()); }
+        if state.stack.hierarchy.as_ref().is_some_and(|h| h.changes_geometry()) { return Err("groups that move, bend or arrange their objects are not drawn by the parts engine".into()); }
+        if state.edit_scope.object().is_some() { return Err("an isolated object (edited on its own) is not drawn by the parts engine".into()); }
         let objs = objects(state)?;
         if objs.is_empty() { return Err("no object shows".into()); }
+        {
+            // (a hidden layer still cuts, masks or morphs the others; only a join with it is harmless)
+            let st = &state.stack;
+            let n = st.layers.len().min(crate::layers::MAX_SCENE_LAYERS);
+            for h in (0..n).filter(|&h| !st.layers[h].show) {
+                for j in (0..n).filter(|&j| j != h && st.layers[j].show) {
+                    let op = st.pair(crate::layers::mask_of(&[h, j])).op;
+                    if op != crate::layers::Op::Apart && op != crate::layers::Op::Join { return Err("a hidden layer that cuts or morphs a shown one is not drawn by the parts engine".into()); }
+                }
+            }
+        }
         let mut sc = PartsScene { objs_at: vec![], owner: vec![], pieces: vec![], balls: vec![], tubes: vec![], tube_table: vec![], tube_text: None, pair: None, arrays: vec![], obj_warp: vec![], warps: vec![], multi: false, smooth: 0.0, kinds: vec![], part_kind: vec![], recs: vec![] };
         for o in &objs { sc.check_parts(state, o)?; }
         sc.arrays = sc.compute_arrays(state, &objs)?;
@@ -1249,5 +1264,26 @@ mod tests {
         refused(&["scene=studio", "preset=sphere", r#"mods=[{"kind":"repeat","mode":0,"a":{"v":[12,12,12],"link":false},"b":{"v":[3.0,3.0,3.0],"link":false}}]"#], "copies");
         refused(&["scene=studio", "preset=sphere", "layer=studio:sphere", "layer=studio:sphere", "J12.op=join", "J13.op=join", "J23.op=join"], "two objects joined");
         refused(&["scene=studio", "preset=sphere", "layer=studio:sphere", "J12.op=a_cuts_b", "L1.x=-0.3", "L2.x=0.3"], "two objects joined");
+        refused(&["scene=studio", "preset=sphere", "layer=studio:sphere", "J12.op=b_cuts_a", "L2.show=0"], "hidden layer");
+    }
+
+    #[test]
+    fn refuses_world_modifiers_groups_and_isolation() {
+        let mut s = st(&["scene=studio", "preset=sphere", "material=glass"]);
+        assert!(accepts(&s).is_ok());
+        s.edit_scope.inside = Some(crate::edit_scope::ObjectScope::new(0));
+        let e = accepts(&s).unwrap_err();
+        assert!(e.contains("isolated"), "{e}");
+        s.edit_scope.inside = None;
+        assert!(accepts(&s).is_ok());
+        let mut m = crate::mods::Modifier::of(crate::mods::Kind::Repeat);
+        m.scope = crate::world_mods::Scope::World;
+        m.mode = 1;
+        m.a = crate::mods::Axes::new([4., 1., 1.], false);
+        s.stack.world_modifiers_mut(crate::groups::Item::Object(0)).unwrap().list = vec![m];
+        let e = accepts(&s).unwrap_err();
+        assert!(e.contains("World modifier"), "{e}");
+        s.stack.world_modifiers_mut(crate::groups::Item::Object(0)).unwrap().list.clear();
+        assert!(accepts(&s).is_ok());
     }
 }

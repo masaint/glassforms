@@ -87,6 +87,18 @@ pub struct Track {
 }
 
 impl Track {
+    /// Held to what the tracks can do (a track read from a file may hold anything): a period above zero,
+    /// finite ends and phase, an easing that exists.
+    pub fn hold(&mut self) {
+        self.period = crate::limits::hold(self.period, (1e-3, 1e6));
+        for v in [&mut self.from, &mut self.to, &mut self.phase] {
+            if !v.is_finite() { *v = 0.0; }
+        }
+        if self.ease >= EASES.len() as i32 { self.ease = -1; }
+        self.ease = self.ease.max(-1);
+        self.at = self.at.min(2);
+    }
+
     /// The easing this track uses, given the one set for all.
     pub fn easing(&self, all: (usize, u8)) -> (usize, u8) {
         if self.ease < 0 { all } else { (self.ease as usize, self.at) }

@@ -725,6 +725,44 @@ struct Targets {
     deep: Option<(wgpu::Texture, wgpu::TextureView, [wgpu::BindGroup; 3])>,
 }
 
+/// What the tier row asks of the Ray Reconstruction draft this frame (dlss_rr.rs).
+#[cfg(feature = "dlss")]
+#[derive(Clone, Copy, Debug)]
+pub struct DraftWant {
+    /// draw this frame through the draft
+    pub on: bool,
+    /// have the context and the tracer ready (the draft is selected, or Auto may use it): they take a moment to make
+    pub prepare: bool,
+    /// the share of each side that is traced
+    pub scale: f64,
+    /// the bounce cap
+    pub bounces: i32,
+    pub motion: crate::dlss_rr::Motion,
+}
+#[cfg(feature = "dlss")]
+impl Default for DraftWant {
+    fn default() -> Self { DraftWant { on: false, prepare: false, scale: 0.5, bounces: 2, motion: crate::dlss_rr::Motion::Surface } }
+}
+
+/// The draft tier's state in the renderer: its context, its tracer's two pipelines (and the thread making them).
+#[cfg(feature = "dlss")]
+#[derive(Default)]
+pub struct DraftState {
+    pub want: DraftWant,
+    ctx: Option<crate::dlss_rr::Draft>,
+    /// the draft tracer's colour and guide pipelines by tracer key (the key alternates between a moving and a still shape: kept, not remade)
+    pipes: HashMap<String, (wgpu::RenderPipeline, wgpu::RenderPipeline)>,
+    building: Option<(String, std::sync::mpsc::Receiver<Result<(wgpu::RenderPipeline, wgpu::RenderPipeline), String>>)>,
+    /// why the draft cannot run (it is then off for the session)
+    pub failed: Option<String>,
+    /// draft frames drawn
+    pub drawn: u64,
+    said: bool,
+    said_frame: bool,
+    misses: u64,
+    fell: u64,
+}
+
 pub struct Renderer {
     gpu: Gpu,
     lin: wgpu::Sampler,
@@ -878,6 +916,9 @@ pub struct Renderer {
     surface: crate::surface::Surface,
     /// DLSS while the view moves, when asked for and built in (dlss.rs)
     pub up: crate::dlss::Upscale,
+    /// the Ray Reconstruction draft tier (dlss_rr.rs): what is asked for, its context and its tracer
+    #[cfg(feature = "dlss")]
+    pub draft: DraftState,
     /// one wavelength inside the glass (hero.rs): as asked for, and whether the tracer in use has it
     pub hero: crate::hero::Hero,
     /// the hero as woven into the tracer in use (None: the whole comb)
@@ -999,9 +1040,34 @@ fn halton(mut i: u32, b: u32) -> f64 {
     r
 }
 
+/// Sampled textures one tracer fragment stage binds, counted from the `l_trace` layout in `Renderer::new`
+/// (bindings 1, 3, 6, 8, 10, 24 to 27, the dome, the cloud shadow, the page, the atlas, 12 and four
+/// projected volumes), without the grid parts and without the cast group.
+pub const TRACE_TEXTURES: u32 = 18;
+/// The cast group's sampled textures (cast.rs: bindings 1, 2, 4).
+pub const CAST_TEXTURES: u32 = 3;
+/// Uniform buffers the tracer layout binds (0, 5, 9, stage, refine, lamps, 13, 32, 33, gem, sdf) and the cast group's one.
+pub const TRACE_UNIFORMS: u32 = 12;
+
+/// Sampled textures the tracer stage needs, with the cast group, with or without a tree's grid volumes.
+pub fn trace_textures_needed(grids: bool) -> u32 {
+    TRACE_TEXTURES + CAST_TEXTURES + if grids { gf_core::csg::MAX_GRIDS as u32 } else { 0 }
+}
+
+/// Can the device bind what the tracer needs at all? A sentence when it cannot.
+pub fn check_trace_limits(l: &wgpu::Limits) -> Result<(), String> {
+    let need = trace_textures_needed(false);
+    if l.max_sampled_textures_per_shader_stage < need || l.max_uniform_buffers_per_shader_stage < TRACE_UNIFORMS {
+        return Err(format!(
+            "this graphics device is too small for the renderer: it allows {} sampled textures and {} uniform buffers per shader stage, the tracer needs {need} and {TRACE_UNIFORMS}",
+            l.max_sampled_textures_per_shader_stage, l.max_uniform_buffers_per_shader_stage));
+    }
+    Ok(())
+}
+
 /// Can the tracer read a tree's grid parts (eight more textures and a sampler than it reads otherwise)?
 pub fn grids_fit(gpu: &Gpu) -> bool {
-    gpu.device.limits().max_sampled_textures_per_shader_stage >= 16 + gf_core::csg::MAX_GRIDS as u32
+    gpu.device.limits().max_sampled_textures_per_shader_stage >= trace_textures_needed(true)
 }
 
 impl Renderer {
@@ -1166,6 +1232,8 @@ impl Renderer {
             dn: Denoise::new(gpu), shown: 0,
             surface: crate::surface::Surface::new(gpu),
             up: Default::default(),
+            #[cfg(feature = "dlss")]
+            draft: Default::default(),
             hero: Default::default(), hero_cur: None, hero_move: None, split_keys: Default::default(), recon: None, accum_chroma: false, dyn_scale: 1.0, dyn_used: 1.0, traced_caps: [0; 2], traced_half: Default::default(), split_refine: false, pass_times: crate::pass_times::PassTimes::from_env(gpu), p_accum_dyn: None, building_dyn: None,
             adapt: crate::adapt::Adapt::new(gpu),
             matcap_on: None, matcap_grown: false, matcap: crate::matcap::Matcap::new(gpu),
@@ -2163,6 +2231,17 @@ impl Renderer {
         self.traced_caps = [u.nb, u.nw];
         self.gpu.queue.write_buffer(&self.u_trace, 0, bytemuck::bytes_of(&u));
 
+        // The Ray Reconstruction draft, when the tier row asks for it (dlss_rr.rs)
+        #[cfg(feature = "dlss")]
+        if self.draft.want.on {
+            if self.frame_draft(tu, look, skip_post, cut) {
+                self.traced_half = Half::Whole;
+                return;
+            }
+            if let Some(d) = self.draft.ctx.as_mut() { d.live = false; }
+            self.draft.fell += 1;
+            if std::env::var_os("GLASSFORMS_DLSS_SAY").is_some() && self.draft.fell % 50 == 1 { eprintln!("dlss: a frame the draft did not draw while it is asked for (#{}, draft frames so far {}, ready {})", self.draft.fell, self.draft.drawn, self.draft_ready()); }
+        }
         // DLSS in place of the antialiasing that follows motion, when asked for (dlss.rs)
         #[cfg(feature = "dlss")]
         {
@@ -2400,6 +2479,216 @@ impl Renderer {
             + (now.lens[0][3] - was.lens[0][3]).abs() * (th_f * 0.2);
         let morph_px = if now.shape_no != was.shape_no { th_f * (1.2 / 720.0) } else { 0.0 };
         (rot_px.max(zoom_px).max(morph_px), shift_px)
+    }
+
+    /// The tier row's wish for this frame. Making the context and the tracer takes a moment (NVIDIA's runtime loads: 0.9 s the first
+    /// time), so it is done when the draft is selected or Auto may use it, not on the first moving frame.
+    #[cfg(feature = "dlss")]
+    pub fn set_draft(&mut self, want: DraftWant) {
+        self.draft.want = want;
+        if want.prepare || want.on { self.prepare_draft(); }
+    }
+
+    /// Is the draft ready to draw (context made for this size, tracer built)?
+    #[cfg(feature = "dlss")]
+    pub fn draft_ready(&self) -> bool {
+        let Some((tw, th)) = self.t.as_ref().map(|t| (t.tw, t.th)) else { return false };
+        self.draft.failed.is_none()
+            && self.draft.ctx.as_ref().is_some_and(|d| d.is_ready(tw, th, self.draft.want.scale))
+            && self.draft.pipes.contains_key(&self.draft_key())
+    }
+
+    #[cfg(feature = "dlss")]
+    fn draft_key(&self) -> String { format!("{}|draft", self.trace_key) }
+
+    #[cfg(feature = "dlss")]
+    fn draft_fail(&mut self, why: String) {
+        if self.draft.failed.is_none() { eprintln!("dlss: {why}; the draft tier is off"); }
+        self.draft.failed = Some(why);
+        self.draft.ctx = None;
+        self.draft.want.on = false;
+    }
+
+    /// Why the draft cannot draw this scene just now, in words for the row (None: it can). The full path draws instead.
+    #[cfg(feature = "dlss")]
+    pub fn draft_blocked(&self) -> Option<String> {
+        if self.surface.on() { return Some("the surface studio is on".into()); }
+        if self.cam.active { return Some("a camera lens is on".into()); }
+        if self.variant.denoise { return Some("this material is denoised".into()); }
+        if rough_split(&self.variant, self.profile) { return Some("rough glass is drawn in two stages".into()); }
+        if self.profile || self.split_keys.contains(&self.trace_key) { return Some("this tracer is drawn in halves".into()); }
+        if self.variant.cast && self.g_cast.is_none() { return Some("the shadows are not ready".into()); }
+        let key = self.draft_key();
+        if self.draft.ctx.is_some() && self.march.is_some() && self.draft.building.is_none() && !self.draft.pipes.contains_key(&key) {
+            return Some("its tracer cannot be made for this material".into());
+        }
+        None
+    }
+
+    /// RR forgets its history at the next draft frame (a new scene).
+    #[cfg(feature = "dlss")]
+    pub fn draft_reset(&mut self) {
+        if let Some(d) = self.draft.ctx.as_mut() { d.live = false; }
+    }
+
+    /// What the window knows of what is dragged: it moved by this much (scene units) since the frame before. Zero: not known.
+    #[cfg(feature = "dlss")]
+    pub fn draft_drag(&mut self, by: [f32; 3]) {
+        if let Some(d) = self.draft.ctx.as_mut() { d.drag = by; }
+    }
+
+    #[cfg(feature = "dlss")]
+    fn poll_draft(&mut self) {
+        let Some((key, rx)) = &self.draft.building else { return };
+        let key = key.clone();
+        match rx.try_recv() {
+            Ok(Ok((colour, guide))) => {
+                self.failed_tracers.built(&key);
+                if self.draft.pipes.len() >= 6 { self.draft.pipes.clear(); }
+                self.draft.pipes.insert(key, (colour, guide));
+                self.draft.building = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Ok(Err(message)) => {
+                self.failed_tracers.failed(&key, message, std::time::Instant::now());
+                self.draft.building = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.failed_tracers.failed(&key, "The draft tracer's compiler stopped.".into(), std::time::Instant::now());
+                self.draft.building = None;
+            }
+        }
+    }
+
+    /// Make the draft's context for this size (probing NVIDIA's runtime the first time) and build its tracer, if not done.
+    #[cfg(feature = "dlss")]
+    fn prepare_draft(&mut self) {
+        if self.draft.failed.is_some() { return; }
+        let Some((tw, th)) = self.t.as_ref().map(|t| (t.tw, t.th)) else { return };
+        let scale = self.draft.want.scale;
+        let made = match self.draft.ctx.as_mut() {
+            Some(d) => d.ready(&self.gpu, tw, th, scale),
+            None => crate::dlss_rr::probe(&self.gpu, tw, th, scale).map(|d| self.draft.ctx = Some(d)),
+        };
+        if let Err(e) = made { self.draft_fail(e); return; }
+        if std::env::var_os("GLASSFORMS_DLSS_SAY").is_some() && !self.draft.said { self.draft.said = true; eprintln!("dlss: the draft's context is made ({tw}x{th}, share {scale})"); }
+        self.poll_draft();
+        let Some(m) = self.march else { return };
+        let key = self.draft_key();
+        let waiting = matches!(self.failed_tracers.standing(&key, std::time::Instant::now()), crate::build_retry::Standing::Waiting(_));
+        if self.draft.pipes.contains_key(&key) || waiting
+            || self.cam.active || self.split_keys.contains(&self.trace_key)
+            || self.profile || self.variant.denoise || rough_split(&self.variant, self.profile) { return; }
+        let Some(src) = crate::dlss::centre(&self.tracer_text(&m, self.variant)) else { return };
+        if src.contains(denoise::MARK) || src.contains("struct FrOut") || src.contains(crate::hero::SPLIT_MARK) { return; }
+        let src = crate::dlss_rr::with_guides(&src);
+        if self.wait_builds {
+            let (c, g) = crate::dlss_rr::build_tracer_pipelines(&self.gpu, &self.l_trace, self.variant.cast.then_some(&self.l_cast), &src);
+            self.draft.pipes.insert(key, (c, g));
+        } else if self.draft.building.is_none() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let (gpu, l_trace) = (self.gpu.clone(), self.l_trace.clone());
+            let l_cast = self.variant.cast.then(|| self.l_cast.clone());
+            let spawned = std::thread::Builder::new().name("tracer-draft".into()).spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::dlss_rr::build_tracer_pipelines(&gpu, &l_trace, l_cast.as_ref(), &src)))
+                    .map_err(|payload| {
+                        let detail = payload.downcast_ref::<String>().map(String::as_str).or_else(|| payload.downcast_ref::<&str>().copied()).unwrap_or("unknown compiler error");
+                        format!("The draft tracer could not be built. {detail}")
+                    });
+                let _ = tx.send(result);
+            });
+            if spawned.is_ok() { self.draft.building = Some((key, rx)); }
+        }
+    }
+
+    /// Draw this frame through the Ray Reconstruction draft: trace a quarter (or a ninth) of the pixels with every pixel's ray at the frame's
+    /// offset and at most `bounces` bounces, make the guides, let RR make the full-size picture so far, and put it in. False (nothing done)
+    /// when it cannot be done this frame; the full path then draws it.
+    #[cfg(feature = "dlss")]
+    fn frame_draft(&mut self, tu: &TraceU, look: &Look, skip_post: bool, cut: bool) -> bool {
+        if self.cam.active || self.profile || self.split_keys.contains(&self.trace_key) || self.surface.on() { return false; }
+        if rough_split(&self.variant, self.profile) || self.variant.denoise { return false; }
+        if self.variant.cast && self.g_cast.is_none() { return false; }
+        if !self.draft_ready() { self.prepare_draft(); }
+        if !self.draft_ready() {
+            self.draft.misses += 1;
+            if std::env::var_os("GLASSFORMS_DLSS_SAY").is_some() && (!self.draft.said_frame || self.draft.misses % 20 == 1) { {
+                let (tw, th) = self.t.as_ref().map(|t| (t.tw, t.th)).unwrap_or((0, 0));
+                let key = self.draft_key();
+                eprintln!("dlss: the draft is not ready (context {}, sized {}, tracers {}, its key matches {}, building {}, picture {tw}x{th}, share {})", self.draft.ctx.is_some(),
+                    self.draft.ctx.as_ref().is_some_and(|d| d.is_ready(tw, th, self.draft.want.scale)), self.draft.pipes.len(), self.draft.pipes.contains_key(&key), self.draft.building.is_some(), self.draft.want.scale);
+                eprintln!("dlss: blocked: {:?}; key length {}, tracers {:?}, misses {}", self.draft_blocked(), key.len(), self.draft.pipes.keys().map(|k| k.len()).collect::<Vec<_>>(), self.draft.misses);
+            } }
+            return false;
+        }
+        let Some((tw, th)) = self.t.as_ref().map(|t| (t.tw, t.th)) else { return false };
+        let want = self.draft.want;
+        let key = self.draft_key();
+        let Some((colour, guide)) = self.draft.pipes.get(&key).map(|(c, g)| (c.clone(), g.clone())) else { return false };
+        let Some(mut d) = self.draft.ctx.take() else { return false };
+        // (a `cut` while the draft draws is a shape being dragged or edited: RR keeps its history, the motion vectors say what moved; a new
+        // scene is the window's business: `Renderer::draft_reset`)
+        let _ = cut;
+        let done = (|| {
+            let f = d.begin(tw)?;
+            let mut u = *tu;
+            u.res = [f.res[0] as f32, f.res[1] as f32];
+            u.frame = self.frame_no as i32;
+            // the tracer's offsets count up from the bottom; the draft's down from the top
+            u.jitter = [f.jitter[0], -f.jitter[1]];
+            u.nb = u.nb.min(want.bounces.max(1));
+            // the plain three-wavelength sample (one wavelength a sample is coloured noise RR cannot use: lab_rr.md)
+            u.nw = 3;
+            if std::env::var_os("GLASSFORMS_DLSS_SAY").is_some() && self.draft.drawn == 0 { eprintln!("dlss: the app's frame asked for nw {} ns {} nb {}; the draft draws nw {} ns {} nb {}; look exposure {}", tu.nw, tu.ns, tu.nb, u.nw, u.ns, u.nb, look.exposure); }
+            let (now, au) = self.accum_u(&u, 1.0, true, look);
+            let prev_obj = self.prev.map(|p| p.obj).unwrap_or(u.obj);
+            let (t, g_trace) = (self.t.as_ref()?, self.g_trace.as_ref()?);
+            // (what the passes read: written before the submit below)
+            self.gpu.queue.write_buffer(&self.u_trace, 0, bytemuck::bytes_of(&u));
+            let mut enc = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame (draft)") });
+            let g_cast = self.g_cast.as_ref().filter(|_| self.variant.cast);
+            d.encode_inputs(&self.gpu, &mut enc, &colour, &guide, g_trace, g_cast, &u, prev_obj, want.motion)?;
+            let target = t.accum_view[1 - self.acc_idx].clone();
+            let cb = match d.evaluate(&self.gpu, &mut enc, &f, &u) {
+                Ok(cb) => cb,
+                Err(e) => return Some(Err(e)),
+            };
+            self.glare_cut = false;
+            self.glare_motion = match self.prev {
+                Some(was) => Self::view_motion(&now, &was, tw, th),
+                None => (0.0, [0.0; 2]),
+            };
+            self.gpu.queue.write_buffer(&self.u_accum, 0, bytemuck::bytes_of(&au));
+            let mut after = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame (after draft)") });
+            d.encode_resolve(&mut after, &target);
+            self.adapt.valid = false;
+            self.dn.live = false;
+            d.live = true;
+            d.drawn += 1;
+            self.prev = Some(now);
+            self.acc_idx = 1 - self.acc_idx;
+            self.accum_n += 1;
+            self.frame_no += 1;
+            let mut full = *tu;
+            full.res = [tw as f32, th as f32];
+            if !skip_post { self.encode_post(&mut after, &full, look, false); }
+            self.gpu.queue.submit([enc.finish(), cb, after.finish()]);
+            self.trace_passes += 1;
+            if let Some(dir) = std::env::var_os("GLASSFORMS_DRAFT_DUMP") {
+                if d.drawn == 40 { d.dump(&self.gpu, &dir.to_string_lossy(), "f40"); }
+            }
+            Some(Ok(()))
+        })();
+        self.draft.ctx = Some(d);
+        match done {
+            Some(Ok(())) => {
+            self.draft.drawn += 1;
+            if std::env::var_os("GLASSFORMS_DLSS_SAY").is_some() && (!self.draft.said_frame || self.draft.drawn % 30 == 0) { self.draft.said_frame = true; eprintln!("dlss: draft frame {} (accum {})", self.draft.drawn, self.accum_n); }
+            true
+        }
+            Some(Err(e)) => { self.draft_fail(e); false }
+            None => false,
+        }
     }
 
     /// Fold this frame in through DLSS: trace a smaller picture with every pixel's ray at the frame's
@@ -2737,4 +3026,18 @@ fn hero_settle_aligns_after_taa_without_first_frame_full_comb() {
     assert_eq!(r.frame_no % e, 2 % e);
     assert_eq!(r.pass_cost(0, 7, true), 1.0);
     assert!(r.pass_cost(e - 2, 7, true) > 1.0);
+}
+
+#[cfg(test)]
+#[test]
+fn trace_limits_count_the_real_layout() {
+    assert_eq!(trace_textures_needed(false), 21);
+    assert_eq!(trace_textures_needed(true), 29);
+    let mut l = wgpu::Limits::default();
+    // (the default 16 textures cannot bind the tracer: refused with a sentence)
+    assert!(check_trace_limits(&l).unwrap_err().contains("too small"));
+    l.max_sampled_textures_per_shader_stage = 32;
+    assert!(check_trace_limits(&l).is_ok());
+    l.max_uniform_buffers_per_shader_stage = 8;
+    assert!(check_trace_limits(&l).is_err());
 }

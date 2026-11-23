@@ -17,11 +17,38 @@
 //!                            In a motion sequence or video, B1.play sets the primary material's opal colour.
 //!   --16                     with --still: a 16-bit PNG, tone-mapped as on screen but without the grain
 //!   --preview file.png       with --still: also save the small picture of the lighting a light room shows
+//!   --hdr file.bin           with --still: also save the picture before bloom and tone mapping (width, height,
+//!                            then RGBA 32-bit floats, top row first)
+//!   --glow-out file.bin      with --still: the light inside a milky body, as the tracer reads it
+//!   --vol-dump file.bin      write the distance volume itself (voxels a side, then 16-bit floats), and exit
+//!   --vol-hash               print a fingerprint of the distance field (hash, mean, extremes), and exit
+//!   --vol-out file.bin       with --vol-hash: also write the volume's 16-bit values
+//!   --bodies-out file.bin    with --vol-hash: also write the bodies' volumes (layered scenes)
+//!   --quiet                  with --video: no frame-by-frame progress
+//!   --version                print the build this is, and exit
+//!   --interact               scripted interaction, frame by frame as the window runs it (events=a;b;c)
+//!   --session N              a live session timed frame by frame: N frames turned by hand, N animating,
+//!                            N settling (what perf_gate.py times)
+//!   --bench-bake [n]  --bench-combine [n]  --bench-focus [n]  --bench-with [n]  --bench-parts [n]
+//!   --bench-switch           timing tools: a build, the layers' combine step, the cost of focus, the cost of
+//!                            with=name:value,..., the parts engine, and the hitch of switching tracers
+//!   --profile                how many volume lookups a pixel costs (the tracer built to count them)
 //!   glassforms --hdri-info picture.exr                what an environment picture is, and how long it takes to read
 //!   glassforms --load-test picture.exr                frame times of a turning view while that picture is read
 //!                                                     in the background, as the window reads one
 //!                                                     (--load-test clay: while the tracer for clay is built)
 //!
+//! Options that are not settings (name=value, read by the program itself and never saved in a setup):
+//!   tier=live|full|matcap  tierAuto=  tierMotion=  tierAll=1   the quality tier and its Auto rule (the window
+//!                            reads all of them; headless runs honour only tier=live)
+//!   refine=0                 selective refinement of thin parts off (honoured by headless runs only), with
+//!                            refineMost=  (the most bricks refined)
+//!   keepRate=<fps>  adapt=   keep a frame rate by scaling the picture (autoscale.rs); adaptive quality on/off
+//!   upscale=dlss  upscaleScale=   DLSS upscaling (needs a build with --features dlss)
+//!   spin=                    --motion-seq: the turn speed;  hz=  an update rate read by the still/video modes
+//!   after=  move=turn|anim|both   with --motion-seq: frames after stopping; what moves
+//!   with=  rounds=  stride=  rebuild=  live=  shots=  shot=  events=  switches=   read by the --bench-*,
+//!                            --interact and --session tools above
 //! Every setting can be given as name=value, with the names the web version takes in its URL: scene, preset,
 //! any setting (ior, disp, dist, fov, aperture, ...), thick, len, melt, puff, travel, beads, res, p.<name>,
 //! rx, ry, rz. For the modes that make no window: w, h (size of the picture), frames (how many are

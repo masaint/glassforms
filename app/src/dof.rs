@@ -369,17 +369,21 @@ impl Dof {
 
     /// A picture with all its smaller sizes: the texture, a view of each size, a view of them all.
     fn chain(&self, label: &str, w: u32, h: u32, n: usize, format: wgpu::TextureFormat) -> (Vec<wgpu::TextureView>, wgpu::TextureView) {
+        // (a texture has only floor(log2(smaller side)) + 1 levels: on a target of a few texels the
+        // smallest one stands for the ones asked for beyond it)
+        let real = n.min(max_levels(w, h));
         let t = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
             size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-            mip_level_count: n as u32,
+            mip_level_count: real as u32,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        let each = (0..n as u32).map(|i| t.create_view(&wgpu::TextureViewDescriptor { base_mip_level: i, mip_level_count: Some(1), ..Default::default() })).collect();
+        let mut each: Vec<wgpu::TextureView> = (0..real as u32).map(|i| t.create_view(&wgpu::TextureViewDescriptor { base_mip_level: i, mip_level_count: Some(1), ..Default::default() })).collect();
+        while each.len() < n { each.push(each[each.len() - 1].clone()); }
         (each, t.create_view(&Default::default()))
     }
 
@@ -617,4 +621,18 @@ mod tests {
         assert_eq!(Dof::levels_for(1000.0, 4), 4);
         assert_eq!(Dof::levels_for(1000.0, 2), 2);
     }
+}
+
+/// The most levels a 2D texture `w` x `h` can have.
+fn max_levels(w: u32, h: u32) -> usize {
+    (32 - w.min(h).max(1).leading_zeros()) as usize
+}
+
+#[cfg(test)]
+#[test]
+fn a_tiny_target_has_few_levels() {
+    assert_eq!(max_levels(1, 9), 1);
+    assert_eq!(max_levels(3, 3), 2);
+    assert_eq!(max_levels(4, 100), 3);
+    assert_eq!(max_levels(0, 5), 1);
 }

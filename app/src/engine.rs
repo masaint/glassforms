@@ -318,13 +318,17 @@ pub struct Engine {
     pub parts_refine: bool,
     pub parts: Option<crate::parts_volume::PartsVolume>,
     pub parts_active: bool,
+    /// (volume size, stage, parts) of a build the device refused when it came to allocating: not tried again while they stand
+    parts_alloc_refused: Option<(u32, u64, usize)>,
     pub parts_note: Option<String>,
     /// the GPU's own time for each frame drawn, on a clock of its own (not keeping the frame rate's): what the quality-tier readout shows
     pub tier_clock: Option<crate::autoscale::Clock>,
     tier_slot: Option<usize>,
     tier_phase: Option<crate::autoscale::Phase>,
     /// GPU times that arrived since the window last took them: (moving or settling, ms)
-    pub gpu_ms: Vec<(crate::autoscale::Phase, f64)>,
+    pub gpu_ms: Vec<(crate::autoscale::Phase, u32, f64)>,
+    /// the tier (`tier::Tier::at`) of the frame being timed: carried in the sample's tag, so a late sample is counted under its own tier
+    pub tier_tag: u32,
     parts_tube_keys: Vec<String>,
     pub shader_error: Option<String>,
     /// milliseconds the last shape took to work out (CPU) and to put on the GPU
@@ -392,12 +396,12 @@ impl Engine {
         let lights_tex = renderer.env_target((FINE * env::ENV_W) as u32, (FINE * env::ENV_H) as u32);
         let lights_view = lights_tex.create_view(&wgpu::TextureViewDescriptor::default());
         let mut e = Self {
-            tier_clock: crate::autoscale::Clock::new(&gpu), tier_slot: None, tier_phase: None, gpu_ms: Vec::new(),
+            tier_clock: crate::autoscale::Clock::new(&gpu), tier_slot: None, tier_phase: None, gpu_ms: Vec::new(), tier_tag: 0,
             pivot_work: Default::default(), baker: Baker::new(&gpu), sculptor: crate::sculpt::Sculptor::new(&gpu), mods_note: None, csg: crate::csg::CsgWork::new(&gpu), layers: LayerWork::new(&gpu), models: crate::mesh_bake::Models::new(auto), bubbler: Bubbler::new(&gpu), stage: crate::stage::StageWork::new(auto), clouds: crate::clouds::CloudCache::new(&gpu), bubbles_in: None, body_bubbles_in: None, scatter: Scatter::new(&gpu), glow: glow::Kept::default(), shape_no: 0, thickness: None, fit_now: 1.0, soft_ok: false, construction_lighting: None, meter: 1.0, fine_crisp: false, fine_room: false, fine_room_l2r: [0; 9], frame_no: 0, sky_painted_at: 0, fine_later: false, lights_hash: 0, bodies_always: false, body_thick: None, thickness_measure: Default::default(), gpu, state, renderer, cast, lights_tex, lights_view, painted: None, painted_px: Vec::new(), lights_lit: true, rig_sh: None, lights_sh: None, room_sh: None, room_sh_l2r: [0; 9], last_lamps: None,
             maker: Arc::new(OnceLock::new()), picture: None, picture_no: 0, glass: None, glass_from: None, hdri_seen: None, loading: None, next: None, building: false, hdri_error: None, hdri_wait: auto,
             show_wanted: Cell::new(false), show: None, shown: None, lighting_no: 0, last_lu: None,
             dirty: true, cut: true, last_tu: None, last_look: None, last_view: None, matcap_error: None, matcap_asked: None, matcap_bake: None,
-            planes_until: None, planes_shown: false, size_override: None, auto, averaging: false, error: None, starved: false, memory_note: None, parts_wanted: false, parts_refine: true, parts: None, parts_active: false, parts_note: None, parts_tube_keys: Vec::new(), shader_error: None, last_bake_ms: 0.0, last_bake_parts: [0.0; 3], time_bakes: false, refine_n: 1, refine_part: 0.0, refine_count: 0, full_sample_ms: 0.0, refine_most: REFINE_MOST, adapt: crate::adapt::enabled(), thick_last: None, thick_later: None, bake_done: Arc::default(), spans: [0.0; 4], warmed_for: String::new(), hero_forced: false, gem_planes: None, keep: None,
+            planes_until: None, planes_shown: false, size_override: None, auto, averaging: false, error: None, starved: false, memory_note: None, parts_wanted: false, parts_refine: true, parts: None, parts_active: false, parts_note: None, parts_alloc_refused: None, parts_tube_keys: Vec::new(), shader_error: None, last_bake_ms: 0.0, last_bake_parts: [0.0; 3], time_bakes: false, refine_n: 1, refine_part: 0.0, refine_count: 0, full_sample_ms: 0.0, refine_most: REFINE_MOST, adapt: crate::adapt::enabled(), thick_last: None, thick_later: None, bake_done: Arc::default(), spans: [0.0; 4], warmed_for: String::new(), hero_forced: false, gem_planes: None, keep: None,
         };
         e.clouds_upkeep();
         e.paint_lights();
@@ -1517,25 +1521,34 @@ impl Engine {
     /// path builds the scene (not wanted, or refused: `parts_note` says why).
     fn build_parts(&mut self, mode: Detail) -> R<bool> {
         use crate::parts_volume::PartsVolume;
-        if !self.parts_wanted || self.state.empty { self.leave_parts(); return Ok(false); }
+        // (a video or a render at its own size (`size_override`) is the output, not the drag: it is built by the existing full path whatever
+        // the tier row says, and the parts engine comes back, by the next bake, when the size is let go)
+        if !self.parts_wanted || self.state.empty || self.size_override.is_some() { self.leave_parts(); return Ok(false); }
         let now = match PartsVolume::accepts(&self.gpu, &self.state).and_then(|_| gf_core::parts::PartsScene::plan(&self.state).map_err(|e| format!("refused: {e}"))) {
             Ok(s) => s,
             Err(e) => { self.parts_refused(e); self.leave_parts(); return Ok(false); }
         };
+        self.state.parts_engine = true;
         // (exact tubes: their tables are made again only when the tube itself changed, not when it is moved)
         let tube_keys: Vec<String> = now.tubes.iter().enumerate().filter(|(_, t)| t.is_some()).map(|(i, _)| self.state.layer_key(now.objs_at[now.owner[i].0].0)).collect();
         let n = self.parts.as_ref().map_or(0, |p| p.scene.pieces.len());
-        let same = self.parts.as_ref().is_some_and(|p| p.scene.kinds == now.kinds && p.scene.pair == now.pair && p.scene.warps.len() == now.warps.len() && tube_keys == self.parts_tube_keys);
+        // (the volume's size and the stage it spans are part of "the same scene": after a drag (low detail) the settle bake, and a change of the
+        // Detail setting or of how far out the layers stand, build it afresh; else the first volume would stay for good)
+        let res = self.state.scene_res(mode).clamp(256, 512);
+        let hb = self.state.scene_hb();
+        let same = self.parts.as_ref().is_some_and(|p| p.res == res && (p.hb() - hb).abs() < 1e-9 && p.scene.kinds == now.kinds && p.scene.pair == now.pair && p.scene.warps.len() == now.warps.len() && tube_keys == self.parts_tube_keys);
         let mut done = false;
         if same && now.pieces.len() == n { done = self.parts.as_mut().is_some_and(|p| p.drag_step(&self.state, mode.is_draft()).is_ok()); }
         else if same && now.pieces.len() == n + 1 { done = self.parts.as_mut().is_some_and(|p| p.add(&self.state).is_ok()); }
         if !done {
             self.parts = None;
             // (the lab's 512: three volumes of it are 768 MiB; at the scene's own detail (1024 for eight objects) they would be 6 GB)
-            let res = self.state.scene_res(mode).clamp(256, 512);
+            // (a build refused at allocation time is not tried again until the size or the number of parts changes, or the choice is made afresh)
+            let key = (res, hb.to_bits(), now.pieces.len());
+            if self.parts_alloc_refused == Some(key) { self.leave_parts(); return Ok(false); }
             match PartsVolume::build_with(&self.gpu, &mut self.state, res, None, self.parts_refine) {
                 Ok(p) => self.parts = Some(p),
-                Err(e) => { self.parts_refused(e); self.leave_parts(); return Ok(false); }
+                Err(e) => { self.parts_alloc_refused = Some(key); self.parts_refused(e); self.leave_parts(); return Ok(false); }
             }
         }
         self.parts_tube_keys = tube_keys;
@@ -1560,6 +1573,7 @@ impl Engine {
         if self.parts_wanted == want { return; }
         self.parts_wanted = want;
         self.parts_note = None;
+        self.parts_alloc_refused = None;
         if !want { self.leave_parts(); }
         self.layers.forget();
         self.dirty = true;
@@ -1573,6 +1587,7 @@ impl Engine {
 
     /// The tracer goes back to the existing path's volumes: what that path kept is forgotten, so it builds afresh.
     fn leave_parts(&mut self) {
+        self.state.parts_engine = false;
         if self.parts_active { self.parts_active = false; self.layers.forget(); }
         self.renderer.set_refine(None);
         self.parts = None;
@@ -2332,8 +2347,8 @@ impl Engine {
     fn keep_end(&mut self, drew: bool) {
         let phase = self.tier_phase.take();
         if let Some(c) = &mut self.tier_clock {
-            if let Some(i) = self.tier_slot.take() { c.end(&self.gpu, i, if drew { phase.map(|phase| crate::autoscale::Tag { phase, gen: 0, cpu: 0.0 }) } else { None }); }
-            for (tag, ms) in c.arrived(&self.gpu) { self.gpu_ms.push((tag.phase, ms)); }
+            if let Some(i) = self.tier_slot.take() { c.end(&self.gpu, i, if drew { phase.map(|phase| crate::autoscale::Tag { phase, gen: self.tier_tag, cpu: 0.0 }) } else { None }); }
+            for (tag, ms) in c.arrived(&self.gpu) { self.gpu_ms.push((tag.phase, tag.gen, ms)); }
             if self.gpu_ms.len() > 64 { self.gpu_ms.drain(..32); }
         }
         let Some(k) = self.keep.as_mut() else { return };

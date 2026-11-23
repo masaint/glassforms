@@ -64,7 +64,7 @@ impl Tier {
     pub fn glass(self) -> bool {
         self != Tier::Matcap
     }
-    fn at(self) -> usize {
+    pub(crate) fn at(self) -> usize {
         TIERS.iter().position(|t| *t == self).unwrap_or(0)
     }
 }
@@ -200,19 +200,33 @@ pub enum Shown {
 pub struct Avail {
     pub draft: Result<(), String>,
     pub live: Result<(), String>,
+    /// the draft could run on this machine but not for this scene or these settings just now (the full path draws it): why
+    pub draft_skip: Option<String>,
 }
 impl Avail {
     pub fn probe(draft: &DraftFacts, live: &dyn Accepts) -> Avail {
-        Avail { draft: draft.check(), live: live.accepts() }
+        Avail { draft: draft.check(), live: live.accepts(), draft_skip: None }
     }
     /// A machine that has everything (tests, and a build that wants every tier).
     pub fn all() -> Avail {
-        Avail { draft: Ok(()), live: Ok(()) }
+        Avail { draft: Ok(()), live: Ok(()), draft_skip: None }
+    }
+    /// Can the draft draw now: the machine has it and the scene allows it.
+    pub fn draft_state(&self) -> Result<(), String> {
+        self.draft.clone()?;
+        match &self.draft_skip {
+            Some(why) => Err(why.clone()),
+            None => Ok(()),
+        }
     }
     pub fn shown(&self, t: Tier) -> Shown {
         match t {
             Tier::Matcap | Tier::Full => Shown::Normal,
-            Tier::Draft => if self.draft.is_ok() { Shown::Normal } else { Shown::Hidden },
+            Tier::Draft => match (&self.draft, &self.draft_skip) {
+                (Err(_), _) => Shown::Hidden,
+                (Ok(()), Some(why)) => Shown::Dimmed(why.clone()),
+                (Ok(()), None) => Shown::Normal,
+            },
             Tier::Live => match &self.live {
                 Ok(()) => Shown::Normal,
                 Err(why) => Shown::Dimmed(why.clone()),
@@ -321,7 +335,7 @@ pub struct Decision {
 /// The rest tier as chosen, made real: a draft that cannot run is the live glass.
 pub fn rest_tier(choice: &TierChoice, avail: &Avail) -> (Tier, Option<Fallback>) {
     if choice.rest == Tier::Draft {
-        if let Err(why) = &avail.draft {
+        if let Err(why) = &avail.draft_state() {
             return (Tier::Live, Some(Fallback(format!("draft unavailable: {why}"))));
         }
     }
@@ -342,7 +356,7 @@ pub fn decide(choice: &TierChoice, avail: &Avail, f: &Frame) -> Decision {
                     Motion::Same => rest,
                     // (a matcap rest tier is already as quick as a tier gets: nothing to draw instead)
                     Motion::Draft if rest == Tier::Matcap => rest,
-                    Motion::Draft => match (&avail.draft, f.draft_ready, f.pop.ok()) {
+                    Motion::Draft => match (&avail.draft_state(), f.draft_ready, f.pop.ok()) {
                         (Err(why), _, _) => {
                             fallback = Some(Fallback(format!("draft unavailable: {why}")));
                             rest
@@ -531,7 +545,7 @@ mod tests {
 
     #[test]
     fn a_draft_that_is_unavailable_or_not_started_is_never_silent() {
-        let none = Avail { draft: DraftFacts::default().check(), live: Ok(()) };
+        let none = Avail { draft: DraftFacts::default().check(), live: Ok(()), draft_skip: None };
         let d = session(glass_auto(Motion::Draft), &none, &[true, false], 30, true, PopGate::default());
         assert_eq!(tiers(&d), vec![L, L]);
         assert!(d[0].fallback.as_ref().unwrap().0.starts_with("draft unavailable: this build has no Ray Reconstruction"));
@@ -581,7 +595,7 @@ mod tests {
 
     #[test]
     fn the_row_hides_the_draft_dims_the_live_glass_and_steps_with_shift_z() {
-        let none = Avail { draft: DraftFacts::default().check(), live: Err("a model is in the scene".into()) };
+        let none = Avail { draft: DraftFacts::default().check(), live: Err("a model is in the scene".into()), draft_skip: None };
         let row = none.row();
         assert_eq!(row.iter().map(|(t, _)| *t).collect::<Vec<_>>(), vec![Tier::Matcap, L, Tier::Full]);
         assert_eq!(none.shown(L), Shown::Dimmed("a model is in the scene".into()));

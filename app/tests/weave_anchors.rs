@@ -426,3 +426,49 @@ fn every_weave_anchor_is_found_as_recorded() {
     }
     assert!(wrong.is_empty(), "weave anchors changed:\n  {}", wrong.join("\n  "));
 }
+
+/// Plain glass (the default material, no weave applied): every composed tracer text, one line each,
+/// `name length hash`. The census above counts anchors; this holds the text itself, so a change to a
+/// shared shader or to the composition that moves plain glass fails here even when every anchor still matches.
+fn plain_texts() -> Vec<(String, String)> {
+    let m = march();
+    let floor = Seen { floor: true, cast: true, ..Default::default() };
+    let mut out = Vec::new();
+    for (li, light) in [LightFrom::Lights, LightFrom::Picture].into_iter().enumerate() {
+        for near in [false, true] {
+            for cast in [false, true] {
+                for (si, stage) in [Seen::default(), floor].into_iter().enumerate() {
+                    for bounces in [false, true] {
+                        let v = Variant { light, near, cast, stage, ..Default::default() };
+                        out.push((format!("tracer light{li} near{} cast{} stage{si} flag{}", near as u8, cast as u8, bounces as u8), tracer_source(&m, v, bounces)));
+                        if !bounces && !cast {
+                            out.push((format!("lens light{li} near{} stage{si}", near as u8), tracer_source_lens(&m, v, false)));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// FNV-1a, 64 bit: stable across Rust versions, unlike `DefaultHasher`.
+fn fnv(text: &str) -> u64 {
+    text.bytes().fold(0xcbf29ce484222325, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3))
+}
+
+/// To record again after an intended change to plain glass text:
+/// `WEAVE_PLAIN_UPDATE=1 cargo test -p glassforms --test weave_anchors plain_glass_text_is_as_recorded`
+#[test]
+fn plain_glass_text_is_as_recorded() {
+    let now: String = plain_texts().iter().map(|(name, t)| format!("{name} {} {:016x}\n", t.len(), fnv(t))).collect();
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/weave_plain_glass.expected");
+    if std::env::var("WEAVE_PLAIN_UPDATE").is_ok() {
+        std::fs::write(&path, &now).unwrap();
+        return;
+    }
+    let want = std::fs::read_to_string(&path).expect("tests/weave_plain_glass.expected is missing: record it with WEAVE_PLAIN_UPDATE=1").replace("\r\n", "\n");
+    let (w, n): (Vec<&str>, Vec<&str>) = (want.lines().collect(), now.lines().collect());
+    let wrong: Vec<String> = n.iter().zip(w.iter()).filter(|(a, b)| a != b).map(|(a, b)| format!("was {b}\n  now {a}")).collect();
+    assert!(wrong.is_empty() && w.len() == n.len(), "plain glass text changed ({} recorded lines, {} now):\n  {}", w.len(), n.len(), wrong.join("\n  "));
+}

@@ -1,0 +1,40 @@
+tracer light0 near0 cast0 stage0 flag0 30334 10f6f58924bb14e6
+lens light0 near0 stage0 41110 506b939bff86ffc4
+tracer light0 near0 cast0 stage0 flag1 30531 a57d9db6f41b733b
+tracer light0 near0 cast0 stage1 flag0 37277 afa3d60cc2e32aad
+lens light0 near0 stage1 48053 d5c8cf2e02911e6f
+tracer light0 near0 cast0 stage1 flag1 37474 83927ffedc3bb8b6
+tracer light0 near0 cast1 stage0 flag0 30334 10f6f58924bb14e6
+tracer light0 near0 cast1 stage0 flag1 30531 a57d9db6f41b733b
+tracer light0 near0 cast1 stage1 flag0 54727 19c79ffcf5431891
+tracer light0 near0 cast1 stage1 flag1 54924 238e6b14d3a8c816
+tracer light0 near1 cast0 stage0 flag0 39237 afec15bef895182a
+lens light0 near1 stage0 50013 2f8a76df528450e2
+tracer light0 near1 cast0 stage0 flag1 39434 417160417f283db1
+tracer light0 near1 cast0 stage1 flag0 46290 78f0e19d26eb6358
+lens light0 near1 stage1 57066 f3f7b699f970c00c
+tracer light0 near1 cast0 stage1 flag1 46487 931e381ba430e347
+tracer light0 near1 cast1 stage0 flag0 39237 afec15bef895182a
+tracer light0 near1 cast1 stage0 flag1 39434 417160417f283db1
+tracer light0 near1 cast1 stage1 flag0 65750 2102ecd5a157e505
+tracer light0 near1 cast1 stage1 flag1 65947 4163573ae60f0970
+tracer light1 near0 cast0 stage0 flag0 36557 c6eea2d0bc6401bf
+lens light1 near0 stage0 47333 7ed38c13f5202d97
+tracer light1 near0 cast0 stage0 flag1 36754 c8ddf662a5894c50
+tracer light1 near0 cast0 stage1 flag0 43500 db7b0e959a7f0dfa
+lens light1 near0 stage1 54276 417c8703e8d47bfa
+tracer light1 near0 cast0 stage1 flag1 43697 6d24fe5c6d74f51b
+tracer light1 near0 cast1 stage0 flag0 54203 d2c9b7a0e7715fe8
+tracer light1 near0 cast1 stage0 flag1 54400 8e2a5e62f581fcd5
+tracer light1 near0 cast1 stage1 flag0 61146 96a41cff7e5429db
+tracer light1 near0 cast1 stage1 flag1 61343 15c1a62424de3fb8
+tracer light1 near1 cast0 stage0 flag0 45516 a02c208d5ecb969e
+lens light1 near1 stage0 56292 9a45f9226f5e0218
+tracer light1 near1 cast0 stage0 flag1 45713 c2b08fc143b6c08d
+tracer light1 near1 cast0 stage1 flag0 52569 9054de5fa6aae464
+lens light1 near1 stage1 63345 9c60fe839c0dc09a
+tracer light1 near1 cast0 stage1 flag1 52766 655f6fc2a58a2d33
+tracer light1 near1 cast1 stage0 flag0 65172 0a08c76de4353e76
+tracer light1 near1 cast1 stage0 flag1 65369 f1c89b701f6e526d
+tracer light1 near1 cast1 stage1 flag0 72225 0232f50f16fd8fca
+tracer light1 near1 cast1 stage1 flag1 72422 0b32e9f61214ab89

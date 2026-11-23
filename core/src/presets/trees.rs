@@ -103,11 +103,7 @@ type V = [f64; 3];
 use crate::math::{add, cross, dot, len, lerp, scale as mul, sub, unit};
 const UP: V = [0.0, 1.0, 0.0];
 const DOWN: V = [0.0, -1.0, 0.0];
-/// A unit vector at right angles to d (any one).
-fn across(d: V) -> V {
-    let t = if d[1].abs() < 0.9 { UP } else { [1.0, 0.0, 0.0] };
-    unit(cross(d, t))
-}
+use super::geo::across;
 /// d turned towards straight down by an angle a, never past straight down.
 fn bend_down(d: V, a: f64) -> V {
     let d = unit(d);

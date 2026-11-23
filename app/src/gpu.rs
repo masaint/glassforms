@@ -95,6 +95,8 @@ pub fn wanted_limits(adapter: &wgpu::Adapter) -> wgpu::Limits {
     l.max_storage_buffer_binding_size = have.max_storage_buffer_binding_size.min(1 << 30);
     // (a tree's grid parts are nine more textures for the tracer to read: gf_core::csg)
     l.max_sampled_textures_per_shader_stage = have.max_sampled_textures_per_shader_stage.min(32).max(l.max_sampled_textures_per_shader_stage);
+    // (the tracer's layout binds 12 uniform buffers with the cast group: the default is exactly 12)
+    l.max_uniform_buffers_per_shader_stage = have.max_uniform_buffers_per_shader_stage.min(16).max(l.max_uniform_buffers_per_shader_stage);
     l
 }
 
@@ -127,6 +129,7 @@ impl Gpu {
     }
 
     pub fn from_parts(device: wgpu::Device, queue: wgpu::Queue, info: &wgpu::AdapterInfo) -> R<Gpu> {
+        crate::render::check_trace_limits(&device.limits()).map_err(|e| format!("{}: {e}", info.name))?;
         let f = device.features();
         if !f.contains(wgpu::Features::FLOAT32_FILTERABLE) {
             return Err(format!("{}: this graphics device cannot interpolate 32-bit float textures, which the renderer needs", info.name));

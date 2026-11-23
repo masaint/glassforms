@@ -629,3 +629,14 @@ pub fn family() -> Family {
         ..Family::new("studio", "Studio shapes", Kind::Field)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// The studio's WGSL keeps its own copy of the fit (it is inside a plain string); parts.rs must use the same number.
+    #[test]
+    fn the_wgsl_fit_equals_parts_fit() {
+        let line = super::PIECES.lines().find(|l| l.starts_with("const FIT: f32 = ")).expect("the studio WGSL defines FIT");
+        let v: f64 = line["const FIT: f32 = ".len()..].trim_end_matches(';').trim().parse().expect("FIT parses");
+        assert_eq!(v, crate::parts::FIT);
+    }
+}

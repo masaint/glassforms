@@ -39,7 +39,7 @@ pub(super) fn hierarchy(ui: &mut Ui, st: &mut State, px: &mut Panels, outline: b
     if let Some(children) = tree.children(&level) { rows(ui, st, px, children, &level, outline); }
     let path = st.edit_scope.construction().to_vec();
     ui.horizontal_wrapped(|ui| {
-        let b = ui.add_enabled(st.csg.parts.len() < MAX_PARTS, egui::Button::new("+ part"));
+        let b = ui.add_enabled(st.csg.parts.len() + 1 < MAX_PARTS, egui::Button::new("+ part"));
         px.note("csg add", b.rect);
         if b.clicked() { super::csg::add(st, px); if let Some(o) = &mut st.edit_scope.inside { o.marked = vec![o.construction.clone()]; } }
         let parent = path.split_last().map(|(_, p)| p).unwrap_or(&[]);

@@ -15,6 +15,7 @@ holds NaN-black blocks.
   csgclay  the formula, in clay
 """
 import json, os, subprocess, sys
+import gf_common
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 from PIL import Image, ImageDraw
@@ -38,7 +39,7 @@ def opt(argv, name, default=None):
 
 
 def presets(exe, family):
-    out = subprocess.run([sys.executable, QUEUE, '--name', 'gensA', '--', exe, '--list'], capture_output=True, text=True).stdout
+    out = gf_common.run([sys.executable, QUEUE, '--name', 'gensA', '--', exe, '--list']).stdout
     line = next(l for l in out.splitlines() if l.startswith('['))
     return next(f['presets'] for f in json.loads(line) if f['id'] == family)
 
@@ -46,7 +47,7 @@ def presets(exe, family):
 def still(exe, family, preset, mode, extra, path, w, h):
     cmd = [sys.executable, QUEUE, '--name', 'gensA', '--', exe, '--still', path, f'w={w}', f'h={h}',
            f'scene={family}', f'preset={preset}'] + MODES[mode] + extra
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    r = gf_common.run(cmd)
     info = {}
     for line in r.stdout.splitlines():
         if line.startswith('{'):

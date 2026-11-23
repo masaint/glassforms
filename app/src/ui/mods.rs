@@ -365,7 +365,7 @@ fn controls(ui: &mut Ui, st: &mut State, px: &mut Panels, i: usize) {
     if m.kind == Kind::Wrap {
         let items = [Item::new("on its face", !m.flip).tip("the motif lies on the form as it lies in its own x and y"), Item::new("standing", m.flip).tip("the motif stands on the form on its own y: a ring or a star about y faces out")];
         if let Some(k) = named_run(ui, Id::unique(("mods wrap face", i)), "motif", &items).clicked {
-            if let Some(e) = st.shape_mut().mods.list.get_mut(i) { e.flip = k == 1; }
+            if let Some(e) = st.selected_modifiers_mut().list.get_mut(i) { e.flip = k == 1; }
             changed(st);
         }
     }
@@ -375,7 +375,7 @@ fn controls(ui: &mut Ui, st: &mut State, px: &mut Panels, i: usize) {
     if m.kind == Kind::Repeat && m.mode == 1 {
         let items = [Item::new("as they are", !m.flip).tip("every slice the same"), Item::new("mirrored", m.flip).tip("each slice mirrored about its middle, so that neighbours meet as reflections")];
         if let Some(k) = named_run(ui, Id::unique(("mods flip", i)), "slices", &items).clicked {
-            if let Some(e) = st.shape_mut().mods.list.get_mut(i) { e.flip = k == 1; }
+            if let Some(e) = st.selected_modifiers_mut().list.get_mut(i) { e.flip = k == 1; }
             changed(st);
         }
     }

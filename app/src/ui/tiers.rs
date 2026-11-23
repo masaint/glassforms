@@ -54,15 +54,20 @@ pub fn at(camera: Pos2) -> Pos2 {
 /// The tier that is lit: the matcap while the view is a matcap, else the glass tier chosen for rest.
 pub fn lit(st: &State, px: &Panels) -> Tier {
     if st.view.mode == ViewMode::Matcap { return Tier::Matcap; }
-    match px.store.tiers.rest {
-        Tier::Matcap => Tier::Full,
-        t => t,
-    }
+    // (a stored matcap, from `tier=matcap`, is lit as the matcap: `tier_step` draws it so)
+    px.store.tiers.rest
 }
 
 /// What this machine and this scene allow. The scene's part (does the parts engine accept it) is looked at
 /// again every few frames, not every frame.
 pub fn avail(st: &State, px: &mut Panels, frame: u64) -> Avail {
+    let mut a = avail_machine(st, px, frame);
+    a.draft_skip = px.draft_skip.clone();
+    a
+}
+
+/// The machine's and the scene's part, cached.
+fn avail_machine(st: &State, px: &mut Panels, frame: u64) -> Avail {
     if let Some((at, a)) = &px.tier_cache {
         if frame.wrapping_sub(*at) < 10 { return a.clone(); }
     }
@@ -170,6 +175,7 @@ fn chevron(p: &Painter, c: Pos2, ink: Color32) {
 fn tip(t: Tier, shown: &Shown) -> String {
     match (t, shown) {
         (Tier::Matcap, _) => "matcap: the first surface shaded by a matcap, no glass; immediate, for modelling · Z".into(),
+        (Tier::Draft, Shown::Dimmed(why)) => format!("draft: not drawn for this scene just now, the full render draws it: {why}"),
         (Tier::Draft, _) => "draft: soft glass from a quarter of the pixels, rebuilt by NVIDIA Ray Reconstruction; fastest glass while things move · shift+Z steps through the tiers".into(),
         (Tier::Live, Shown::Dimmed(why)) => format!("live glass: this scene is drawn by the full render: {why}"),
         (Tier::Live, _) => "live glass: the whole scene in one volume, the dragged part drawn live; edits stay fast at any number of parts · shift+Z".into(),
@@ -293,17 +299,20 @@ fn dropdown(ctx: &egui::Context, st: &mut State, px: &mut Panels, a: &Avail, fir
             }
             Tier::Live => {
                 let c = px.tier_cfg.clone();
-                let run = named_run(ui, Id::unique(("tier live thin", px.place)), "thin detail", &[
-                    Item::new("off", c.thin == 0), Item::new("refine", c.thin == 1).tip("finer bricks only where a thin piece sits"), Item::new("fitted box", c.thin == 2).tip("one choice: the two together look noisier"),
-                ]);
-                if let Some(i) = run.clicked { px.tier_cfg.thin = i; }
-                let run = named_run(ui, Id::unique(("tier live volume", px.place)), "volume", &[
-                    Item::new("512", c.volume == 0), Item::new("768", c.volume == 1).tip("about 3 GB, rest over 11 ms at 4K"), Item::new("1024", c.volume == 2).tip("about 6.5 GB, drag 21 ms at 4K"),
-                ]);
-                if let Some(i) = run.clicked { px.tier_cfg.volume = i; }
-                let r = row(ui, 22.0);
-                label(ui, r, "refine MB");
-                text_in(ui, beside_label(ui, r, 22.0), Align2::LEFT_CENTER, &format!("{} MB (10 to 500)", c.refine_mb), mono(SIZE), pal().bright);
+                // (none of the three is read by the engine yet: dimmed, and said so on hover)
+                ui.add_enabled_ui(false, |ui| {
+                    let run = named_run(ui, Id::unique(("tier live thin", px.place)), "thin detail", &[
+                        Item::new("off", c.thin == 0), Item::new("refine", c.thin == 1).tip("finer bricks only where a thin piece sits"), Item::new("fitted box", c.thin == 2).tip("one choice: the two together look noisier"),
+                    ]);
+                    if let Some(i) = run.clicked { px.tier_cfg.thin = i; }
+                    let run = named_run(ui, Id::unique(("tier live volume", px.place)), "volume", &[
+                        Item::new("512", c.volume == 0), Item::new("768", c.volume == 1).tip("about 3 GB, rest over 11 ms at 4K"), Item::new("1024", c.volume == 2).tip("about 6.5 GB, drag 21 ms at 4K"),
+                    ]);
+                    if let Some(i) = run.clicked { px.tier_cfg.volume = i; }
+                    let r = row(ui, 22.0);
+                    label(ui, r, "refine MB");
+                    text_in(ui, beside_label(ui, r, 22.0), Align2::LEFT_CENTER, &format!("{} MB", c.refine_mb), mono(SIZE), pal().bright);
+                }).response.on_disabled_hover_text("not wired yet");
                 match &a.live {
                     Ok(()) => note(ui, "parts, cell entries, device MB and last release ms will show here once live glass is in the engine"),
                     Err(why) => note(ui, &format!("not used for this scene: {why}; drawn by the full render")),

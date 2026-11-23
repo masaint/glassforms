@@ -22,6 +22,7 @@ import hashlib
 import json
 import os
 import subprocess
+import gf_common
 import sys
 import time
 
@@ -202,7 +203,7 @@ def print_paired_quality(drawn):
 def run(exe, args, frames, name):
     cmd = [sys.executable, os.path.join(HERE, 'gpu_run.py'), '--name', 'perf_gate_' + name, '--timing', '--',
            exe, '--session', str(frames), 'w=3840', 'h=2160'] + args
-    r = subprocess.run(cmd, capture_output=True, text=True, cwd=NATIVE)
+    r = gf_common.run(cmd, cwd=NATIVE)
     line = next((l for l in r.stdout.splitlines() if l.startswith('{') and '"all"' in l), None)
     if r.returncode != 0 or line is None:
         return {'error': (r.stderr or r.stdout)[-800:]}
@@ -294,9 +295,13 @@ def main(argv):
     with open(os.path.join(OUT, f'gate_{stamp}.json'), 'w') as f:
         json.dump(results, f, indent=1)
     if '--baseline' in argv and not any('error' in r for r in results.values()):
+        merged = {}
+        if os.path.exists(base_path):
+            merged = json.load(open(base_path))
+        merged.update(results)       # --only X replaces just that scene, the rest keep their baseline
         with open(base_path, 'w') as f:
-            json.dump(results, f, indent=1)
-        print('written as the baseline')
+            json.dump(merged, f, indent=1)
+        print('written as the baseline' + (f' ({len(results)} of {len(merged)} scenes replaced)' if len(merged) != len(results) else ''))
     print('GATE ' + ('FAILED: ' + ', '.join(failed) if failed else 'PASSED'))
     return 1 if failed else 0
 

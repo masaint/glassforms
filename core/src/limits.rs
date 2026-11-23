@@ -41,7 +41,8 @@ pub fn setting(name: &str) -> Option<(f64, f64)> {
         "giBounces" | "giSamples" => (1.0, 8.0),
         "giStrength" => (0.0, 4.0),
         "ns" => (1.0, 32.0),
-        "nw" => (1.0, 32.0),
+        // (three at least: with one or two the sum of a channel's wavelength weights passes through zero and the tracer divides by it)
+        "nw" => (3.0, 32.0),
         "heroSettle" => (0.0, 1.0),
         "lensN" => (1.0, 64.0),
         "exposure" => (0.0, 1000.0),
@@ -282,6 +283,14 @@ mod tests {
             let v = p.get(n).unwrap();
             assert!(v >= lo && v <= hi, "{n}: its default {v} is outside {lo}..{hi}");
         }
+    }
+
+    #[test]
+    fn fewer_than_three_wavelengths_are_not_held() {
+        let mut p = Settings::default();
+        p.nw = 1.0;
+        p.hold_hard();
+        assert_eq!(p.nw, 3.0);
     }
 
     #[test]
