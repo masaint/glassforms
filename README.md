@@ -38,7 +38,7 @@ The GPU tests need a Vulkan device. Without one they print `NOT TESTED (skipped)
 
 - **Live glass** (the tier that draws through the parts engine) takes only scenes it can draw exactly. It does not take: World modifiers (an array or twist of the whole scene), a group that changes geometry, object isolation, or a hidden object that cuts or morphs a visible one, nor the families and features listed in `core/src/parts.rs` (`accepts`). When a scene is refused, the program falls back to the normal (Full) path and says why in one sentence; it never draws a different picture silently. (These refusals are being added; until a build carries them, check the picture of such a scene against Full.)
 - Live glass draws at most 8 objects of 64 parts each, as the rest of the app does.
-- Draft (Ray Reconstruction) needs a `--features dlss` build, Vulkan, an NVIDIA GPU and the runtime files; otherwise its button is greyed with the reason.
+- Draft (Ray Reconstruction) needs a `--features dlss` build, Vulkan, an NVIDIA GPU and the runtime files; otherwise its button is not shown.
 - Settings have hard limits (`docs/limits.md`); a value past them is held to them.
 
 
