@@ -96,7 +96,7 @@ mod imp {
             Some(a) => super::adapter_ok(&a.get_info()).is_ok(),
             None => DEVICE_OK.load(Ordering::Relaxed),
         };
-        let dlls = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("nvngx_dlss.dll").is_file() && d.join("nvngx_dlssd.dll").is_file())).unwrap_or(false);
+        let dlls = crate::dlss::runtime_files_present();
         crate::tier::DraftFacts { built: crate::tier::DraftFacts::built_in(), device, supported: supported(), dlls }
     }
 
@@ -248,7 +248,7 @@ mod imp {
         let adapter = gpu.dlss_adapter.as_ref().ok_or("the graphics device was not opened for DLSS (it must go through dlss_wgpu)")?;
         super::adapter_ok(&adapter.get_info())?;
         if !supported() { return Err("Ray Reconstruction is not supported on this device".into()); }
-        let sdk = DlssSdk::new(project(), gpu.device.clone()).map_err(|e| format!("could not start NVIDIA's runtime (are nvngx_dlss.dll and nvngx_dlssd.dll beside the program?): {e}"))?;
+        let sdk = DlssSdk::new(project(), gpu.device.clone()).map_err(|e| format!("could not start NVIDIA's runtime (are nvngx_dlss.dll and nvngx_dlssd.dll beside the program or in its nvidia folder?): {e}"))?;
         let mut d = Draft { sdk, pipes: Pipes::new(gpu), sized: None, live: false, n: 0, drawn: 0, drag: [0.0; 3] };
         d.ready(gpu, w, h, scale)?;
         Ok(d)

@@ -37,6 +37,30 @@ pub fn centre(src: &str) -> Option<String> {
 #[cfg(feature = "dlss")]
 pub const PROJECT_ID: &str = "9ed1b06a-911b-40f4-9d5b-d520be6407e5";
 
+/// Where NVIDIA's runtime files are kept when the program comes in a package that keeps them apart under their own licence:
+/// the folder nvidia/lib/Windows_x86_64/rel beside the program (the layout dlss_wgpu looks in under $DLSS_SDK). When that folder holds
+/// nvngx_dlss.dll and DLSS_SDK is not set, DLSS_SDK is set to the nvidia folder before NVIDIA's runtime is asked for anything. Without the
+/// folder nothing changes: the files are then looked for beside the program, as before.
+#[cfg(feature = "dlss")]
+pub fn use_packaged_runtime() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if std::env::var_os("DLSS_SDK").is_some() { return; }
+        let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("nvidia"))) else { return };
+        if dir.join("lib").join("Windows_x86_64").join("rel").join("nvngx_dlss.dll").is_file() { std::env::set_var("DLSS_SDK", &dir); }
+    });
+}
+
+/// Are the two NVIDIA runtime files where the program will look for them (beside it, or in the package's `nvidia` folder)?
+#[cfg(feature = "dlss")]
+pub fn runtime_files_present() -> bool {
+    use_packaged_runtime();
+    let both = |d: &std::path::Path| d.join("nvngx_dlss.dll").is_file() && d.join("nvngx_dlssd.dll").is_file();
+    let beside = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| both(d))).unwrap_or(false);
+    let sdk = std::env::var_os("DLSS_SDK").map(|s| both(&std::path::Path::new(&s).join("lib").join("Windows_x86_64").join("rel"))).unwrap_or(false);
+    beside || sdk
+}
+
 /// Is DLSS in this build?
 pub const BUILT: bool = cfg!(feature = "dlss");
 
@@ -123,6 +147,7 @@ mod imp {
 
     /// The same, as its parts (for the window, which is handed them).
     pub fn open_parts() -> R<(wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
+        super::use_packaged_runtime();
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
         desc.backends = wgpu::Backends::VULKAN;
         let mut support = FeatureSupport::default();
