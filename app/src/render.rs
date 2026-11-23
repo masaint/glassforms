@@ -2639,6 +2639,7 @@ impl Renderer {
             u.nb = u.nb.min(want.bounces.max(1));
             // the plain three-wavelength sample (one wavelength a sample is coloured noise RR cannot use: lab_rr.md)
             u.nw = 3;
+            u.disp *= crate::dlss_rr::DISPERSION;
             if std::env::var_os("GLASSFORMS_DLSS_SAY").is_some() && self.draft.drawn == 0 { eprintln!("dlss: the app's frame asked for nw {} ns {} nb {}; the draft draws nw {} ns {} nb {}; look exposure {}", tu.nw, tu.ns, tu.nb, u.nw, u.ns, u.nb, look.exposure); }
             let (now, au) = self.accum_u(&u, 1.0, true, look);
             let prev_obj = self.prev.map(|p| p.obj).unwrap_or(u.obj);

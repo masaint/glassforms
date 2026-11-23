@@ -19,6 +19,10 @@
 pub const DIFFUSE_ALBEDO: f32 = 0.04;
 /// Roughness handed to RR on glass; RR ignores it on this glass, the API wants the texture.
 pub const ROUGHNESS: f32 = 0.05;
+/// Dispersion the draft's colour pass keeps (a scale on the frame's). Any dispersion makes every channel's ray go its own way, so a bright
+/// light seen through glass lands as single-channel specks that RR reads as detail: saturated colour confetti on dark scenes with many
+/// small bodies (obj8, objtree8). Off, those scenes are clean; the fringes go (they were already pastel in the draft).
+pub const DISPERSION: f32 = 0.0;
 /// The draft's pixel shares of a side: a quarter of the pixels (RR Performance), a ninth (Ultra-Performance).
 pub const SCALES: [f64; 2] = [0.5, 0.33];
 
