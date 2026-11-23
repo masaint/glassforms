@@ -19,7 +19,11 @@ wgpu = { version = "30.0.2", default-features = false, features = ["std", "parki
 bytemuck = { version = "1.25", features = ["derive"] }
 pollster = "0.4"
 png = "0.18"
+# reading JPEG pictures (a matcap picture)
+zune-jpeg = "0.5"
+zune-core = "0.5"
 half = { version = "2", features = ["bytemuck"] }
+rayon = "1.11"
 # the window: egui on the same wgpu device as the renderer; rfd for the folder, save and open dialogs
 eframe = { version = "0.37", default-features = false, features = ["default_fonts", "wgpu_no_default_features"] }
 rfd = { version = "0.18", default-features = false }
@@ -32,10 +36,12 @@ serde_json = { version = "1", features = ["float_roundtrip"] }      # numbers re
 # nvngx_dlss.dll beside the program. Neither is part of this repository.
 dlss_wgpu = { version = "6.0", optional = true }
 uuid = { version = "1", optional = true }
+# (tracers that keep the formula out of line are written to SPIR-V here: src/noinline.rs)
+naga = { version = "30.0.2", features = ["wgsl-in", "spv-out"] }
 
 [features]
 default = []
 dlss = ["dep:dlss_wgpu", "dep:uuid"]
 
 [dev-dependencies]
-naga = { version = "30.0.2", features = ["wgsl-in"] }
+naga = { version = "30.0.2", features = ["wgsl-in", "spv-out"] }

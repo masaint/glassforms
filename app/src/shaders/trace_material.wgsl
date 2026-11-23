@@ -12,6 +12,62 @@
 // are the very same functions for one material and for several. What only a scene of one material uses
 // (shadeM, beyondM, grazeM and their helpers) is left out of it.
 
+//#if SSS
+// The diffusion volume stores reduced scattering, sigma_s' = (1-g) sigma_s.
+// A straight segment reaches its next surface only if it has no collision.
+// Use the true rates for that survival and for the complementary first-collision light.
+// Green's unreduced rate is supplied separately; the channels retain their measured ratios.
+fn collisionRates() -> vec3f {
+  if (mu.sssK.r == mu.sssK.b) { return vec3f(mu.sss.x); }
+  return mu.sssK.rgb * (mu.sss.x / max(mu.sssK.g, 1e-6));
+}
+//#endif
+
+//#if PATH_RANDOM
+// plain random numbers, as many as wanted
+var<private> rState: u32;
+fn rnd() -> f32 {
+  rState = pcg(rState);
+  return f32(rState >> 8u) / 16777216.0;
+}
+//#endif
+//#if WALK_PHASE
+// A direction drawn evenly from all directions.
+fn anywhere() -> vec3f {
+  let z = 1.0 - 2.0 * rnd();
+  let r = sqrt(max(1.0 - z * z, 0.0));
+  let ph = 6.2831853 * rnd();
+  return vec3f(r * cos(ph), r * sin(ph), z);
+}
+fn walkFlight(rates: vec3f) -> f32 {
+  var rate = rates.g;
+  if (max(rates.r, rates.b) - min(rates.r, rates.b) > 1e-5 * rate) {
+    rate = rates[min(i32(3.0 * rnd()), 2)];
+  }
+  return -log(max(1.0-rnd(),1e-6)) / max(rate,1e-6);
+}
+// Divide each channel's flight density (or survival probability to the actual
+// interface) by the mixture used to sample it. The shared exponential cancels.
+fn walkWeight(rates: vec3f, distance: f32, scatter: bool) -> vec3f {
+  if (rates.r == rates.b) {return vec3f(1.0);}
+  let slow = min(rates.r,min(rates.g,rates.b));
+  let tr = exp(-(rates-vec3f(slow))*max(distance,0.0));
+  let probability = select(tr,rates*tr,scatter);
+  return probability / max(dot(probability,vec3f(1.0/3.0)),1e-20);
+}
+fn walkDirection(dir: vec3f) -> vec3f {
+  let g=clamp(1.0-mu.sssK.g/max(mu.sss.x,1e-6),0.0,0.95);
+  if (g<0.001) {return anywhere();}
+  // Henyey-Greenstein inverse CDF about the previous flight direction.
+  let ratio=(1.0-g*g)/(1.0-g+2.0*g*rnd());
+  let c=clamp((1.0+g*g-ratio*ratio)/(2.0*g),-1.0,1.0);
+  let ph=6.2831853*rnd();
+  let axis=select(vec3f(0.0,0.0,1.0),vec3f(0.0,1.0,0.0),abs(dir.z)>0.9);
+  let u=normalize(cross(axis,dir));
+  return c*dir+sqrt(max(1.0-c*c,0.0))*(cos(ph)*u+sin(ph)*cross(dir,u));
+}
+//#endif
+
 struct MU {
   surf: vec4f,        // x: roughness (spread of the surface's slopes; 0 = polished)   y: (kept for the renderer)
                       // z: the index the body sees above it (1 = air, the coat's with a full coat)
@@ -42,6 +98,12 @@ struct MU {
                       // black film   w: which way is up (1, or -1)
   film5: vec4f,       // x: the film's mean thickness, nm (read only for pieces of the body seen through it)
                       // y: 1 = the family's lights are lit beside the environment picture
+  grating: vec4f,     // efficiency, groove spacing in nm, in-plane rotation, concentric grooves
+  gratingFrame: array<vec4f, 3>, // inverse placement of the owner in scene coordinates
+  ggxEnergy: array<vec4f, 8>, // split-sum directional albedo, two viewing angles in each vector
+  brushEnergy: array<vec4f, 24>, // directional albedo across, between, and along the polishing lines
+  proposals: array<vec4f, 4>, // directions in the light rig and cap sizes (one minus cosine)
+  proposalCdf: vec4f,
 }
 //#if !BODIES
 @group(0) @binding(9) var<uniform> mu: MU;
@@ -57,6 +119,59 @@ fn isHollow() -> bool { return true; }
 fn wallR(c: f32) -> f32 {
   let F = fresnel(c, 1.0, mu.sss.w);
   return 2.0 * F / (1.0 + F);
+}
+//#endif
+
+//#if GRATING
+// Reflection grating in the surface's tangent plane. Groove-parallel wavevector
+// is conserved. Each first order receives half the diffracted share; a closed
+// order retains its share in the ordinary reflection.
+fn gratingAcross(p: vec3f, n: vec3f) -> vec3f {
+  let g = mu.grating;
+  var local = vec3f(1.0, 0.0, 0.0);
+  if (g.w > 0.5) {
+    let scene = vec4f(toObj(p),1.0);
+    local = vec3f(dot(mu.gratingFrame[0],scene),0.0,dot(mu.gratingFrame[2],scene));
+  }
+  let sceneAxis = local.x*mu.gratingFrame[0].xyz + local.y*mu.gratingFrame[1].xyz + local.z*mu.gratingFrame[2].xyz;
+  let axis = vec3f(dot(sceneAxis, u.obj0.xyz), dot(sceneAxis, u.obj1.xyz), dot(sceneAxis, u.obj2.xyz));
+  let projected = axis - dot(axis,n) * n;
+  if (dot(projected,projected) < 1e-8) { return vec3f(0.0); }
+  let a = normalize(projected);
+  return cos(g.z) * a + sin(g.z) * cross(n,a);
+}
+fn gratingReflect(p: vec3f, n: vec3f, rd: vec3f, zero: vec3f, xi: f32) -> vec3f {
+  let g = mu.grating;
+  if (g.x <= 0.0) { return zero; }
+  let across = gratingAcross(p,n);
+  if (dot(across,across) < 1e-8) { return zero; }
+  let along = cross(n,across);
+  let mirror = reflect(rd,n);
+  let x = dot(mirror,across);
+  let y = dot(mirror,along);
+  var spectral = vec3f(0.0);
+  var norm = vec3f(0.0);
+  for (var i = 0; i < 12; i++) {
+    let lambda = 400.0 + 25.0 * (f32(i) + xi);
+    let weight = specW(lambda);
+    var pair = vec3f(0.0);
+    for (var m = -1; m <= 1; m += 2) {
+      let k = x + f32(m) * lambda / g.y;
+      let h2 = 1.0 - k*k - y*y;
+      if (h2 <= 0.0) { pair += zero; }
+      else {
+        let outgoing = k * across + y * along + sqrt(h2) * n;
+//#if ROUGH
+        pair += envL(outgoing, 1.41421 * mu.surf.x);
+//#else
+        pair += env(outgoing);
+//#endif
+      }
+    }
+    spectral += weight * (0.5 * pair);
+    norm += weight;
+  }
+  return mix(zero, spectral / norm, g.x);
 }
 //#endif
 
@@ -138,8 +253,7 @@ fn mirrorWide(p: vec3f, n: vec3f, c: f32) -> f32 {
   let bend = min((abs(mean) + dev) * 2.0 / (h * h), 1.0 / h);
   let far = length(p - vec3f(0.0, 0.0, u.dist));
   let pixel = 2.0 * u.tan_fov / u.res.y;
-  let wide = pixel * (1.0 + 2.0 * bend * far / max(c, 0.25));
-  return 0.4 * wide;
+  return pbr_reflection_width(pixel, bend, far, c);   // pbr/widen.wgsl
 }
 //#if PICTURE
 // The surroundings as a mirror (a metal, a film, a glaze) shows them along rd: the picture itself at that level; and,
@@ -196,24 +310,23 @@ fn sharpEnv(rd: vec3f, p: vec3f, n: vec3f, c: f32) -> vec3f {
 //   mu.tab[7..13].w   the marks (times how used the surface is)   mu.tab[14..16].w   the recesses' colour
 //   mu.more.w         brush: how strong the polishing lines are (round the shape's vertical)
 //   mu.sssC.w         mottle: how uneven the colour is
-fn wHash(i: vec3i) -> f32 {
-  var h = (u32(i.x) * 73856093u) ^ (u32(i.y) * 19349663u) ^ (u32(i.z) * 83492791u);
-  h = (h ^ (h >> 16u)) * 0x45d9f3bu;
-  h = (h ^ (h >> 16u)) * 0x45d9f3bu;
-  h = h ^ (h >> 16u);
-  return f32(h & 0xffffffu) * (2.0 / 16777215.0) - 1.0;
-}
-// smooth noise, -1 to 1, one bump about every unit of x
-fn wNoise(x: vec3f) -> f32 {
-  let i = vec3i(floor(x));
-  let f = fract(x);
-  let s = f * f * (3.0 - 2.0 * f);
-  let a = mix(mix(wHash(i), wHash(i + vec3i(1, 0, 0)), s.x), mix(wHash(i + vec3i(0, 1, 0)), wHash(i + vec3i(1, 1, 0)), s.x), s.y);
-  let b = mix(mix(wHash(i + vec3i(0, 0, 1)), wHash(i + vec3i(1, 0, 1)), s.x), mix(wHash(i + vec3i(0, 1, 1)), wHash(i + vec3i(1, 1, 1)), s.x), s.y);
-  return mix(a, b, s.z);
-}
 // the shape's own frame -> the world (toObj turned back)
-fn wearFromObj(v: vec3f) -> vec3f { return vec3f(dot(v, vec3f(u.obj0.x, u.obj1.x, u.obj2.x)), dot(v, vec3f(u.obj0.y, u.obj1.y, u.obj2.y)), dot(v, vec3f(u.obj0.z, u.obj1.z, u.obj2.z))); }
+// Wear lives in the owning layer's coordinates, even when the assembly turns around it.
+fn wearLocal(value: vec3f, position: f32) -> vec3f {
+  let v = vec4f(toObj(value),position);
+  return vec3f(dot(mu.gratingFrame[0],v),dot(mu.gratingFrame[1],v),dot(mu.gratingFrame[2],v));
+}
+fn wearFromObj(v: vec3f) -> vec3f {
+  let invSize = length(mu.gratingFrame[0].xyz);
+  let scene = (v.x*mu.gratingFrame[0].xyz+v.y*mu.gratingFrame[1].xyz+v.z*mu.gratingFrame[2].xyz)/invSize;
+  return vec3f(dot(u.obj0.xyz,scene),dot(u.obj1.xyz,scene),dot(u.obj2.xyz,scene));
+}
+
+// Change between object coordinates and the polishing frame. An angle of zero is the original vertical axis.
+fn brushCoordinates(q: vec3f, sine: f32) -> vec3f {
+  let cosine = 1.0 + mu.tab[18].w;
+  return vec3f(cosine*q.x - sine*q.y, sine*q.x + cosine*q.y, q.z);
+}
 
 struct Wear {
   n: vec3f,       // the surface's facing, with the marks under the point
@@ -288,10 +401,11 @@ fn wearAt(p: vec3f, n: vec3f) -> Wear {
   w.dust = 0.0;
   w.scr = 0.0;
   w.sx = vec3f(0.0);
-  let q = toObj(p);
-  let nq = toObj(n);
+  let invSize = length(mu.gratingFrame[0].xyz);
+  let q = wearLocal(p,1.0);
+  let nq = wearLocal(n,0.0)/invSize;
   // the width of a pixel at p (as mirrorLod reckons it)
-  let px = length(p - vec3f(0.0, 0.0, u.dist)) * 2.0 * u.tan_fov / u.res.y;
+  let px = invSize*length(p - vec3f(0.0, 0.0, u.dist)) * 2.0 * u.tan_fov / u.res.y;
   let edgeA = mEdge();
   let cavA = mCavity();
   let scrA = mScratch();
@@ -304,20 +418,9 @@ fn wearAt(p: vec3f, n: vec3f) -> Wear {
   var shut = 0.0;
   if (edgeA + cavA + scrA + smA + dustA > 0.0) {
     let h = 4.0 * (2.0 * HB / u.vres);
-    let sg = select(-1.0, 1.0, n.z >= 0.0);
-    let k = -1.0 / (sg + n.z);
-    let m = n.x * n.y * k;
-    let t1 = vec3f(1.0 + sg * n.x * n.x * k, sg * m, -sg * n.x);
-    let t2 = vec3f(m, sg + n.y * n.y * k, -n.y);
-    let d0 = mapW(p);
-    let bend = (mapW(p + h * t1) + mapW(p + h * (-0.5 * t1 + 0.8660254 * t2)) + mapW(p + h * (-0.5 * t1 - 0.8660254 * t2)) - 3.0 * d0) / 3.0;
-    // (a sphere of radius r bends by h^2 / 2r over h: convex 1 for a radius of about four steps or less)
-    convex = clamp(bend / (0.06 * h), -1.0, 1.0);
-    for (var i = 0; i < 3; i++) {
-      let s = 0.02 + 0.06 * f32(i);
-      shut += max(s - mapW(p + n * s), 0.0) / s;
-    }
-    shut = clamp(shut / 1.5, 0.0, 1.0);
+    let form = wearForm(p, n, h);
+    convex = form.x;
+    shut = form.y;
   }
   let exposed = clamp(0.5 + 0.5 * convex - 0.6 * shut, 0.0, 1.0);
   let recess = clamp(0.6 * shut + max(-convex, 0.0) * 0.6, 0.0, 1.0);
@@ -327,7 +430,6 @@ fn wearAt(p: vec3f, n: vec3f) -> Wear {
   let dirt = cavA * recess;
   w.sig += 0.12 * dirt;
   w.keep *= 1.0 - 0.45 * dirt;
-  w.tint = mix(vec3f(1.0), vec3f(mu.tab[14].w, mu.tab[15].w, mu.tab[16].w) * 1.6, 0.7 * dirt);
   // ---- 3. scratches: straight, hair-fine, of every length, more where the surface is exposed; those
   // narrower than a pixel are thinned to their share of it, and what they would all add up to across
   // the pixel is a faint widening of the reflection
@@ -355,21 +457,7 @@ fn wearAt(p: vec3f, n: vec3f) -> Wear {
   }
   // ---- 4. polishing swirls: rings round a few pad centres, seen as arcs round a sharp highlight
   if (swA > 0.0) {
-    let cell = vec3i(floor(q / 0.7));
-    var ring = vec3f(0.0);
-    for (var j = 0; j < 8; j++) {
-      let c = cell + vec3i(j % 2, (j / 2) % 2, j / 4);
-      let o = (vec3f(c) + 0.5 + 0.5 * vec3f(wHash(c + vec3i(1, 2, 3)), wHash(c + vec3i(4, 5, 6)), wHash(c + vec3i(7, 8, 9)))) * 0.7;
-      var r = q - o;
-      r = r - nq * dot(r, nq);
-      let rl = length(r);
-      if (rl > 0.5 || rl < 1e-4) { continue; }
-      // fine rings, broken into arcs, fading towards the pad's edge
-      let f = 220.0 + 80.0 * wHash(c);
-      let arcs = smoothstep(0.2, 0.7, wNoise(vec3f(atan2(dot(r, cross(nq, vec3f(0.0, 1.0, 0.0001))), dot(r, vec3f(0.0, 1.0, 0.0001))) * 3.0, rl * 6.0, f32(j))));
-      let lineFine = 1.0 - smoothstep(0.3, 1.0, px * f);
-      ring += (r / rl) * (sin(rl * f) * arcs * lineFine * (1.0 - smoothstep(0.3, 0.5, rl)));
-    }
+    let ring = polishingPads(q, nq, px);
     w.n = normalize(w.n + wearFromObj(ring) * (0.03 * swA * (1.0 - worn)));
     w.sig += 0.004 * swA;
   }
@@ -385,20 +473,7 @@ fn wearAt(p: vec3f, n: vec3f) -> Wear {
   // ---- 6. smudges and finger marks: a few patches where the object is handled (its exposed parts),
   // duller, with the whorl of a fingertip in them
   if (smA > 0.0) {
-    let cell = vec3i(floor(q / 0.45));
-    var sm = 0.0;
-    for (var j = 0; j < 8; j++) {
-      let c = cell + vec3i(j % 2, (j / 2) % 2, j / 4);
-      if (0.5 + 0.5 * wHash(c + vec3i(11, 13, 17)) > 0.55 * smA + 0.1) { continue; }
-      let o = (vec3f(c) + 0.5 + 0.5 * vec3f(wHash(c + vec3i(2, 3, 1)), wHash(c + vec3i(5, 1, 4)), wHash(c + vec3i(8, 7, 3)))) * 0.45;
-      let r = q - o;
-      let rl = length(r - nq * dot(r, nq));
-      let pad = (1.0 - smoothstep(0.03, 0.09, rl)) * (1.0 - smoothstep(0.0, 0.08, abs(dot(r, nq))));
-      // (the ridges of a fingertip: whorls a third of a millimetre apart at life size, averaged away
-      // where they are finer than a pixel)
-      let ridges = mix(0.6, 0.5 + 0.5 * sin(rl * 260.0 + 4.0 * wNoise(q * 30.0)), 1.0 - smoothstep(0.3, 1.0, px * 260.0));
-      sm = max(sm, pad * ridges);
-    }
+    var sm = fingerMarks(q, nq, px, smA);
     sm *= smA * (0.3 + 0.7 * exposed);
     w.sig += 0.08 * sm;
     w.keep *= 1.0 - 0.12 * sm;
@@ -413,12 +488,15 @@ fn wearAt(p: vec3f, n: vec3f) -> Wear {
   // ---- the polishing lines: round the shape's vertical (along latitude on a ball, round a cylinder)
   let br = mu.more.w * (1.0 - 0.7 * worn);
   if (br > 0.0) {
-    var bq = vec3f(0.0, 1.0, 0.0) - nq * nq.y;
+    let sine = mu.tab[17].w;
+    let brushedPoint = brushCoordinates(q, sine);
+    let brushedNormal = brushCoordinates(nq, sine);
+    var bq = vec3f(0.0, 1.0, 0.0) - brushedNormal * brushedNormal.y;
     let lb = length(bq);
-    bq = mix(vec3f(1.0, 0.0, 0.0) - nq * nq.x, bq, smoothstep(0.1, 0.3, lb));
-    w.b = wearFromObj(normalize(bq + vec3f(1e-6)));
-    let y = q.y + 0.004 * wNoise(q * 3.0);
-    let r = vec3f(q.x * 9.0, q.z * 9.0, 0.0);
+    bq = mix(vec3f(1.0, 0.0, 0.0) - brushedNormal * brushedNormal.x, bq, smoothstep(0.1, 0.3, lb));
+    w.b = wearFromObj(brushCoordinates(normalize(bq + vec3f(1e-6)), -sine));
+    let y = brushedPoint.y + 0.004 * wNoise(brushedPoint * 3.0);
+    let r = vec3f(brushedPoint.x * 9.0, brushedPoint.z * 9.0, 0.0);
     let fine = 1.0 - smoothstep(0.3, 1.0, px * 380.0);
     let coarse = 1.0 - smoothstep(0.3, 1.0, px * 110.0);
     let line = wNoise(vec3f(r.x, y * 380.0, r.y)) * fine + 0.6 * wNoise(vec3f(r.x * 0.4 + 7.0, y * 110.0, r.y * 0.4 + 3.0)) * coarse;
@@ -428,10 +506,7 @@ fn wearAt(p: vec3f, n: vec3f) -> Wear {
   // worn high points: smoother, and the spread above taken back there
   w.sig *= 1.0 - 0.8 * worn;
   w.keep = mix(w.keep, 1.0, worn);
-  let mo = mu.sssC.w;
-  if (mo > 0.0) {
-    w.tint *= vec3f(1.0) + mo * 0.06 * vec3f(wNoise(q * 2.3 + vec3f(5.0, 1.0, 8.0)), wNoise(q * 2.3 + vec3f(11.0, 3.0, 2.0)), wNoise(q * 2.3 + vec3f(2.0, 13.0, 6.0)));
-  }
+  w.tint = wearPigment(q, dirt, vec3f(mu.tab[14].w, mu.tab[15].w, mu.tab[16].w), mu.sssC.w);
   return w;
 }
 
@@ -447,7 +522,7 @@ fn wearRead(rd: vec3f, lod: f32, sig: f32) -> vec3f {
       let uv = vec2f(atan2(d.z, d.x) * 0.15915494 + 0.5, acos(clamp(d.y, -1.0, 1.0)) * 0.31830989);
       c += textureSampleLevel(softTex, softSmp, uv, clamp(select(log2(max(sig, 1e-6) / T0), sig / (2.0 * T0), sig < 2.0 * T0), 0.0, 9.0)).rgb;
     }
-    return c;
+    return c; // worn surface panorama
   }
 //#endif
   return envL(rd, sig);
@@ -493,7 +568,6 @@ fn wearLines(rd_in: vec3f, w: Wear, p: vec3f, c: f32) -> vec3f {
 // the square evenly frame by frame, and the reflection off it is followed like any other (to the next
 // surface of the shape, or to the lights): so the shape hides the lights from it where it should, and the
 // frames add up to the whole lobe.
-//#if !BODIES
 const BR_ACROSS: f32 = 0.15;     // the slopes' spread across the lines (GGX alpha) at brush 1
 const BR_ALONG: f32 = 0.006;     // and along them
 fn brushRnd(fc: vec2f, b: i32) -> vec2f {
@@ -508,14 +582,28 @@ fn brushRnd(fc: vec2f, b: i32) -> vec2f {
 // sg: 1, or -1 for the facet opposite (the pair is read together: half the grain for one more look)
 // Returns the facet (xyz) and how far its reflection is read softened (w, radians): more the farther out
 // in the tail the facet lies, where the lobe is thin and one look stands for a wide piece of it.
-fn brushN(w: Wear, p: vec3f, rd: vec3f, fc: vec2f, b: i32, wide: f32, sg: f32) -> vec4f {
-  let br = min(mu.more.w, 1.5);
-  let q = toObj(p);
+fn brushStreak(p: vec3f) -> f32 {
+  let q = brushCoordinates(wearLocal(p,1.0), mu.tab[17].w);
   // (line by line, and in a few broader bands, the grooves are deeper or shallower)
   // (lines finer than a pixel are not drawn, their mean is: as wearAt does)
-  let px = length(p - vec3f(0.0, 0.0, u.dist)) * 2.0 * u.tan_fov / u.res.y;
+  let px = length(mu.gratingFrame[0].xyz)*length(p - vec3f(0.0, 0.0, u.dist)) * 2.0 * u.tan_fov / u.res.y;
   let fine = 1.0 - smoothstep(0.3, 1.0, px * 150.0);
-  let streak = max(0.6 + 0.4 * fine * wNoise(vec3f(q.x * 3.0, q.y * 150.0, q.z * 3.0)) + 0.3 * wNoise(vec3f(q.x * 1.5 + 5.0, q.y * 31.0, q.z * 1.5 + 1.0)), 0.15);
+  return max(0.6 + 0.4 * fine * wNoise(vec3f(q.x * 3.0, q.y * 150.0, q.z * 3.0)) + 0.3 * wNoise(vec3f(q.x * 1.5 + 5.0, q.y * 31.0, q.z * 1.5 + 1.0)), 0.15);
+}
+// The sampled solo and assembly closures use the same tangent frame and slope widths.
+struct BrushSurface { across: vec3f, slopes: vec2f }
+fn brushSurface(w: Wear, p:vec3f, alpha:f32) -> BrushSurface {
+  if (w.aniso <= 0.0) { return BrushSurface(vec3f(0.0),vec2f(alpha)); }
+  let across = normalize(w.b-w.n*dot(w.b,w.n));
+  let brush = clamp(mu.more.w,0.0,1.0);
+  let aspect = sqrt(1.0-0.60*brush);
+  let base = vec2f(alpha/aspect,alpha*aspect);
+  let groove = brush*vec2f(BR_ACROSS*brushStreak(p),BR_ALONG);
+  return BrushSurface(across,sqrt(base*base+groove*groove));
+}
+fn brushN(w: Wear, p: vec3f, rd: vec3f, fc: vec2f, b: i32, wide: f32, sg: f32) -> vec4f {
+  let br = min(mu.more.w, 1.5);
+  let streak = brushStreak(p);
   let ax = br * BR_ACROSS * streak + wide * (1.0 + 1.5 * br) * (0.7 + 0.3 * streak);
   let ay = BR_ALONG + 0.5 * w.sig + wide * (1.0 - 0.6 * min(br, 1.0));
   let r = brushRnd(fc, b);
@@ -532,14 +620,8 @@ fn brushN(w: Wear, p: vec3f, rd: vec3f, fc: vec2f, b: i32, wide: f32, sg: f32) -
   return vec4f(m, soft);
 }
 //#endif
-//#endif
 
 //#if RANDOM
-fn pcg(v: u32) -> u32 {
-  let x = v * 747796405u + 2891336453u;
-  let w = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u;
-  return (w >> 22u) ^ w;
-}
 // Two numbers in 0..1 for the j-th random choice along the path of the ray that left the camera along
 // rd0. Each pixel has its own starting point, and from frame to frame (and from ray to ray within a
 // frame) the numbers run along a sequence that fills the square evenly, so that the ten or so frames
@@ -615,24 +697,6 @@ fn filmRGB(c1: f32, d: f32, n1: f32, n3: f32) -> vec3f {
 
 // ---- what is shared with the tracer of several bodies -------------------------------------------------
 //#if METAL
-// Unpolarised reflectance of a metal of index n + ik, seen from a clear medium of index n1 (the exact
-// Fresnel equations for an absorbing medium).
-fn fresMetal(c: f32, n1: f32, n: f32, k: f32) -> f32 {
-  let c2 = c * c;
-  let s2 = 1.0 - c2;
-  let e = n / n1;
-  let ek = k / n1;
-  let t0 = e * e - ek * ek - s2;
-  let ab = sqrt(t0 * t0 + 4.0 * e * e * ek * ek);
-  let t1 = ab + c2;
-  let a = sqrt(max(0.5 * (ab + t0), 0.0));
-  let t2 = 2.0 * a * c;
-  let Rs = (t1 - t2) / (t1 + t2);
-  let t3 = c2 * ab + s2 * s2;
-  let t4 = t2 * s2;
-  return 0.5 * (Rs + Rs * (t3 - t4) / (t3 + t4));
-}
-
 //#if FILM
 // complex numbers, as (real, imaginary)
 fn cmul(a: vec2f, b: vec2f) -> vec2f { return vec2f(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x); }
@@ -687,14 +751,82 @@ fn metalRGB(c: f32, n1: f32, d: f32) -> vec3f {
   // the body's colour tints the reflection, less and less towards grazing (where every surface is a mirror)
   return col * mix(mu.body.rgb, vec3f(1.0), pow(1.0 - c, 5.0));
 }
+// Power reaching a smooth conductor and escaping back through its clear coat.
+// Both interfaces are parallel. Each internal round trip repeats the same angle
+// and polarisation, so its geometric series can be integrated exactly.
+fn coatEscape(f: f32, r: vec3f) -> vec3f {
+  let t = 1.0 - f;
+  return r * (t * t) / max(vec3f(1e-8), 1.0 - f * r);
+}
+fn polishedCoatReturn(c: f32, cc: f32, index: f32, top: vec3f) -> vec3f {
+  let sa = (c - index * cc) / max(c + index * cc, 1e-7);
+  let pa = (index * c - cc) / max(index * c + cc, 1e-7);
+  let fs = sa * sa;
+  let fp = pa * pa;
+  let tint = mix(mu.body.rgb, vec3f(1.0), pow(1.0 - cc, 5.0));
+  if (mu.body.w <= 0.5) {
+    return 0.5 * (coatEscape(fs, tint) + coatEscape(fp, tint));
+  }
+  var returned = vec3f(0.0);
+  var sensor = vec3f(0.0);
+  for (var j = 0; j < 16; j++) {
+    let nk = mu.tab[2 * j].xy;
+    let metal = fresMetalPolar(cc, index, nk.x, nk.y);
+    let response = specW(400.0 + 20.0 * f32(j));
+    returned += response * (0.5 * (coatEscape(fs, tint * metal.x) + coatEscape(fp, tint * metal.y)));
+    sensor += response;
+  }
+  return clamp(returned / sensor, vec3f(0.0), 1.0 - top);
+}
+
+// Single and multiple reflection energy after Fdez-Agüera (2019), Eq. 18.
+// Multiple surface encounters are spread across the hemisphere; their tint includes absorption on each hit.
+struct ConductorEnergy { single: vec3f, multiple: vec3f }
+fn conductorAb(i: u32) -> vec2f {
+  let v = mu.ggxEnergy[i / 2u];
+  return select(v.xy, v.zw, (i & 1u) != 0u);
+}
+fn frMetalRig(p: vec3f, n: vec3f, rd: vec3f, mid: vec3f, var0: f32, bounce: i32,
+              alpha: f32, coated: bool, incident: vec3f) -> vec3f {
+  let x = pbr_energy_x(-dot(rd, n));
+  let i = u32(x);
+  let ab = mix(conductorAb(i), conductorAb(min(i+1u,15u)), fract(x));
+  let geometric = max(ab.x + ab.y, 0.01);
+  return incident; // finite GGX light
+}
+fn conductorEnergy(c: f32, medium: f32, smoothR: vec3f) -> ConductorEnergy {
+  let x = pbr_energy_x(c);
+  let i = u32(x);
+  let ab = mix(conductorAb(i), conductorAb(min(i+1u,15u)), fract(x));
+  return conductorEnergyFromAb(ab,medium,smoothR);
+}
+fn brushedAb(angle:u32, azimuth:u32) -> vec2f {
+  let v = mu.brushEnergy[azimuth*8u + angle/2u];
+  return select(v.xy,v.zw,(angle & 1u) != 0u);
+}
+fn brushConductorEnergy(c:f32, medium:f32, smoothR:vec3f, across:vec3f, view:vec3f, normal:vec3f) -> ConductorEnergy {
+  let projected = view-normal*dot(normal,view);
+  let ratio = clamp(dot(across,projected)*dot(across,projected)/max(dot(projected,projected),1e-12),0.0,1.0);
+  let azimuth = 2.0*(1.0-ratio);
+  let a = min(u32(azimuth),1u);
+  let x = pbr_energy_x(c);
+  let i = u32(x);
+  let j = min(i+1u,15u);
+  let low = mix(brushedAb(i,a),brushedAb(j,a),fract(x));
+  let high = mix(brushedAb(i,a+1u),brushedAb(j,a+1u),fract(x));
+  return conductorEnergyFromAb(mix(low,high,azimuth-f32(a)),medium,smoothR);
+}
+fn conductorEnergyFromAb(ab:vec2f, medium:f32, smoothR:vec3f) -> ConductorEnergy {
+  let f0 = clamp(metalRGB(1.0, medium, 0.0), vec3f(0.0), vec3f(1.0));
+  let e = pbr_energy_split(ab, f0);   // pbr/energy.wgsl
+  let blend = smoothstep(0.0, 0.08, mu.surf.x);
+  return ConductorEnergy(mix(smoothR, e.single, blend), blend * e.multiple);
+}
+
 
 //#endif
 
 //#if SSS
-// Light that has passed through a milky body without being turned right round has still been nudged
-// many times, a little each time: what is seen through it is softened, by a spread whose square grows
-// with the number of scatterings on the way (this many square radians for each).
-const HAZE: f32 = 2.0;
 // What is left of the colour of light that crosses a stretch s of the body without being scattered away:
 // it takes on the body's colour, deeper the further it goes, so thin parts and edges lit from behind glow
 // amber in wax. Looks first: the grains a real body's colour comes from also tint what passes them by
@@ -724,15 +856,22 @@ const GLOW_N: i32 = 6;
 // inside into the whole half-space outside, which thins it by the square of the index.
 fn glowAlong(pos: vec3f, dir: vec3f, s_in: f32) -> vec3f {
   let s = max(s_in, 0.0);                   // (settling onto the surface can leave a length a hair below nothing)
-  let st = mu.sssK.rgb + mu.sssA.rgb;
+  let sigmaS = collisionRates();
+  let st = sigmaS + mu.sssA.rgb + u.absorb.xyz;
   let k = min(st.r, min(st.g, st.b));
   let all = 1.0 - exp(-k * s);
   var sum = vec3f(0.0);
   let deepen = mu.sssK.w > 0.0;
+  var transmit = vec3f(1.0);
   for (var j = 0; j < GLOW_N; j++) {
     let t = -log(1.0 - (f32(j) + 0.5) / f32(GLOW_N) * all) / k;
     let x = toObj(pos + dir * t) / (2.0 * HB) + 0.5;
-    var g = glowAt(x) * exp(-(st - k) * t);
+    // Integrate each colour's attenuation exactly over this section. A channel
+    // whose mean free path is short may give up most of its light in the first.
+    let edge = select(-log(max(1.0-(f32(j)+1.0)*all/f32(GLOW_N),1e-10))/k,s,j+1==GLOW_N);
+    let next = exp(-st * edge);
+    var g = glowAt(x) * (transmit - next);
+    transmit = next;
     // (light crossing the body takes on its colour, deeper the further it goes: the light here has come
     // at least as far in as the point lies deep, and goes on t more to the eye)
     if (deepen) { g *= throughHue(t + max(-mapW(pos + dir * t), 0.0)); }
@@ -742,7 +881,126 @@ fn glowAlong(pos: vec3f, dir: vec3f, s_in: f32) -> vec3f {
   // surface, kept as bright as it was; looks first, see docs/materials.md section 14)
   let body = mu.sssC.rgb / max(max(mu.sssC.r, mu.sssC.g), max(mu.sssC.b, 1e-3));
   let dye = mix(vec3f(1.0), body / max(dot(body, vec3f(0.2126, 0.7152, 0.0722)), 1e-3), mu.sssA.w);
-  return sum * dye * mu.sssK.rgb * (all / (f32(GLOW_N) * k) * 0.0795775 / (u.ior * u.ior));
+  return sum * dye * (sigmaS / max(st,vec3f(1e-6))) * (0.0795775 / (u.ior * u.ior));
+}
+// Multi-scale ambient occlusion in crevices and folds for matte/opaque subsurface wax.
+fn waxOcclusion(p: vec3f, n: vec3f) -> f32 {
+  var shut = 0.0;
+  var weight = 1.0;
+  for (var i = 0; i < 5; i++) {
+    let h = 0.012 + 0.052 * f32(i);
+    shut += weight * max(h - mapW(p + n * h), 0.0) / h;
+    weight *= 0.8;
+  }
+  return clamp(1.0 - 0.46 * shut, 0.0, 1.0);
+}
+// Subsurface optical depth for opaque-exit wax: thin tips and rims transmit warmly according
+// to sssDepth, while thick bulk cores (>1 unit) attenuate to solid sculptural wax.
+fn waxTau(s: f32) -> f32 {
+  return (1.55 * mu.sss.x + 1.45) * max(s, 0.0);
+}
+// Chromatic Beer-Lambert + Rayleigh crystallite enrichment along transmitted wax paths.
+fn waxThroughTint(tau: f32) -> vec3f {
+  let c = clamp(mu.sssC.rgb, vec3f(0.015), vec3f(0.992));
+  let peak = max(c.r, max(c.g, max(c.b, 0.02)));
+  let chroma = clamp(c / peak, vec3f(0.02), vec3f(1.0));
+  let spread = 0.35 + 0.65 * clamp(1.0 - mu.sssK.b / max(mu.sssK.r, 1e-6), 0.0, 1.0);
+  let warmShift = vec3f(0.0, 0.08, 0.22) * spread * sqrt(max(tau, 0.0));
+  let chromaPow = 1.35 + (1.10 + 0.55 * clamp(mu.sssK.w, 0.0, 1.5)) * sqrt(max(tau, 0.0));
+  let amp = pow(peak, 0.55 + 0.35 * min(tau, 3.0));
+  return amp * exp(log(chroma) * chromaPow - warmShift);
+}
+// Smooth wide-cone SDF self-occlusion behind a diffuse wax exit point: blocks solid adjacent cores
+// seamlessly without projecting sharp X-ray silhouettes of distant thin background geometry.
+fn waxBackCone(p: vec3f, d: vec3f) -> f32 {
+  var open = 1.0;
+  var t = 0.014;
+  let bound = HB * (1.0 - 1.5 / u.vres);
+  for (var i = 0; i < 7; i++) {
+    let pt = p + d * t;
+    if (any(abs(toObj(pt)) >= vec3f(bound))) { break; }
+    let r = 0.88 * t + 0.010;
+    let pen = -mapW(pt) / r;
+    open *= 1.0 - smoothstep(0.03, 0.78, pen);
+    t *= 1.85;
+  }
+  return open;
+}
+// Continuous thin-feature openness in 0..1 at back-wall exit q: 1 at genuine thin tips/rims,
+// smoothly decaying to 0 before grazing concave V-creases backed by solid wax core.
+fn waxThinOpen(q: vec3f, dir: vec3f) -> f32 {
+  var m = nrm(q);
+  let ci = abs(dot(dir, m));
+  if (dot(dir, m) < 0.0) { m = -m; }
+  let grazeFade = smoothstep(0.03, 0.36, ci);
+  if (grazeFade <= 0.0) { return 0.0; }
+  let dFwd = normalize(mix(dir, m, 0.14));
+  return grazeFade * waxBackCone(q + m * 0.006, dFwd);
+}
+// Diffuse + forward-scattered radiance entering the back face (q, mN) of an opaque wax wedge.
+fn waxExit(q: vec3f, mN: vec3f, dir: vec3f) -> vec3f {
+  let ci = clamp(dot(dir, mN), 0.0, 1.0);
+  let grazeFade = smoothstep(0.03, 0.36, ci);
+  if (grazeFade <= 0.0) { return vec3f(0.0); }
+  let dFwd = normalize(mix(dir, mN, 0.14));
+  let openFwd = waxBackCone(q + mN * 0.006, dFwd);
+  if (openFwd <= 0.001) { return vec3f(0.0); }
+  let dNorm = normalize(mix(mN, dir, 0.25));
+  let open = grazeFade * openFwd * (0.58 + 0.42 * waxBackCone(q + mN * 0.010, dNorm));
+  let dSky = normalize(vec3f(dFwd.x, max(dFwd.y, 0.06 * abs(dFwd.z)), dFwd.z));
+  let backlit = 0.58 * envL(dSky, 0.38) + 0.42 * envL(mN, 0.75);
+  return open * backlit;
+}
+// Directional + wrapped hemisphere irradiance on a waxy facet facing n.
+fn waxHemi(n: vec3f) -> vec3f {
+  return 0.65 * envL(n, 0.38) + 0.35 * envL(n, 0.95);
+}
+// Near-surface waxy scattering at entry (p, n): crisp 3D facet shading and warm valley bounce,
+// independent of ray-exit chord s so concave V-creases stay C1-smooth.
+fn waxNear(n: vec3f, ao: f32, s: f32) -> vec3f {
+  let c = pow(clamp(mu.sssC.rgb, vec3f(0.0), vec3f(1.0)), vec3f(1.22));
+  let bounce = mix(0.32 * c, vec3f(1.0), ao);
+  return 0.33 * waxHemi(n) * c * bounce;
+}
+// Calibrated 3D diffusion-volume scatter along stretch s for opaque wax, de-biased from any
+// residual glass tint (u.absorb) and bridged smoothly across concave creases backed by solid core.
+fn waxVolume(pos: vec3f, dir: vec3f, s_in: f32, n: vec3f, ao: f32, hasNormal: bool) -> vec3f {
+  let sRaw = max(s_in, 0.0);
+  var s = sRaw;
+  if (hasNormal && sRaw < 0.95) {
+    let openThin = waxThinOpen(pos + dir * sRaw, dir);
+    s = mix(0.95, sRaw, openThin);
+  }
+  let sigmaS = collisionRates();
+  let st = sigmaS + mu.sssA.rgb + u.absorb.xyz;
+  let stWax = max(sigmaS + mu.sssA.rgb, vec3f(1.55 * mu.sss.x + 2.60));
+  let k = max(min(stWax.r, min(stWax.g, stWax.b)), 1e-4);
+  let all = 1.0 - exp(-k * s);
+  var sum = vec3f(0.0);
+  var transmit = vec3f(1.0);
+  for (var j = 0; j < GLOW_N; j++) {
+    let t = -log(max(1.0 - (f32(j) + 0.5) / f32(GLOW_N) * all, 1e-10)) / k;
+    let x = toObj(pos + dir * t) / (2.0 * HB) + 0.5;
+    let edge = select(-log(max(1.0 - (f32(j) + 1.0) * all / f32(GLOW_N), 1e-10)) / k, s, j + 1 == GLOW_N);
+    let next = exp(-stWax * edge);
+    sum += glowAt(x) * (transmit - next);
+    transmit = next;
+  }
+  let c = clamp(mu.sssC.rgb, vec3f(0.01), vec3f(0.995));
+  let ssAlbedo = sigmaS / max(st, vec3f(1e-6));
+  let bakedTint = clamp(ssAlbedo * exp(-(mu.sssA.rgb + u.absorb.xyz) * 0.65), vec3f(0.14), vec3f(1.0));
+  let waxPigment = pow(c, vec3f(1.30)) * (ssAlbedo / bakedTint);
+  let vol = sum * waxPigment * (0.0795775 / (u.ior * u.ior));
+  let bounce = mix(0.34 * c, vec3f(1.0), ao);
+  var shadeMod = 1.0;
+  if (hasNormal) {
+    let lumFront = dot(waxHemi(n), vec3f(0.2126, 0.7152, 0.0722));
+    let lumAvg = max(dot(envL(n, 1.45), vec3f(0.2126, 0.7152, 0.0722)), 1e-3);
+    let ratio = clamp(lumFront / lumAvg, 0.25, 1.35);
+    let thinShare = exp(-2.0 * s);
+    shadeMod = mix(0.32 + 0.60 * ratio, 1.0, thinShare);
+  }
+  return 0.26 * vol * bounce * shadeMod;
 }
 //#endif
 //#endif
@@ -778,26 +1036,6 @@ fn clayM(p: vec3f, rd: vec3f) -> vec3f {
 // ---- a mirror or a metal -------------------------------------------------------------------------------
 //#if METAL
 //#if !BODIES
-// The first surface a ray outside the body meets: true if there is one, and how far along.
-fn outHit(ro: vec3f, rd: vec3f, tHit: ptr<function, f32>) -> bool {
-  let b = dot(ro, rd);
-  let h = b * b - (dot(ro, ro) - BOUND * BOUND);
-  if (h <= 0.0) { return false; }
-  let tFar = -b + sqrt(h);
-  var t = 0.0;
-  for (var i = 0; i < STEPS_OUT; i++) {
-    let d = mapW(ro + rd * t);
-    if (d < 0.0008) {
-      t += mapNW(ro + rd * t);
-      *tHit = t;
-      return true;
-    }
-    t += d * STEP_SCALE;
-    if (t > tFar) { break; }
-  }
-  return false;
-}
-
 // An opaque reflecting body: the reflection is followed from surface to surface (the shape mirrored in
 // itself) for up to `nb` bounces, each tinted by the metal's own reflectance at that angle.
 fn shadeM(ro: vec3f, rd_in: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
@@ -843,20 +1081,93 @@ fn shadeM(ro: vec3f, rd_in: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f 
     let cc = sqrt(max(1.0 - (1.0 - cosi * cosi) / (nx * nx), 0.0));
 //#if FILM
     let Fc = filmRGB(cosi, fd, 1.0, nx);
-    let R = metalRGB(cc, nx, 0.0);
 //#else
     let Fc = vec3f(fresnel(cosi, 1.0, nx));
-    let R = metalRGB(cc, nx, fd);
 //#endif
+//#if ROUGH
     col += thr * Fc * sharpEnv(mir, p, n, cosi);
+    var R = metalRGB(cc, nx, 0.0);
     thr *= 1.0 - Fc;
 //#else
-    let R = metalRGB(cosi, 1.0, fd);
+//#if FILM
+    col += thr * Fc * sharpEnv(mir, p, n, cosi);
+    var R = (1.0 - Fc) * metalRGB(cc, nx, 0.0);
+//#else
+    let returned = polishedCoatReturn(cosi, cc, nx, Fc);
+//#if WEAR
+    col += thr * Fc * sharpEnv(mir, p, n, cosi);
+    var R = returned;
+//#else
+    // Both polished interfaces send light along the same ray, including a
+    // second encounter with the shape before that ray reaches the room.
+    var R = Fc + returned;
+//#endif
+//#endif
+//#endif
+//#else
+    var R = metalRGB(cosi, 1.0, fd);
+//#endif
+//#if ROUGH
+    var hiddenR = R;
+    if (fd <= 0.0) {
+//#if COAT
+      let cosine = cc;
+      let medium = nx;
+//#else
+      let cosine = cosi;
+      let medium = 1.0;
+//#endif
+      var energy = conductorEnergy(cosine, medium, R);
+//#if ROUGH_REF
+//#if WEAR
+      if (brushed) {
+        let across = normalize(wr.b-wr.n*dot(wr.b,wr.n));
+        energy = brushConductorEnergy(cosine,medium,R,across,-rd,wr.n);
+      }
+//#endif
+//#endif
+      R = energy.single;
+      hiddenR = energy.single + energy.multiple;
+//#if COAT
+      hiddenR = Fc + (1.0-Fc)*hiddenR;
+//#endif
+      col += thr * energy.multiple * envL(n, 0.80);
+    }
 //#endif
     // where the reflection goes: straight for a polished surface, off one facet of a rough one
     var dir = mir;
 //#if ROUGH
     dir = frMetalDir(rd, n, b, rd_in, xi);
+//#if ROUGH_REF
+//#if WEAR
+    {
+      let normal = wr.n;
+      let alpha = sqrt(mu.surf.x*mu.surf.x + wr.sig*wr.sig);
+      let frame = brushSurface(wr,p,alpha);
+//#else
+    {
+      let normal = n;
+      let alpha = mu.surf.x;
+//#endif
+//#if WEAR
+      let coated = mu.surf.z > 1.001;
+      let sample = frGlossyFrame(p,rd,normal,rnd2(select(82+b,b,coated),rd_in,xi),alpha,coated,frame.across,frame.slopes,brushed);
+//#else
+//#if COAT
+      let sample = frGlossySample(p, rd, normal, rnd2(b, rd_in, xi), alpha, true);
+//#else
+      let sample = frGlossySample(p, rd, normal, rnd2(82+b, rd_in, xi), alpha, false);
+//#endif
+//#endif
+      if (sample.weight <= 0.0) { break; }
+      dir = sample.direction;
+//#if COAT
+      R *= sample.weight;
+//#else
+      R = metalRGB(sample.facetCosine, 1.0, fd) * sample.weight;
+//#endif
+    }
+//#endif
     // The lobe this surface reflects: spread by what the light was spread by already, by the facets,
     // and by the bend of the patch the cone landed on. Its middle is followed to the next surface while
     // it is narrow (share fo); the rest of it sees the lights, less what the shape itself hides of them.
@@ -868,6 +1179,7 @@ fn shadeM(ro: vec3f, rd_in: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f 
     fv = frCap(fv + wr.sig * wr.sig);
     var mid = frMid(rd, wr.n);
     var mid2 = mid;
+//#if !ROUGH_REF
     if (brushed) {
       let sr = sqrt(fv);
       let m4 = brushN(wr, p, rd, fc, b, 0.3 * sr, 1.0);
@@ -879,13 +1191,23 @@ fn shadeM(ro: vec3f, rd_in: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f 
       let d0 = reflect(rd, m);
       dir = d0 - 2.0 * min(dot(d0, n), 0.0) * n;
     }
+//#endif
+//#if ROUGH_REF
     let lit0 = 0.5 * (frMetalLit(dir, mid, fv, b) + frMetalLit(dir, mid2, fv, b)) * (wr.keep * wr.tint);
-    let fo = frFollow(fv);
-    let hid = frMetalHid(p, n, mid, fv, lit0, R);
 //#else
-    let lit0 = frMetalLit(dir, frMid(rd, n), fv, b);
+    let incident = 0.5 * (frMetalLit(dir,mid,fv,b) + frMetalLit(dir,mid2,fv,b));
+    let lit0 = frMetalRig(p,wr.n,rd,mid,fv,b,sqrt(mu.surf.x*mu.surf.x+wr.sig*wr.sig),mu.surf.z>1.001,incident) * (wr.keep*wr.tint);
+//#endif
     let fo = frFollow(fv);
-    let hid = frMetalHid(p, n, frMid(rd, n), fv, lit0, R);
+    let hid = frMetalHid(p, n, mid, fv, lit0, hiddenR);
+//#else
+//#if ROUGH_REF
+    let lit0 = frMetalLit(dir, frMid(rd, n), fv, b);
+//#else
+    let lit0 = frMetalRig(p,n,rd,frMid(rd,n),fv,b,mu.surf.x,mu.surf.z>1.001,frMetalLit(dir,frMid(rd,n),fv,b));
+//#endif
+    let fo = frFollow(fv);
+    let hid = frMetalHid(p, n, frMid(rd, n), fv, lit0, hiddenR);
 //#endif
     let lit = mix(hid, lit0, fo);
 //#else
@@ -922,10 +1244,15 @@ fn shadeM(ro: vec3f, rd_in: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f 
     if (b + 1 >= u.nb || !outHit(o, dir, &t2)) {
 //#endif
       // it leaves the shape (or the bounces are used up): the lights
-//#if FILM
-      col += thr * R * (lit + skyOf(mir));
+//#if GRATING
+      let reflected = gratingReflect(p,n,rd,lit,xi);
 //#else
-      col += thr * R * lit;
+      let reflected = lit;
+//#endif
+//#if FILM
+      col += thr * R * (reflected + skyOf(mir));
+//#else
+      col += thr * R * reflected;
 //#endif
       break;
     }
@@ -1045,19 +1372,6 @@ fn axisW() -> vec3f {
 //#endif
 
 //#if WALK
-// plain random numbers, as many as wanted
-var<private> rState: u32;
-fn rnd() -> f32 {
-  rState = pcg(rState);
-  return f32(rState >> 8u) / 16777216.0;
-}
-// A direction drawn evenly from all directions.
-fn anywhere() -> vec3f {
-  let z = 1.0 - 2.0 * rnd();
-  let r = sqrt(max(1.0 - z * z, 0.0));
-  let ph = 6.2831853 * rnd();
-  return vec3f(r * cos(ph), r * sin(ph), z);
-}
 // March inside the body from ro along rd for at most tMax: how far it got, and whether that was the
 // surface (then it is settled onto the smooth field, as marchIn does).
 fn marchTo(ro: vec3f, rd: vec3f, tMax: f32, hit: ptr<function, bool>) -> f32 {
@@ -1110,7 +1424,8 @@ fn wander(p: vec3f, d: vec3f) -> vec3f {
   for (var e = 0; e < 256; e++) {
     let depth = -mapW(pos);
     if (depth > 0.0) {
-      let fly = -log(max(1.0 - rnd(), 1e-6)) / mu.sss.x;
+      let rates = collisionRates();
+      let fly = walkFlight(rates);
       var got = fly;
       var hit = false;
       if (fly >= depth * 0.9) { got = max(marchTo(pos, dir, fly, &hit), 0.0); }
@@ -1118,10 +1433,10 @@ fn wander(p: vec3f, d: vec3f) -> vec3f {
 //#if GLOW
       lit += att * mu.glow.rgb * got;
 //#endif
-      att *= exp(-(u.absorb.xyz + mu.sssA.rgb) * got);
+      att *= exp(-(u.absorb.xyz + mu.sssA.rgb) * got) * walkWeight(rates, got, !hit);
       if (max(att.x, max(att.y, att.z)) < 0.002) { break; }      // the body has swallowed it
       if (!hit) {
-        dir = anywhere();
+        dir = walkDirection(dir);
         continue;
       }
       let m = nrm(pos);
@@ -1130,12 +1445,13 @@ fn wander(p: vec3f, d: vec3f) -> vec3f {
         pos += dir * 0.004;
         continue;
       }
-      if (rnd() < fresnel(ci, u.ior, 1.0)) {
-        dir = reflect(dir, m);
-        pos -= m * 0.004;
-      } else {
-        dir = refract(dir, -m, u.ior);
+      let interface_sample = pbr_dielectric_sample(
+        traceDielectricHit(-m, resolvedSceneMedium(u.ior), airMedium()), -dir, PbrPathRng(vec2f(0.0), rnd()));
+      dir = interface_sample.wi;
+      if (interface_sample.medium_transition == PBR_MEDIUM_ENTER_DESTINATION) {
         pos += m * 0.006;
+      } else {
+        pos -= m * 0.004;
       }
     } else {
       var t = 0.0;
@@ -1147,12 +1463,13 @@ fn wander(p: vec3f, d: vec3f) -> vec3f {
         pos += dir * 0.004;
         continue;
       }
-      if (rnd() < fresnel(ci, 1.0, u.ior)) {
-        dir = reflect(dir, n);
-        pos += n * 0.004;
-      } else {
-        dir = refract(dir, n, 1.0 / u.ior);
+      let interface_sample = pbr_dielectric_sample(
+        traceDielectricHit(n, airMedium(), resolvedSceneMedium(u.ior)), -dir, PbrPathRng(vec2f(0.0), rnd()));
+      dir = interface_sample.wi;
+      if (interface_sample.medium_transition == PBR_MEDIUM_ENTER_DESTINATION) {
         pos -= n * 0.004;
+      } else {
+        pos += n * 0.004;
       }
     }
   }
@@ -1169,6 +1486,15 @@ fn iorOf(i: i32, xi: f32, W: i32) -> f32 {
   return iorAt(400.0 + 300.0 * (f32(i) + xi) / f32(W));
 //#endif
 }
+//#if PAINT_TOP
+fn paintTop(c: f32) -> f32 {
+//#if COAT
+  return paintBoundaryFresnel(c, 1.0, u.ior, mu.surf.z, true);
+//#else
+  return paintBoundaryFresnel(c, 1.0, u.ior, 1.0, false);
+//#endif
+}
+//#endif
 //#if !FINE
 fn wOf(i: i32, xi: f32, W: i32) -> vec3f {
 //#if MONO
@@ -1180,6 +1506,9 @@ fn wOf(i: i32, xi: f32, W: i32) -> vec3f {
 // What the top of the surface reflects of light arriving from outside at cosine c: the coat if there is
 // one, else the body (as plain glass has it: at the index of the middle of the spectrum).
 fn top1(c: f32) -> f32 {
+//#if PAINT_TOP
+  return paintTop(c);
+//#else
 //#if COAT
   return fresnel(c, 1.0, mu.surf.z);
 //#else
@@ -1189,10 +1518,14 @@ fn top1(c: f32) -> f32 {
   return fresnel(c, 1.0, u.ior);
 //#endif
 //#endif
+//#endif
 }
 //#else
 // The same for a group of wavelengths: with a film on top, each has its own.
 fn top4(c: f32, l: vec4f, d: f32) -> vec4f {
+//#if PAINT_TOP
+  return vec4f(paintTop(c));
+//#else
 //#if COAT
 //#if FILM
   return filmR4(c, l, d, 1.0, mu.surf.z);
@@ -1207,6 +1540,7 @@ fn top4(c: f32, l: vec4f, d: f32) -> vec4f {
   return vec4f(wallR(c));
 //#else
   return vec4f(fresnel(c, 1.0, u.ior));
+//#endif
 //#endif
 //#endif
 //#endif
@@ -1240,6 +1574,7 @@ fn beyondM(ro_in: vec3f, rd_in: vec3f, ior: f32, sig_in: f32) -> vec3f {
   var rd = rd_in;
   var col = vec3f(0.0);
 //#endif
+  let px = 2.0 * u.tan_fov / u.res.y;
   var thr = vec3f(1.0);
   var sig = sig_in;
   for (var l = 0; l < LAYERS; l++) {
@@ -1248,18 +1583,13 @@ fn beyondM(ro_in: vec3f, rd_in: vec3f, ior: f32, sig_in: f32) -> vec3f {
     if (h <= 0.0) { break; }
     let tFar = -b + sqrt(h);
     var t = 0.0;
-    var hit = false;
-    for (var i = 0; i < STEPS_OUT; i++) {
-      let d = mapW(ro + rd * t);
-      if (d < 0.0008) { hit = true; break; }
-      t += d * STEP_SCALE;
-      if (t > tFar) { break; }
-    }
+    let hit = marchBeyond(ro, rd, tFar, px, &t);
 //#if ROUGH
     if (!hit) { frMiss(l); break; }
 //#else
     if (!hit) { break; }
 //#endif
+    t += mapNW(ro + rd * t);
     t += mapNW(ro + rd * t);
     let p = ro + rd * t;
 //#if ROUGH
@@ -1268,8 +1598,8 @@ fn beyondM(ro_in: vec3f, rd_in: vec3f, ior: f32, sig_in: f32) -> vec3f {
     // it does (the rest of the cone passes it by and sees the lights).
     let fp = t * sig;
     frHit(l, fp, sig);
-    let n = frNrm(p, fp);
-    let ne = frFarIn(n, rd, p);
+    let n = faceIncident(frNrm(p, fp), -rd);
+    let ne = faceIncident(frFarIn(n, rd, p), -rd);
 //#if COAT
     let ci = clamp(-dot(rd, n), 0.0, 1.0);
 //#else
@@ -1281,7 +1611,7 @@ fn beyondM(ro_in: vec3f, rd_in: vec3f, ior: f32, sig_in: f32) -> vec3f {
       thr *= cv;
     }
 //#else
-    let n = nrm(p);
+    let n = faceIncident(nrm(p), -rd);
     let ci = clamp(-dot(rd, n), 0.0, 1.0);
 //#endif
     // what this surface reflects, and what it lets in
@@ -1304,8 +1634,21 @@ fn beyondM(ro_in: vec3f, rd_in: vec3f, ior: f32, sig_in: f32) -> vec3f {
 //#if HOLLOW
     let F = wallR(ci);
 //#else
+//#if ROUGH
     let F = fresnel(ci, 1.0, ior);
+//#else
+//#if BIREF
+    let F = fresnel(ci, 1.0, ior);
+//#else
+    let F = pbr_dielectric_split(traceDielectricHit(n, airMedium(), resolvedSceneMedium(ior)), -rd).reflectance;
 //#endif
+//#endif
+//#endif
+//#endif
+//#endif
+//#if SSS
+//#if !WALK
+    let colPreF = col;
 //#endif
 //#endif
 //#if ROUGH
@@ -1327,17 +1670,44 @@ fn beyondM(ro_in: vec3f, rd_in: vec3f, ior: f32, sig_in: f32) -> vec3f {
 //#endif
     let ne = n;
 //#endif
+//#if SSS
+//#if !WALK
+    col = mix(col, colPreF, clamp(mu.tab[19].w, 0.0, 1.0));
+//#endif
+//#endif
 //#if ROUGH
     {
       // A wide cone is not followed through the piece: the piece scatters it every way, and what comes
       // out of it this side is the light from all round.
+//#if SSS
+//#if !WALK
+      let wd = frWide(sig) * (1.0 - clamp(mu.tab[19].w, 0.0, 1.0));
+//#else
       let wd = frWide(sig);
+//#endif
+//#else
+      let wd = frWide(sig);
+//#endif
       col += thr * (1.0 - F) * wd * frAll(rd);
       thr *= 1.0 - wd;
       if (wd > 0.999) { return col; }
     }
 //#endif
+//#if ROUGH
     var d2 = refract(rd, ne, 1.0 / ior);
+//#else
+//#if BIREF
+    var d2 = refract(rd, ne, 1.0 / ior);
+//#else
+    var d2 = pbr_dielectric_split(traceDielectricHit(ne, airMedium(), resolvedSceneMedium(ior)), -rd).transmitted;
+//#endif
+//#endif
+//#if SSS
+//#if !WALK
+    let sssOpB = clamp(mu.tab[19].w, 0.0, 1.0);
+    if (sssOpB > 0.0) { d2 = normalize(mix(d2, normalize(mix(rd, -n, 0.12)), sssOpB)); }
+//#endif
+//#endif
     var q0 = p - n * 0.004;
 //#if GRIN
     let s = travel(&q0, &d2, ior);
@@ -1357,6 +1727,9 @@ fn beyondM(ro_in: vec3f, rd_in: vec3f, ior: f32, sig_in: f32) -> vec3f {
       thr *= inn.keep;
     }
 //#endif
+//#if SSS
+    let incoming = thr * (1.0 - F);
+//#endif
     thr *= (1.0 - F) * exp(-u.absorb.xyz * s);
 //#if SPECTRUM
     thr *= exp(-vec3f(mu.film2.z, mu.film2.w, mu.axis.w) * max(s, 0.0));
@@ -1368,26 +1741,35 @@ fn beyondM(ro_in: vec3f, rd_in: vec3f, ior: f32, sig_in: f32) -> vec3f {
     {
       // the milky body: part of the light is scattered on the way through, and that part is replaced by
       // the diffuse light inside (taken as the lights gathered by the face it came in by)
-      let ext = exp(-(mu.sssK.rgb + mu.sssA.rgb) * max(s, 0.0));
 //#if WALK
-      {
-        // the part of the ray scattered on this stretch: one point of the stretch stands for it, drawn
-        // as rays are scattered along it, and from there the ray is followed as it wanders
-        let all = 1.0 - exp(-mu.sss.x * max(s, 0.0));
-        let at = -log(1.0 - rnd() * all) / mu.sss.x;
-        col += thr * all * exp(-mu.sssA.rgb * at) * wander(q - d2 * (s - at), anywhere());
+      let rates = collisionRates();
+      let travelled = max(s,0.0);
+      let fly = walkFlight(rates);
+      if (fly < travelled) {
+        let scattered = incoming * exp(-(mu.sssA.rgb + u.absorb.xyz) * fly) * walkWeight(rates,fly,true);
+        col += scattered * wander(q - d2 * (s-fly), walkDirection(d2));
+        // The uncollided part is accounted for deterministically below.
       }
+      thr *= exp(-(rates + mu.sssA.rgb) * travelled);
 //#else
-      col += thr * glowAlong(q - d2 * s, d2, s);
-      thr *= throughHue(s);
+      let glassScatter = glowAlong(q - d2*s,d2,s);
+      let glassThr = thr * exp(-(collisionRates() + mu.sssA.rgb)*max(s,0.0)) * throughHue(s);
+      if (sssOpB > 0.0) {
+        let tauB = waxTau(s);
+        let waxThr = incoming * exp(-vec3f(tauB)) * waxThroughTint(tauB);
+        col += incoming * mix(glassScatter, waxVolume(q - d2*s, d2, s, n, 1.0, false), sssOpB);
+        thr = mix(glassThr, waxThr, sssOpB);
+      } else {
+        col += incoming * glassScatter;
+        thr = glassThr;
+      }
 //#endif
-      thr *= ext;
-      sig = sqrt(sig * sig + HAZE * mu.sss.x * s);
     }
 //#endif
     var m = nrm(q);
     var co = dot(d2, m);
     if (co < 0.0) { m = -m; co = -co; }
+    m = -faceIncident(-m, -d2);
     // leaving again
 //#if COAT
     let F2 = 1.0 - (1.0 - fresnel(co, ior, mu.surf.z)) * (1.0 - fresnel(sqrt(max(1.0 - (ior * ior) * (1.0 - co * co) / (mu.surf.z * mu.surf.z), 0.0)), mu.surf.z, 1.0));
@@ -1400,7 +1782,15 @@ fn beyondM(ro_in: vec3f, rd_in: vec3f, ior: f32, sig_in: f32) -> vec3f {
 //#endif
     thr *= mu.axis.xyz * mu.axis.xyz;       // (through the wall twice: in and out)
 //#else
+//#if ROUGH
     let F2 = fresnel(co, ior, 1.0);
+//#else
+//#if BIREF
+    let F2 = fresnel(co, ior, 1.0);
+//#else
+    let F2 = pbr_dielectric_split(traceDielectricHit(-m, resolvedSceneMedium(ior), airMedium()), -d2).reflectance;
+//#endif
+//#endif
 //#endif
 //#endif
 //#if ROUGH
@@ -1409,38 +1799,116 @@ fn beyondM(ro_in: vec3f, rd_in: vec3f, ior: f32, sig_in: f32) -> vec3f {
     rd = refract(d2, -m, ior);
 //#else
 //#if COAT
+//#if SSS
+//#if !WALK
+    let F2c = F2 * (1.0 - sssOpB);
+    if (F2c > 0.999) {
+      return col + thr * seen(reflect(d2, m), max(sig, spreadR()));
+    }
+    thr *= 1.0 - F2c;
+    rd = normalize(mix(refract(d2, -m, ior), d2, sssOpB));
+//#else
     if (F2 > 0.999) {                       // trapped by total reflection under the coat: take the bounce and stop there
       return col + thr * seen(reflect(d2, m), max(sig, spreadR()));
     }
     thr *= 1.0 - F2;
     rd = refract(d2, -m, ior);
+//#endif
+//#else
+    if (F2 > 0.999) {                       // trapped by total reflection under the coat: take the bounce and stop there
+      return col + thr * seen(reflect(d2, m), max(sig, spreadR()));
+    }
+    thr *= 1.0 - F2;
+    rd = refract(d2, -m, ior);
+//#endif
 //#else
     {
       // The wall this piece is left by, met by a cone of light: the part of it beyond the critical angle
       // is sent back inside, and is taken to leave at the bounce, softened; the rest goes on, bent and spread.
       let mf = frFarFacet(m, d2, q);
       let vi = sig * sig / (ior * ior) + frVin0(ior);
+//#if SSS
+//#if !WALK
+      let w = mix(frWall(dot(d2, mf), vi, ior, 1.0, vec2f(0.0)), vec3f(0.0, 0.0, 0.0), sssOpB);
+//#else
       let w = frWall(dot(d2, mf), vi, ior, 1.0, vec2f(0.0));
+//#endif
+//#else
+      let w = frWall(dot(d2, mf), vi, ior, 1.0, vec2f(0.0));
+//#endif
       if (w.x > 1.0 - frLeak()) { return col + thr * seen(reflect(d2, mf), max(sig, spreadR())); }
       col += thr * w.z * seen(reflect(d2, mf), max(sig, spreadR()));
       thr *= 1.0 - w.x;
       rd = frExit(d2, m, mf, w, ior);
+//#if SSS
+//#if !WALK
+      if (sssOpB > 0.0) { rd = normalize(mix(rd, d2, sssOpB)); }
+      sig = sqrt(max(sig * sig, frVout(vi, w, dot(rd, m), ior, vec2f(0.0)) * (1.0 - sssOpB)));
+//#else
       sig = sqrt(max(sig * sig, frVout(vi, w, dot(rd, m), ior, vec2f(0.0))));
+//#endif
+//#else
+      sig = sqrt(max(sig * sig, frVout(vi, w, dot(rd, m), ior, vec2f(0.0))));
+//#endif
     }
 //#endif
 //#endif
 //#else
 //#if !HOLLOW
+//#if SSS
+//#if !WALK
+    if (F2 * (1.0 - sssOpB) > 0.999) {
+      return col + thr * seen(reflect(d2, m), sig);
+    }
+//#else
     if (F2 > 0.999) {                       // trapped by total reflection: take the bounce and stop there
       return col + thr * seen(reflect(d2, m), sig);
     }
 //#endif
+//#else
+    if (F2 > 0.999) {                       // trapped by total reflection: take the bounce and stop there
+      return col + thr * seen(reflect(d2, m), sig);
+    }
+//#endif
+//#endif
+//#if !HOLLOW
+//#if SSS
+//#if !WALK
+    thr *= 1.0 - F2 * (1.0 - sssOpB);
+//#else
     thr *= 1.0 - F2;
+//#endif
+//#else
+    thr *= 1.0 - F2;
+//#endif
+//#else
+    thr *= 1.0 - F2;
+//#endif
+//#if BIREF
     rd = refract(d2, -m, ior);
+//#else
+    rd = pbr_dielectric_split(traceDielectricHit(-m, resolvedSceneMedium(ior), airMedium()), -d2).transmitted;
+//#endif
+//#if !HOLLOW
+//#if SSS
+//#if !WALK
+    if (sssOpB > 0.0) { rd = normalize(mix(rd, d2, sssOpB)); }
+//#endif
+//#endif
+//#endif
 //#endif
     ro = q + m * 0.006;
   }
+//#if SSS
+//#if !WALK
+  let exitSig = max(sig, 1.15 * clamp(mu.tab[19].w, 0.0, 1.0));
+  return col + thr * seen(rd, exitSig);
+//#else
   return col + thr * seen(rd, sig);
+//#endif
+//#else
+  return col + thr * seen(rd, sig);
+//#endif
 }
 
 // What shade() does, for every material with a clear or milky body.
@@ -1453,14 +1921,66 @@ fn surfaceK() -> f32 {
 
 fn shadeM(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
   let p = ro + rd * t;
-  let n = nrm(p);
+//#if PAINT_INTERFACE
+  let rawN = nrm(p);
+  var n = faceIncident(rawN, -rd);
+  let c0 = dot(-rd, rawN);
+  let perp = rawN - rd * dot(rawN, rd);
+  let pl = length(perp);
+  if (c0 < 0.72 && pl > 1e-5) {
+    let inDir = -perp / pl;
+    let vox = 2.0 * HB / min(u.vres, 768.0);
+    let qLoc = p + (inDir - rd) * (1.2 * vox);
+    let nLoc0 = nrm(qLoc);
+    let nLoc = nrm(qLoc - nLoc0 * mapW(qLoc));
+    let onBev = smoothstep(0.008, 0.045, dot(-rd, nLoc) - c0);
+    if (onBev > 0.0) {
+      var qOut = p - inDir * (2.2 * vox) - rd * (4.0 * vox);
+      var minD = 1e9;
+      for (var s = 0; s < 8; s++) {
+        let d = mapW(qOut);
+        minD = min(minD, d);
+        qOut += rd * max(d, 0.5 * vox);
+      }
+      let isSil = smoothstep(0.20 * vox, 0.70 * vox, minD);
+      if (isSil > 0.0) {
+        let q1 = p + (inDir - rd) * (2.6 * vox);
+        let n10 = nrm(q1);
+        let n1 = nrm(q1 - n10 * mapW(q1));
+        let c1 = dot(-rd, n1);
+        if (c1 > c0 + 0.015) {
+          let q2 = p + (inDir - rd) * (3.8 * vox);
+          let n20 = nrm(q2);
+          let n2 = nrm(q2 - n20 * mapW(q2));
+          let flat = smoothstep(0.9988, 0.9997, dot(n1, n2));
+          let w = isSil * onBev * flat * smoothstep(0.015, 0.06, c1 - c0);
+          n = normalize(mix(n, faceIncident(n1, -rd), w));
+        }
+      }
+    }
+  }
+  let minC = clamp(0.22 + 0.60 * mu.tab[30].w, 0.22, 0.55);
+  let cn = -dot(rd, n);
+  if (cn < minC) {
+    let tang = n + rd * cn;
+    let tl = length(tang);
+    if (tl > 1e-5) { n = tang * (sqrt(max(1.0 - minC * minC, 0.0)) / tl) - rd * minC; }
+  }
+//#else
+  let n = faceIncident(nrm(p), -rd);
+//#endif
 //#if ROUGH
 //#if COAT
   let ne = n;                               // (under a coat the top of the surface is the coat, and smooth)
   let cosi = clamp(-dot(rd, n), 0.0, 1.0);
 //#else
-  let ne = frIn(n, rd, xi);                 // the facet light gets in through (the surface's own normal, unless by chance)
-  let cosi = frCos(-dot(rd, ne));
+  let ne = faceIncident(frIn(n, rd, xi), -rd); // the facet light gets in through (the surface's own normal, unless by chance)
+  let cosi0 = frCos(-dot(rd, ne));
+//#if SSS
+  let cosi = mix(cosi0, max(cosi0, 0.62), clamp(mu.tab[19].w * sqrt(clamp(mu.surf.x, 0.0, 1.0)), 0.0, 1.0));
+//#else
+  let cosi = cosi0;
+//#endif
 //#endif
 //#else
   let cosi = clamp(-dot(rd, n), 0.0, 1.0);
@@ -1471,30 +1991,60 @@ fn shadeM(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
 
   // ---- the surface: what it reflects, and through which facet light gets in
 //#if ROUGH
-  let envB = frTop(rd, n, xi, cosi);        // the body's own reflection, spread by its roughness
+//#if COAT
+  let baseReflection = frTop(rd, n, xi, cosi);        // the body's own reflection, spread by its roughness
+//#else
+  let baseReflection = frTop(rd, n, xi, cosi0);       // the body's own reflection, spread by its roughness
+//#endif
 //#else
 //#if WEAR
   let wr = wearAt(p, n);
-  let envB = wearSee(rd, wr, p, cosi) * (wr.keep * wr.tint);
+  let baseReflection = wearSee(rd, wr, p, cosi) * (wr.keep * select(wr.tint, vec3f(1.0), mu.tab[31].w > 0.0));
 //#else
 //#if SSS
   // (a ceramic's glaze softens what it mirrors by its haze, mu.tab[30].w)
-  var envB = sharpEnv(reflect(rd, n), p, n, cosi);
-  if (mu.tab[30].w > 0.0) { envB = envL(reflect(rd, n), mu.tab[30].w); }
+  var baseReflection = sharpEnv(reflect(rd, n), p, n, cosi);
+  if (mu.tab[30].w > 0.0) { baseReflection = envL(reflect(rd, n), mu.tab[30].w); }
 //#else
-  let envB = env(reflect(rd, n));
+  let baseReflection = env(reflect(rd, n));
 //#endif
 //#endif
   let ne = n;
+//#endif
+//#if SSS
+//#if !WALK
+  let sssOpTop = clamp(mu.tab[19].w, 0.0, 1.0);
+  var waxAo = 1.0;
+  if (sssOpTop > 0.0) { waxAo = waxOcclusion(p, n); }
+//#endif
+//#endif
+//#if GRATING
+  let envB = gratingReflect(p,n,rd,baseReflection,xi);
+//#else
+//#if SSS
+//#if !WALK
+  let waxSpecScale = (1.0 - 0.30 * clamp(mu.surf.x, 0.0, 1.0)) * (0.30 + 0.70 * waxAo);
+  let envB = baseReflection * mix(1.0, waxSpecScale, sssOpTop);
+//#else
+  let envB = baseReflection;
+//#endif
+//#else
+  let envB = baseReflection;
+//#endif
 //#endif
 //#if COAT
 //#if ROUGH
   // (the coat's reflection is sharp whatever lies under it)
 //#if WEAR
   let wr = wearAt(p, n);
-  let envT = wearSee(rd, wr, p, cosi) * (wr.keep * wr.tint);
+  let coatReflection = wearSee(rd, wr, p, cosi) * (wr.keep * select(wr.tint, vec3f(1.0), mu.tab[31].w > 0.0));
 //#else
-  let envT = sharpEnv(reflect(rd, n), p, n, cosi);
+  let coatReflection = sharpEnv(reflect(rd, n), p, n, cosi);
+//#endif
+//#if GRATING
+  let envT = gratingReflect(p,n,rd,coatReflection,xi);
+//#else
+  let envT = coatReflection;
 //#endif
 //#else
   let envT = envB;
@@ -1508,7 +2058,11 @@ fn shadeM(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
 //#if ROUGH
   let envF = envT + skyOf(reflect(rd, n));
 //#else
+//#if GRATING
+  let envF = gratingReflect(p,n,rd,mirrorEnv(reflect(rd,n), mirrorLod(p,n,cosi)),xi) + skyOf(reflect(rd,n));
+//#else
   let envF = mirrorEnv(reflect(rd, n), mirrorLod(p, n, cosi)) + skyOf(reflect(rd, n));
+//#endif
 //#endif
 //#else
   let fd = 0.0;
@@ -1538,6 +2092,15 @@ fn shadeM(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
 //#each
     {
       let l = lams(i, GROUP, xi, W);
+//#if PAINT_FILM
+//#if COAT
+      let coated = true;
+//#else
+      let coated = false;
+//#endif
+      let film = paintFilmLanes(cosi,1.0,iorOf(i,xi,W),mu.surf.z,coated,mu.film.y,fd,l);
+      acc += tint4(l,film.top)*envF + tint4(l,film.substrate)*envB;
+//#else
       let Ft = top4(cosi, l, fd);
 //#if FILM
       let lit = envF;
@@ -1545,15 +2108,26 @@ fn shadeM(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
       let lit = envT;
 //#endif
 //#if COAT
+//#if PAINT_COAT
+      let shares = pbr_layer_shares(cosi, 1.0, iorOf(i,xi,W), mu.surf.z, true);
+      acc += tint4(l, vec4f(shares.x)) * lit + tint4(l, vec4f(shares.y)) * envB;
+//#else
       acc += tint4(l, Ft) * lit + tint4(l, (1.0 - Ft) * (1.0 - Ft) * under(cosi, iorOf(i, xi, W))) * envB;
+//#endif
 //#else
       acc += tint4(l, Ft) * lit;
+//#endif
 //#endif
     }
 //#end
 //#else
 //#if COAT
+//#if PAINT_COAT
+    let shares = pbr_layer_shares(cosi, 1.0, iorOf(i,xi,W), mu.surf.z, true);
+    acc += wOf(i,xi,W) * (shares.x * envT + shares.y * envB);
+//#else
     acc += wOf(i, xi, W) * (top1(cosi) * envT + (1.0 - top1(cosi)) * (1.0 - top1(cosi)) * under(cosi, iorOf(i, xi, W)) * envB);
+//#endif
 //#else
     acc += wOf(i, xi, W) * (top1(cosi) * envT);
 //#endif
@@ -1585,16 +2159,32 @@ fn shadeM(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
     var t1 = vec4f(0.0);
     var t2 = vec4f(0.0);
 //#each
+//#if PAINT_FILM
 //#if COAT
+    t[g] = paintFilmLanes(cosi,1.0,ior,mu.surf.z,true,mu.film.y,fd,lams(i,GROUP,xi,W)).diffuse;
+//#else
+    t[g] = paintFilmLanes(cosi,1.0,ior,mu.surf.z,false,mu.film.y,fd,lams(i,GROUP,xi,W)).diffuse;
+//#endif
+//#else
+//#if COAT
+//#if PAINT_COAT
+    t[g] = vec4f(pbr_layer_shares(cosi,1.0,ior,mu.surf.z,true).z);
+//#else
     t[g] = (1.0 - top4(cosi, lams(i, GROUP, xi, W), fd)) * (1.0 - under(cosi, ior));
+//#endif
 //#else
     t[g] = 1.0 - top4(cosi, lams(i, GROUP, xi, W), fd);
+//#endif
 //#endif
 //#end
     var thr = max(max4(t0), max(max4(t1), max4(t2)));
 //#else
 //#if COAT
+//#if PAINT_COAT
+    var thr = pbr_layer_shares(cosi,1.0,ior,mu.surf.z,true).z;
+//#else
     var thr = (1.0 - top1(cosi)) * (1.0 - under(cosi, ior));
+//#endif
 //#else
     var thr = 1.0 - top1(cosi);
 //#endif
@@ -1612,7 +2202,17 @@ fn shadeM(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
 //#if ROUGH
     var dir = frDir(refract(rd, ne, 1.0 / ior), n);
 //#else
-    var dir = refract(rd, ne, 1.0 / ior);
+    var dir = pbr_dielectric_split(traceDielectricHit(ne, airMedium(), resolvedSceneMedium(ior)), -rd).transmitted;
+//#endif
+//#endif
+//#if SSS
+//#if !WALK
+    if (sssOpTop > 0.0) {
+      dir = normalize(mix(dir, normalize(mix(rd, -n, 0.12)), sssOpTop));
+//#if BIREF
+      kv = dir * length(kv);
+//#endif
+    }
 //#endif
 //#endif
 //#if ROUGH
@@ -1627,9 +2227,6 @@ fn shadeM(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
 //#else
     var att = vec3f(1.0);
 //#endif
-//#if SSS
-    var haze = 0.0;                         // how far what this path sees is softened by the milky body, squared
-//#endif
     for (var b = 0; b < MAX_NB; b++) {
       if (b >= u.nb || thr < 0.02) { break; }      // nothing got in (total reflection at the surface): skip the interior
       // ---- to the next surface
@@ -1637,7 +2234,8 @@ fn shadeM(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
       // How far the ray gets before it is scattered. Short of the surface: it is turned to a random
       // direction there and followed as it wanders, to the lights. As far as the surface: it is treated
       // there as a ray in clear glass is.
-      let fly = -log(max(1.0 - rnd(), 1e-6)) / mu.sss.x;
+      let rates = collisionRates();
+      let fly = walkFlight(rates);
       var s = fly;
       var out = false;
       if (fly >= -mapW(pos) * 0.9) { s = marchTo(pos, dir, fly, &out); }
@@ -1645,10 +2243,10 @@ fn shadeM(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
 //#if GLOW
       acc += {{WEIGHT}} * att * mu.glow.rgb * s;
 //#endif
-      att *= exp(-(u.absorb.xyz + mu.sssA.rgb) * s);
-      haze += HAZE * mu.sss.x * s;
+      att *= exp(-(u.absorb.xyz + mu.sssA.rgb) * s) * walkWeight(rates, s, !out);
+      // A survived flight is ballistic; a collided flight follows its actual phase.
       if (!out) {
-        acc += {{WEIGHT}} * att * wander(pos, anywhere());
+        acc += {{WEIGHT}} * att * wander(pos, walkDirection(dir));
         break;
       }
       let q = pos;
@@ -1679,15 +2277,29 @@ fn shadeM(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
       acc += {{WEIGHT}} * att * mu.glow.rgb * (s * pow(clamp(-mapW(pos + dir * (0.5 * s)) / max(0.5 * s, 1e-4), 0.0, 1.0), mu.glow.w));
 //#endif
 //#endif
+//#if SSS
+      let incoming = att;
+//#endif
       att *= exp(-u.absorb.xyz * s);
 //#if SSS
       {
         // part of the ray is scattered away on this stretch; in its place comes the light the body
         // holds along it, scattered towards the eye
-        let ext = exp(-(mu.sssK.rgb + mu.sssA.rgb) * max(s, 0.0));
-        acc += {{WEIGHT}} * att * glowAlong(q - dir * s, dir, s);
-        att *= ext * throughHue(s);
-        haze += HAZE * mu.sss.x * s;
+        let ext = exp(-(collisionRates() + mu.sssA.rgb) * max(s, 0.0));
+        let glassScatter = glowAlong(q - dir * s, dir, s);
+        let glassAtt = att * ext * throughHue(s);
+        if (sssOpTop > 0.0) {
+          let tau0 = waxTau(s);
+          var waxScatter = waxVolume(q - dir * s, dir, s, n, waxAo, b == 0);
+          if (b == 0) { waxScatter += waxNear(n, waxAo, s); }
+          let waxScale = select(1.0, 0.56, b == 0);
+          let waxAtt = incoming * (waxScale * exp(-vec3f(tau0))) * waxThroughTint(tau0);
+          acc += {{WEIGHT}} * incoming * mix(glassScatter, waxScatter, sssOpTop);
+          att = mix(glassAtt, waxAtt, sssOpTop);
+        } else {
+          acc += {{WEIGHT}} * incoming * glassScatter;
+          att = glassAtt;
+        }
       }
 //#endif
 //#endif
@@ -1723,6 +2335,7 @@ fn shadeM(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
 //#endif
       var ci = dot(dir, mN);
       if (ci < 0.0) { mN = -mN; ci = -ci; }
+      mN = -faceIncident(-mN, -dir);
 //#if BIREF
       // the wave meets the surface at its own angle, with its own index
       let iorIn = length(kv);
@@ -1757,7 +2370,15 @@ fn shadeM(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
       // the ending, and none stays trapped that a rough wall would let out). It is taken off before the
       // part that leaves is followed, and what the wall sends back is reckoned without it, so that
       // nothing more has to be carried meanwhile.
+//#if SSS
+//#if !WALK
+      let we = frEnd(fv, bend) * (1.0 - sssOpTop);
+//#else
       let we = frEnd(fv, bend);
+//#endif
+//#else
+      let we = frEnd(fv, bend);
+//#endif
       acc += {{WEIGHT}} * (fw.x * we) * att * frDeep(s) * frAll(mN);
 //#if FINE
 //#each
@@ -1766,7 +2387,15 @@ fn shadeM(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
 //#endif
       thr *= 1.0 - fw.x * we;
       var bare = fw.x * (1.0 - we) / max(1.0 - fw.x * we, 1e-4);
+//#if SSS
+//#if !WALK
+      if (bare * (1.0 - sssOpTop) > 1.0 - frLeak()) {
+//#else
       if (bare > 1.0 - frLeak()) {
+//#endif
+//#else
+      if (bare > 1.0 - frLeak()) {
+//#endif
         // (so little of it leaves here that following it is not worth the march: that little is given
         // the light from all round as well)
         acc += {{WEIGHT}} * (1.0 - bare) * att * frAll(mN);
@@ -1782,7 +2411,11 @@ fn shadeM(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
       fv = frNext(fv, bend);
 //#endif
 //#else
+//#if BIREF
       let bare = fresnel(cf, iorIn, 1.0);
+//#else
+      let bare = pbr_dielectric_split(traceDielectricHit(-mf, resolvedSceneMedium(iorIn), airMedium()), -dir).reflectance;
+//#endif
 //#endif
 //#endif
       // ---- where the part that stays inside goes next (worked out now, so that less has to be carried
@@ -1800,13 +2433,26 @@ fn shadeM(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
 //#endif
       let np = q - mN * 0.004;
       var X = vec3f(0.0);
+//#if SSS
+//#if !WALK
+      let bareExit = bare * (1.0 - sssOpTop);
+      if (bareExit < 0.999) {
+//#else
       if (bare < 0.999) {
+//#endif
+//#else
+      if (bare < 0.999) {
+//#endif
         // ---- the part that leaves: on through further pieces of the body, to the lights
 //#if BIREF
         // the wave keeps the part of itself that lies along the surface
         var od = normalize(kv - dot(kv, mN) * mN + sqrt(max(1.0 - dot(kv, kv) + dot(kv, mN) * dot(kv, mN), 0.0)) * mN);
 //#else
+//#if ROUGH
         var od = refract(dir, -mN, iorIn);
+//#else
+        var od = pbr_dielectric_split(traceDielectricHit(-mN, resolvedSceneMedium(iorIn), airMedium()), -dir).transmitted;
+//#endif
 //#endif
 //#if ROUGH
 //#if !COAT
@@ -1817,13 +2463,9 @@ fn shadeM(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
 //#endif
 //#endif
 //#endif
-        // What it sees is softened by: the milky body; the facets it leaves through; and what its
-        // direction inside was spread by without being sampled for it (on the way in, and at every
-        // bounce since), widened as leaving the body widens any spread.
+        // The surface facets spread the exiting light. Extinction already removed every
+        // volume collision from this ray; the in-scattered light was integrated separately.
         var sg = 0.0;
-//#if SSS
-        sg = haze;
-//#endif
 //#if ROUGH
 //#if COAT
         sg += fv;
@@ -1835,19 +2477,69 @@ fn shadeM(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
 //#endif
 //#endif
 //#endif
+//#if SSS
+//#if !WALK
+        if (sssOpTop > 0.0) {
+          od = normalize(mix(od, dir, 0.55 * sssOpTop));
+          sg = max(sg, 0.16 * sssOpTop * sssOpTop);
+        }
+//#endif
+//#endif
 //#if FILM
         // (what the far face of the film sent back has been reflected by the film: it sees the film's sky)
         let sky = select(0.0, 1.0, b > 0);
         if (LAYERS > 0) {
+//#if SSS
+//#if !WALK
+          if (sssOpTop < 0.999) {
+            X = att * beyondM(q + mN * 0.006, od, ior, sqrt(sg), sky);
+          }
+          if (sssOpTop > 0.0) {
+            X = mix(X, att * (waxExit(q, mN, dir) + sky * skyDim(od)), sssOpTop);
+          }
+//#else
           X = att * beyondM(q + mN * 0.006, od, ior, sqrt(sg), sky);
+//#endif
+//#else
+          X = att * beyondM(q + mN * 0.006, od, ior, sqrt(sg), sky);
+//#endif
         } else {
+//#if SSS
+//#if !WALK
+          X = att * (mix(seen(od, sqrt(sg)), waxExit(q, mN, dir), sssOpTop) + sky * skyDim(od));
+//#else
           X = att * (seen(od, sqrt(sg)) + sky * skyDim(od));
+//#endif
+//#else
+          X = att * (seen(od, sqrt(sg)) + sky * skyDim(od));
+//#endif
         }
 //#else
         if (LAYERS > 0) {
+//#if SSS
+//#if !WALK
+          if (sssOpTop < 0.999) {
+            X = att * beyondM(q + mN * 0.006, od, ior, sqrt(sg));
+          }
+          if (sssOpTop > 0.0) {
+            X = mix(X, att * waxExit(q, mN, dir), sssOpTop);
+          }
+//#else
           X = att * beyondM(q + mN * 0.006, od, ior, sqrt(sg));
+//#endif
+//#else
+          X = att * beyondM(q + mN * 0.006, od, ior, sqrt(sg));
+//#endif
         } else {
+//#if SSS
+//#if !WALK
+          X = att * mix(seen(od, sqrt(sg)), waxExit(q, mN, dir), sssOpTop);
+//#else
           X = att * seen(od, sqrt(sg));
+//#endif
+//#else
+          X = att * seen(od, sqrt(sg));
+//#endif
         }
 //#endif
 //#if HOLLOW
@@ -1865,16 +2557,25 @@ fn shadeM(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
         let l = lams(i, GROUP, xi, W);
 //#if COAT
 //#if FILM
-        let Fx = 1.0 - (1.0 - F1) * (1.0 - filmR4(ccb, l, fd, mu.surf.z, 1.0));
+        let Fx0 = 1.0 - (1.0 - F1) * (1.0 - filmR4(ccb, l, fd, mu.surf.z, 1.0));
 //#else
-        let Fx = vec4f(1.0 - (1.0 - F1) * (1.0 - fresnel(ccb, mu.surf.z, 1.0)));
+        let Fx0 = vec4f(1.0 - (1.0 - F1) * (1.0 - fresnel(ccb, mu.surf.z, 1.0)));
 //#endif
 //#else
 //#if FILM
-        let Fx = filmR4(cf, l, fd, iorIn, 1.0);
+        let Fx0 = filmR4(cf, l, fd, iorIn, 1.0);
 //#else
-        let Fx = vec4f(bare);
+        let Fx0 = vec4f(bare);
 //#endif
+//#endif
+//#if SSS
+//#if !WALK
+        let Fx = Fx0 * (1.0 - sssOpTop);
+//#else
+        let Fx = Fx0;
+//#endif
+//#else
+        let Fx = Fx0;
 //#endif
         acc += tint4(l, t[g] * (1.0 - Fx)) * X;
         t[g] *= Fx;
@@ -1883,9 +2584,25 @@ fn shadeM(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
       thr = max(max4(t0), max(max4(t1), max4(t2)));
 //#else
 //#if COAT
+//#if SSS
+//#if !WALK
+      let Fx = (1.0 - (1.0 - F1) * (1.0 - fresnel(ccb, mu.surf.z, 1.0))) * (1.0 - sssOpTop);
+//#else
       let Fx = 1.0 - (1.0 - F1) * (1.0 - fresnel(ccb, mu.surf.z, 1.0));
+//#endif
+//#else
+      let Fx = 1.0 - (1.0 - F1) * (1.0 - fresnel(ccb, mu.surf.z, 1.0));
+//#endif
+//#else
+//#if SSS
+//#if !WALK
+      let Fx = bareExit;
 //#else
       let Fx = bare;
+//#endif
+//#else
+      let Fx = bare;
+//#endif
 //#endif
       acc += wOf(i, xi, W) * (thr * (1.0 - Fx)) * X;
       thr *= Fx;
@@ -1922,6 +2639,11 @@ fn shadeM(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
 //#endif
   }
 //#if ROUGH
+//#if SSS
+//#if !WALK
+  frRad *= (1.0 - sssOpTop);
+//#endif
+//#endif
   frSeen(n, rd, xi, cosi, W);               // (what the stage that blurs the inside of rough glass is told about this surface)
 //#endif
 //#if SSS
@@ -1934,7 +2656,23 @@ fn grazeM(p: vec3f, rd: vec3f) -> vec3f {
 //#if COAT
   return env(reflect(rd, nrm(p))) * surfaceK();
 //#else
+//#if SSS
+//#if !WALK
+  let sssOpG = clamp(mu.tab[19].w, 0.0, 1.0);
+  let ng = nrm(p);
+  let baseG = seen(reflect(rd, ng), spreadR()) * surfaceK();
+  if (sssOpG > 0.0) {
+    let fG = fresnel(0.60, 1.0, u.ior);
+    let waxG = fG * baseG + (1.0 - fG) * waxNear(ng, 1.0, 0.08);
+    return mix(baseG, waxG, sssOpG * smoothstep(0.0, 0.20, sqrt(clamp(mu.surf.x, 0.0, 1.0))));
+  }
+  return baseG;
+//#else
   return seen(reflect(rd, nrm(p)), spreadR()) * surfaceK();
+//#endif
+//#else
+  return seen(reflect(rd, nrm(p)), spreadR()) * surfaceK();
+//#endif
 //#endif
 }
 //#endif
@@ -1978,5 +2716,27 @@ fn waveE(kt: vec3f, N: vec3f, a: vec3f, no: f32, nE: f32) -> vec3f {
   let k1 = kt + (-B + sqrt(disc)) / (2.0 * A) * N;
   if (dot(rayE(k1, a, no, nE), N) > 0.0) { return k1; }
   return kt + (-B - sqrt(disc)) / (2.0 * A) * N;
+}
+//#endif
+
+//#if AIR_HIT
+// The first surface a ray outside the body meets: true if there is one, and how far along.
+fn outHit(ro: vec3f, rd: vec3f, tHit: ptr<function, f32>) -> bool {
+  let b = dot(ro, rd);
+  let h = b * b - (dot(ro, ro) - BOUND * BOUND);
+  if (h <= 0.0) { return false; }
+  let tFar = -b + sqrt(h);
+  var t = 0.0;
+  for (var i = 0; i < STEPS_OUT; i++) {
+    let d = mapW(ro + rd * t);
+    if (d < 0.0008) {
+      t += mapNW(ro + rd * t);
+      *tHit = t;
+      return true;
+    }
+    t += d * STEP_SCALE;
+    if (t > tFar) { break; }
+  }
+  return false;
 }
 //#endif

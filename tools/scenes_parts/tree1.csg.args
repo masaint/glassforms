@@ -1,0 +1,7 @@
+scene=studio
+preset=block
+p.width=1.1
+p.height=1.1
+p.depth=1.1
+material=glass
+trace=csg

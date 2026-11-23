@@ -33,12 +33,21 @@ struct SU {
   base: vec4f,              // rgb: the surface's base colour   w: how many lights at infinity
   k: vec4f,                 // x: weight of the direct diffuse light   y: how far the shadows dim the frame's own light
                             // z: how far the ambient occlusion dims it   w: 1 = lamps stand in the scene
+                            // ceramic y: effective coat IOR; z: bare (0), coated (1), thin film (-1)
   clay: vec4f,              // x: the light clay gathers on average   y: how far differences from it are drawn out
   lights: array<SLight, 12>,
   cer: vec4f,               // a ceramic: x 1 = on   y: how far its diffuse light wraps past the terminator
-                            // z: its glaze's reflectance head on   w: the cone its reflections are hidden by
+                            // z: the body's refractive index   w: the cone its reflections are hidden by
   nine: array<vec4f, 9>,    // a ceramic: the room's light without the lights (nine terms, as a white matte
                             // surface gathers it, over pi), in the lights' own frame
+  pigmentFrame: array<vec4f, 3>,
+  pigmentDirt: vec4f,
+  pigmentVariation: vec4f,
+  film: array<vec4f,3>,
+  gi: vec4f,                // x: bounces (0 = off), y: strength, z: samples, w: direct light count
+  floorPlane: vec4f,        // xyz: floor up in camera frame, w: floor height in room frame
+  floorLit: vec4f,          // rgb: unshadowed matte floor radiance, w: floor fade (< 0 for sky horizon)
+  floorAlbedo: vec4f,       // rgb: floor diffuse albedo, w: floor shadow strength
 }
 @group(0) @binding(0) var<uniform> s: SU;
 @group(0) @binding(1) var frameTex: texture_2d<f32>;
@@ -104,16 +113,12 @@ fn nrm(p: vec3f) -> vec3f {
 }
 
 // the tracer's interleaved gradient noise (to aim at the very point its first sample went through)
-fn ign(p: vec2f) -> f32 { return fract(52.9829189 * fract(dot(p, vec2f(0.06711056, 0.00583715)))); }
+fn ign(p: vec2f) -> f32 { return pbr_ign(p); }   // pbr/hash.wgsl
 
 // random numbers: a hash of the pixel, the frame and a counter, so every light and every axis of it
 // gets numbers of its own, unrelated to its neighbours'
 var<private> seed: u32;
-fn pcg(v: u32) -> u32 {
-  let st = v * 747796405u + 2891336453u;
-  let w = ((st >> ((st >> 28u) + 4u)) ^ st) * 277803737u;
-  return (w >> 22u) ^ w;
-}
+fn pcg(v: u32) -> u32 { return pbr_pcg(v); }   // pbr/hash.wgsl
 fn rnd() -> f32 {
   seed = pcg(seed);
   return f32(seed >> 8u) / 16777216.0;
@@ -163,16 +168,7 @@ fn shadowTo(p: vec3f, n: vec3f, rd_in: vec3f, w: f32, tMax: f32, j: f32) -> f32 
 
 // Ambient occlusion: how far the distance field closes in over the surface, from five looks along the
 // normal (the same arithmetic the clay's own folds are judged by).
-fn occlusion(p: vec3f, n: vec3f) -> f32 {
-  var shut = 0.0;
-  var weight = 1.0;
-  for (var i = 0; i < 5; i++) {
-    let h = 0.012 + 0.052 * f32(i);
-    shut += weight * max(h - mapW(p + n * h), 0.0) / h;
-    weight *= 0.8;
-  }
-  return clamp(1.0 - 0.42 * shut, 0.0, 1.0);
-}
+fn occlusion(p: vec3f, n: vec3f) -> f32 { return lightOcclusion(p, n); }   // light/occlusion.wgsl
 
 struct Direct {
   lit: vec3f,               // the direct light arriving, shadowed (irradiance)
@@ -199,30 +195,8 @@ fn atInfinity(p: vec3f, n: vec3f) -> Direct {
   for (var i = 0; i < 12; i++) {
     if (i >= count) { break; }
     let L = s.lights[i];
-    let tw = L.a.w;
-    let th = L.u.w;
-    let soft = max(L.v.w, 1e-3);
-    let na = dot(ne, L.a.xyz);
-    let nu = dot(ne, L.u.xyz);
-    let nv = dot(ne, L.v.xyz);
-    // (wholly behind the surface: every corner of the rectangle faces away, by more than a ceramic's wrap)
-    let wrap = s.cer.y;
-    if (na + abs(nu) * tw + abs(nv) * th + wrap * sqrt(1.0 + tw * tw + th * th) <= 0.0) { continue; }
-    var open = 0.0;
-    for (var gy = 0; gy < 4; gy++) {
-      let y = (f32(gy) * 0.5 - 0.75) * th;
-      let sy = 1.0 - smoothstep(0.0, 1.0, (abs(y) / th - (1.0 - soft)) / soft);
-      for (var gx = 0; gx < 4; gx++) {
-        let x = (f32(gx) * 0.5 - 0.75) * tw;
-        let sx = 1.0 - smoothstep(0.0, 1.0, (abs(x) / tw - (1.0 - soft)) / soft);
-        let q = 1.0 + x * x + y * y;
-        // (cosine = (na + x nu + y nv) / sqrt(q); solid angle per unit of the plane = 1 / q^1.5)
-        // (a ceramic's light wraps a little past the terminator, as light scattered just under its
-        // surface does: (cosine + wrap) / (1 + wrap))
-        open += max(na + x * nu + y * nv + wrap * sqrt(q), 0.0) * sx * sy / (q * q * (1.0 + wrap));
-      }
-    }
-    open *= tw * th * 0.25;
+    // (a ceramic's light wraps a little past the terminator: s.cer.y)
+    let open = lightRigOpen(ne, L.a, L.u, L.v, s.cer.y);   // light/rig.wgsl
     if (open <= 0.0) { continue; }
     let e = L.rgb.rgb * open;
     o.open += e;
@@ -287,8 +261,15 @@ fn fromLamps(p: vec3f, n: vec3f) -> Direct {
     var at = L.p.xyz;
     var size = L.u.w;
     if (L.p.w > 1.5) {
-      at += L.u.xyz * (r1 * L.u.w) + L.v.xyz * (r2 * L.v.w);
-      size = min(L.u.w, L.v.w);
+      let sample = panelSample(L.p.xyz-p, L.u, L.v, n, q2);
+      if (sample.w>0.0) {
+        let dist = length(sample.xyz);
+        let width = max(0.25*min(L.u.w,L.v.w)/max(dist,1e-3),0.004);
+        let energy = L.rgb.rgb*sample.w;
+        o.open += energy;
+        o.lit += energy*shadowTo(p,n,normalize(sample.xyz),width,dist,j);
+      }
+      continue;
     } else if (L.p.w > 0.5) {
       at += L.u.xyz * (r1 * L.v.w);
     }
@@ -302,8 +283,6 @@ fn fromLamps(p: vec3f, n: vec3f) -> Direct {
     if (L.p.w > 0.5 && L.p.w < 1.5) {
       let along = dot(l, L.u.xyz);
       area += 4.0 * L.u.w * L.v.w * sqrt(max(1.0 - along * along, 0.0));
-    } else if (L.p.w > 1.5) {
-      area = 4.0 * L.u.w * L.v.w * max(-dot(l, cross(L.u.xyz, L.v.xyz)), 0.0);
     }
     let e = L.rgb.rgb * (area * cosn / max(d2, area + 1e-4));
     o.open += e;
@@ -330,7 +309,7 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   var t = src.a;
   t += mapNW(ro + rd * t);
   let d2 = mapNW(ro + rd * t);
-  if (abs(d2) > 0.01) { return keep; }
+  if (abs(d2) > max(0.01, 2.0 * HB() / s.k0.x)) { return keep; }
   t += d2;
   let p = ro + rd * t;
   let n = nrm(p);
@@ -366,7 +345,7 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   var direct = atInfinity(p, n);
   let lampLight = fromLamps(p, n);
   if (s.k0.w > 4.5) { return vec4f(select(lampLight.lit, lampLight.open, s.k0.w < 5.5) * 0.01, 0.0); }
-  // (the lamps' light as matte clay always gathered it, the lights at infinity's as the nine terms do: over pi)
+  // Preserve the milky body shadow weights. Clay converts finite irradiance to outgoing diffuse radiance below.
   let lit = direct.lit * 0.31830989 + lampLight.lit;
   let open = direct.open * 0.31830989 + lampLight.open;
 
@@ -395,7 +374,23 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   }
   // (for looking: the frame's own light alone, or the direct light alone)
   if (s.k0.w > 1.5) { return vec4f(0.0, 0.0, 0.0, keepK); }
-  let add = s.base.rgb * (infLit * addK + lampLight.lit) * (s.k.x * cover);
+  let diffuseLamp = lampLight.lit * select(1.0, 0.31830989, s.clay.x > 0.0);
+  var giAdd = vec3f(0.0);
+  if (s.gi.x > 0.5 && s.gi.y > 0.0) {
+    let ne = n.x * s.env0.xyz + n.y * s.env1.xyz + n.z * s.env2.xyz;
+    let giAlb = s.base.rgb * select(0.85, 0.90, s.clay.x > 0.0);
+    let g = surfGiBounce(fc, p, n, giAlb);
+    let giW = clamp(s.gi.y, 0.0, 1.0);
+    if (s.clay.x > 0.0) {
+      let delta = g.bouncedSelf * s.gi.y - g.occSelf * (0.80 * giW) + g.floorDelta * giW;
+      giAdd = s.base.rgb * max(delta, vec3f(0.0)) * (addK * cover);
+    } else {
+      let flDelta = max(g.floorDelta * giW, -0.20 * nineAt(ne));
+      let selfGain = g.bouncedSelf * (s.gi.y * (0.38 + 0.45 * s.k.x));
+      giAdd = s.base.rgb * max(flDelta * 0.55 + selfGain, vec3f(0.0)) * cover;
+    }
+  }
+  let add = pbr_diffuse_albedo(s.base.rgb, s.k.x * cover, clamp(-dot(rd, n), 0.0, 1.0)) * (infLit * addK + diffuseLamp) + giAdd;
   if (s.k0.w > 0.5) { return vec4f(add, 0.0); }
   return vec4f(add, keepK);
 }
@@ -403,11 +398,241 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 // The ceramic's nine terms of the room along d (the lights' own frame): what a white matte surface facing
 // d gathers, over pi.
 fn nineAt(d: vec3f) -> vec3f {
-  let v = s.nine[0].rgb
-        + s.nine[1].rgb * d.y + s.nine[2].rgb * d.z + s.nine[3].rgb * d.x
-        + s.nine[4].rgb * (d.x * d.y) + s.nine[5].rgb * (d.y * d.z) + s.nine[6].rgb * (3.0 * d.z * d.z - 1.0)
-        + s.nine[7].rgb * (d.x * d.z) + s.nine[8].rgb * (d.x * d.x - d.y * d.y);
+  let v = pbr_sh9_sum(s.nine[0].rgb, s.nine[1].rgb, s.nine[2].rgb, s.nine[3].rgb, s.nine[4].rgb, s.nine[5].rgb, s.nine[6].rgb, s.nine[7].rgb, s.nine[8].rgb, d);
   return max(v, vec3f(0.0));
+}
+
+fn surfGiDistant(d_w: vec3f) -> vec3f {
+  let e = d_w.x * s.env0.xyz + d_w.y * s.env1.xyz + d_w.z * s.env2.xyz;
+  let v = pbr_sh9_distant(s.nine[0].rgb, s.nine[1].rgb, s.nine[2].rgb, s.nine[3].rgb, s.nine[4].rgb, s.nine[5].rgb, s.nine[6].rgb, s.nine[7].rgb, s.nine[8].rgb, e);
+  return max(v, vec3f(0.0));
+}
+
+fn surfGiSample2(fc: vec2f, si: i32, b: i32, nSmp: i32) -> vec2f {
+  let off = vec2f(f32(b * 17 + si * 5), f32(b * 31 + si * 11));
+  let shift = vec2f(ign(fc + off + vec2f(11.3, 27.9)), ign(fc.yx + off.yx + vec2f(37.7, 5.1)));
+  let stepN = f32((u32(s.k0.z) % 4096u) * u32(nSmp) + u32(si + b * 137));
+  return fract(shift + stepN * vec2f(0.754877666, 0.569840296));
+}
+
+fn surfGiCosine(n: vec3f, uv: vec2f) -> vec3f {
+  let ax = select(vec3f(0.0, 1.0, 0.0), vec3f(1.0, 0.0, 0.0), abs(n.y) > 0.9);
+  let t1 = normalize(cross(ax, n));
+  let t2 = cross(n, t1);
+  let phi = 6.2831853 * uv.y;
+  let r = sqrt(clamp(uv.x, 0.0, 1.0));
+  return n * sqrt(max(1.0 - uv.x, 0.0)) + r * (t1 * cos(phi) + t2 * sin(phi));
+}
+
+fn surfGiHitObj(ro_w: vec3f, rd_w: vec3f, tOut: ptr<function, f32>) -> bool {
+  let vox = 2.0 * HB() / s.k0.x;
+  let ro = toObj(ro_w);
+  let rd = toObj(rd_w);
+  let bound = 0.99 * HB();
+  let b = dot(ro, rd);
+  let h = b * b - (dot(ro, ro) - bound * bound);
+  if (h <= 0.0) { return false; }
+  let sh = sqrt(h);
+  let tFar = -b + sh;
+  if (tFar <= 0.0) { return false; }
+  var t = max(-b - sh, 0.5 * vox);
+  let eps = max(0.001, 0.42 * vox);
+  for (var i = 0; i < 44; i++) {
+    if (t > tFar) { break; }
+    let d = map(ro + rd * t);
+    if (d < eps) {
+      t = max(t + d, 0.25 * vox);
+      *tOut = t;
+      return true;
+    }
+    t += clamp(d * 0.85, 0.4 * vox, 0.09);
+  }
+  return false;
+}
+
+fn surfGiShadow(p: vec3f, n: vec3f, rd_in: vec3f) -> f32 {
+  let vox = 2.0 * HB() / s.k0.x;
+  let ro = toObj(p + n * (2.0 * vox));
+  let rd = toObj(rd_in);
+  let bound = 0.99 * HB();
+  let b = dot(ro, rd);
+  let h = b * b - (dot(ro, ro) - bound * bound);
+  if (h <= 0.0) { return 1.0; }
+  let sh = sqrt(h);
+  let tFar = -b + sh;
+  if (tFar <= 0.0) { return 1.0; }
+  var t = max(-b - sh, vox);
+  var vis = 1.0;
+  for (var i = 0; i < 20; i++) {
+    if (t > tFar) { break; }
+    let sd = map(ro + rd * t);
+    if (sd < -0.5 * vox) { return 0.0; }
+    vis = min(vis, clamp(0.5 + 0.5 * sd / max(0.025 * t, vox), 0.0, 1.0));
+    t += clamp(abs(sd), vox, 0.18);
+  }
+  return vis;
+}
+
+fn surfGiDirect(q: vec3f, nq: vec3f, wrap: f32, shadowW: f32, openOut: ptr<function, vec3f>) -> vec3f {
+  let count = min(i32(s.gi.w), 12);
+  *openOut = vec3f(0.0);
+  if (count <= 0) { return vec3f(0.0); }
+  let ne = nq.x * s.env0.xyz + nq.y * s.env1.xyz + nq.z * s.env2.xyz;
+  var totalOpen = vec3f(0.0);
+  var topE = vec3f(0.0);
+  var topW = 0.0;
+  var topIdx = -1;
+  for (var i = 0; i < 12; i++) {
+    if (i >= count) { break; }
+    let L = s.lights[i];
+    let tw = L.a.w;
+    let th = L.u.w;
+    let soft = max(L.v.w, 1e-3);
+    let na = dot(ne, L.a.xyz);
+    let nu = dot(ne, L.u.xyz);
+    let nv = dot(ne, L.v.xyz);
+    if (na + abs(nu) * tw + abs(nv) * th + wrap * sqrt(1.0 + tw * tw + th * th) <= 0.0) { continue; }
+    let edgeK = 1.0 - smoothstep(1.0 - soft, 1.0, 0.58);
+    var open = 0.0;
+    for (var sy = -1; sy <= 1; sy += 2) {
+      let y = 0.5 * f32(sy) * th;
+      for (var sx = -1; sx <= 1; sx += 2) {
+        let x = 0.5 * f32(sx) * tw;
+        let q2 = 1.0 + x * x + y * y;
+        open += max(na + x * nu + y * nv + wrap * sqrt(q2), 0.0) / (q2 * q2 * (1.0 + wrap));
+      }
+    }
+    open *= tw * th * edgeK * edgeK;
+    if (open <= 0.0) { continue; }
+    let e = L.rgb.rgb * (open * 0.31830989);
+    totalOpen += e;
+    let w = dot(e, LUM);
+    if (w > topW) { topW = w; topE = e; topIdx = i; }
+  }
+  *openOut = totalOpen;
+  if (topIdx < 0 || shadowW <= 0.0) { return totalOpen; }
+  let dTop = fromEnv(s.lights[topIdx].a.xyz);
+  let vis = mix(1.0, surfGiShadow(q, nq, dTop), shadowW);
+  let rest = totalOpen - topE;
+  return topE * vis + rest * mix(1.0, vis, 0.5);
+}
+
+fn surfGiFloorCov(r: f32, fade: f32) -> f32 {
+  if (fade < 0.0) {
+    return exp(-r * (1.8 / max(-fade, 4.0)));
+  }
+  if (fade <= 0.0 || r >= fade) { return 0.0; }
+  let r0 = min(3.0, 0.2 * fade);
+  let rs = max(0.11 * fade, 0.1);
+  let uEnd = 1.0 / (1.0 + max(fade - r0, 0.0) / rs);
+  let uVis = 1.0 / (1.0 + max(r - r0, 0.0) / rs);
+  let tv = clamp((uVis - uEnd) / max(1.0 - uEnd, 1e-5), 0.0, 1.0);
+  let sv = tv * tv * (3.0 - 2.0 * tv);
+  return sv * sqrt(sv);
+}
+
+struct SurfGiOut {
+  bouncedSelf: vec3f,
+  occSelf: vec3f,
+  floorDelta: vec3f,
+  hitSelf: f32,
+}
+
+fn surfGiBounce(fc: vec2f, p: vec3f, n: vec3f, selfAlb: vec3f) -> SurfGiOut {
+  var out = SurfGiOut(vec3f(0.0), vec3f(0.0), vec3f(0.0), 0.0);
+  let maxB = clamp(i32(s.gi.x), 0, 4);
+  if (maxB <= 0 || s.gi.y <= 0.0) { return out; }
+  let nSmp = clamp(i32(s.gi.z), 1, 4);
+  let vox = 2.0 * HB() / s.k0.x;
+  let bias = max(0.0015, 1.35 * vox);
+  let nw = s.floorPlane.xyz;
+  let hasFloor = dot(nw, nw) > 0.5;
+  let hFloor = s.floorPlane.w;
+  let floorAlb = s.floorAlbedo.rgb;
+  let floorShadowW = s.floorAlbedo.w;
+  let wrap = max(s.cer.y, 0.06);
+  for (var si = 0; si < 4; si++) {
+    if (si >= nSmp) { break; }
+    var q = p;
+    var nq = n;
+    var thr = vec3f(1.0);
+    var pathSelfBounced = vec3f(0.0);
+    var pathSelfOcc = vec3f(0.0);
+    var pathFloorDelta = vec3f(0.0);
+    var firstSelf = false;
+    var hitAnySelf = false;
+    for (var b = 1; b <= 4; b++) {
+      if (b > maxB) { break; }
+      let dir = surfGiCosine(nq, surfGiSample2(fc, si, b, nSmp));
+      let ro = q + nq * bias;
+      var tObj = 1e9;
+      let hitObj = surfGiHitObj(ro, dir, &tObj);
+      var tFl = 1e9;
+      var hitFl = false;
+      if (hasFloor) {
+        let dy = dot(dir, nw);
+        if (dy < -1e-5) {
+          let tf = (hFloor - dot(ro, nw)) / dy;
+          if (tf > 0.0 && tf < tObj) { tFl = tf; hitFl = true; }
+        }
+      }
+      if (hitFl) {
+        let pf = ro + dir * tFl;
+        let r = sqrt(max(dot(pf, pf) - hFloor * hFloor, 0.0));
+        let cov = surfGiFloorCov(r, s.floorLit.w);
+        if (cov > 0.01) {
+          let distRad = surfGiDistant(dir);
+          var flOpen = vec3f(0.0);
+          let flLit = surfGiDirect(pf, nw, 0.0, floorShadowW, &flOpen);
+          var flRad: vec3f;
+          if (s.clay.x > 0.0) {
+            let nwEnv = nw.x * s.env0.xyz + nw.y * s.env1.xyz + nw.z * s.env2.xyz;
+            flRad = floorAlb * (nineAt(nwEnv) + flLit);
+          } else {
+            flRad = max(s.floorLit.rgb - floorAlb * max(flOpen - flLit, vec3f(0.0)), vec3f(0.0));
+          }
+          if (b == 1) {
+            pathFloorDelta += thr * ((flRad - distRad) * cov);
+          } else {
+            pathSelfOcc += thr * (distRad * cov);
+            pathSelfBounced += thr * mix(distRad, flRad, cov);
+          }
+          q = pf;
+          nq = nw;
+          thr *= floorAlb * cov;
+          continue;
+        }
+        break;
+      }
+      if (!hitObj) { break; }
+      let q2 = ro + dir * tObj;
+      let n2 = nrm(q2);
+      if (dot(dir, n2) >= 0.0) { break; }
+      if (b == 1) { firstSelf = true; }
+      hitAnySelf = true;
+      pathSelfOcc += thr * surfGiDistant(dir);
+      thr *= selfAlb;
+      let n2Env = n2.x * s.env0.xyz + n2.y * s.env1.xyz + n2.z * s.env2.xyz;
+      var dOpen = vec3f(0.0);
+      let dLit = surfGiDirect(q2, n2, wrap, 1.0, &dOpen);
+      let aoEnd = select(1.0, occlusion(q2, n2), b == maxB);
+      pathSelfBounced += thr * (nineAt(n2Env) * aoEnd + dLit);
+      q = q2;
+      nq = n2;
+    }
+    if (hitAnySelf) {
+      out.bouncedSelf += clamp(pathSelfBounced, vec3f(0.0), vec3f(5.0));
+      out.occSelf += pathSelfOcc;
+      if (firstSelf) { out.hitSelf += 1.0; }
+    }
+    out.floorDelta += clamp(pathFloorDelta, vec3f(-2.0), vec3f(3.0));
+  }
+  let invS = 1.0 / f32(nSmp);
+  out.bouncedSelf *= invS;
+  out.occSelf *= invS;
+  out.floorDelta *= invS;
+  out.hitSelf *= invS;
+  return out;
 }
 
 // A ceramic (porcelain, milk glass, stoneware, bisque). The frame holds what the tracer gave it: the
@@ -420,10 +645,40 @@ fn nineAt(d: vec3f) -> vec3f {
 fn ceramic(p: vec3f, n: vec3f, rd: vec3f, direct: Direct, lampLight: Direct, cover: f32) -> vec4f {
   let ao = occlusion(p, n);
   let ne = n.x * s.env0.xyz + n.y * s.env1.xyz + n.z * s.env2.xyz;
-  let c = clamp(-dot(rd, n), 0.0, 1.0);
-  let F = s.cer.z + (1.0 - s.cer.z) * pow(1.0 - c, 5.0);
-  let light = direct.lit * 0.31830989 + lampLight.lit + nineAt(ne) * ao;
-  let add = s.base.rgb * light * ((1.0 - F) * s.k.x * cover);
+  let c = max(clamp(-dot(rd, n), 0.0, 1.0), clamp(0.18 + 0.55 * s.cer.w, 0.18, 0.52));
+  var transmission: vec3f;
+  if (s.k.z < 0.0) {
+    let up = vec3f(s.env0.y,s.env1.y,s.env2.y);
+    let nm = max(0.0,solidFilmThickness(p,toObj(p),n,up,s.film[0],s.film[1],s.film[2]));
+    transmission = paintFilmRGB(c,1.0,s.cer.z,s.k.y,s.k.z < -1.5,s.film[0].x,nm)[2];
+  } else {
+    let f = 1.0 - paintLayerWeights(c, 1.0, s.cer.z, s.k.y, s.k.z > 0.0).z;
+    transmission = vec3f(1.0-f);
+  }
+  var base = s.base.rgb;
+  if (s.pigmentDirt.w > 0.0 || s.pigmentVariation.x > 0.0) {
+    let v = vec4f(toObj(p), 1.0);
+    let frame = s.pigmentFrame;
+    let q = vec3f(dot(frame[0],v), dot(frame[1],v), dot(frame[2],v));
+    var dirt = 0.0;
+    if (s.pigmentDirt.w > 0.0) {
+      let form = wearForm(p, n, 8.0 * HB() / s.k0.x);
+      dirt = s.pigmentDirt.w * clamp(0.6 * form.y + max(-form.x, 0.0) * 0.6, 0.0, 1.0);
+    }
+    base *= wearPigment(q, dirt, s.pigmentDirt.rgb, s.pigmentVariation.x);
+  }
+  // Both finite lamps and distant panels supply irradiance. A diffuse body returns albedo/π.
+  var indirect = nineAt(ne) * ao;
+  if (s.gi.x > 0.5 && s.gi.y > 0.0) {
+    let giW = clamp(s.gi.y, 0.0, 1.0);
+    let res = s.cam.xy;
+    let fc = floor((rd.xy / max(abs(rd.z) * max(s.cam2.w, 1e-3), 1e-4) - s.cam2.xy) * (0.5 * res.y) + 0.5 * res);
+    let g = surfGiBounce(fc, p, n, base * (0.94 * s.k.x));
+    let aoEff = mix(ao, 1.0, g.hitSelf * 0.80 * giW);
+    indirect = max(nineAt(ne) * aoEff + g.bouncedSelf * s.gi.y - g.occSelf * giW + g.floorDelta * giW, vec3f(0.0));
+  }
+  let light = (direct.lit + lampLight.lit) * 0.31830989 + indirect;
+  let add = pbr_diffuse_albedo(base, s.k.x * cover, c) * light * transmission;   // pbr/diffuse.wgsl
   let r = reflect(rd, n);
   let vis = shadowTo(p, n, r, s.cer.w, 1e9, walk(rnd()));
   // (the room's reflection is also dimmed a little by the folds, which the march's cone does not see)

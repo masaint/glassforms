@@ -134,7 +134,8 @@ pub fn caustic_lights(st: &State, to_obj: &gf_core::math::Mat3, hb: f64) -> Vec<
 
 /// The lamps' shadows put into a tracer with lamps and casting both woven in.
 pub fn weave_shadows(src: &str) -> String {
-    src.replace(SHADOW_STUB, SHADOW).replacen(PIXEL_AT, &format!("{PIXEL_AT}  lampFc = fc;\n"), 1)
+    use crate::weave::{replace, replacen};
+    replacen(&replace(src, "lamps.shadow_stub", SHADOW_STUB, SHADOW), "lamps.pixel_at", PIXEL_AT, &format!("{PIXEL_AT}  lampFc = fc;\n"), 1)
 }
 
 /// What the tracer is told of the lamps as the state has them now (in the camera's frame).
@@ -167,20 +168,40 @@ pub fn uniforms(st: &State, floor: Option<(f64, f64)>) -> LampsU {
     u
 }
 
+/// Attach the finite-source proposal to a sampled glossy material, including a construction
+/// face whose shader will receive its own function and structure names.
+pub(crate) fn weave_glossy_sampling(s: &mut String) {
+    if !s.contains("fn frSceneLights(") { return; }
+    const STUBS: [(&str, &str, &str); 3] = [
+        ("lamps.fr_scene_lights", "fn frSceneLights(p: vec3f, n: vec3f) -> FrLampMix { return FrLampMix(); }",
+            "fn frSceneLights(p: vec3f, n: vec3f) -> FrLampMix { return glossyLampWeights(p, n); }"),
+        ("lamps.fr_scene_ray", "fn frSceneRay(p: vec3f, lights: FrLampMix, r: vec2f) -> vec3f { return vec3f(0.0); }",
+            "fn frSceneRay(p: vec3f, lights: FrLampMix, r: vec2f) -> vec3f { return glossyLampRay(p, lights, r); }"),
+        ("lamps.fr_scene_pdf", "fn frScenePdf(p: vec3f, lights: FrLampMix, wo: vec3f) -> f32 { return 0.0; }",
+            "fn frScenePdf(p: vec3f, lights: FrLampMix, wo: vec3f) -> f32 { return glossyLampPdf(p, lights, wo); }"),
+    ];
+    // (the three stubs come together with frSceneLights: one missing is drift)
+    let counts = STUBS.map(|(name, old, _)| crate::weave::found(s, name, old));
+    if counts != [1, 1, 1] { crate::weave::drifted("lamps.fr_scene", &format!("stubs found {counts:?} times, expected once each")); }
+    *s = STUBS.iter().fold(std::mem::take(s), |t, (_, old, new)| t.replace(old, new));
+    s.push_str(include_str!("shaders/glossy_lamps.wgsl"));
+}
+
 /// The tracer's text with the lamps in it (see the header). Lines that are not there (a tracer without a
 /// floor, without clay, without a spread reading of the lights) are simply not woven.
 pub fn weave(src: &str) -> String {
+    use crate::weave::{find, replace};
     let mut s = src.to_string();
     // every lookup of the lights meets the lamps, from where the ray set out
-    s = s.replace("fn env(rd: vec3f) -> vec3f { return envMap(toEnv(rd)); }", "fn env(rd: vec3f) -> vec3f { return lampsEnv(envMap(toEnv(rd)), rd); }");
+    s = replace(&s, "lamps.env", "fn env(rd: vec3f) -> vec3f { return envMap(toEnv(rd)); }", "fn env(rd: vec3f) -> vec3f { return lampsEnv(envMap(toEnv(rd)), rd); }");
     // a ray sets out from a point whose normal has just been found
-    s = s.replace("fn nrm(p: vec3f) -> vec3f {\n", "fn nrm(p: vec3f) -> vec3f {\n  gRo = p;\n");
-    s = s.replace("fn nrmB(p: vec3f, k: i32) -> vec3f {\n", "fn nrmB(p: vec3f, k: i32) -> vec3f {\n  gRo = p;\n");
+    s = replace(&s, "lamps.nrm", "fn nrm(p: vec3f) -> vec3f {\n", "fn nrm(p: vec3f) -> vec3f {\n  gRo = p;\n");
+    s = replace(&s, "lamps.nrm_b", "fn nrmB(p: vec3f, k: i32) -> vec3f {\n", "fn nrmB(p: vec3f, k: i32) -> vec3f {\n  gRo = p;\n");
     // a reading spread by a rough surface or a milky body meets them widened
-    s = s.replace("fn envL(rd: vec3f, sig: f32) -> vec3f {\n", "fn envL(rd: vec3f, sig: f32) -> vec3f { return lampsSoft(envL0(rd, sig), rd, sig); }\nfn envL0(rd: vec3f, sig: f32) -> vec3f {\n");
+    s = replace(&s, "lamps.env_l", "fn envL(rd: vec3f, sig: f32) -> vec3f {\n", "fn envL(rd: vec3f, sig: f32) -> vec3f { return lampsSoft(envL0(rd, sig), rd, sig); }\nfn envL0(rd: vec3f, sig: f32) -> vec3f {\n");
     // a polished surface that is not glass, under an environment picture, reads the picture itself (and, worn,
     // spread): the lamps there too
-    s = s.replace(
+    s = replace(&s, "lamps.mirror_env_picture",
         "fn mirrorEnv(rd: vec3f, lod: f32) -> vec3f {
   let d = toEnv(rd);",
         "fn mirrorEnv(rd: vec3f, lod: f32) -> vec3f { return lampsEnv(mirrorEnv0(rd, lod), rd); }
@@ -188,33 +209,27 @@ fn mirrorEnv0(rd: vec3f, lod: f32) -> vec3f {
   let d = toEnv(rd);",
     );
     // (and without a picture, the mirror's own reading of the softened lights' copies)
-    s = s.replace(
+    s = replace(&s, "lamps.mirror_env_lights",
         "fn mirrorEnv(rd: vec3f, lod: f32) -> vec3f {
   let e = toEnv(rd);",
         "fn mirrorEnv(rd: vec3f, lod: f32) -> vec3f { return lampsEnv(mirrorEnv0(rd, lod), rd); }
 fn mirrorEnv0(rd: vec3f, lod: f32) -> vec3f {
   let e = toEnv(rd);",
     );
-    s = s.replace(
-        "sig / (2.0 * T0), sig < 2.0 * T0), 0.0, 7.0)).rgb;
-    }
-    return c;",
-        "sig / (2.0 * T0), sig < 2.0 * T0), 0.0, 7.0)).rgb;
-    }
-    return lampsSoft(c, rd, sig);",
-    );
+    // The HDR panorama path in wearRead returns before the envL lookup below it.
+    s = replace(&s, "lamps.worn_panorama", "return c; // worn surface panorama", "return lampsSoft(c, rd, sig);");
     // matte clay gathers their light
-    s = s.replace(
+    s = replace(&s, "lamps.clay",
         "  return c * light * filled + nine(9, toEnv(reflect(rd, n))) * (sheen * open);",
-        "  light += lampsDiffuse(p + n * 0.002, n);\n  return c * light * filled + nine(9, toEnv(reflect(rd, n))) * (sheen * open);",
+        "  light += lampsDiffuse(p + n * 0.002, n) * 0.31830989;\n  return c * light * filled + nine(9, toEnv(reflect(rd, n))) * (sheen * open);",
     );
     // so does a floor (as its own colour: what it gives back of the light falling on it)
-    if let Some(at) = s.find("  var fl = (su.floor.rgb + su.tint.rgb * sweepAt(d.y))") {
+    if let Some(at) = find(&s, "lamps.floor", "  var fl = (su.floor.rgb + su.tint.rgb * sweepAt(d.y))") {
         let end = at + s[at..].find('\n').unwrap_or(0) + 1;
         s.insert_str(end, "  fl += lamps.floor.rgb * lampsDiffuse(ro + rd * tf, vec3f(su.room0.y, su.room1.y, su.room2.y)) * 0.31830989;\n");
     }
     // the camera sees the lamps it is to see, nearer than whatever else is there
-    if let Some(at) = s.find("  return vec4f(max(col, vec3f(0.0))") {
+    if let Some(at) = find(&s, "lamps.seen", "  return vec4f(max(col, vec3f(0.0))") {
         s.insert_str(
             at,
             "  {\n    let lseen = lampsSeen(ro, rd, select(1e9, depth, depth > 0.0));\n    if (lseen.a > 0.0) {\n      col = col * (1.0 - min(lseen.a, 1.0)) + lseen.rgb;\n      if (lseen.a > 0.5) { depth = lampNear; }\n    }\n  }\n",
@@ -222,7 +237,45 @@ fn mirrorEnv0(rd: vec3f, lod: f32) -> vec3f {
     }
     s.push('\n');
     s.push_str(LAMPS_WGSL);
+    let conductor_lights = s.contains("return incident; // finite GGX light") && s.contains("fn envL0(");
+    let file_lights = s.contains("// imported specular");
+    if conductor_lights {
+        s = replace(&s, "lamps.finite_ggx", "return incident; // finite GGX light",
+            "return roughLampRadiance(p,n,rd,mid,var0,bounce,alpha,coated,geometric,incident);");
+    }
+    if file_lights {
+        s = replace(&s, "lamps.imported_specular", "let reflected=mix(env(r),nine(9,toEnv(r)),rough*rough); // imported specular",
+            "let reflected=fmLampReflection(p,n,rd,r,rough);");
+        s.push_str(r#"
+fn fmLampReflection(p: vec3f, n: vec3f, rd: vec3f, r: vec3f, rough: f32) -> vec3f {
+  if (rough <= 0.0) { return env(r); }
+  let alpha = rough * rough;
+  let mid = normalize(mix(n, r, (1.0-alpha)*(sqrt(1.0-alpha)+alpha)));
+  let far = mix(envMap(toEnv(r))+lampsFloor(r), nine(9,toEnv(r)), alpha);
+  return roughLampRadiance(p,n,rd,mid,2.0*alpha*alpha,0,alpha,false,1.0,far);
+}
+"#);
+    }
+    if conductor_lights || file_lights {
+        let emitter = include_str!("shaders/rough_lamp_radiance.wgsl");
+        if s.contains("fn envL0(") {
+            s.push_str(emitter);
+        } else {
+            s.push_str(&replace(emitter, "lamps.emitter_env_l0", "envL0(wo,0.0)", "envMap(toEnv(wo))"));
+        }
+    }
+    weave_glossy_sampling(&mut s);
+    if s.contains("fn paintB_seen(") && s.contains("fn paintVisB(") {
+        weave_paint_lamps(&mut s);
+    }
     s
+}
+
+/// Add local emitters to a paint closure after its geometry-specific visibility is in place.
+pub(crate) fn weave_paint_lamps(src: &mut String) {
+    *src = crate::weave::replace(src, "lamps.paint", "let lampLight = vec3f(0.0);", "let lampLight = paintLampsB(k, p, n);");
+    src.push_str(include_str!("shaders/panel_irradiance.wgsl"));
+    src.push_str(include_str!("shaders/paint_lamps.wgsl"));
 }
 
 #[cfg(test)]

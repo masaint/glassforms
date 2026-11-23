@@ -24,7 +24,7 @@ struct FU {
   skirt: f32,         // the share of the light that is spread SKIRT times as far (the facets' skirt)
   levels: f32,        // how many smaller copies there are
   show: f32,          // 1: draw the blur's radius instead of the picture
-  pad: vec2f,
+  allocation: vec2f,      // full allocation containing the traced region
 }
 struct LU {
   src: vec2f,         // size of the copy this one is made from
@@ -76,7 +76,7 @@ struct Down { @location(0) col: vec4f, @location(1) face: vec4f }
 @fragment
 fn fs_down(@builtin(position) pos: vec4f) -> Down {
   let o = vec2i(pos.xy) * 2;
-  let hi = vec2i(lu.src) - 1;
+  let hi = vec2i(min(lu.src, ceil(fu.res / exp2(lu.k - 1.0)))) - 1;
   // the nearest of the four in the middle
   var zf = 0.0;
   var at = vec2i(0);
@@ -144,8 +144,8 @@ fn fs_down(@builtin(position) pos: vec4f) -> Down {
 // g a pixel and faces n: the four texels around it, weighed as usual by how near they are, and by
 // whether they lie on that surface and face that way. rgb is not yet divided by the weight (a).
 fn copy(at: vec2f, z: f32, g: vec2f, n: vec3f, k: i32) -> vec4f {
-  let size = vec2i(textureDimensions(pyrTex, k - 1));
   let sc = exp2(f32(k));
+  let size = min(vec2i(textureDimensions(pyrTex, k - 1)), vec2i(ceil(fu.res / sc)));
   let c = at / sc - 0.5;
   let i0 = floor(c);
   let f = c - i0;
@@ -193,7 +193,10 @@ fn fs_out(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   // as wide as the blur they report).
   var r = aux.a;
   for (var k = 1; k <= min(i32(fu.levels), 5); k++) {
-    let rk = textureSampleLevel(pyrFace, smp, pos.xy / fu.res, f32(k - 1)).z;
+    let dims = vec2f(textureDimensions(pyrFace, k - 1));
+    let last = min(dims, ceil(fu.res / exp2(f32(k)))) - 0.5;
+    let uv = min(pos.xy / fu.allocation, last / dims);
+    let rk = textureSampleLevel(pyrFace, smp, uv, f32(k - 1)).z;
     r = max(r, rk * smoothstep(0.35, 0.7, rk / (z * fu.px * exp2(f32(k)))));
   }
   // what is seen through the surface: all the light, less what the surface itself reflects; and the

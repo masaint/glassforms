@@ -87,7 +87,7 @@ fn a_model_arrives_without_stopping_the_picture_and_a_bad_file_changes_nothing()
     e.models.wait = false;
     e.resize(96, 54);
     e.bake(Detail::Full).unwrap();
-    e.state.want = None;
+    e.state.drop_request();
     e.draw(false);
     let knot = fingerprint(&e);
 

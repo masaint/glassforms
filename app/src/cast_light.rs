@@ -13,7 +13,17 @@ use gf_core::cast::{self as core, Caster, Kind, MAX_BODIES};
 use crate::gpu::*;
 
 /// The shader that follows the light and lands it (two files, one shader).
-pub const LIGHT_WGSL: &str = concat!(include_str!("shaders/cast_light.wgsl"), include_str!("shaders/cast_land.wgsl"));
+pub const LIGHT_WGSL: &str = concat!(
+    include_str!("shaders/pbr/hash.wgsl"),
+    include_str!("shaders/pcg.wgsl"),
+    include_str!("shaders/ggx_microsurface.wgsl"),
+    include_str!("shaders/conductor_fresnel.wgsl"),
+    include_str!("shaders/pbr/types.wgsl"),
+    include_str!("shaders/pbr/dielectric.wgsl"),
+    include_str!("shaders/dielectric_fresnel.wgsl"),
+    include_str!("shaders/cast_light.wgsl"),
+    include_str!("shaders/cast_land.wgsl"),
+);
 const RESOLVE_WGSL: &str = include_str!("shaders/cast_resolve.wgsl");
 
 /// The shader that turns landed light into arriving light. `storage16`: a compute shader can write a
@@ -25,12 +35,64 @@ pub fn resolve_source(storage16: bool) -> String {
 
 /// The shader that follows the lights' rays and lands their light, with the box the volumes span told
 /// rather than fixed (lu.body[0].tint.w: it grows when the layers are placed far out).
-pub fn light_source() -> String {
-    LIGHT_WGSL
+pub fn light_source(medium_priority: bool) -> String {
+    let source = if medium_priority { medium_priority_cast_wgsl(LIGHT_WGSL) } else { LIGHT_WGSL.to_owned() };
+    source
         .replace("const HB: f32 = 1.5;", "")
         .replace("const BOUND: f32 = 1.47;", "")
         .replace("BOUND", "(lu.body[0].tint.w * 0.98)")
         .replace("HB", "lu.body[0].tint.w")
+}
+
+/// The forward-caustic ownership sites, specialized only when active bodies have different priorities.
+/// Optical events, weights, wavelengths, offsets and absorption remain the original source in both variants.
+pub fn medium_priority_cast_wgsl(src: &str) -> String {
+    fn one(src: &mut String, from: &str, to: &str) {
+        assert_eq!(src.matches(from).count(), 1, "medium-priority caustic site changed: {from}");
+        *src = src.replacen(from, to, 1);
+    }
+    let mut out = src.replace("\r\n", "\n");
+    one(&mut out,
+r#"fn within(a: vec4f, m: i32) -> vec4f {
+  let i = vec4i(0, 1, 2, 3);
+  return select(select(a, -a, i == vec4i(m)), vec4f(BIG), i < vec4i(m));
+}"#,
+r#"fn castPrecedes(k: i32, m: i32) -> bool {
+  if (k == m) { return false; }
+  if (m < 0) { return true; }
+  let a = lu.body[k].medium.y;
+  let b = lu.body[m].medium.y;
+  return a > b || (a == b && k > m);
+}
+fn within(a: vec4f, m: i32) -> vec4f {
+  let i = vec4i(0, 1, 2, 3);
+  let own = select(a, -a, i == vec4i(m));
+  var visible = vec4<bool>(false);
+  for (var k = 0; k < 4; k++) { visible[k] = k == m || castPrecedes(k, m); }
+  return select(own, vec4f(BIG), !visible);
+}
+fn castWhich(a: vec4f, f: f32) -> i32 {
+  var which = -1;
+  for (var k = 0; k < 4; k++) {
+    if (a[k] == f && (which < 0 || castPrecedes(k, which))) { which = k; }
+  }
+  return which;
+}"#);
+    one(&mut out,
+"      *which = select(select(select(3, 2, a.z == f), 1, a.y == f), 0, a.x == f);",
+"      *which = castWhich(a, f);");
+    one(&mut out,
+r#"      next = -1;
+      let dd = dist(p) + lu.gone1;
+      for (var k = 0; k < 4; k++) {
+        if (k < m && dd[k] < 0.0) { next = k; }
+      }"#,
+r#"      next = -1;
+      let dd = dist(p) + lu.gone1;
+      for (var k = 0; k < 4; k++) {
+        if (k != m && dd[k] < 0.0 && (next < 0 || castPrecedes(k, next))) { next = k; }
+      }"#);
+    out
 }
 
 /// Rays a side of the grid sent from one light at most: when the picture is at rest, and while things move.
@@ -93,12 +155,16 @@ struct BodyL {
     absorb: [f32; 4],
     tint: [f32; 4],
     mask: [f32; 4],
+    surface: [f32; 4],
+    medium: [i32; 4],
+    optical_constants: [[f32; 4]; 8],
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, PartialEq)]
 struct LightsU {
     body: [BodyL; 4],
+    spectral_rgb: [[f32; 4]; 16],
     k: [f32; 4],
     lev: [f32; 4],
     soft: [f32; 4],
@@ -204,6 +270,7 @@ pub struct Caustics {
     p_resolve: wgpu::ComputePipeline,
     p_floor: wgpu::ComputePipeline,
     p_bound: wgpu::ComputePipeline,
+    medium_priority: bool,
     /// the box round the bodies that start a caustic (cast_light.wgsl: `bound`)
     bound: wgpu::Buffer,
     u_lights: wgpu::Buffer,
@@ -274,6 +341,22 @@ fn skipped() -> &'static str {
     SKIP.get_or_init(|| std::env::var("GLASSFORMS_CAST_SKIP").unwrap_or_default())
 }
 
+fn follow_pipelines(gpu: &Gpu, layout: &wgpu::BindGroupLayout, medium_priority: bool)
+    -> (wgpu::ComputePipeline, wgpu::ComputePipeline, wgpu::ComputePipeline)
+{
+    let light = gpu.shader("cast: light", &light_source(medium_priority), false);
+    let pipe = |label, entry| {
+        let pipeline_layout = gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some(label), bind_group_layouts: &[Some(layout)], immediate_size: 0,
+        });
+        gpu.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some(label), layout: Some(&pipeline_layout), module: &light,
+            entry_point: Some(entry), compilation_options: Default::default(), cache: None,
+        })
+    };
+    (pipe("cast: follow", "cs_follow"), pipe("cast: land", "cs_land"), pipe("cast: bound", "cs_bound"))
+}
+
 impl Caustics {
     pub fn new(gpu: &Gpu) -> Self {
         let c = wgpu::ShaderStages::COMPUTE;
@@ -286,7 +369,7 @@ impl Caustics {
         let l_area = gpu.bind_layout("cast: area", &[out(0, area_format, d3)]);
         let l_resolve = gpu.bind_layout("cast: resolve", &[storage_ro(1), tex(2, d3), tex(3, d3), out(4, rgba, d3)]);
         let l_floor = gpu.bind_layout("cast: floor", &[storage_ro(1), tex(5, d2), out(6, rgba, d2)]);
-        let light = gpu.shader("cast: light", &light_source(), false);
+        let (p_follow, p_land, p_bound) = follow_pipelines(gpu, &l_follow, false);
         let resolve = gpu.shader("cast: resolve", &resolve_source(gpu.storage16), false);
         let pipe = |label, module: &wgpu::ShaderModule, entry, layouts: &[Option<&wgpu::BindGroupLayout>]| {
             let layout = gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some(label), bind_group_layouts: layouts, immediate_size: 0 });
@@ -297,12 +380,13 @@ impl Caustics {
         Self {
             gpu: gpu.clone(),
             smp: gpu.sampler(wgpu::FilterMode::Linear, wgpu::AddressMode::ClampToEdge),
-            p_follow: pipe("cast: follow", &light, "cs_follow", &[Some(&l_follow)]),
-            p_land: pipe("cast: land", &light, "cs_land", &[Some(&l_follow)]),
+            p_follow,
+            p_land,
             p_area: pipe("cast: area", &resolve, "cs_area", &[Some(&l_ru), Some(&l_area)]),
             p_resolve: pipe("cast: resolve", &resolve, "cs_resolve", &[Some(&l_ru), Some(&l_resolve)]),
             p_floor: pipe("cast: floor", &resolve, "cs_floor", &[Some(&l_ru), Some(&l_floor)]),
-            p_bound: pipe("cast: bound", &light, "cs_bound", &[Some(&l_follow)]),
+            p_bound,
+            medium_priority: false,
             bound: gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("cast: bound"), size: 32, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }),
             l_follow, l_ru, l_area, l_resolve, l_floor,
             u_lights: gpu.uniform_buffer("cast: lights", std::mem::size_of::<LightsU>() as u64),
@@ -312,6 +396,15 @@ impl Caustics {
             hits: None, acc: None, levels: Vec::new(), floor: Vec::new(), floor_all: None, floor_clip: 0, blank, blank2,
             area_from: None, bound_from: None, made: None, quick: false, moved: false, pass: 0, shift: [0.0; 2], rays: 0, runs: 0, ms: 0.0,
         }
+    }
+
+    /// Select the compile-time forward-ownership variant and invalidate only its dependent light results.
+    pub fn set_medium_priority(&mut self, enabled: bool) {
+        if self.medium_priority == enabled { return; }
+        (self.p_follow, self.p_land, self.p_bound) = follow_pipelines(&self.gpu, &self.l_follow, enabled);
+        self.medium_priority = enabled;
+        self.clear();
+        self.bound_from = None;
     }
 
     /// The volume of arriving light a tracer reads (None until one has been made).
@@ -479,6 +572,14 @@ impl Caustics {
         let mut u: LightsU = Zeroable::zeroed();
         let mut ru: ResolveU = Zeroable::zeroed();
         let mut waves = 1;
+        // Same sixteen wavelengths as the camera's conductor integral. Each channel's
+        // weights sum to one so a white, lossless reflector returns the incident energy.
+        static WEIGHTS: std::sync::OnceLock<[[f32; 4]; 16]> = std::sync::OnceLock::new();
+        u.spectral_rgb = *WEIGHTS.get_or_init(|| {
+            let weights: [[f64; 3]; 16] = std::array::from_fn(|i| gf_core::material::spec_w(400.0 + 20.0 * i as f64));
+            let sums: [f64; 3] = std::array::from_fn(|c| weights.iter().map(|v| v[c]).sum());
+            weights.map(|w| [(w[0]/sums[0]) as f32, (w[1]/sums[1]) as f32, (w[2]/sums[2]) as f32, 0.0])
+        });
         for k in 0..MAX_BODIES {
             let (mut before, mut after) = (0.0, 0.0);
             let mut mask = [0.0f32; 4];
@@ -500,6 +601,12 @@ impl Caustics {
                     absorb: [o.absorb[0] as f32, o.absorb[1] as f32, o.absorb[2] as f32, o.rough as f32],
                     tint: [o.tint[0] as f32, o.tint[1] as f32, o.tint[2] as f32, 0.0],
                     mask,
+                    surface: [o.coat_ior as f32, if o.conductor.is_some() { 1.0 } else { 0.0 }, 0.0, 0.0],
+                    medium: c.medium.raw(),
+                    optical_constants: o.conductor.map_or([[0.0; 4]; 8], |metal| std::array::from_fn(|pair| {
+                        let i = 4 * pair;
+                        [metal.n[i], metal.k[i], metal.n[i + 2], metal.k[i + 2]]
+                    })),
                 };
             }
             u.gone0[k] = if before == 0.0 { 1.0e3 } else { 0.0 };

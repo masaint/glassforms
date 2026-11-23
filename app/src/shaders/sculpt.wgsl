@@ -258,7 +258,8 @@ fn thickness(p: vec3f, f: f32, most: f32, h: f32) -> f32 {
   let g = vec3f(srcAt(p + vec3f(h, 0.0, 0.0)) - srcAt(p - vec3f(h, 0.0, 0.0)),
                 srcAt(p + vec3f(0.0, h, 0.0)) - srcAt(p - vec3f(0.0, h, 0.0)),
                 srcAt(p + vec3f(0.0, 0.0, h)) - srcAt(p - vec3f(0.0, 0.0, h)));
-  let n = g / max(length(g), 1e-6);
+  let gl = length(g);
+  let n = select(vec3f(0.0, 1.0, 0.0), g / gl, gl > 1e-6);
   let reach = clamp(2.0 * most, 2.0 * h, 0.6);
   var best = 0.0;
   for (var k = 1; k <= 10; k++) {
@@ -298,7 +299,8 @@ fn cs_eval(@builtin(global_invocation_id) gid: vec3u) {
     let g = vec3f(srcAt(p0 + vec3f(e, 0.0, 0.0)) - srcAt(p0 - vec3f(e, 0.0, 0.0)),
                   srcAt(p0 + vec3f(0.0, e, 0.0)) - srcAt(p0 - vec3f(0.0, e, 0.0)),
                   srcAt(p0 + vec3f(0.0, 0.0, e)) - srcAt(p0 - vec3f(0.0, 0.0, e)));
-    nrm = g / max(length(g), 1e-6);
+    let gl = length(g);
+    if (gl > 1e-6) { nrm = g / gl; }
   }
 
   var f = f0;
@@ -468,7 +470,7 @@ fn cs_eval(@builtin(global_invocation_id) gid: vec3u) {
         var v = 0.0;
         if (proj == 0) {
           var w = pow(abs(nrm), vec3f(4.0));
-          w = w / (w.x + w.y + w.z);
+          w = w / max(w.x + w.y + w.z, 1e-12);
           v = w.x * picture(s.zy * vec2f(1.0, -1.0) + 0.5, img) + w.y * picture(s.xz + 0.5, img) + w.z * picture(s.xy * vec2f(1.0, -1.0) + 0.5, img);
         } else if (proj == 1) {
           v = picture(s.xy * vec2f(1.0, -1.0) + 0.5, img);

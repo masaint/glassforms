@@ -22,6 +22,10 @@ fn chance() -> Vec<(&'static str, material::Variant)> {
         ("true jade (rough)", of(&|p| { p.sss = 1.0; p.sss_walk = 1.0; p.rough = 0.1; p.disp = 0.0; })),
         ("true milk with a coat and a film", of(&|p| { p.sss = 1.0; p.sss_walk = 1.0; p.coat = 0.5; p.film = 400.0; })),
         ("rough by sampling alone", of(&|p| { p.rough = 0.6; p.rough_ref = 1.0; })),
+        ("wax and polished metal", material::Variant::of_bodies(&[
+            &Settings { sss: 1.0, sss_walk: 1.0, ..Settings::default() },
+            &Settings { metal: 1.0, ..Settings::default() },
+        ])),
         ("clear glass", material::Variant::default()),
     ]
 }
@@ -61,4 +65,15 @@ fn what_is_denoised() {
         f(&mut p);
         assert!(!glassforms::denoise::wanted(&material::Variant::of(&p), false, 2.0), "{:?}", material::Variant::of(&p));
     }
+}
+
+#[test]
+fn denoise_filter_and_temporal_lens_shaders_are_valid() {
+    let filter = concat!(include_str!("../src/shaders/pbr/hash.wgsl"), include_str!("../src/shaders/denoise.wgsl"));
+    let accum = include_str!("../src/shaders/accum.wgsl");
+    check("denoise filter (plain)", filter);
+    check("denoise filter (any lens)", &glassforms::camera::denoise(filter));
+    let temporal = glassforms::denoise::temporal_source(accum);
+    check("denoise temporal (plain)", &temporal);
+    check("denoise temporal (any lens)", &glassforms::camera::accum(&temporal));
 }

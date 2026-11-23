@@ -25,6 +25,7 @@
 //! layout of the small picture of the lighting that a light room shows (`preview_dir`, `preview_uv`).
 
 use crate::presets::Light;
+use rayon::prelude::*;
 
 pub const ENV_W: usize = 256;
 pub const ENV_H: usize = 128;
@@ -57,10 +58,7 @@ fn hypot2(a: f64, b: f64) -> f64 {
     sum.sqrt() * max
 }
 
-fn sstep(x: f64) -> f64 {
-    let x = x.clamp(0.0, 1.0);
-    x * x * (3.0 - 2.0 * x)
-}
+use crate::math::sstep;
 
 /// The lights painted into an equirectangular map: RGBA f32, `w` x `h`, row 0 (the top of the sky) first.
 ///
@@ -77,10 +75,13 @@ pub fn paint(lights: &[Light], ambient: [f64; 3], w: usize, h: usize) -> Vec<f32
         let ul = hypot2(u[0], u[2]);
         let u = if ul > 1e-6 { [u[0] / ul, 0.0, u[2] / ul] } else { [1.0, 0.0, 0.0] };      // straight up or down: any horizontal axis will do
         let v = [a[1]*u[2] - a[2]*u[1], a[2]*u[0] - a[0]*u[2], a[0]*u[1] - a[1]*u[0]];
-        Lamp { a, u, v, tw: libm::tan(l.w * D), th: libm::tan(l.h * D), rgb: l.rgb, soft: l.soft.max(1e-3) }
+        let w_deg = crate::limits::hold(l.w, crate::limits::LIGHT_SIZE);
+        let h_deg = crate::limits::hold(l.h, crate::limits::LIGHT_SIZE);
+        Lamp { a, u, v, tw: libm::tan(w_deg * D), th: libm::tan(h_deg * D), rgb: l.rgb, soft: l.soft.max(1e-3) }
     }).collect();
     let mut px = vec![0.0f32; w * h * 4];
-    for j in 0..h {
+    // (each row by itself, on all cores: every texel is worked out alone, so the map is the same to the bit)
+    px.par_chunks_mut(w * 4).enumerate().for_each(|(j, row)| {
         let th = (j as f64 + 0.5) / h as f64 * PI;
         let (st, ct) = (libm::sin(th), libm::cos(th));
         for i in 0..w {
@@ -97,13 +98,13 @@ pub fn paint(lights: &[Light], ambient: [f64; 3], w: usize, h: usize) -> Vec<f32
                 g += l.rgb[1] * m;
                 b += l.rgb[2] * m;
             }
-            let o = (j * w + i) * 4;
-            px[o] = r as f32;
-            px[o + 1] = g as f32;
-            px[o + 2] = b as f32;
-            px[o + 3] = 1.0;
+            let o = i * 4;
+            row[o] = r as f32;
+            row[o + 1] = g as f32;
+            row[o + 2] = b as f32;
+            row[o + 3] = 1.0;
         }
-    }
+    });
     px
 }
 
@@ -165,21 +166,21 @@ pub fn add_glows(px: &mut [f32], glows: &[Glow], gain: f64, extra: f64, w: usize
         // nothing worth adding beyond the angle where the bell has fallen to a millionth
         let far = (1.0 - 13.8 * s2).max(-1.0).acos();
         let lat = g.dir[1].clamp(-1.0, 1.0).acos();
-        for j in 0..h {
+        px[..w * h * 4].par_chunks_mut(w * 4).enumerate().for_each(|(j, row)| {
             let th = (j as f64 + 0.5) / h as f64 * PI;
             // the nearest this row comes to the glow is the difference of their latitudes
-            if (th - lat).abs() > far { continue; }
+            if (th - lat).abs() > far { return; }
             let (st, ct) = (th.sin(), th.cos());
             for i in 0..w {
                 let ph = ((i as f64 + 0.5) / w as f64 - 0.5) * 2.0 * PI;
                 let c = st * ph.cos() * g.dir[0] + ct * g.dir[1] + st * ph.sin() * g.dir[2];
                 let m = ((c - 1.0) / s2).exp() * norm;
-                let o = (j * w + i) * 4;
-                px[o] += (g.energy[0] * m) as f32;
-                px[o + 1] += (g.energy[1] * m) as f32;
-                px[o + 2] += (g.energy[2] * m) as f32;
+                let o = i * 4;
+                row[o] += (g.energy[0] * m) as f32;
+                row[o + 1] += (g.energy[1] * m) as f32;
+                row[o + 2] += (g.energy[2] * m) as f32;
             }
-        }
+        });
     }
 }
 
@@ -229,6 +230,45 @@ pub fn paint_dir(u: f64, v: f64) -> [f64; 3] {
     use std::f64::consts::PI;
     let (th, ph) = (v * PI, (u - 0.5) * 2.0 * PI);
     [th.sin() * ph.cos(), th.cos(), th.sin() * ph.sin()]
+}
+
+/// A map (`w` x `h`, laid out as `paint` lays it out) stretched to `fw` x `fh` by bilinear filtering,
+/// wrapping round the horizon and clamped at the poles, as the tracer's linear sampler would read it.
+pub fn stretch(px: &[f32], w: usize, h: usize, fw: usize, fh: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; fw * fh * 4];
+    out.par_chunks_mut(fw * 4).enumerate().for_each(|(j, row)| {
+        let v = ((j as f32 + 0.5) * h as f32 / fh as f32 - 0.5).clamp(0.0, (h - 1) as f32);
+        let j0 = v.floor() as usize;
+        let j1 = (j0 + 1).min(h - 1);
+        let fy = v - j0 as f32;
+        for i in 0..fw {
+            let u = (i as f32 + 0.5) * w as f32 / fw as f32 - 0.5;
+            let i0f = u.floor();
+            let fx = u - i0f;
+            let i0 = (i0f as isize).rem_euclid(w as isize) as usize;
+            let i1 = (i0 + 1) % w;
+            for q in 0..4 {
+                let top = px[(j0 * w + i0) * 4 + q] * (1.0 - fx) + px[(j0 * w + i1) * 4 + q] * fx;
+                let bot = px[(j1 * w + i0) * 4 + q] * (1.0 - fx) + px[(j1 * w + i1) * 4 + q] * fx;
+                row[i * 4 + q] = top * (1.0 - fy) + bot * fy;
+            }
+        }
+    });
+    out
+}
+
+/// `paint_dir` for every texel of a `w` x `h` map, row 0 first, worked out once per size and kept (a
+/// map painted again as the sky moves need not take a million sines and cosines each time).
+pub fn paint_dirs(w: usize, h: usize) -> std::sync::Arc<Vec<[f64; 3]>> {
+    use std::sync::{Arc, Mutex};
+    static KEPT: Mutex<Vec<((usize, usize), Arc<Vec<[f64; 3]>>)>> = Mutex::new(Vec::new());
+    let mut kept = KEPT.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, d)) = kept.iter().find(|(k, _)| *k == (w, h)) { return d.clone(); }
+    let d: Arc<Vec<[f64; 3]>> = Arc::new((0..w * h).into_par_iter().map(|o| paint_dir(((o % w) as f64 + 0.5) / w as f64, ((o / w) as f64 + 0.5) / h as f64)).collect());
+    // (a handful of sizes are ever painted; the oldest goes if more turn up)
+    if kept.len() >= 8 { kept.remove(0); }
+    kept.push(((w, h), d.clone()));
+    d
 }
 
 /// Which order of harmonics each of the nine terms belongs to.
@@ -306,4 +346,36 @@ pub fn preview_uv(d: [f64; 3]) -> (f64, f64) {
     use std::f64::consts::PI;
     let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1e-30);
     (0.5 + d[0].atan2(-d[2]) / (2.0 * PI), (d[1] / l).clamp(-1.0, 1.0).acos() / PI)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stretch_keeps_a_map_of_its_own_size_to_the_bit_and_an_even_one_even() {
+        let (w, h) = (16, 8);
+        let px: Vec<f32> = (0..w * h * 4).map(|k| (k as f32 * 0.37).sin() + 1.5).collect();
+        assert_eq!(stretch(&px, w, h, w, h), px);
+        let even = vec![0.75f32; w * h * 4];
+        assert!(stretch(&even, w, h, 4 * w, 4 * h).iter().all(|v| (v - 0.75).abs() < 1e-6));
+        // wraps round the horizon: the first and last columns of the stretched map blend the same two
+        let s = stretch(&px, w, h, 4 * w, 4 * h);
+        let a = s[0];
+        let b = s[(4 * w - 1) * 4];
+        let mid = (px[0] + px[(w - 1) * 4]) * 0.5;
+        assert!((a - mid).abs() < 0.5 && (b - mid).abs() < 0.5);
+    }
+
+    #[test]
+    fn kept_directions_are_paint_dir() {
+        let (w, h) = (24, 12);
+        let d = paint_dirs(w, h);
+        for j in 0..h {
+            for i in 0..w {
+                assert_eq!(d[j * w + i], paint_dir((i as f64 + 0.5) / w as f64, (j as f64 + 0.5) / h as f64));
+            }
+        }
+        assert!(std::sync::Arc::ptr_eq(&d, &paint_dirs(w, h)));
+    }
 }

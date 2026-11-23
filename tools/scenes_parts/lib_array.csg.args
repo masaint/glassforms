@@ -1,0 +1,7 @@
+scene=studio
+preset=sphere
+material=glass
+mods=[{"kind":"repeat","mode":1,"a":{"v":[8,1,1],"link":false},"b":{"v":[3.0,2.2,3.8],"link":false},"detail":2.4}]
+dist=6.0
+rot=75,0,0
+trace=csg

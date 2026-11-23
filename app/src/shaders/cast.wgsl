@@ -62,19 +62,35 @@ const CAST_STRIDE: f32 = 0.7;         // the longest stride
 // way: the length of the ray inside it is measured, and the light is dimmed and coloured by that.
 // (a light at a place, not at infinity: the march stops where it stands. Set only around a lamp's march.)
 var<private> castMax: f32 = 1e9;
+fn castSample(q: vec3f) -> vec4f {
+  let c = clamp(q, vec3f(-HB), vec3f(HB));
+  let d = textureSampleLevel(castBodies, castSmp, c / (2.0 * HB) + 0.5, 0.0);
+  let diff = q - c;
+  let out2 = dot(diff, diff);
+  if (out2 > 0.0) {
+    let pos = max(d, vec4f(0.0));
+    return sqrt(pos * pos + vec4f(out2));
+  }
+  return d;
+}
 fn castShadow(ro: vec3f, rd: vec3f, w: f32) -> vec3f {
   let b = dot(ro, rd);
-  let h = b * b - (dot(ro, ro) - BOUND * BOUND);
+  let wc = min(w, 0.85);
+  let a = max(1.0 - wc * wc, 0.05);
+  let hb = b - wc * BOUND;
+  let h = hb * hb - a * (dot(ro, ro) - BOUND * BOUND);
   if (h <= 0.0) { return vec3f(1.0); }
-  let tFar = -b + sqrt(h);
+  let sh = sqrt(h);
+  let tNear = (-hb - sh) / a;
+  let tFar = min((-hb + sh) / a, max(-b, 0.0) + BOUND * 2.0);
   if (tFar <= 0.0) { return vec3f(1.0); }
   // The first look is taken near enough that the surface the march starts from does not count as cover;
-  // from a point outside the scene (a floor's), where the ray enters the ball that holds the bodies.
-  var t = max(cu.k.z / max(w, 0.2), -b - sqrt(h));
+  // from a point outside the scene (a floor's), where the ray enters the cone around the ball that holds the bodies.
+  var t = max(cu.k.z / max(w, 0.2), tNear);
   var r = vec4f(1.0);
   var s = vec4f(0.0);
   for (var i = 0; i < CAST_STEPS; i++) {
-    let d = textureSampleLevel(castBodies, castSmp, (ro + rd * t) / (2.0 * HB) + 0.5, 0.0);
+    let d = castSample(ro + rd * t);
     r = min(r, d / (w * t));
     // wholly behind something that lets nothing through: no need to look further
     if (any(r * cu.solid <= vec4f(-1.0))) { break; }
@@ -113,6 +129,11 @@ fn castArriving(q: vec3f, n: vec3f) -> vec3f {
                + textureSampleLevel(castLight, castSmp, c + b, 0.0).rgb + textureSampleLevel(castLight, castSmp, c - b, 0.0).rgb);
 }
 
+fn castFocused(p: vec3f, n: vec3f) -> vec3f {
+  let no = toObj(n);
+  return castArriving(toObj(p) + no * cu.k2.y, no) * cu.k.y;
+}
+
 // The diffuse light at p (a point in the camera's frame, as the tracer has it) on a surface facing n, in parts:
 //   total    the light a matte surface facing n gathers from the whole lighting (nine terms)
 //   lost     of that, each light's own share times how much of the light is hidden from p
@@ -142,8 +163,7 @@ fn castParts(p: vec3f, n: vec3f) -> CastParts {
     if (share <= 0.0) { continue; }
     lost += cu.lights[i].rgb.rgb * share * (vec3f(1.0) - castShadow(ro, cu.lights[i].dir.xyz, cu.lights[i].dir.w));
   }
-  let no = toObj(n);
-  let added = castArriving(toObj(p) + no * cu.k2.y, no) * cu.k.y;
+  let added = castFocused(p,n);
   return CastParts(total, lost, added);
 }
 
@@ -154,23 +174,42 @@ fn castAt(p: vec3f, n: vec3f) -> vec3f {
   return max(c.total - c.lost + c.added, vec3f(0.0)) / max(c.total, vec3f(1e-5));
 }
 
-// How much of the sky above a floor point ro (in the object's frame; up: the floor's up there) the bodies
-// that cast hide, 0 to 1, each by its veil (cu.veil): the distance to them asked at a few heights straight up, against each height
-// (as a matte surface's own folds are judged). Under a body it is most, falling off softly around it.
-fn castUnder(ro: vec3f, up: vec3f) -> f32 {
-  var shut = 0.0;
-  var w = 1.0;
-  var ws = 0.0;
-  for (var i = 0; i < 5; i++) {
-    let h = 0.08 + 0.25 * f32(i * i) * 0.25 + 0.1 * f32(i);
-    let d = textureSampleLevel(castBodies, castSmp, (ro + up * h) / (2.0 * HB) + 0.5, 0.0) + cu.far;
-    // each body hides what it hides of that light (clear glass little, a solid body all of it)
-    let c = clamp((vec4f(h) - d) / h, vec4f(0.0), vec4f(1.0)) * cu.veil;
-    shut += w * max(max(c.x, c.y), max(c.z, c.w));
-    ws += w;
-    w *= 0.8;
+// How much of the upper hemisphere above a floor point ro (in the object's frame; up: the floor's normal
+// there) the casting bodies hide, 0 to 1, weighted by cosine and each body's veil (cu.veil). Seven short
+// cones (zenith + six symmetric ring directions) sample the hemisphere so sharp vertices and thin
+// overhanging loops cast restrained, physically shaped contact shade instead of a wide vertical column.
+fn castUnderCone(ro: vec3f, dir: vec3f) -> f32 {
+  var coneOcc = vec4f(0.0);
+  for (var s = 0; s < 7; s++) {
+    let fs = f32(s);
+    let t = HB * (0.028 + 0.140 * fs + 0.025 * fs * fs);
+    let w = 0.55 * t + 0.012 * HB;
+    let d = castSample(ro + dir * t) + cu.far;
+    let x = clamp(0.5 - 0.5 * (d / w), vec4f(0.0), vec4f(1.0));
+    let cov = x * x * (3.0 - 2.0 * x);
+    let fade = 1.0 - smoothstep(0.50 * HB, 1.85 * HB, t);
+    coneOcc = vec4f(1.0) - (vec4f(1.0) - coneOcc) * (vec4f(1.0) - 0.42 * cov * fade);
   }
-  return clamp(shut / ws, 0.0, 1.0);
+  let occ = coneOcc * cu.veil;
+  return 1.0 - (1.0 - occ.x) * (1.0 - occ.y) * (1.0 - occ.z) * (1.0 - occ.w);
+}
+
+fn castUnder(ro: vec3f, up: vec3f) -> f32 {
+  let reach = BOUND + 1.85 * HB;
+  if (dot(ro, ro) > reach * reach) { return 0.0; }
+  if (dot(cu.veil, vec4f(1.0)) <= 0.0) { return 0.0; }
+  let t1 = normalize(cross(up, select(vec3f(1.0, 0.0, 0.0), vec3f(0.0, 1.0, 0.0), abs(up.x) > 0.7)));
+  let t2 = cross(up, t1);
+  let cz = 0.7313537;
+  let sz = 0.6819984;
+  var shut = 0.22 * castUnderCone(ro, up);
+  shut += 0.13 * castUnderCone(ro, up * cz + t1 * sz);
+  shut += 0.13 * castUnderCone(ro, up * cz + (0.5 * t1 + 0.8660254 * t2) * sz);
+  shut += 0.13 * castUnderCone(ro, up * cz + (-0.5 * t1 + 0.8660254 * t2) * sz);
+  shut += 0.13 * castUnderCone(ro, up * cz - t1 * sz);
+  shut += 0.13 * castUnderCone(ro, up * cz + (-0.5 * t1 - 0.8660254 * t2) * sz);
+  shut += 0.13 * castUnderCone(ro, up * cz + (0.5 * t1 - 0.8660254 * t2) * sz);
+  return clamp(shut, 0.0, 1.0);
 }
 
 // What the bodies do to the light on a floor under the shape, at p: a point of the floor in the room's
@@ -180,24 +219,53 @@ fn castUnder(ro: vec3f, up: vec3f) -> f32 {
 // that light, and each light's share of it, are worked out beforehand (cu.floorTotal, cu.floorShare).
 // Light that arrives by way of the bodies is read from a map of the floor's plane, which is far finer
 // than the volume the bodies read theirs from.
-fn castFloor(p: vec3f) -> vec3f {
-  if (cu.floor.z < 0.5) { return vec3f(1.0); }
+struct FloorCast {
+  ro: vec3f,
+  up: vec3f,
+  direct: vec3f,
+  lost: vec3f,
+}
+fn castFloorBase(p: vec3f) -> FloorCast {
   // the point and the floor's normal as the camera sees them, then in the object's frame
   let pw = vec3f(dot(cu.room0.xyz, p), dot(cu.room1.xyz, p), dot(cu.room2.xyz, p));
   let nw = vec3f(cu.room0.y, cu.room1.y, cu.room2.y);
-  let ro = toObj(pw) + toObj(nw) * cu.k.z;
+  let up = toObj(nw);
+  let ro = toObj(pw) + up * cu.k.z;
   var lost = vec3f(0.0);
+  var direct = vec3f(0.0);
   let count = i32(cu.k.x);
   for (var i = 0; i < 12; i++) {
     if (i >= count) { break; }
     let share = cu.floorShare[i].rgb;
     if (share.x + share.y + share.z <= 0.0) { continue; }
+    direct += share;
     lost += share * (vec3f(1.0) - castShadow(ro, cu.lights[i].dir.xyz, cu.lights[i].dir.w));
   }
+  return FloorCast(ro, up, direct, lost);
+}
+
+// Directional floor shadow ratio only (without castUnder ambient occlusion), so traced floor GI bounce
+// rays can supply upper-hemisphere occlusion and colour bleeding without double-occluding the floor.
+fn castFloorDirect(p: vec3f) -> vec3f {
+  if (cu.floor.z < 0.5) { return vec3f(1.0); }
+  let fb = castFloorBase(p);
   let total = cu.floorTotal.rgb;
-  // the light from all round, hidden where bodies stand over the floor: a soft pool of shade under them
-  lost += total * (cu.floorTotal.w * castUnder(ro, toObj(nw)));
-  return max(total - lost, vec3f(0.0)) / max(total, vec3f(1e-5));
+  return max(total - fb.lost, vec3f(0.0)) / max(total, vec3f(1e-5));
+}
+
+fn castFloor(p: vec3f) -> vec3f {
+  if (cu.floor.z < 0.5) { return vec3f(1.0); }
+  let fb = castFloorBase(p);
+  let total = cu.floorTotal.rgb;
+  let rem = max(total - fb.lost, vec3f(0.0));
+  // Ambient hemisphere shade scales the remaining light by its luminance-balanced non-direct share,
+  // keeping sunlit contact shade neutral instead of stripping blue sky from yellow sunlight while
+  // preserving full sky hue inside directional shadows.
+  let lum = vec3f(0.2126, 0.7152, 0.0722);
+  let allRound = max(total - fb.direct / max(cu.floorAlbedo.w, 1e-5), vec3f(0.0));
+  let ambShare = clamp(dot(allRound, lum) / max(dot(rem, lum), 1e-5), 0.0, 1.0);
+  let under = clamp(cu.floorTotal.w * castUnder(fb.ro, fb.up), 0.0, 1.0);
+  return (rem * (1.0 - ambShare * under)) / max(total, vec3f(1e-5));
 }
 
 // The light the bodies focus onto the floor at p (room's frame), as the floor gives it back: added to
@@ -226,6 +294,7 @@ fn castFloorSeen(ro: vec3f, rd: vec3f) -> vec3f {
   if (cu.floor.z < 0.5) { return vec3f(0.0); }
   let o = ro.x * cu.room0.xyz + ro.y * cu.room1.xyz + ro.z * cu.room2.xyz;
   let d = rd.x * cu.room0.xyz + rd.y * cu.room1.xyz + rd.z * cu.room2.xyz;
+  if (d.y >= -1e-5) { return vec3f(0.0); }
   let tf = (cu.floor.x - o.y) / d.y;
   if (!(tf > 0.0)) { return vec3f(0.0); }
   let p = o + d * tf;

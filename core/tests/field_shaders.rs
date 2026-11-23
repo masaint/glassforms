@@ -39,7 +39,8 @@ fn check_block(p: &Preset, module: &naga::Module) {
     let (members, size) = layout(module, u.ty);
     assert_eq!(size as usize, field::UNIFORM_SIZE, "{id}: size of the uniform block");
     let places: Vec<(&str, u32)> = members.iter().map(|(n, o, _)| (n.as_str(), *o)).collect();
-    assert_eq!(places, [("hb", 0), ("res", 4), ("puff", 8), ("pad", 12), ("pr", 16)], "{id}");
+    assert_eq!(places, [("hb", 0), ("res", 4), ("puff", 8), ("first_slice", 12), ("pr", 16)], "{id}");
+    assert!(matches!(module.types[members[3].2].inner, TypeInner::Scalar(naga::Scalar::F32)), "{id}: first slice must match the f32 uniform");
 
     // the parameters: eight floats, the preset's own first and in order
     let (pr, pr_size) = layout(module, members[4].2);

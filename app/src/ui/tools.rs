@@ -39,6 +39,8 @@ impl Default for Nav {
     }
 }
 impl Nav {
+    /// What the line says now, if anything.
+    pub fn said_text(&self) -> Option<&str> { self.said.as_ref().map(|(w, _)| w.as_str()) }
     pub fn say(&mut self, words: String) {
         self.said = Some((words, Instant::now()));
         self.said_by_objects = false;
@@ -186,7 +188,7 @@ fn object_end(px: &Panels, full: Rect) -> f32 {
 /// The lowest a floating window on the left starts without covering the camera's bar or the cube; and on
 /// the right, without covering the object bar.
 pub fn below_left(full: Rect) -> f32 {
-    full.top() + EDGE + CUBE.max(BAR_H) + BELOW
+    full.top() + EDGE + CUBE.max(2.0 * BAR_H + GAP) + BELOW
 }
 pub fn below_right(full: Rect) -> f32 {
     full.top() + EDGE + BAR_H + BELOW
@@ -198,7 +200,10 @@ pub fn bars(ctx: &egui::Context, st: &mut State, px: &mut Panels, full: Rect) {
     let lo = px.left_at.map_or(full.left(), |r| r.right());
     let hi = px.right_at.map_or(full.right(), |r| r.left());
     let room = hi - lo;
-    if room >= CAMERA_W + 24.0 { camera_bar(ctx, st, px, full); }
+    if room >= CAMERA_W + 24.0 {
+        camera_bar(ctx, st, px, full);
+        super::tiers::bar(ctx, st, px, camera_at(px, full));
+    }
     if room >= CAMERA_W + OBJECT_W + 44.0 { object_bar(ctx, st, px, full); }
     if room >= CAMERA_W + OBJECT_W + CUBE + 60.0 { cube(ctx, st, px, full); }
     words(ctx, px, full);
@@ -365,17 +370,12 @@ pub fn words(ctx: &egui::Context, px: &mut Panels, full: Rect) {
 /// bar's "frame".
 pub fn frame(st: &mut State, px: &mut Panels) {
     let (centre, r) = match px.handles.chosen(st) {
-        Some(Target::Layer(i)) => {
-            let pl = st.stack.layers[i].place;
-            (pl.pos, gf_core::FIT * pl.size.abs().max(1e-3))
-        }
-        Some(Target::Part(i)) => {
-            let Some((c, size)) = st.csg.part_in_scene(i) else { return };
+        Some(Target::World(item)) => { let Some(bounds) = st.world_framing(item) else { return }; bounds }
+        Some(Target::Pivot(layer, i)) => (layer.position(st, i).unwrap_or_default(), 0.2),
+        Some(t @ (Target::Part(_) | Target::Whole | Target::ConstructionNode)) => {
+            let Some(h) = t.construction(st) else { return };
+            let (c, size) = h.in_scene();
             (c, gf_core::FIT * size.max(1e-3))
-        }
-        Some(Target::Whole) => {
-            let pl = st.csg.place;
-            (pl.pos, gf_core::FIT * pl.size.abs().max(1e-3))
         }
         Some(Target::Lamp(i)) => {
             let Some((c, _)) = st.lamp_in_view(i) else { return };
@@ -393,10 +393,12 @@ pub fn frame(st: &mut State, px: &mut Panels) {
     };
     st.frame_on(centre, r);
     px.nav.say(match px.handles.chosen(st) {
-        Some(Target::Layer(i)) => format!("framed {}", st.layer_title(i)),
+        Some(Target::World(item)) => format!("framed {}", st.world_name(item)),
         Some(Target::Lamp(i)) => format!("framed lamp {}", i + 1),
-        Some(Target::Part(i)) => format!("framed part {}", i + 1),
+        Some(Target::Part(id)) => format!("framed part {}", st.csg.construction_part(id).unwrap_or(0) + 1),
+        Some(Target::ConstructionNode) => "framed the construction layer".into(),
         Some(Target::Whole) => "framed the csg shape".into(),
+        Some(Target::Pivot(_, _)) => "framed the pivot".into(),
         None => "framed the scene".into(),
     });
 }

@@ -31,7 +31,24 @@ use gf_core::state::State;
 use crate::gpu::*;
 use crate::render::{Variant, HDR};
 
-pub const SURFACE_WGSL: &str = include_str!("shaders/surface.wgsl");
+pub const SURFACE_WGSL: &str = concat!(
+    include_str!("shaders/pbr/hash.wgsl"),
+    include_str!("shaders/pbr/sh9.wgsl"),
+    include_str!("shaders/light/occlusion.wgsl"),
+    include_str!("shaders/light/rig.wgsl"),
+    include_str!("shaders/pbr/diffuse.wgsl"),
+    include_str!("shaders/pbr/types.wgsl"),
+    include_str!("shaders/pbr/dielectric.wgsl"),
+    include_str!("shaders/dielectric_fresnel.wgsl"),
+    include_str!("shaders/paint_interface.wgsl"),
+    include_str!("shaders/paint_film.wgsl"),
+    include_str!("shaders/film_pattern.wgsl"),
+    include_str!("shaders/surface.wgsl"),
+    "\n",
+    include_str!("shaders/panel_irradiance.wgsl"),
+    "\n",
+    include_str!("shaders/wear_pigment.wgsl"),
+);
 pub const MAX_LIGHTS: usize = 12;
 
 /// How far a milky body's own light is dimmed where the lights are hidden from its surface.
@@ -80,9 +97,14 @@ fn show() -> f32 {
 /// (The lines changed are also those lamps.rs and cast.rs look for, so neither weaves into them.)
 pub fn weave(src: &str, v: &Variant) -> String {
     if v.surface != Kind::Clay { return src.to_string(); }
-    src.replace("  let level = dot(light, vec3f(0.2126, 0.7152, 0.0722)) / lu.clay2.x;\n  light *= pow(max(level, 1e-4), lu.clay2.y);\n", "")
-        .replace("  var light = nine(0, toEnv(n));", "  var light = max(nine(0, toEnv(n)), vec3f(0.0));")
-        .replace("* (sheen * open);", "* (open * sheen);")
+    const CLAY: [(&str, &str, &str); 3] = [
+        ("surface.clay_stretch", "  let level = dot(light, vec3f(0.2126, 0.7152, 0.0722)) / lu.clay2.x;\n  light *= pow(max(level, 1e-4), lu.clay2.y);\n", ""),
+        ("surface.clay_light", "  var light = nine(0, toEnv(n));", "  var light = max(nine(0, toEnv(n)), vec3f(0.0));"),
+        ("surface.clay_sheen", "* (sheen * open);", "* (open * sheen);"),
+    ];
+    let counts = CLAY.map(|(name, old, _)| crate::weave::found(src, name, old));
+    crate::weave::all_once("surface.clay", &counts);
+    CLAY.iter().fold(src.to_string(), |s, (_, old, new)| s.replace(old, new))
 }
 
 /// One light at infinity as the shader has it (see `SLight` there).
@@ -93,6 +115,35 @@ pub struct SLight {
     pub u: [f32; 4],
     pub v: [f32; 4],
     pub rgb: [f32; 4],
+}
+
+/// The owner's inverse placement and the two controls that tint an opaque substrate.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Default, PartialEq, Debug)]
+pub struct Pigment {
+    frame: [[f32; 4]; 3],
+    dirt: [f32; 4],
+    variation: [f32; 4],
+}
+
+impl Pigment {
+    fn of(state: &State) -> Self {
+        let p = &state.p;
+        let cavity = gf_core::material::marks(p)[1] * p.age.max(0.0);
+        let mottle = p.mottle.clamp(0.0, 1.0);
+        if cavity == 0.0 && mottle == 0.0 { return Self::default(); }
+        let frame = if state.plain() {
+            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]]
+        } else {
+            let inv = state.stack.combine().inv[0];
+            std::array::from_fn(|i| std::array::from_fn(|j| inv[i*4+j] as f32))
+        };
+        Self {
+            frame,
+            dirt: [p.cavity_r.clamp(0.0, 1.0) as f32, p.cavity_g.clamp(0.0, 1.0) as f32, p.cavity_b.clamp(0.0, 1.0) as f32, cavity as f32],
+            variation: [mottle as f32, 0.0, 0.0, 0.0],
+        }
+    }
 }
 
 #[repr(C)]
@@ -110,6 +161,12 @@ pub struct SurfU {
     pub lights: [SLight; MAX_LIGHTS],
     pub cer: [f32; 4],
     pub nine: [[f32; 4]; 9],
+    pub pigment: Pigment,
+    pub film: [[f32; 4]; 3],
+    pub gi: [f32; 4],
+    pub floor_plane: [f32; 4],
+    pub floor_lit: [f32; 4],
+    pub floor_albedo: [f32; 4],
 }
 
 /// What the engine tells the pass about the material and the lights (the view is added each frame).
@@ -121,11 +178,41 @@ pub struct Lit {
     /// tracer's clay did before, now on the room and the direct light together); zero for other materials
     pub clay: [f32; 4],
     pub lights: [SLight; MAX_LIGHTS],
-    /// a ceramic: x 1 = on, y wrap past the terminator, z the glaze's reflectance head on, w the cone its
+    /// a ceramic: x 1 = on, y wrap past the terminator, z the body's refractive index, w the cone its
     /// reflections are hidden by (zero for other materials)
     pub cer: [f32; 4],
     /// a ceramic: the room's light without the lights, nine terms as `env::sh_terms(.., SH_MATTE)` gives
     pub nine: [[f32; 4]; 9],
+    pub pigment: Pigment,
+    pub film: [[f32; 4]; 3],
+    pub gi: [f32; 4],
+    pub floor_plane: [f32; 4],
+    pub floor_lit: [f32; 4],
+    pub floor_albedo: [f32; 4],
+}
+
+impl Lit {
+    /// Attach global-illumination and floor-plane parameters for surface self-bounce and floor-to-object bounce.
+    pub fn with_gi(mut self, state: &State, floor_h: Option<f64>, floor_own: [f64; 3], sky_horizon: bool, shadow_w: f32) -> Self {
+        let p = &state.p;
+        if p.gi > 0.5 && p.gi_strength > 0.0 && !state.empty {
+            self.gi[0] = p.gi_bounces.round().clamp(1.0, 4.0) as f32;
+            self.gi[1] = p.gi_strength.clamp(0.0, 4.0) as f32;
+            self.gi[2] = p.gi_samples.round().clamp(1.0, 4.0) as f32;
+        } else {
+            self.gi[0] = 0.0;
+            self.gi[1] = 0.0;
+            self.gi[2] = 1.0;
+        }
+        if let (Some(h), Some(f)) = (floor_h, gf_core::stage::Floor::of(p)) {
+            let m = state.room_m();
+            self.floor_plane = [m[1] as f32, m[4] as f32, m[7] as f32, h as f32];
+            let fade = if sky_horizon { -(f.fade as f32) } else { f.fade as f32 };
+            self.floor_lit = [floor_own[0] as f32, floor_own[1] as f32, floor_own[2] as f32, fade];
+            self.floor_albedo = [f.albedo[0] as f32, f.albedo[1] as f32, f.albedo[2] as f32, shadow_w];
+        }
+        self
+    }
 }
 
 /// The lights of a rig as the shader takes them: the direction to each one's middle and the two across
@@ -144,7 +231,7 @@ pub fn lights_of(lights: &[Light], rgb: impl Fn([f64; 3]) -> [f64; 3]) -> ([SLig
         let u = [a[2], 0.0, -a[0]];
         let ul = (u[0] * u[0] + u[2] * u[2]).sqrt();
         let u = if ul > 1e-6 { [u[0] / ul, 0.0, u[2] / ul] } else { [1.0, 0.0, 0.0] };
-        let v = [a[1] * u[2] - a[2] * u[1], a[2] * u[0] - a[0] * u[2], a[0] * u[1] - a[1] * u[0]];
+        let v = gf_core::math::cross(a, u);
         out[n] = SLight {
             a: [a[0] as f32, a[1] as f32, a[2] as f32, (l.w * D).tan() as f32],
             u: [u[0] as f32, u[1] as f32, u[2] as f32, (l.h * D).tan() as f32],
@@ -154,6 +241,46 @@ pub fn lights_of(lights: &[Light], rgb: impl Fn([f64; 3]) -> [f64; 3]) -> ([SLig
         n += 1;
     }
     (out, n)
+}
+
+/// The scene's analytic area lights (`rig` lights scaled by `lightGain`, plus the physical sky's
+/// directional solar source when active — already scaled by `sunPower * skyGain`), transformed
+/// by `scale` into the tracer/surface buffer format.
+pub fn scene_lights_atten(
+    state: &State,
+    rig_lit: bool,
+    sky_active: bool,
+    sun_atten: f64,
+    scale: impl Fn([f64; 3]) -> [f64; 3],
+) -> ([SLight; MAX_LIGHTS], usize) {
+    let gain = state.p.light_gain;
+    let mut all = Vec::new();
+    if rig_lit {
+        for l in &state.rig().lights {
+            let mut copy = l.clone();
+            copy.rgb = copy.rgb.map(|c| c * gain);
+            all.push(copy);
+        }
+    }
+    if sky_active {
+        if let Some(sun) = gf_core::sky::Sky::of(&state.p).sun_as_light_scaled(&state.lights_to_room(), sun_atten) {
+            all.push(sun);
+        }
+    }
+    lights_of(&all, scale)
+}
+
+pub fn scene_lights_scaled(
+    state: &State,
+    rig_lit: bool,
+    sky_active: bool,
+    scale: impl Fn([f64; 3]) -> [f64; 3],
+) -> ([SLight; MAX_LIGHTS], usize) {
+    scene_lights_atten(state, rig_lit, sky_active, 1.0, scale)
+}
+
+pub fn scene_lights(state: &State, rig_lit: bool, sky_active: bool) -> ([SLight; MAX_LIGHTS], usize) {
+    scene_lights_atten(state, rig_lit, sky_active, 1.0, |c| c)
 }
 
 /// The lighting's nine terms (unnormalised, as `env::sh_of_map` makes them) of the lights alone: what the
@@ -178,39 +305,183 @@ pub fn lights_sh(state: &State, gain: f64) -> Sh9 {
     env::sh_of_map(&px, w, h, 4, env::paint_dir)
 }
 
-/// The rig's lights for a milky body: as they are, made `gain` times as bright.
-pub fn milky(state: &State, lit: bool, body: [f64; 3]) -> Lit {
-    let gain = state.p.light_gain;
-    let (lights, n) = if lit { lights_of(&state.rig().lights, |c| c.map(|x| x * gain)) } else { ([SLight::zeroed(); MAX_LIGHTS], 0) };
-    Lit { base: [body[0] as f32, body[1] as f32, body[2] as f32, n as f32], k: [MILKY_DIRECT, MILKY_SHADOW, MILKY_FOLDS, 0.0], clay: [0.0; 4], lights, cer: [0.0; 4], nine: [[0.0; 4]; 9] }
+pub use gf_core::sky::light_open_factor;
+
+/// Sample the physical sky dome into 6 soft octahedral area patches (in the lights' frame) so
+/// `surface.wgsl`'s `milky` pass receives full-sphere sky-dome direct shading and smooth self-shadowing
+/// without a `dot(n, sun) == 0` terminator step when the solar disc is behind the body.
+fn sample_pano_dir(pano: &[f32], pw: usize, ph: usize, d_r: [f64; 3]) -> [f64; 3] {
+    use std::f64::consts::{PI, TAU};
+    let su = ((d_r[2].atan2(d_r[0]) / TAU + 0.5) * pw as f64).rem_euclid(pw as f64);
+    let sv = (d_r[1].clamp(-1.0, 1.0).acos() / PI * ph as f64).clamp(0.0, (ph - 1) as f64);
+    let x = (su as usize).min(pw - 1);
+    let y = (sv as usize).min(ph - 1);
+    let o = (y * pw + x) * 4;
+    [pano[o] as f64, pano[o + 1] as f64, pano[o + 2] as f64]
 }
 
-/// A glaze's reflectance head on (index about 1.5).
-const GLAZE_F0: f32 = 0.04;
+fn milky_lights(
+    state: &State,
+    lit: bool,
+    sky: bool,
+    sun_atten: f64,
+    pano: Option<(&[f32], usize, usize)>,
+) -> ([SLight; MAX_LIGHTS], usize, usize) {
+    let gain = state.p.light_gain;
+    let mut all = Vec::new();
+    if lit {
+        for l in &state.rig().lights {
+            let mut copy = l.clone();
+            copy.rgb = copy.rgb.map(|c| c * gain);
+            all.push(copy);
+        }
+    }
+    let mut direct_len = all.len();
+    if sky {
+        let sky_model = gf_core::sky::Sky::of(&state.p);
+        let l2r = state.lights_to_room();
+        if let Some(sun) = sky_model.sun_as_light_scaled(&l2r, sun_atten) {
+            all.push(sun);
+        }
+        direct_len = all.len();
+        if sky_model.active && all.len() < MAX_LIGHTS {
+            let lut = sky_model.transmittance_lut();
+            let ground_lit = sky_model.ground_radiance(&lut);
+            let r2l = gf_core::math::transpose(&l2r);
+            let half_deg = 34.0;
+            let soft = 0.45;
+            // Weight each of the 6 octahedral patches so overlapping 34° lobes integrate to pi sr.
+            let scale_k = 1.94 / gf_core::sky::quad_solid_angle(half_deg, soft);
+            let yaw0 = sky_model.sun_yaw.to_radians();
+            let el_h = 14.0_f64.to_radians();
+            let el_sample = 22.0_f64.to_radians();
+            let mut dirs: Vec<([f64; 3], [f64; 3])> = Vec::with_capacity(6);
+            dirs.push(([0.0, 1.0, 0.0], [0.0, 1.0, 0.0]));
+            for k in 0..4 {
+                let yaw = yaw0 + (k as f64) * std::f64::consts::FRAC_PI_2;
+                let (sy, cy) = yaw.sin_cos();
+                let d_dir = [sy * el_h.cos(), el_h.sin(), -cy * el_h.cos()];
+                let d_smp = [sy * el_sample.cos(), el_sample.sin(), -cy * el_sample.cos()];
+                dirs.push((d_dir, d_smp));
+            }
+            dirs.push(([0.0, -1.0, 0.0], [0.0, -0.5, 0.0]));
+            for (d_room, d_sample) in dirs {
+                if all.len() >= MAX_LIGHTS { break; }
+                let rad = match pano {
+                    Some((px, pw, ph)) => sample_pano_dir(px, pw, ph, d_sample),
+                    None => sky_model.eval_dome(d_sample, &lut, ground_lit),
+                };
+                let d_l = gf_core::math::apply(&r2l, d_room);
+                let az = d_l[0].atan2(-d_l[2]).to_degrees();
+                let el = d_l[1].clamp(-1.0, 1.0).asin().to_degrees();
+                all.push(Light {
+                    az,
+                    el,
+                    w: half_deg,
+                    h: half_deg,
+                    rgb: rad.map(|c| c * scale_k),
+                    soft,
+                });
+            }
+        }
+    }
+    let (_, n_direct) = lights_of(&all[..direct_len.min(all.len())], |c| c);
+    let (lights, n_all) = lights_of(&all, |c| c);
+    (lights, n_all, n_direct)
+}
+
+/// The rig's (and sky sun + dome's) lights for a milky body: as they are, made `gain` times as bright.
+pub fn milky(state: &State, lit: bool, sky: bool, body: [f64; 3], room: &Sh9) -> Lit {
+    milky_atten(state, lit, sky, 1.0, None, body, room)
+}
+
+pub fn milky_atten(
+    state: &State,
+    lit: bool,
+    sky: bool,
+    sun_atten: f64,
+    pano: Option<(&[f32], usize, usize)>,
+    body: [f64; 3],
+    room: &Sh9,
+) -> Lit {
+    let weight = state.p.sss.clamp(0.0, 1.0) as f32;
+    let op = state.p.sss_opaque.clamp(0.0, 1.0);
+    let direct = MILKY_DIRECT + 0.14 * op as f32;
+    let shadow = MILKY_SHADOW - 0.32 * op as f32;
+    let folds = MILKY_FOLDS + 0.12 * op as f32;
+    let sub_pow = 1.0 + 0.32 * op;
+    let tinted = body.map(|c| c.clamp(0.0, 1.0).powf(sub_pow) as f32);
+    let (lights, n, n_direct) = milky_lights(state, lit, sky, sun_atten, pano);
+    Lit {
+        base: [tinted[0], tinted[1], tinted[2], n as f32],
+        k: [direct * weight, shadow * weight, folds * weight, 0.0],
+        clay: [0.0; 4],
+        lights,
+        cer: [0.0; 4],
+        nine: env::sh_terms(room, env::SH_MATTE),
+        pigment: Pigment::default(),
+        film: [[0.0; 4]; 3],
+        gi: [0.0, 0.0, 1.0, n_direct as f32],
+        floor_plane: [0.0; 4],
+        floor_lit: [0.0; 4],
+        floor_albedo: [0.0; 4],
+    }
+}
+
 /// How far a ceramic's diffuse light wraps past the terminator: a little for an opaque body, more the
 /// more of its inner light shows (light scattered under the surface carries round the edge of a shadow).
 const WRAP_MIN: f64 = 0.06;
 const WRAP_THROUGH: f64 = 0.35;
 
-/// The rig's lights for a ceramic body, as they are (made `gain` times as bright, the units its light
+/// The rig's (and sky sun's) lights for a ceramic body, as they are (made `gain` times as bright, the units its light
 /// volume and the room's nine terms are in), its body's colour, the share of its inner light the tracer
 /// keeps (the rest is the body's surface light, given here), the glaze's haze, and the room's nine terms
 /// (`room`, the lighting less the lights).
-pub fn ceramic(state: &State, lit: bool, body: [f64; 3], through: f64, haze: f64, room: &Sh9) -> Lit {
-    let gain = state.p.light_gain;
-    let (lights, n) = if lit { lights_of(&state.rig().lights, |c| c.map(|x| x * gain)) } else { ([SLight::zeroed(); MAX_LIGHTS], 0) };
+pub fn ceramic(state: &State, lit: bool, sky: bool, body: [f64; 3], through: f64, haze: f64, room: &Sh9) -> Lit {
+    ceramic_atten(state, lit, sky, 1.0, body, through, haze, room)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn ceramic_atten(
+    state: &State,
+    lit: bool,
+    sky: bool,
+    sun_atten: f64,
+    body: [f64; 3],
+    through: f64,
+    haze: f64,
+    room: &Sh9,
+) -> Lit {
+    let (lights, n) = scene_lights_atten(state, lit, sky, sun_atten, |c| c);
     let through = through.clamp(0.0, 1.0);
     let wrap = WRAP_MIN + WRAP_THROUGH * through;
+    let p = &state.p;
+    let mut film = [[0.0; 4]; 3];
+    if p.film > 0.0 {
+        let drain = gf_core::material::film::numbers(p);
+        film[0] = [p.film_ior as f32,p.film_var.clamp(0.0,1.0) as f32,p.film_scale as f32,p.film_flow as f32];
+        film[1] = std::array::from_fn(|i| drain[i] as f32);
+        film[2] = std::array::from_fn(|i| drain[i+4] as f32);
+    }
     Lit {
         base: [body[0] as f32, body[1] as f32, body[2] as f32, n as f32],
         // (the share of the light inside that the tracer keeps is light that went deeper before coming
         // out: the surface's own diffuse light gives way to it by only half as much, which keeps a white
         // body white at the exposure clay gets under the same lights)
-        k: [(1.0 - 0.5 * through) as f32, 0.0, 0.0, 0.0],
+        // Standalone paint receives this ray through air. Negative tags select the film,
+        // with -2 denoting a distinct authored clear coat underneath it.
+        k: [(1.0 - 0.5 * through) as f32, gf_core::material::coat_index(&state.p) as f32,
+            if state.p.film > 0.0 { if state.p.coat > 0.0 { -2.0 } else { -1.0 } } else if state.p.coat > 0.0 { 1.0 } else { 0.0 }, 0.0],
         clay: [0.0; 4],
         lights,
-        cer: [1.0, wrap as f32, GLAZE_F0, (0.03 + haze.clamp(0.0, 0.6)) as f32],
+        cer: [1.0, wrap as f32, state.p.ior as f32, (0.03 + haze.clamp(0.0, 0.6)) as f32],
         nine: env::sh_terms(room, env::SH_MATTE),
+        pigment: Pigment::of(state),
+        film,
+        gi: [0.0, 0.0, 1.0, n as f32],
+        floor_plane: [0.0; 4],
+        floor_lit: [0.0; 4],
+        floor_albedo: [0.0; 4],
     }
 }
 
@@ -304,14 +575,22 @@ impl Surface {
             lights: lit.lights,
             cer: lit.cer,
             nine: lit.nine,
+            pigment: lit.pigment,
+            film: lit.film,
+            gi: lit.gi,
+            floor_plane: lit.floor_plane,
+            floor_lit: lit.floor_lit,
+            floor_albedo: lit.floor_albedo,
         };
         gpu.queue.write_buffer(&self.u, 0, bytemuck::bytes_of(&su));
+        let (render_w, render_h) = (tu.res[0] as u32, tu.res[1] as u32);
         enc.copy_texture_to_texture(
             wgpu::TexelCopyTextureInfo { texture: tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
             wgpu::TexelCopyTextureInfo { texture: &src.0, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            wgpu::Extent3d { width: render_w, height: render_h, depth_or_array_layers: 1 },
         );
         let mut rp = pass(enc, frame, None, false);
+        rp.set_viewport(0.0, 0.0, tu.res[0], tu.res[1], 0.0, 1.0);
         rp.set_pipeline(&self.pipe);
         rp.set_bind_group(0, self.group.as_ref().expect("just made"), &[]);
         rp.draw(0..3, 0..1);

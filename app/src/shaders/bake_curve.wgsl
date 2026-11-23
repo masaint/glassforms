@@ -171,7 +171,7 @@ fn hex_dist(q: vec3f, r: f32, h: f32) -> f32 {
 // A stretch of a profile swept along a path (`path::sweep`): a rounded rectangle carried from a to c, its
 // sizes and its turn about the stretch changing evenly between them, cut at either end by the plane
 // halfway between this stretch's heading and its neighbour's, so that neighbours meet exactly.
-fn sweep_dist(p: vec3f, round: f32, i: u32) -> f32 {
+fn sweep_dist(p: vec3f, round: f32, i: u32, ne: u32) -> f32 {
   let a = pts[i + 1u];
   let c = pts[i + 2u];
   let sa = pts[i + 3u];
@@ -192,7 +192,28 @@ fn sweep_dist(p: vec3f, round: f32, i: u32) -> f32 {
   let hs = vec2f(mix(a.w, c.w, h), mix(sa.w, sc.w, h));
   let r = min(round, min(hs.x, hs.y));
   let q = abs(vec2f(dot(w, side), dot(w, up))) - (hs - r);
-  let flat = length(max(q, vec2f(0.0))) + min(max(q.x, q.y), 0.0) - r;
+  var flat = length(max(q, vec2f(0.0))) + min(max(q.x, q.y), 0.0) - r;
+  if (ne > 0u) {
+    // an outline instead (`path::Profile::outline`): its edges in a square from -1 to 1 that the half-sizes
+    // stretch, filled by the even-odd rule; the distance found there scaled back by the smaller half-size
+    // (a little under the true one where the two differ: never over it)
+    let x = vec2f(dot(w, side), dot(w, up)) / max(hs, vec2f(1e-6));
+    var d2 = 1e18;
+    var inside = false;
+    for (var e = 0u; e < ne; e++) {
+      let s = pts[i + 7u + e];
+      let a0 = s.xy;
+      let ab = s.zw - s.xy;
+      let hh = clamp(dot(x - a0, ab) / max(dot(ab, ab), 1e-12), 0.0, 1.0);
+      let ww = x - a0 - ab * hh;
+      d2 = min(d2, dot(ww, ww));
+      if ((a0.y > x.y) != (s.w > x.y)) {
+        if (x.x < ab.x * (x.y - a0.y) / ab.y + a0.x) { inside = !inside; }
+      }
+    }
+    flat = sqrt(d2) * min(hs.x, hs.y);
+    if (inside) { flat = -flat; }
+  }
   // Outside its two cuts, the distance to the stretch's end. Inside them, the depth under its surface; a cut
   // is a face only where it is an open end of the path (between two stretches it only shares the space out:
   // measured to it, the solid would read nearly flush with its surface all through, and the surface's slope
@@ -200,12 +221,21 @@ fn sweep_dist(p: vec3f, round: f32, i: u32) -> f32 {
   let c0 = -dot(p - a.xyz, n0);
   let c1 = dot(p - c.xyz, n1);
   let cut = max(c0, c1);
-  if (cut > 0.0) { return length(vec2f(max(flat, 0.0), cut)); }
+  let end0 = pts[i + 5u].w;
+  let end1 = pts[i + 6u].w;
+  if (cut > 0.0) {
+    // (a rounded end: the section's core, rounded over by the rounding, which is a ball's half on a tube)
+    let end = select(end1, end0, c0 >= c1);
+    if (end > 1.5 && ne == 0u) { return length(vec2f(max(flat + r, 0.0), cut)) - r; }
+    return length(vec2f(max(flat, 0.0), cut));
+  }
   var inner = flat;
-  if (pts[i + 5u].w > 0.5) { inner = max(inner, c0); }
-  if (pts[i + 6u].w > 0.5) { inner = max(inner, c1); }
+  let flat_end = select(1.5, 2.5, ne > 0u);
+  if (end0 > 0.5 && end0 < flat_end) { inner = max(inner, c0); }
+  if (end1 > 0.5 && end1 < flat_end) { inner = max(inner, c1); }
   return inner;
 }
+//#path
 fn piece_dist(p: vec3f, seg: u32, mark: f32) -> f32 {
   var i = seg + 2u;
   let end = i + u32(PIECE_MARK - mark + 0.5);
@@ -226,9 +256,13 @@ fn piece_dist(p: vec3f, seg: u32, mark: f32) -> f32 {
       let v = p - q.xyz;
       d = max(d, hex_dist(vec3f(dot(v, u), dot(v, cross(ax, u)), dot(v, ax)), t.y, t.z));
       i += 4u;
-    } else if (kind == 7u) {
-      d = max(d, sweep_dist(p, t.y, i));
-      i += 7u;
+    } else if (kind == 9u) {
+      let ne = u32(t.y + 0.5);
+      d = max(d, pathPrim(p, pts[i + 1u], pts[i + 2u], pts[i + 3u], pts[i + 4u], pts[i + 5u], pts[i + 6u], vec4f(0.0), i + 7u, ne, 1e9));
+      i += 7u + ne;
+    } else if (kind == 7u || kind == 8u) {
+      d = max(d, sweep_dist(p, t.y, i, u32(t.z + 0.5) * u32(kind == 8u)));
+      i += 7u + u32(t.z + 0.5) * u32(kind == 8u);
     } else {
       // an outline, filled by the even-odd rule, extruded and rounded
       let ux = pts[i + 2u].xyz;

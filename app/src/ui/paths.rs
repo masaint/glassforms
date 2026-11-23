@@ -20,9 +20,10 @@
 use eframe::egui::{self, Align2, Color32, Id, Painter, Pos2, Rect, Sense, Shape, Stroke, Ui};
 use gf_core::camera::Camera;
 use gf_core::math::{apply, euler, transpose, Mat3};
-use gf_core::path::{self, add, dot, len3, norm, scale, sub, Frame, Path, Piece};
+use gf_core::path::{self, add, dot, len3, norm, scale, sub, Frame, Path, Piece, Walk};
 use gf_core::presets::paths as pp;
-use gf_core::state::{Detail, State};
+use gf_core::build::BuildRequest;
+use gf_core::state::State;
 
 use super::theme::*;
 use super::widgets::*;
@@ -35,9 +36,13 @@ pub const ANGLE_STEP: f64 = 15.0;
 pub const TURNS: [f64; 4] = [22.5, 45.0, 90.0, 180.0];
 pub const SLOPES: [f64; 4] = [15.0, 30.0, 45.0, 90.0];
 pub const BANKS: [f64; 4] = [15.0, 30.0, 45.0, 90.0];
-/// How near the pointer must come to take hold of a joint or a handle, and to pick a piece by its line.
-const REACH_PT: f32 = 8.0;
-const LINE_PT: f32 = 6.0;
+/// How near the pointer must come to take hold of something of the path: the radius it is drawn with
+/// (`paint`), plus a little slack. A joint (as drawn under the pointer), the start's ring, a curve's
+/// handle; and a piece by its line (half the width of its dark edge).
+const JOINT_PT: f32 = 5.0 + super::pick::SLACK_PT;
+const START_PT: f32 = 6.5 + super::pick::SLACK_PT;
+const HANDLE_PT: f32 = 1.9 + super::pick::SLACK_PT;
+const LINE_PT: f32 = 1.6 + super::pick::SLACK_PT;
 
 /// The kinds of piece the builder offers.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -111,6 +116,8 @@ pub enum Hit {
 #[derive(Clone, Debug)]
 pub struct Grab {
     hit: Hit,
+    /// the layer whose path is held (the drag lets go if another is selected under it)
+    layer: usize,
     /// the path's text when the drag began (Esc puts it back)
     text0: String,
     path0: Path,
@@ -150,6 +157,23 @@ impl Default for PathEdit {
 pub fn editing(st: &State) -> bool {
     st.family().id == pp::FAMILY && !st.is_csg_object(st.stack.sel)
 }
+/// A path walked, kept for as long as it stays the same: the panel, the hover test, the drawing over the
+/// picture and a drag all want the walk of the same path every frame, and a long path with many bends
+/// is thousands of samples.
+fn walk_of(p: &Path) -> std::rc::Rc<Walk> {
+    thread_local! {
+        static LAST: std::cell::RefCell<Option<(String, std::rc::Rc<Walk>)>> = const { std::cell::RefCell::new(None) };
+    }
+    let key = p.text();
+    LAST.with(|c| {
+        let mut c = c.borrow_mut();
+        if let Some((k, w)) = c.as_ref() { if *k == key { return w.clone(); } }
+        let w = std::rc::Rc::new(p.walk());
+        *c = Some((key, w.clone()));
+        w
+    })
+}
+
 /// The selected layer's path as its text stands.
 pub fn path_now(st: &State) -> Path {
     pp::path_of(st.preset().id, &st.shape().model)
@@ -159,7 +183,7 @@ fn set_path(st: &mut State, p: &Path, quick: bool) {
     let text = p.text();
     if st.shape().model == text { return; }
     st.shape_mut().model = text;
-    st.want = Some(if quick { Detail::Quick } else { Detail::Full });
+    st.request(BuildRequest::slider(quick));
 }
 /// How wide the profile is (a loop steps aside by a little more than this, so that it clears itself).
 fn profile_width(st: &State) -> f64 {
@@ -205,7 +229,9 @@ pub fn glyph(p: &Painter, r: Rect, k: Kind, ink: Color32) {
     let c = r.center();
     let s = 0.36 * r.width().min(r.height());
     let at = |x: f32, y: f32| Pos2::new(c.x + x * s, c.y - y * s);
-    let line = |pts: Vec<Pos2>| Shape::line(pts, Stroke::new(1.5, ink));
+    // (the stroke grows a little with the drawing, so that a larger one reads as firmly)
+    let weight = (r.width() / 13.0).clamp(1.4, 2.2);
+    let line = |pts: Vec<Pos2>| Shape::line(pts, Stroke::new(weight, ink));
     let arc = |cx: f32, cy: f32, rad: f32, a0: f32, a1: f32| -> Vec<Pos2> {
         (0..=16).map(|i| { let a = a0 + (a1 - a0) * i as f32 / 16.0; at(cx + rad * a.cos(), cy + rad * a.sin()) }).collect()
     };
@@ -304,7 +330,7 @@ pub fn panel(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     if !editing(st) { return; }
     let mut path = path_now(st);
     px.paths.tidy(&path);
-    let walk = path.walk();
+    let walk = walk_of(&path);
     gap(ui, 4.0);
     px.heading(ui, "path", "path");
     // what the path comes to
@@ -312,7 +338,9 @@ pub fn panel(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     let state = if walk.closed {
         "a closed loop".to_owned()
     } else if n > 0 {
-        let (gap_to, angle) = path.end_gap();
+        let e = *walk.joints.last().expect("one joint at least");
+        let gap_to = len3(sub(e.p, path.start.p));
+        let angle = dot(path.start.axes().t, e.axes().t).clamp(-1.0, 1.0).acos().to_degrees();
         format!("open · its end {} from the start, heading {:.0}° off", path::fmt(gap_to), angle)
     } else {
         "nothing laid yet".to_owned()
@@ -374,7 +402,7 @@ pub fn panel(ui: &mut Ui, st: &mut State, px: &mut Panels) {
 fn chips(ui: &mut Ui, st: &mut State, px: &mut Panels, path: &Path) {
     let _ = st;
     let n = path.pieces.len();
-    let size = 20.0;
+    let size = 26.0;
     let per = ((ui.available_width() + 2.0) / (size + 2.0)).floor().max(1.0) as usize;
     let lines = (n + 1).div_ceil(per).max(1);
     let r = row(ui, lines as f32 * (size + 2.0) - 2.0);
@@ -520,7 +548,7 @@ fn reshaped(p: &Piece, k: Kind, width: f64, ed: &PathEdit) -> Piece {
 fn finishing(ui: &mut Ui, st: &mut State, px: &mut Panels, path: &mut Path) {
     let font = mono(SIZE);
     let pad = egui::vec2(6.0, 2.0);
-    let closed = path.walk().closed;
+    let closed = walk_of(&path).closed;
     let words = ["undo last", "close loop", "centre", "clear"];
     let tips = [
         "take the last piece off the end",
@@ -681,21 +709,21 @@ impl PathEdit {
     pub fn hit(&self, st: &State, rect: Rect, at: Pos2) -> Option<Hit> {
         if !self.show || !editing(st) { return None; }
         let path = path_now(st);
-        let walk = path.walk();
+        let walk = walk_of(&path);
         let look = Look::of(st, rect);
-        let near = |q: [f64; 3]| look.screen(q).is_some_and(|s| (s - at).length() <= REACH_PT);
+        let near = |q: [f64; 3], reach: f32| look.screen(q).is_some_and(|s| (s - at).length() <= reach);
         // the selected curve's handles
         if let Some(i) = self.sel {
             if let (Some(Piece::Curve { out, h2, end }), Some(f)) = (path.pieces.get(i), walk.joints.get(i)) {
                 let c = curve_points(f, *out, *h2, *end);
-                if near(c[1]) { return Some(Hit::Out(i)); }
-                if near(c[2]) { return Some(Hit::Arrive(i)); }
+                if near(c[1], HANDLE_PT) { return Some(Hit::Out(i)); }
+                if near(c[2], HANDLE_PT) { return Some(Hit::Arrive(i)); }
             }
         }
         for i in (0..path.pieces.len()).rev() {
-            if near(walk.joints[i + 1].p) { return Some(Hit::Joint(i)); }
+            if near(walk.joints[i + 1].p, JOINT_PT) { return Some(Hit::Joint(i)); }
         }
-        if near(path.start.p) { return Some(Hit::Start); }
+        if near(path.start.p, START_PT) { return Some(Hit::Start); }
         // the line: the nearest piece's
         let mut best = (LINE_PT, None);
         for i in 0..path.pieces.len() {
@@ -708,19 +736,27 @@ impl PathEdit {
 
     pub fn begin(&mut self, st: &State, at: Pos2, hit: Hit) {
         let path = path_now(st);
-        self.grab = Some(Grab { hit, text0: st.shape().model.clone(), path0: path, at0: at, moved: 0.0 });
-        if let Hit::Joint(i) | Hit::Line(i) | Hit::Out(i) | Hit::Arrive(i) = hit { self.sel = Some(i); }
+        self.grab = Some(Grab { hit, layer: st.stack.sel, text0: st.shape().model.clone(), path0: path, at0: at, moved: 0.0 });
+        // (a line does not drag: its press is only ever a click, which `end` toggles)
+        if let Hit::Joint(i) | Hit::Out(i) | Hit::Arrive(i) = hit { self.sel = Some(i); }
+    }
+
+    /// The drag held, while it is still on the selected layer's path.
+    fn held(&mut self, st: &State) -> Option<&mut Grab> {
+        if self.grab.as_ref().is_some_and(|g| g.layer != st.stack.sel || !editing(st)) { self.grab = None; }
+        self.grab.as_mut()
     }
 
     /// The pointer has moved to `at` while holding on. `free`: no steps (ctrl); `vertical`: up and down (shift).
     pub fn drag(&mut self, st: &mut State, rect: Rect, at: Pos2, free: bool, vertical: bool) {
+        if self.held(st).is_none() { return; }
         let Some(g) = &mut self.grab else { return };
         g.moved = g.moved.max((at - g.at0).length());
         let snap = self.snap && !free;
         let look = Look::of(st, rect);
         let Some((o, d)) = look.ray(at) else { return };
         let mut path = g.path0.clone();
-        let walk = path.walk();
+        let walk = walk_of(&path);
         let up = [0.0, 1.0, 0.0];
         // a point moved across the floor (the level plane through it), or up and down (the upright plane
         // through it that faces the camera best)
@@ -796,22 +832,25 @@ impl PathEdit {
 
     /// Let go: the shape is built finely; a press that hardly moved is a click (it selects).
     pub fn end(&mut self, st: &mut State) {
+        if self.held(st).is_none() { return; }
         let Some(g) = self.grab.take() else { return };
         if g.moved < 4.0 {
             match g.hit {
-                Hit::Line(i) | Hit::Joint(i) => self.sel = if self.sel == Some(i) && matches!(g.hit, Hit::Line(_)) { None } else { Some(i) },
+                Hit::Line(i) => self.sel = if self.sel == Some(i) { None } else { Some(i) },
+                Hit::Joint(i) => self.sel = Some(i),
                 Hit::Start => self.sel = None,
                 _ => {}
             }
         }
-        if st.shape().model != g.text0 { st.want = Some(Detail::Full); }
+        if st.shape().model != g.text0 { st.request(BuildRequest::edit()); }
     }
 
     /// Esc during a drag: the path as it was when the drag began. True if there was a drag.
     pub fn cancel(&mut self, st: &mut State) -> bool {
+        if self.held(st).is_none() { return false; }
         let Some(g) = self.grab.take() else { return false };
         st.shape_mut().model = g.text0;
-        st.want = Some(Detail::Full);
+        st.request(BuildRequest::edit());
         true
     }
 
@@ -821,7 +860,7 @@ impl PathEdit {
         self.spots.clear();
         if !self.show || !editing(st) { self.hover = None; return; }
         let path = path_now(st);
-        let walk = path.walk();
+        let walk = walk_of(&path);
         let look = Look::of(st, rect);
         self.hover = if self.grab.is_some() { self.grab.as_ref().map(|g| g.hit) } else { pointer.and_then(|at| self.hit(st, rect, at)) };
         let shadow = Stroke::new(3.2, Color32::from_black_alpha(110));

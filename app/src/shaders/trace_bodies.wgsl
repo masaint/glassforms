@@ -21,8 +21,9 @@
 // Each body is clear (its own index, dispersion and tint), a metal or mirror, milky, or a thin wall
 // around air; and each may have colour by wavelength, a graded index, double refraction, bubbles (cut
 // into both volumes beforehand, bubbles.rs) and what lies inside (inner.wgsl: a changing tint, cracks,
-// grains, fibres, a glow under pressure, which also glows where the body presses on another). What a
-// single material has and a body among several has not: true scattering (the light volume is used).
+// grains, fibres, a glow under pressure, which also glows where the body presses on another).
+// Milky bodies choose the light volume or wavelength-dependent random walks independently.
+// Bare and clear-coated dielectrics can sample their rough interface, including against another body.
 
 struct MB {
   kind: vec4f,              // for each body: 0 clear, 1 a metal or a mirror, 2 milky, 3 a thin wall around air
@@ -31,7 +32,9 @@ struct MB {
   has: vec4f,               // what else it has, as bits (material.rs, body_bits): 1 colour by wavelength,
                             // 2 a graded index, 4 double refraction, 8 something inside it, 16 a glow under pressure
   absorb: array<vec4f, 4>,  // rgb: what its inside absorbs per unit length
+  medium: array<vec4i, 4>,  // raw identity, signed interface priority, two reserved zero lanes
   b: array<MU, 4>,
+  envelope: vec4f,
 }
 @group(0) @binding(12) var bodTex: texture_3d<f32>;
 @group(0) @binding(13) var<uniform> mb: MB;
@@ -154,45 +157,64 @@ fn paintB(k: i32) -> bool {
   if (k < 0) { return false; }
   return mb.kind[k] > 3.5;
 }
-// What such a body sends back along -rd from p (n: its outward normal): its glaze's reflection, softened
-// by the glaze's haze, over the coloured body lit by the room and the lights as a matte surface gathers
-// them (the lights' map spread about a radian about the normal), darkened in the folds and where another
-// body stands close over it (the scene's distances along the normal: the shell round it, a neighbour).
-fn paintB_seen(k: i32, p: vec3f, n_in: vec3f, rd: vec3f) -> vec3f {
-  var n = n_in;
-  if (dot(n, rd) > 0.0) { n = -n; }
-  let c = clamp(-dot(rd, n), 0.0, 1.0);
-  let nc = max(mb.b[k].surf.z, 1.45);
-  let F = fresnel(c, 1.0, nc);
-  let haze = mb.b[k].tab[30].w;
-  let refl = seenB(reflect(rd, n), haze);
-  var shut = 0.0;
-  for (var i = 0; i < 4; i++) {
-    let h = 0.015 + 0.045 * f32(i);
-    shut += max(h - abs(mapW(p + n * h)), 0.0) / h;
-  }
-  let ao = clamp(1.0 - 0.3 * shut, 0.0, 1.0);
-  let lit = envL(n, 0.9) * ao;
-  return F * refl * mix(1.0, ao, 0.5) + (1.0 - F) * mb.b[k].body.rgb * lit;
-}
+//#if PAINT_BODIES
+// The paint closure is in paint_bodies.wgsl.
+//#else
+fn paintB_seen(k: i32, p: vec3f, n: vec3f, rd: vec3f, incident: f32) -> vec3f { return vec3f(0.0); }
+//#endif
 // the index of what a place is made of, at a wavelength (air, and the air inside a thin wall: 1)
 fn iorB(k: i32, lam: f32) -> f32 {
   if (k < 0) { return 1.0; }
   if (wallB(k)) { return 1.0; }
   return mb.ior[k] + mb.disp[k] * (1.0e6 / (lam * lam) - 3.3058) / 4.2092;
 }
+fn mediumB(k: i32, ior: f32) -> PbrMedium {
+  if (k < 0 || wallB(k)) { return airMedium(); }
+  let metadata = mb.medium[k];
+  return PbrMedium(ior, 0.0, bitcast<u32>(metadata.x), metadata.y);
+}
 
 // What the surface between a (what the light is in) and b (what lies beyond; -1 is the air) sends back,
 // as a colour, of light arriving at cosine c at the point q, where the surface faces n. lam: the
 // wavelength whose bending is being followed. The surface is the higher-numbered body's, and so are the
 // film and the coat on it.
+// A rough conductor returns a directional lobe and a broad multiple-scattering lobe.
+var<private> conductorBroadB: vec3f;
+//#if LIVE_CONDUCTOR_FINISH
+// The pixel's polishing sample is shared by a directly visible conductor and
+// one reached after reflection or transmission at another surface.
+var<private> finishPixelB: vec2f;
+
+struct ConductorFinishB {
+  normal: vec3f,
+  tint: vec3f,
+  variance: f32,
+  marked: bool,
+}
+
+fn conductorFinishB(body: i32, p: vec3f, geometric: vec3f, incident: vec3f) -> ConductorFinishB {
+  cb = body;
+  let wear = wearAt(p, geometric);
+  var normal = wear.n;
+  var variance = wear.sig * wear.sig;
+  if (wear.aniso > 0.0) {
+    let spread = 1.41421 * mb.b[cb].surf.x;
+    let facet = brushN(wear, p, incident, finishPixelB, 0, spread * 0.3, 1.0);
+    normal = facet.xyz;
+    variance += facet.w * facet.w;
+  }
+  return ConductorFinishB(normal, wear.keep * wear.tint, variance, wear.sig > 0.0 || wear.aniso > 0.0);
+}
+//#endif
 fn surfB(a: i32, b: i32, c: f32, q: vec3f, n: vec3f, lam: f32) -> vec3f {
+  conductorBroadB = vec3f(0.0);
   let o = max(a, b);
   cb = o;
   var d = 0.0;
 //#if FILM
   if (mb.b[o].film.x > 0.0) { d = filmNm(q, n); }
 //#endif
+  let filmOnCoat = d > 0.0;
   let nc = mb.b[o].surf.z;                  // the coat's index (1 = no coat)
   var na = iorB(a, lam);
   var cc = c;
@@ -213,7 +235,17 @@ fn surfB(a: i32, b: i32, c: f32, q: vec3f, n: vec3f, lam: f32) -> vec3f {
 //#if METAL
     // a metal or a mirror, under its film if it has one
     cb = b;
+    if (a < 0 && nc > 1.001 && mb.b[b].surf.x <= 0.0 && !filmOnCoat) {
+      return top + polishedCoatReturn(c, cc, nc, top);
+    }
     under = metalRGB(cc, na, d);
+//#if ROUGH
+    if (mb.b[b].surf.x > 0.0 && d <= 0.0) {
+      let energy = conductorEnergy(cc, na, under);
+      under = energy.single + energy.multiple;
+      conductorBroadB = (1.0 - top) * (1.0 - top) * energy.multiple;
+    }
+//#endif
     cb = o;
 //#endif
   } else {
@@ -241,16 +273,26 @@ fn surfB(a: i32, b: i32, c: f32, q: vec3f, n: vec3f, lam: f32) -> vec3f {
 // the place ahead of m) begins. Returns how far that is. q: the place. nq: the normal of the surface met
 // there (not yet turned to face the ray). b: what lies beyond it (-1: the air).
 fn eventB(pos: vec3f, dir: vec3f, m: i32, q: ptr<function, vec3f>, nq: ptr<function, vec3f>, b: ptr<function, i32>) -> f32 {
+  let px = 2.0 * u.tan_fov / u.res.y;
   var t = 0.0;
-  var j = -1;
-  for (var i = 0; i < STEPS_IN; i++) {
-    let v = dist4(pos + dir * t);
-    var d = -v[m];
-    j = -1;
-    for (var k = m + 1; k < COUNT; k++) { if (v[k] < d) { d = v[k]; j = k; } }
-    if (d < 0.0008) { break; }
+  var distances: vec4f;
+  for (var i = 0; i < 2 * STEPS_IN; i++) {
+    let at = pos + dir * t;
+    distances = dist4(at);
+    var d = -distances[m];
+    if (COUNT > 1 && m < 1) { d = min(d, distances.y); }
+    if (COUNT > 2 && m < 2) { d = min(d, distances.z); }
+    if (COUNT > 3 && m < 3) { d = min(d, distances.w); }
+    let eps = clamp(0.25 * px * max(u.dist - at.z, 0.1), 0.00008, 0.0008);
+    if (d < eps) { break; }
     t += d * STEP_SCALE;
     if (t > 2.5 * BOUND) { break; }
+  }
+  // Only the final step needs a body id. Strict comparison preserves surface priority at a tie.
+  var j = -1;
+  var nearest = -distances[m];
+  for (var k = m + 1; k < COUNT; k++) {
+    if (distances[k] < nearest) { nearest = distances[k]; j = k; }
   }
   let p = pos + dir * t;
   if (j >= 0) {
@@ -266,9 +308,11 @@ fn eventB(pos: vec3f, dir: vec3f, m: i32, q: ptr<function, vec3f>, nq: ptr<funct
 // the air. Sets what lies beyond, the place and the normal there; returns how far the place was moved
 // along dir to settle on the surface.
 fn leaveB(p: vec3f, dir: vec3f, m: i32, q: ptr<function, vec3f>, nq: ptr<function, vec3f>, b: ptr<function, i32>) -> f32 {
-  let v = dist4(p + dir * 0.004);
   var lower = -1;
-  for (var k = 0; k < m; k++) { if (v[k] < 0.0) { lower = k; } }
+  if (m > 0) {
+    let v = dist4(p + dir * 0.004);
+    for (var k = 0; k < m; k++) { if (v[k] < 0.0) { lower = k; } }
+  }
   var t = 0.0;
   if (lower < 0) {
     // the outside of the whole scene: settle on the scene's own smooth surface, as plain glass does
@@ -463,11 +507,298 @@ fn widenB(alpha: f32, na: f32, c: f32, nb: f32, od: vec3f, nq: vec3f) -> f32 {
   return w * w;
 }
 
-// A stretch of length s through body m, from pos along dir: what it adds of its own light (its glow; the
-// light inside a milky body, from that body's light volume, as glowAlong gathers it for one material),
-// and what it leaves of the light passing through (thr, by colour). sg2: the spread of what is seen
-// beyond it, widened by a milky body's haze.
-fn throughB(m: i32, pos: vec3f, dir: vec3f, s: f32, thr: ptr<function, vec3f>, sg2: ptr<function, f32>) -> vec3f {
+//#if BODY_PATH
+// A scattered or facet-sampled path continues through the actual body volumes. Walking keeps
+// all three channels, and every subsequent dielectric interface or opaque body
+// can affect the light returning to the camera.
+//#if BODY_FROST
+fn walkBodyPath(p0:vec3f,d0:vec3f,m0:i32,lam:f32,sampledStart:bool)->vec3f {
+  var sampled = sampledStart;
+  var survival = 1.0;
+//#if FROST_DIRECT
+  var naturalWeight=directFrost.escapeWeight;
+//#if FROST_ROOM_EXIT
+  var roomSampled=sampledStart && directFrost.enabled;
+//#endif
+//#endif
+//#else
+fn walkBodies(p0: vec3f,d0: vec3f,m0:i32,lam:f32)->vec3f {
+//#endif
+//#if BODY_METAL_SAMPLE
+  var metSampledMetal = false;
+//#endif
+  var spread = 0.0;
+  var pos=p0; var dir=d0; var m=m0;
+  var keep=vec3f(1.0); var light=vec3f(0.0);
+  for(var e=0;e<256;e++){
+    if(max3(keep)<0.002){break;}
+//#if BODY_FROST
+    if (sampled && e >= max(u.nb,8)) {
+      let moving = u.env0.w > 0.5;
+      let tail = select(0.15, 0.02, moving);
+      let continuation = select(0.95, 0.82, moving);
+      let next = tail + continuation * (survival - tail);
+      if (rnd() * survival > next) {break;}
+      keep *= survival / next;
+      survival = next;
+    }
+//#endif
+    var q=pos; var n=vec3f(0.0); var b=-1;
+    if(m<0){
+      let bb=dot(pos,dir);let h=bb*bb-dot(pos,pos)+BOUND*BOUND;
+//#if BODY_METAL_SAMPLE
+      if((h<=0.0) && metSampledMetal){return light+keep*sampledMetalRoomB(pos,dir,spread);}
+//#endif
+//#if FROST_DIRECT
+      if(h<=0.0){return light+keep*naturalWeight*roomEscapeB(pos,dir,spread);}
+//#else
+      if(h<=0.0){return light+keep*roomEscapeB(pos,dir,spread);}
+//#endif
+      let far=-bb+sqrt(h);var t=0.0;var found=false;
+      for(var j=0;j<STEPS_OUT;j++){
+        let d=mapW(pos+t*dir);
+        if(d<0.0008){found=true;break;}
+        t+=d*STEP_SCALE;if(t>far){break;}
+      }
+//#if BODY_METAL_SAMPLE
+      if((!found) && metSampledMetal){return light+keep*sampledMetalRoomB(pos,dir,spread);}
+//#endif
+//#if FROST_DIRECT
+      if(!found){return light+keep*naturalWeight*roomEscapeB(pos,dir,spread);}
+//#else
+      if(!found){return light+keep*roomEscapeB(pos,dir,spread);}
+//#endif
+      t+=mapNW(pos+dir*t);q=pos+dir*t;
+      b=nearestOf(dist4(q)); n=nrm(q);
+    }else{
+      cb=m;
+//#if BODY_WALK
+      let walking=hasB(m,32u);
+      var fly=1e9;var rates=vec3f(0.0);
+      if(walking){
+        rates=collisionRates();fly=walkFlight(rates);
+        let v=dist4(pos);var safety=-v[m];
+        for(var j=m+1;j<COUNT;j++){safety=min(safety,v[j]);}
+        if(fly<0.9*safety){
+          keep*=exp(-(mb.absorb[m].rgb+mb.b[m].sssA.rgb)*fly)*walkWeight(rates,fly,true);
+          pos+=dir*fly;dir=walkDirection(dir);continue;
+        }
+      }
+//#endif
+//#if BODY_FROST
+      let before = dir;
+      var len = 0.0;
+      if (sampled) {len=max(stretchB(pos,&dir,m,lam,&q,&n,&b),0.0);}
+      else {len=max(eventB(pos,dir,m,&q,&n,&b),0.0);}
+//#if INNER
+      if (sampled && hasB(m,8u)) {
+        let inclusions=inner(pos,before,len,iorB(m,lam),e);
+        light+=keep*inclusions.light;
+        keep*=inclusions.keep;
+//#if CRACK
+        if (inclusions.t>=0.0) {
+          keep*=exp(-mb.absorb[m].rgb*inclusions.t);
+          pos+=before*inclusions.t;
+          dir=inclusions.dir;
+          continue;
+        }
+//#endif
+      }
+//#endif
+      if (sampled) {light+=keep*mb.b[m].glow.rgb*len;}
+//#else
+      let len=max(eventB(pos,dir,m,&q,&n,&b),0.0);
+//#endif
+//#if BODY_WALK
+      if(walking && fly<len){
+        keep*=exp(-(mb.absorb[m].rgb+mb.b[m].sssA.rgb)*fly)*walkWeight(rates,fly,true);
+        pos+=dir*fly;dir=walkDirection(dir);continue;
+      }
+      if(walking){
+        keep*=exp(-(mb.absorb[m].rgb+mb.b[m].sssA.rgb)*len)*walkWeight(rates,len,false);
+      }else
+//#endif
+//#if SSS
+      if(mb.kind[m]==2.0){
+        cb=m;
+        let glassS = glowAlong(pos,dir,len);
+        let glassKeep = keep*exp(-(mb.absorb[m].rgb+collisionRates()+mb.b[m].sssA.rgb)*len)*throughHue(len);
+        let sssOp = clamp(mb.b[m].tab[19].w, 0.0, 1.0);
+        if (sssOp > 0.0) {
+          let tauW = waxTau(len);
+          let waxKeep = keep * exp(-vec3f(tauW)) * waxThroughTint(tauW);
+          light += keep * mix(glassS, waxVolume(pos, dir, len, dir, 1.0, false), sssOp);
+          keep = mix(glassKeep, waxKeep, sssOp);
+        } else {
+          light += keep * glassS;
+          keep = glassKeep;
+        }
+      }else
+//#endif
+      {
+//#if SPECTRUM
+//#if BODY_FROST
+        if (sampled && hasB(m,1u)) {keep*=keepSpecB(m,len);}
+        else
+//#endif
+//#endif
+        {keep*=exp(-mb.absorb[m].rgb*len);}
+      }
+    }
+//#if FROST_DIRECT
+    naturalWeight=1.0;
+//#endif
+    if(dot(dir,n)>0.0){n=-n;}
+    n=faceIncident(n,-dir);
+    if(paintB(b)){return light+keep*paintB_seen(b,q,n,dir,iorB(m,lam));}
+//#if BODY_FROST
+    if (sampledInterfaceB(m,b)) {
+//#if BODY_METAL_SAMPLE
+      metSampledMetal = false;
+//#endif
+//#if FROST_DIRECT
+//#if FROST_ROOM_EXIT
+      directFrost.enabled=!roomSampled && m>=0 && b<0 && spread<=0.0 && mirrorSharp<=0.0;
+      roomSampled=roomSampled || directFrost.enabled;
+//#else
+      directFrost.enabled=e<6 && spread<=0.0 && mirrorSharp<=0.0;
+//#endif
+//#endif
+      let path = sampleInterfaceB(q,dir,n,m,b,lam);
+//#if FROST_DIRECT
+      light+=keep*directFrost.added;
+      naturalWeight=directFrost.escapeWeight;
+//#endif
+      if (path.w == 0.0) {break;}
+      dir = path.xyz;
+      let crossed = path.w > 0.0;
+      pos = q + select(n,-n,crossed)*0.004;
+      if (crossed) {m=b;}
+      sampled = true;
+      continue;
+    }
+//#endif
+//#if BODY_METAL_SAMPLE
+    if (b >= 0 && hasB(b, 128u)) {
+      let surface = secondaryMetalB(q, n, dir, b, m, lam);
+      light += keep * surface.emitted;
+      keep *= surface.weight;
+      dir = surface.direction;
+      pos = q + n * 0.004;
+      metSampledMetal = true;
+      continue;
+    }
+//#endif
+    let c=clamp(-dot(dir,n),0.0,1.0);let r=surfB(m,b,c,q,n,lam);
+    let dielectricHit=traceDielectricHit(n,mediumB(m,iorB(m,lam)),mediumB(b,iorB(b,lam)));
+    let dielectricSplit=pbr_dielectric_split(dielectricHit,-dir);
+    var refracted=dielectricSplit.transmitted;
+    var metalNormal = n;
+    var metalTint = vec3f(1.0);
+    var finishVariance = 0.0;
+//#if LIVE_CONDUCTOR_FINISH
+    if (opaqueB(b)) {
+      let finish = conductorFinishB(b, q, n, dir);
+      metalNormal = finish.normal;
+      metalTint = finish.tint;
+      finishVariance = finish.variance;
+    }
+//#endif
+    var reflected = reflect(dir, metalNormal);
+//#if BODY_FROST
+//#if BIREF
+    var reflectedWave=kw;
+    if (sampled && (biB(m) || biB(b))) {
+      let kin=waveOf(m,dir,lam);
+      reflected=crossW(kin,metalNormal,m,lam);
+      reflectedWave=kw;
+      refracted=crossW(kin,-n,b,lam);
+    }
+//#endif
+//#endif
+    let prob=clamp(dot(r,vec3f(0.2126,0.7152,0.0722)),0.0,1.0);
+    let interfaceOwner=max(m,b);
+    var plainDielectric=!opaqueB(b) && !wallB(interfaceOwner) &&
+      mb.b[interfaceOwner].surf.x<=0.0 && mb.b[interfaceOwner].surf.z<=1.001;
+//#if FILM
+    plainDielectric=plainDielectric && mb.b[interfaceOwner].film.x<=0.0;
+//#endif
+//#if BODY_FROST
+    plainDielectric=plainDielectric && !sampled;
+//#endif
+//#if BIREF
+    plainDielectric=plainDielectric && !biB(m) && !biB(b);
+//#endif
+    if(plainDielectric){
+      if(dielectricSplit.total_internal_reflection!=0u){
+        dir=dielectricSplit.reflected;pos=q+0.004*n;
+      }else{
+        let interfaceSample=pbr_dielectric_sample(
+          dielectricHit,-dir,PbrPathRng(vec2f(0.0),rnd()));
+        dir=interfaceSample.wi;
+        if(interfaceSample.medium_transition==PBR_MEDIUM_ENTER_DESTINATION){
+          pos=q-0.004*n;m=b;
+        }else{
+          pos=q+0.004*n;
+        }
+      }
+      continue;
+    }
+//#if BODY_FROST
+    if (sampled && opaqueB(b)) {
+      let alpha=mb.b[b].surf.x;
+//#if BIREF
+      kw=reflectedWave;
+      if (dot(reflected,reflected)<0.5) {break;}
+//#endif
+      light+=keep*(mb.b[b].glow.rgb*0.3+metalTint*r*skyFarB(b,reflected));
+//#if ROUGH
+      light+=keep*metalTint*conductorBroadB*envL(n,0.80);
+//#endif
+      keep*=metalTint*(r-conductorBroadB);
+      spread+=2.0*alpha*alpha+finishVariance;
+      dir=reflected;pos=q+0.004*n;
+      continue;
+    }
+//#endif
+    if(opaqueB(b) || dot(refracted,refracted)<0.5){
+//#if BODY_FROST
+//#if BIREF
+      if (sampled) {kw=reflectedWave;if (dot(reflected,reflected)<0.5) {break;}}
+//#endif
+//#endif
+      keep*=r*metalTint;spread+=finishVariance;dir=reflected;pos=q+0.004*n;
+    }else if(rnd()<prob){
+//#if BODY_FROST
+      if (sampled) {let owner=max(m,b);let alpha=mb.b[owner].surf.x;spread+=2.0*alpha*alpha;}
+//#endif
+//#if BODY_FROST
+//#if BIREF
+      if (sampled) {kw=reflectedWave;if (dot(reflected,reflected)<0.5) {break;}}
+//#endif
+//#endif
+      keep*=r/max(prob,1e-6);dir=reflected;pos=q+0.004*n;
+    }else{
+//#if BODY_FROST
+      if (sampled) {
+        let owner=max(m,b);
+        spread+=widenB(mb.b[owner].surf.x,iorB(m,lam),c,iorB(b,lam),refracted,n);
+        if (wallB(owner)) {keep*=mb.b[owner].axis.xyz;}
+      }
+//#endif
+      keep*=(vec3f(1.0)-r)/max(1.0-prob,1e-6);
+      dir=refracted;pos=q-0.004*n;m=b;
+    }
+  }
+  return light;
+}
+//#endif
+// Integrate emission and scattering on this segment. Rays surviving extinction
+// retain their direction and any spread accumulated at actual rough interfaces.
+fn throughB(m: i32, pos: vec3f, dir: vec3f, s: f32, lam: f32, thr: ptr<function, vec3f>) -> vec3f {
+//#if SSS
+  let incoming = *thr;
+//#endif
 //#if SPECTRUM
   if (hasB(m, 1u)) {
     *thr *= keepSpecB(m, s);
@@ -484,9 +815,30 @@ fn throughB(m: i32, pos: vec3f, dir: vec3f, s: f32, thr: ptr<function, vec3f>, s
 //#if SSS
   if (mb.kind[m] > 1.5 && mb.kind[m] < 2.5) {
     cb = m;
-    add += *thr * glowAlong(pos, dir, s);
-    *thr *= exp(-(mb.b[m].sss.x + mb.b[m].sssA.rgb) * max(s, 0.0)) * throughHue(s);
-    *sg2 += HAZE * mb.b[m].sss.x * max(s, 0.0);
+//#if BODY_WALK
+    if(hasB(m,32u)){
+      let rates=collisionRates();let fly=walkFlight(rates);
+      if(fly<max(s,0.0)){
+        let scatter=incoming*exp(-(mb.absorb[m].rgb+mb.b[m].sssA.rgb)*fly)*walkWeight(rates,fly,true);
+        add+=scatter*walkBodies(pos+dir*fly,walkDirection(dir),m,lam);
+      }
+      cb=m;
+      *thr*=exp(-(rates+mb.b[m].sssA.rgb)*max(s,0.0));
+      return add;
+    }
+//#endif
+    let glassS = glowAlong(pos, dir, s);
+    let glassThr = *thr * exp(-(collisionRates() + mb.b[m].sssA.rgb) * max(s, 0.0)) * throughHue(s);
+    let sssOp = clamp(mb.b[m].tab[19].w, 0.0, 1.0);
+    if (sssOp > 0.0) {
+      let tauW = waxTau(s);
+      let waxThr = incoming * (0.62 * exp(-vec3f(tauW))) * waxThroughTint(tauW);
+      add += incoming * mix(glassS, waxVolume(pos, dir, s, dir, 1.0, false), sssOp);
+      *thr = mix(glassThr, waxThr, sssOp);
+    } else {
+      add += incoming * glassS;
+      *thr = glassThr;
+    }
   }
 //#endif
   return add;
@@ -503,6 +855,9 @@ fn beyondB(ro_in: vec3f, rd_in: vec3f, m0: i32, lam: f32, sg0: f32) -> vec3f {
   var col = vec3f(0.0);
   var thr = vec3f(1.0);
   var sg2 = sg0;
+//#if BODY_METAL_SAMPLE
+  var metSampledMetal = false;
+//#endif
   for (var l = 0; l < EVENTS; l++) {
     var q: vec3f;
     var nq: vec3f;
@@ -515,23 +870,48 @@ fn beyondB(ro_in: vec3f, rd_in: vec3f, m0: i32, lam: f32, sg0: f32) -> vec3f {
 //#if ROUGH
         frMiss(l);
 //#endif
-        break;
+//#if BODY_METAL_SAMPLE
+        if (metSampledMetal) { return col + thr * sampledMetalRoomB(ro, rd, sg2); }
+//#endif
+        return col + thr * roomEscapeB(ro, rd, sg2);
       }
-      let tFar = -bb + sqrt(h);
+      // A ray outside the stage still probes its origin unless the measured field rules it out.
+      var tFar = max(0.0, -bb + sqrt(h));
+      if (mb.envelope.x > 0.0 && mb.envelope.x < 1e5) {
+        let scale = 1.5 / HB;
+        let x = toObj(ro) * scale;
+        let direction = toObj(rd) * scale;
+        let weight = sqrt(abs(x));
+        let above = dot(x*x,weight) - mb.envelope.x;
+        let along = 1.25 * dot(x*weight,direction);
+        let curvature = 1.25 * dot(weight,direction*direction);
+        // Convexity of (x*x)^1.25 gives a quadratic lower bound along the ray.
+        // Once that quadratic rises above the measured level, no hit remains.
+        if (above > 0.0 && along >= 0.0) { tFar = -1.0; }
+        else if (curvature > 0.000001) {
+          let disc = along*along - curvature*above;
+          if (disc < -0.00001) { tFar = -1.0; }
+          else {
+            let root = sqrt(max(0.0,disc));
+            var end = (-along + root) / curvature;
+            if (along >= 0.0 && along + root > 0.0000001) { end = -above/(along+root); }
+            tFar = min(tFar,end+0.00001);
+          }
+        }
+      }
+      let px = 2.0 * u.tan_fov / u.res.y;
       var t = 0.0;
-      var hit = false;
-      for (var i = 0; i < STEPS_OUT; i++) {
-        let d = mapW(ro + rd * t);
-        if (d < 0.0008) { hit = true; break; }
-        t += d * STEP_SCALE;
-        if (t > tFar) { break; }
-      }
+      let hit = marchBeyond(ro, rd, tFar, px, &t);
       if (!hit) {
 //#if ROUGH
         frMiss(l);
 //#endif
-        break;
+//#if BODY_METAL_SAMPLE
+        if (metSampledMetal) { return col + thr * sampledMetalRoomB(ro, rd, sg2); }
+//#endif
+        return col + thr * roomEscapeB(ro, rd, sg2);
       }
+      t += mapNW(ro + rd * t);
       t += mapNW(ro + rd * t);
 //#if ROUGH
       // (the first piece the light leaving a rough body lands on: where the blur after tracing takes its width)
@@ -555,32 +935,63 @@ fn beyondB(ro_in: vec3f, rd_in: vec3f, m0: i32, lam: f32, sg0: f32) -> vec3f {
         thr *= inn.keep;
 //#if CRACK
         if (inn.t >= 0.0) {
-          col += throughB(m, ro, d0, inn.t, &thr, &sg2);
+          col += throughB(m, ro, d0, inn.t, lam, &thr);
           return col + thr * seenB(inn.dir, sqrt(sg2));
         }
 //#endif
       }
 //#endif
-      col += throughB(m, ro, d0, s, &thr, &sg2);
+      col += throughB(m, ro, d0, s, lam, &thr);
     }
     var c = -dot(rd, nq);
     if (c < 0.0) { nq = -nq; c = -c; }      // nq now faces the ray
-    if (paintB(b)) { return col + thr * paintB_seen(b, q, nq, rd); }
+    nq = faceIncident(nq, -rd);
+    if (paintB(b)) { return col + thr * paintB_seen(b, q, nq, rd, iorB(m, lam)); }
+//#if BODY_FROST
+    if (sampledInterfaceB(m,b)) {return col+thr*secondaryFrostB(q,rd,nq,m,b,lam);}
+//#endif
+//#if BODY_METAL_SAMPLE
+    if (b >= 0 && hasB(b, 128u)) {
+      let surface = secondaryMetalB(q, nq, rd, b, m, lam);
+      col += thr * surface.emitted;
+      thr *= surface.weight;
+      if (max3(thr) < 0.002) { return col; }
+      rd = surface.direction;
+      ro = q + nq * 0.004;
+      metSampledMetal = true;
+      continue;
+    }
+//#endif
     let o = max(m, b);
     let R = surfB(m, b, c, q, nq, lam);
     let alpha = mb.b[o].surf.x;
     let mir = reflect(rd, nq);
     if (opaqueB(b)) {
       // a metal turns it, and it goes on through what it was in
-      col += thr * (mb.b[b].glow.rgb * 0.3 + R * skyFarB(o, mir));
-      thr *= R;
+//#if LIVE_CONDUCTOR_FINISH
+      let finish = conductorFinishB(b, q, nq, rd);
+      let metalNormal = finish.normal;
+      let metalTint = finish.tint;
+      sg2 += finish.variance;
+      let reflected = reflect(rd, metalNormal);
+      if (finish.marked) { mirrorSharp = 0.0; }
+//#else
+      let metalNormal = nq;
+      let metalTint = vec3f(1.0);
+      let reflected = mir;
+//#endif
+      col += thr * (mb.b[b].glow.rgb * 0.3 + R * metalTint * skyFarB(o, mir));
+//#if ROUGH
+      if (any(conductorBroadB > vec3f(0.0))) { col += thr * metalTint * conductorBroadB * envL(nq, 0.80); }
+//#endif
+      thr *= metalTint * (R - conductorBroadB);
       sg2 += 2.0 * alpha * alpha;
       if (max3(thr) < 0.02) { return col; }
 //#if BIREF
-      rd = crossW(waveOf(m, rd, lam), nq, m, lam);
+      rd = crossW(waveOf(m, rd, lam), metalNormal, m, lam);
       if (dot(rd, rd) < 0.5) { return col; }
 //#else
-      rd = mir;
+      rd = reflected;
 //#endif
       ro = q + nq * 0.004;
       continue;
@@ -590,7 +1001,7 @@ fn beyondB(ro_in: vec3f, rd_in: vec3f, m0: i32, lam: f32, sg0: f32) -> vec3f {
 //#if BIREF
     let od = crossW(waveOf(m, rd, lam), -nq, b, lam);
 //#else
-    let od = refract(rd, nq, na / nb);
+    let od = pbr_dielectric_split(traceDielectricHit(nq, mediumB(m, na), mediumB(b, nb)), -rd).transmitted;
 //#endif
     if (dot(od, od) < 0.5) {
       // trapped by total reflection: take the bounce and stop there
@@ -608,15 +1019,218 @@ fn beyondB(ro_in: vec3f, rd_in: vec3f, m0: i32, lam: f32, sg0: f32) -> vec3f {
   return col + thr * seenB(rd, sqrt(sg2));
 }
 
+// The terminal light after an air ray misses every other body.
+fn roomEscapeB(origin: vec3f, direction: vec3f, spread: f32) -> vec3f {
+  return seenB(direction, sqrt(spread)); // terminal room
+}
+
+// Follow a smooth surface reflection through the scene. A conductor can see the lit floor.
+fn externalReflectionB(metalTop: bool, k: i32, origin: vec3f, direction: vec3f, spread: f32) -> vec3f {
+  return beyondB(origin, direction, -1, 550.0, spread); // metal reflection
+}
+
+//#if BODY_METAL_SAMPLE
+struct MetalSampleB {
+  coat: vec3f,
+  emitted: vec3f,
+  direction: vec3f,
+  weight: vec3f,
+}
+
+fn sampleMetalSurfaceB(p: vec3f, n: vec3f, rd: vec3f, k: i32, medium: i32,
+                       wavelength: f32, r: vec2f, fc: vec2f) -> MetalSampleB {
+  cb = k;
+  let cosine = clamp(-dot(rd, n), 0.0, 1.0);
+  let coatIor = mb.b[k].surf.z;
+  let coated = medium < 0 && coatIor > 1.001;
+  let outsideIor = select(iorB(medium, wavelength), coatIor, coated);
+  var film = 0.0;
+//#if FILM
+  if (mb.b[k].film.x > 0.0) { film = filmNm(p, n); }
+//#endif
+  var coat = vec3f(0.0);
+  var emitted = mb.b[k].glow.rgb * 0.3;
+  var substrateCosine = cosine;
+  if (coated) {
+    coat = vec3f(fresnel(cosine, 1.0, coatIor));
+//#if FILM
+    if (film > 0.0) { coat = filmRGB(cosine, film, 1.0, coatIor); }
+    film = 0.0;
+//#endif
+    substrateCosine = sqrt(max(1.0 - (1.0 - cosine * cosine) / (coatIor * coatIor), 0.0));
+  }
+  var normal = n;
+  var alpha = mb.b[k].surf.x;
+  var tint = vec3f(1.0);
+//#if WEAR
+  let wear = wearAt(p, n);
+  normal = wear.n;
+  alpha = sqrt(alpha * alpha + wear.sig * wear.sig);
+  tint = wear.tint * wear.keep;
+  let frame = brushSurface(wear,p,alpha);
+//#endif
+  let smoothReflectance = metalRGB(substrateCosine, outsideIor, film);
+  var single = smoothReflectance;
+  let substrate = (1.0 - coat) * tint;
+  if (film <= 0.0) {
+    var energy = conductorEnergy(substrateCosine, outsideIor, smoothReflectance);
+//#if WEAR
+    if (wear.aniso > 0.0) {
+      energy = brushConductorEnergy(substrateCosine,outsideIor,smoothReflectance,frame.across,-rd,normal);
+    }
+//#endif
+    emitted += substrate * energy.multiple * envL(normal, 0.80);
+    single = energy.single;
+  }
+//#if WEAR
+  let sample = frGlossyFrame(p,rd,normal,r,alpha,coated,frame.across,frame.slopes,wear.aniso>0.0);
+//#else
+  let sample = frGlossySample(p, rd, normal, r, alpha, coated);
+//#endif
+  if (!coated) { single = metalRGB(sample.facetCosine, outsideIor, film); }
+  let weight = substrate * single * sample.weight;
+  emitted += weight * skyFarB(k, reflect(rd, n));
+  return MetalSampleB(coat, emitted, sample.direction, weight);
+}
+
+// On a secondary path, sample one of the coat or substrate connections. The choice
+// divides its probability back out and lets the scene walk continue without branching.
+fn secondaryMetalB(q: vec3f, n: vec3f, rd: vec3f, body: i32, medium: i32, lam: f32) -> MetalSampleB {
+  var surface = sampleMetalSurfaceB(q, n, rd, body, medium, lam, hash2(q + rd), q.xy);
+  if (any(surface.coat > vec3f(0.0))) {
+    let chance = clamp(dot(surface.coat, vec3f(0.2126, 0.7152, 0.0722)), 0.02, 0.98);
+    if (hash2(q - rd).x < chance) {
+      surface.weight = surface.coat / chance;
+      surface.direction = reflect(rd, n);
+    } else {
+      surface.weight /= 1.0 - chance;
+    }
+  }
+  return surface;
+}
+
+fn sampledMetalRoomB(origin: vec3f, direction: vec3f, spread: f32) -> vec3f {
+  if (spread > 0.0) { return envL(direction, sqrt(spread)); }
+//#if PICTURE
+  let incident = env(direction);
+//#else
+  let incident = mirrorEnv(direction, 0.0);
+//#endif
+  return incident; // sampled metal escaping the scene
+}
+
+fn sampledMetalB(p: vec3f, n: vec3f, rd: vec3f, k: i32, xi: f32, fc: vec2f) -> vec3f {
+  let coated = mb.b[k].surf.z > 1.001;
+  let surface = sampleMetalSurfaceB(p, n, rd, k, -1, 550.0, rnd2(select(82, 0, coated), rd, xi), fc);
+  let origin = p + 0.006 * n;
+  var radiance = surface.emitted;
+  if (any(surface.coat > vec3f(0.0))) {
+    mirrorSharp = 1.0 + mirrorLod(p, n, clamp(-dot(rd, n), 0.0, 1.0));
+    radiance += surface.coat * externalReflectionB(true, k, origin, reflect(rd, n), 0.0);
+    cb = k;
+  }
+  if (any(surface.weight > vec3f(0.0))) {
+//#if PICTURE
+    mirrorSharp = 0.0;
+//#else
+    mirrorSharp = 1.0;
+//#endif
+    radiance += surface.weight * externalReflectionB(true, k, origin, surface.direction, 0.0);
+    cb = k;
+  }
+  mirrorSharp = 0.0;
+  return radiance;
+}
+//#endif
+
+fn paintProbeB(p: vec3f, inDir: vec3f, rd: vec3f, dist: f32, k: i32) -> vec3f {
+  let q = p + (inDir - rd) * dist;
+  let n0 = nrmB(q, k);
+  return nrmB(q - n0 * dist4(q)[k], k);
+}
+
+fn paintRimNormalB(p: vec3f, rawN: vec3f, rd: vec3f, k: i32) -> vec3f {
+  var n = faceIncident(rawN, -rd);
+  let c0 = dot(-rd, rawN);
+  let perp = rawN - rd * dot(rawN, rd);
+  let pl = length(perp);
+  if (c0 < 0.72 && pl > 1e-5) {
+    let inDir = -perp / pl;
+    let vox = 2.0 * HB / min(u.vres, 768.0);
+    let nLoc = paintProbeB(p, inDir, rd, 1.2 * vox, k);
+    let onBev = smoothstep(0.008, 0.045, dot(-rd, nLoc) - c0);
+    if (onBev > 0.0) {
+      var qOut = p - inDir * (2.2 * vox) - rd * (4.0 * vox);
+      var minD = 1e9;
+      for (var s = 0; s < 8; s++) {
+        let d = dist4(qOut)[k];
+        minD = min(minD, d);
+        qOut += rd * max(d, 0.5 * vox);
+      }
+      let isSil = smoothstep(0.20 * vox, 0.70 * vox, minD);
+      if (isSil > 0.0) {
+        let n1 = paintProbeB(p, inDir, rd, 2.6 * vox, k);
+        let c1 = dot(-rd, n1);
+        if (c1 > c0 + 0.015) {
+          let n2 = paintProbeB(p, inDir, rd, 3.8 * vox, k);
+          let flat = smoothstep(0.9988, 0.9997, dot(n1, n2));
+          let w = isSil * onBev * flat * smoothstep(0.015, 0.06, c1 - c0);
+          n = normalize(mix(n, faceIncident(n1, -rd), w));
+        }
+      }
+    }
+  }
+  let minC = clamp(0.22 + 0.60 * mb.b[k].tab[30].w, 0.22, 0.55);
+  let cn = -dot(rd, n);
+  if (cn < minC) {
+    let tang = n + rd * cn;
+    let tl = length(tang);
+    if (tl > 1e-5) { n = tang * (sqrt(max(1.0 - minC * minC, 0.0)) / tl) - rd * minC; }
+  }
+  return n;
+}
+
 // What a point of the surface sends towards the eye: shade(), for bodies of several materials.
 fn shadeB(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
+//#if LIVE_CONDUCTOR_FINISH
+  finishPixelB = fc;
+//#endif
+//#if BODY_PATH
+  rState=pcg(bitcast<u32>(rd.x)+pcg(bitcast<u32>(rd.y)+pcg(u32(u.frame)+pcg(bitcast<u32>(xi)))));
+//#endif
   let p = ro + rd * t;
-  let n = nrm(p);
-  let cosi = clamp(-dot(rd, n), 0.0, 1.0);
+  let rawN = nrm(p);
+  var n = faceIncident(rawN, -rd);
   var k = mediumOf(dist4(p - n * 0.004));
   if (k < 0) { k = nearestOf(dist4(p)); }
   cb = k;
-  if (paintB(k)) { return paintB_seen(k, p, n, rd); }
+  if (paintB(k)) { n = paintRimNormalB(p, rawN, rd, k); }
+//#if PAINT_ONLY
+  return paintB_seen(k, p, n, rd, 1.0);
+//#else
+  if (paintB(k)) { return paintB_seen(k, p, n, rd, 1.0); }
+  var cosi = clamp(-dot(rd, n), 0.0, 1.0);
+//#if SSS
+  if (mb.kind[k] > 1.5 && mb.kind[k] < 2.5 && mb.b[k].tab[19].w > 0.0) {
+    let c0w = dot(-rd, rawN);
+    if (c0w < 0.35) {
+      let fnw = nrmB(p - (rawN + rd) * (4.0 * HB / u.vres), k);
+      if (dot(-rd, fnw) > c0w) {
+        n = normalize(mix(n, faceIncident(fnw, -rd), smoothstep(0.35, 0.03, c0w)));
+      }
+    }
+    cosi = clamp(-dot(rd, n), 0.0, 1.0);
+    cosi = mix(cosi, max(cosi, 0.62), clamp(mb.b[k].tab[19].w * sqrt(clamp(mb.b[k].surf.x, 0.0, 1.0)), 0.0, 1.0));
+  }
+//#endif
+//#if BODY_FROST
+  if (sampledInterfaceB(-1,k)) {return primaryFrostB(p,rd,n,k,xi,W,fc);}
+//#endif
+//#if BODY_METAL_SAMPLE
+  if (hasB(k, 128u) && mb.b[k].grating.x <= 0.0) {
+    return sampledMetalB(p, n, rd, k, xi, fc);
+  }
+//#endif
   let alpha = mb.b[k].surf.x;
   let sigR = 1.41421 * alpha;
   let mir = reflect(rd, n);
@@ -641,31 +1255,69 @@ fn shadeB(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
     envR = wearSee(rd, wr, p, cosi) * (wr.keep * wr.tint);
   }
 //#endif
+//#if GRATING
+  envR = gratingReflect(p,n,rd,envR,xi);
+//#endif
   envR += skyB(k, mir);
-  if (opaqueB(k)) {
-    // a metal: what it mirrors is followed on, to the lights or to the other bodies
-    // (one path for the whole spectrum, an ordinary one)
-//#if SPECTRUM
-    bandB(400.0, 300.0, 12, xi);
-//#endif
-//#if BIREF
-    pmode = 0;
-//#endif
-    var R = surfB(-1, k, cosi, p, n, 550.0);
-    var mirM = mir;
-    if (mb.b[k].more.y > 0.5 && alpha <= 0.0) { mirrorSharp = 1.0 + mirrorLod(p, n, cosi); }
-//#if WEAR
-    // the metal body's marks, as a single metal has them (trace_material.wgsl: wearAt), at its first surface
-    let wr = wearAt(p, n);
-    mirM = reflect(rd, wr.n);
-    R *= wr.keep * wr.tint;
-    if (wr.sig > 0.0 || wr.aniso > 0.0) { mirrorSharp = 0.0; }
-    let far = beyondB(p + n * 0.006, mirM, -1, 550.0, sigR * sigR + wr.sig * wr.sig + wr.aniso * wr.aniso);
+  let metalTop = opaqueB(k);
+//#if SCENE_REFLECTION
+  let sceneGlass = mb.kind[k] < 0.5 && alpha <= 0.0 && mb.b[k].film.x <= 0.0;
 //#else
-    let far = beyondB(p + n * 0.006, mirM, -1, 550.0, sigR * sigR);
+  let sceneGlass = false;
 //#endif
+  if (metalTop || sceneGlass) {
+    // Leaving a smooth interface, one reflected ray serves the whole spectrum.
+    // Metals and dielectrics share the external scene walk, including secondary materials.
+  //#if SPECTRUM
+    bandB(400.0, 300.0, 12, xi);
+  //#endif
+  //#if BIREF
+    pmode = 0;
+  //#endif
+    var R = vec3f(0.0);
+    var broad = vec3f(0.0);
+    var dir = mir;
+    var spread = 0.0;
+    if (metalTop) {
+      R = surfB(-1, k, cosi, p, n, 550.0);
+      R -= conductorBroadB;
+      spread = sigR * sigR;
+    //#if ROUGH
+      if (any(conductorBroadB > vec3f(0.0))) { broad = conductorBroadB * envL(n, 0.80); }
+    //#endif
+      if (mb.b[k].more.y > 0.5 && alpha <= 0.0) { mirrorSharp = 1.0 + mirrorLod(p, n, cosi); }
+    //#if LIVE_CONDUCTOR_FINISH
+      let finish = conductorFinishB(k, p, n, rd);
+      dir = reflect(rd, finish.normal);
+      R *= finish.tint;
+      broad *= finish.tint;
+      spread += finish.variance;
+      if (finish.marked) { mirrorSharp = 0.0; }
+    //#endif
+    }
+  //#if ROUGH
+    let transmittedRadius = frRad;
+  //#endif
+  //#if BODY_PATH
+    let transmittedSeed = rState;
+  //#endif
+    let far = externalReflectionB(metalTop, k, p + n * 0.006, dir, spread);
+    cb = k;
     mirrorSharp = 0.0;
-    return mb.b[k].glow.rgb * 0.3 + R * (far + skyB(k, mir));
+  //#if GRATING
+    let reflected = gratingReflect(p,n,rd,far,xi);
+  //#else
+    let reflected = far;
+  //#endif
+    if (metalTop) { return mb.b[k].glow.rgb * 0.3 + broad + R * (reflected + skyB(k, mir)); }
+    // The transmitted ray maintains its own blur footprint and random sequence.
+  //#if ROUGH
+    frRad = transmittedRadius;
+  //#endif
+  //#if BODY_PATH
+    rState = transmittedSeed;
+  //#endif
+    envR = reflected + skyB(k, mir);
   }
 
   // a clear or milky body or a thin wall: its own reflection, and each wavelength's way through it
@@ -710,7 +1362,7 @@ fn shadeB(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
     var dir = crossW(rd, -n, k, lam);
     if (dot(dir, dir) < 0.5) { continue; }
 //#else
-    var dir = refract(rd, n, 1.0 / n1);
+    var dir = pbr_dielectric_split(traceDielectricHit(n, airMedium(), mediumB(k, n1)), -rd).transmitted;
 //#endif
     var sg2 = widenB(alpha, 1.0, cosi, n1, dir, n);
 //#if ROUGH
@@ -726,6 +1378,18 @@ fn shadeB(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
     var att = 1.0 - R0;
     if (wallB(k)) { att *= mb.b[k].axis.xyz; }
     var L = vec3f(0.0);
+//#if SSS
+    if (mb.kind[k] > 1.5 && mb.kind[k] < 2.5 && !hasB(k, 32u)) {
+      let sssOpK = clamp(mb.b[k].tab[19].w, 0.0, 1.0);
+      if (sssOpK > 0.0) {
+        cb = k;
+        let aoB = waxOcclusion(p, n);
+        dir = normalize(mix(dir, normalize(mix(rd, -n, 0.12)), sssOpK));
+        L += att * sssOpK * waxNear(n, aoB, 0.25);
+        att *= mix(1.0, 0.44, sssOpK);
+      }
+    }
+//#endif
     // Surfaces met inside are of two sorts. Where the ray is sent back (by the air outside, a metal) it
     // has bounced, and bounces are counted as plain glass counts them. Where another clear or milky
     // body begins, the ray goes on into it and that is no bounce: two bodies of the same glass then draw
@@ -754,7 +1418,7 @@ fn shadeB(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
         att *= inn.keep;
 //#if CRACK
         if (inn.t >= 0.0) {
-          L += throughB(m, pos, d0, inn.t, &att, &sg2);
+          L += throughB(m, pos, d0, inn.t, lam, &att);
           // after so many turns the path is taken to leave the way it then heads
           if (turns >= i32(ibod[m].crackC.w)) {
             L += att * crackSeen(inn.dir);
@@ -771,32 +1435,60 @@ fn shadeB(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
 //#endif
       }
 //#endif
-      L += throughB(m, pos, d0, s, &att, &sg2);
+//#if SSS
+      if (e == 0 && mb.kind[m] > 1.5 && mb.kind[m] < 2.5 && !hasB(m, 32u)) {
+        let sssOp0 = clamp(mb.b[m].tab[19].w, 0.0, 1.0);
+        if (sssOp0 > 0.0) {
+          cb = m;
+          L += att * (sssOp0 * 1.65 * waxNear(n, waxOcclusion(p, n), s));
+        }
+      }
+//#endif
+      L += throughB(m, pos, d0, s, lam, &att);
       var c = -dot(dir, nq);
       if (c < 0.0) { nq = -nq; c = -c; }
+      nq = faceIncident(nq, -dir);
       if (paintB(nx)) {
         // a painted body met from inside a clear one: seen, and the path ends there
-        L += att * paintB_seen(nx, q, nq, dir);
+        L += att * paintB_seen(nx, q, nq, dir, iorB(m, lam));
         break;
       }
+//#if BODY_FROST
+      if (sampledInterfaceB(m,nx)) {
+        L += att * secondaryFrostB(q,dir,nq,m,nx,lam);
+        break;
+      }
+//#endif
       let o = max(m, nx);
       var R = surfB(m, nx, c, q, nq, lam);
       let al = mb.b[o].surf.x;
-      let mir = reflect(dir, nq);
+      var metalNormal = nq;
+      var metalTint = vec3f(1.0);
+      var finishVariance = 0.0;
+//#if LIVE_CONDUCTOR_FINISH
+      if (opaqueB(nx)) {
+        let finish = conductorFinishB(nx, q, nq, dir);
+        metalNormal = finish.normal;
+        metalTint = finish.tint;
+        finishVariance = finish.variance;
+      }
+//#endif
+      let mir = reflect(dir, metalNormal);
 //#if BIREF
       let kin = waveOf(m, dir, lam);        // (the wave as it meets the surface: both ways on are worked out from it)
 //#endif
-      var next = sg2 + 2.0 * al * al;      // the spread of what this surface sends back inside
+      var next = sg2 + 2.0 * al * al + finishVariance;      // the spread of what this surface sends back inside
       if (opaqueB(nx)) {
         // a metal met from inside this body
         L += att * mb.b[nx].glow.rgb * 0.3;
+        R *= metalTint;
       } else {
         let na = iorB(m, lam);
         let nb = iorB(nx, lam);
 //#if BIREF
         var od = crossW(kin, -nq, nx, lam);
 //#else
-        var od = refract(dir, nq, na / nb);
+        var od = pbr_dielectric_split(traceDielectricHit(nq, mediumB(m, na), mediumB(nx, nb)), -dir).transmitted;
 //#endif
         var through = 1.0 - R;
         var wide = sg2 + widenB(al, na, c, nb, od, nq);
@@ -820,6 +1512,18 @@ fn shadeB(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
           next = frNext(sg2, vec2f(0.0));
         }
 //#endif
+//#if SSS
+        var sssOpM = 0.0;
+        if (mb.kind[m] > 1.5 && mb.kind[m] < 2.5 && !hasB(m, 32u)) {
+          sssOpM = clamp(mb.b[m].tab[19].w, 0.0, 1.0);
+          if (sssOpM > 0.0) {
+            od = normalize(mix(od, dir, 0.55 * sssOpM));
+            through = mix(through, vec3f(1.0), sssOpM);
+            R *= (1.0 - sssOpM);
+            if (nx < 0) { wide = max(wide, 0.16 * sssOpM * sssOpM); }
+          }
+        }
+//#endif
         if (dot(od, od) > 0.5) {
           var X = att * through;
           if (wallB(o)) { X *= mb.b[o].axis.xyz; }
@@ -837,7 +1541,17 @@ fn shadeB(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
           // (light the film has sent back inside at least once sees the film's sky where it leaves)
           var sky = vec3f(0.0);
           if (filmed) { sky = skyDimB(o, od); }
+//#if SSS
+          var airOut = vec3f(0.0);
+          if (sssOpM < 0.999) { airOut = beyondB(q - nq * 0.006, od, nx, lam, wide); }
+          if (sssOpM > 0.0) {
+            cb = m;
+            airOut = mix(airOut, waxExit(q, -nq, dir), sssOpM);
+          }
+          L += X * (airOut + sky);
+//#else
           L += X * (beyondB(q - nq * 0.006, od, nx, lam, wide) + sky);
+//#endif
         }
       }
       if (!opaqueB(nx) && mb.b[o].film.x > 0.0) { filmed = true; }
@@ -846,7 +1560,7 @@ fn shadeB(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
 //#if BIREF
       // (what is sent back keeps the part of the wave that lies along the surface: an extraordinary wave
       // that has no such reflection ends here)
-      dir = crossW(kin, nq, m, lam);
+      dir = crossW(kin, metalNormal, m, lam);
       if (dot(dir, dir) < 0.5) { break; }
 //#else
       dir = mir;
@@ -879,7 +1593,11 @@ fn shadeB(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {
   frTopLight += top * envR;
   frTopShare += dot(top, vec3f(0.33333));
 //#endif
+//#if BODY_WALK
+  // The random-walk body's transmitted radiance is available here.
+//#endif
   return res;
+//#endif
 }
 
 // the reflection blended in where a ray grazes the outline
@@ -887,10 +1605,22 @@ fn grazeB(p: vec3f, rd: vec3f) -> vec3f {
   let n = nrm(p);
   let k = nearestOf(dist4(p));
   cb = k;
+  if (paintB(k)) { return paintB_seen(k, p, faceIncident(n, -rd), rd, 1.0); }
   let mir = reflect(rd, n);
   var R = vec3f(1.0);
 //#if METAL
   if (mb.kind[k] > 0.5 && mb.kind[k] < 1.5) { R = metalRGB(0.05, 1.0, 0.0); }
 //#endif
-  return R * (seenB(mir, 1.41421 * mb.b[k].surf.x) + skyB(k, mir));
+  let baseG = R * (seenB(mir, 1.41421 * mb.b[k].surf.x) + skyB(k, mir));
+//#if SSS
+  if (mb.kind[k] > 1.5 && mb.kind[k] < 2.5 && mb.b[k].surf.z <= 1.001) {
+    let sssOpG = clamp(mb.b[k].tab[19].w, 0.0, 1.0);
+    if (sssOpG > 0.0) {
+      let fG = fresnel(0.60, 1.0, mb.ior[k]);
+      let waxG = fG * baseG + (1.0 - fG) * waxNear(n, 1.0, 0.08);
+      return mix(baseG, waxG, sssOpG * smoothstep(0.0, 0.20, sqrt(clamp(mb.b[k].surf.x, 0.0, 1.0))));
+    }
+  }
+//#endif
+  return baseG;
 }

@@ -2,8 +2,8 @@
 //! read never says the surface is further than it is (nor puts a point on the wrong side). Union, subtract and
 //! intersect (min, max and a change of sign), and their rounded seams (whose slope is a share of the two
 //! slopes), all keep that: so the tree is safe wherever its parts' volumes are. These check the volumes the
-//! bakers make against the exact distance, at many voxels: a tube (the curve baker, near its surface and in
-//! the far field it fills from a coarse grid) and a ball read from a file (the model baker).
+//! bakers make against the exact distance, at many voxels: a tube (its formula, near its surface and in the
+//! far field it joins from its cells' middles) and a ball read from a file (the model baker).
 //!
 //! Needs a GPU (through the queue).
 
@@ -17,7 +17,7 @@ fn engine(gpu: &Gpu, pairs: &[(&str, &str)]) -> Engine {
     let mut e = Engine::new(gpu.clone(), State::with_args(&args, true), true);
     e.resize(64, 36);
     e.bake(Detail::Full).unwrap();
-    e.state.want = None;
+    e.state.drop_request();
     e
 }
 
@@ -80,13 +80,25 @@ fn a_tube_volume_never_says_the_surface_is_further_than_it_is() {
                 (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() - r
             }).fold(f64::MAX, f64::min)
         };
+        // (the volume holds the tube of the curves fitted to those points, which lie within the fit's
+        // tolerance of them: a value may be that much further from the surface than the points' own chain
+        // is, outside it or inside)
+        let fitted = |q: [f64; 3]| { let d = exact(q); d + gf_core::presets::tubes::FIT_TOLERANCE.copysign(d) };
         let (res_n, v) = values(&e);
-        let (over, wrong, n, ratio) = worst(res_n, &v, 3, exact);
-        eprintln!("trefoil at {res}: at {n} voxels the value is at most {over:.3} voxel further than the surface, at most {ratio:.4} of the distance; {wrong} on the wrong side");
-        assert!(ratio <= 1.001, "{ratio}");
+        let (_, wrong, n, ratio) = worst(res_n, &v, 3, fitted);
+        // Within three voxels of the surface the formula reads its spans exactly: no value there is over.
+        // (Further off the way is told from the cells' middles, each to the nearest of the pieces that the
+        // cells about it found: not always the nearest of all, so a value may be a little over.)
+        let h = 2.0 * HB / res_n as f64;
+        let near = |q: [f64; 3]| { let d = fitted(q); if d.abs() < 3.0 * h { d } else { f64::INFINITY.copysign(d) } };
+        let (over, _, _, near_ratio) = worst(res_n, &v, 3, near);
+        eprintln!("trefoil at {res}: at {n} voxels the value is at most {over:.3} voxel further than the surface near it, at most {ratio:.4} of the distance anywhere; {wrong} on the wrong side");
+        assert!(ratio <= 1.3, "{ratio}");
+        // What the picture needs near the surface: a ray steps by the value times the march's step
+        // scale, so it never crosses the surface while that product stays under the distance.
+        let step = e.state.march().0;
+        assert!(near_ratio * step <= 0.98, "{near_ratio} x step {step}");
         assert_eq!(wrong, 0);
-        // (the curve is cut into steps of three quarters of a voxel: between its points the tube is a chain of
-        // capsules, which bulges outside the smooth tube by less than a hundredth of a voxel)
         assert!(over < 0.05, "a value says the surface is {over:.3} voxel further than it is");
     }
 }

@@ -1215,3 +1215,70 @@ fn a_million_triangles() {
         eprintln!("{name:>10}: {:>4} MB, {} triangles read in {:.0} ms", bytes.len() >> 20, mesh.tri.len(), took.as_secs_f64() * 1000.0);
     }
 }
+
+#[test]
+fn textured_obj_preserves_material_slots_and_per_corner_uvs_at_a_seam() {
+    let dir = test_dir("image_material");
+    let model = dir.join("two.obj");
+    std::fs::write(&model, "mtllib slots.mtl\nv 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0.25 0.75\nusemtl logo\nf 1/1 2/2 3/3\nusemtl mould\nf 1/4 3/3 4/1\n").unwrap();
+    std::fs::write(dir.join("slots.mtl"), "newmtl logo\nmap_Kd swatch.png\nnewmtl mould\nKd 0.2 0.4 0.8\nbump -bm 0.3 swatch.png\n").unwrap();
+    image::RgbaImage::from_pixel(1,1,image::Rgba([128,64,32,255])).save(dir.join("swatch.png")).unwrap();
+    let asset = read_asset(&model).unwrap();
+    assert!(asset.appearance_notice.is_none());
+    let look = asset.appearance.unwrap();
+    assert_eq!(look.images.len(), 1);
+    assert_eq!(look.images[0].pixels, [128,64,32,255]);
+    assert_eq!(look.faces[0].material, Some(0));
+    assert_eq!(look.faces[1].material, Some(1));
+    assert_eq!(look.faces[0].base_uv[0], [0.0,1.0]);
+    assert_eq!(look.faces[1].base_uv[0], [0.25,0.25]);
+    assert!(look.materials[1].height);
+    assert_eq!(look.materials[1].normal_scale, 0.3);
+    std::fs::remove_file(dir.join("swatch.png")).unwrap();
+    let fallback = read_asset(&model).unwrap();
+    assert_eq!(fallback.mesh.tri, asset.mesh.tri);
+    assert!(fallback.appearance.is_none());
+    assert!(fallback.appearance_notice.unwrap().contains("swatch.png"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn gltf_normalized_second_uv_and_mirrored_tangent_follow_the_node() {
+    let dir = test_dir("second_uv");
+    let model = dir.join("uv.gltf");
+    image::RgbaImage::from_pixel(1,1,image::Rgba([128,128,255,255])).save(dir.join("detail.png")).unwrap();
+    let mut bytes = Vec::new();
+    for value in [0.0f32,0.,0.,1.,0.,0.,0.,1.,0.] { bytes.extend(value.to_le_bytes()); }
+    bytes.extend([0,0,255,0,0,255,0,0]);
+    for _ in 0..3 { for v in [1.0f32,0.,0.,1.] { bytes.extend(v.to_le_bytes()); } }
+    std::fs::write(dir.join("uv.bin"), &bytes).unwrap();
+    let doc = json!({
+        "asset":{"version":"2.0"}, "scene":0, "scenes":[{"nodes":[0]}], "nodes":[{"mesh":0,"scale":[-1,1,1]}],
+        "meshes":[{"primitives":[{"attributes":{"POSITION":0,"TEXCOORD_1":1,"TANGENT":2},"material":0}]}],
+        "buffers":[{"byteLength":bytes.len(),"uri":"uv.bin"}],
+        "bufferViews":[{"buffer":0,"byteLength":36},{"buffer":0,"byteOffset":36,"byteLength":6},{"buffer":0,"byteOffset":44,"byteLength":48}],
+        "accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"},{"bufferView":1,"componentType":5121,"normalized":true,"count":3,"type":"VEC2"},{"bufferView":2,"componentType":5126,"count":3,"type":"VEC4"}],
+        "images":[{"uri":"detail.png"}], "samplers":[{"wrapS":33071,"wrapT":33648}], "textures":[{"source":0,"sampler":0}],
+        "materials":[{
+            "normalTexture":{"index":0,"texCoord":1,"extensions":{"KHR_texture_transform":{"scale":[0.5,1]}}},
+            "pbrMetallicRoughness":{"metallicRoughnessTexture":{"index":0,"extensions":{"KHR_texture_transform":{"texCoord":1,"offset":[0.25,0.5]}}}}
+        }]
+    });
+    std::fs::write(&model, doc.to_string()).unwrap();
+    let asset = read_asset(&model).unwrap();
+    let look = asset.appearance.unwrap();
+    let map = look.materials[0].normal.unwrap();
+    assert_eq!(map.wrap, [33071,33648]);
+    assert_eq!(look.faces[0].normal_uv, [[0.,0.],[0.5,0.],[0.,1.]]);
+    assert_eq!(look.faces[0].finish_uv, [[0.25,0.5],[1.25,0.5],[0.25,1.5]]);
+    assert_eq!(look.faces[0].canonical_uv.normal, [[0.,0.],[1.,0.],[0.,1.]]);
+    assert_eq!(look.faces[0].canonical_uv.finish, [[0.,0.],[1.,0.],[0.,1.]]);
+    assert_eq!(look.materials[0].metallic_roughness.unwrap().image, map.image);
+    let words = look.shader_words(&asset.mesh, &gf_core::mesh::solid::Fit::of(&asset.mesh, false));
+    let finish = words[1] as usize + 34;
+    let expected = [0.25_f32, 0.5, 1.25, 0.5, 0.25, 1.5].map(f32::to_bits);
+    assert_eq!(words[4], 40);
+    assert_eq!(words[finish..finish + 6], expected);
+    for t in look.faces[0].tangent { assert_eq!(t, [-1.,0.,0.,-1.]); }
+    std::fs::remove_dir_all(dir).unwrap();
+}

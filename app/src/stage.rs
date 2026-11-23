@@ -45,12 +45,84 @@ pub struct Seen {
     pub mirror: bool,
     /// shadows and caustics fall on the floor (the tracer then has a `castFloor`)
     pub cast: bool,
+    /// the physical sky dome is shown behind the shape
+    pub sky: bool,
+    /// diffuse colour and indirect light bounces on the floor
+    pub gi: bool,
+    /// scene has separate-material bodies (`bodTex` and `mb` are bound)
+    pub multi: bool,
+    /// the cached volumetric sky-space cubemap and cloud shadow map are bound
+    pub sky_space: bool,
+    /// foreground atmospheric haze, aerial perspective, or volumetric sunray shafts are active
+    pub atmo: bool,
 }
 
 impl Seen {
     pub fn any(&self) -> bool {
-        self.backdrop || self.floor
+        self.backdrop || self.floor || self.sky || self.sky_space || self.atmo
     }
+}
+
+/// Effective diffuse/subsurface/metallic bounce reflectance of one body (`w = 0`: pure clear glass).
+pub fn body_gi_albedo(p: &gf_core::settings::Settings, clay: bool) -> [f32; 4] {
+    if clay {
+        return [0.74, 0.70, 0.66, 1.0];
+    }
+    let v = gf_core::material::Variant::of(p);
+    if v.metal {
+        let tint = [p.body_r.clamp(0.0, 1.0), p.body_g.clamp(0.0, 1.0), p.body_b.clamp(0.0, 1.0)];
+        let refl = match gf_core::material::metal_of(p) {
+            Some(m) => gf_core::material::colour_of(|l| {
+                gf_core::material::fresnel_metal(0.65, 1.0, gf_core::material::table_at(&m.n, l), gf_core::material::table_at(&m.k, l))
+            }),
+            None => [0.92; 3],
+        };
+        let w = 0.65;
+        return [
+            (refl[0].clamp(0.0, 1.0) * tint[0] * w) as f32,
+            (refl[1].clamp(0.0, 1.0) * tint[1] * w) as f32,
+            (refl[2].clamp(0.0, 1.0) * tint[2] * w) as f32,
+            w as f32,
+        ];
+    }
+    if v.ceramic {
+        let ior = if v.coat { gf_core::material::coat_index(p) } else { p.ior.max(1.0) };
+        let f = gf_core::material::fresnel(0.65, 1.0, ior.max(1.0));
+        let diff_w = (1.0 - f) * (1.0 - 0.5 * p.ceramic_through.clamp(0.0, 1.0));
+        return [
+            (p.body_r.clamp(0.0, 1.0) * diff_w) as f32,
+            (p.body_g.clamp(0.0, 1.0) * diff_w) as f32,
+            (p.body_b.clamp(0.0, 1.0) * diff_w) as f32,
+            1.0,
+        ];
+    }
+    if v.sss {
+        let f = gf_core::material::fresnel(0.65, 1.0, p.ior.max(1.0));
+        let sss_w = p.sss.clamp(0.0, 1.0) * (1.0 - f);
+        if sss_w <= 1e-4 {
+            return [0.0; 4];
+        }
+        return [
+            (p.body_r.clamp(0.0, 1.0) * sss_w) as f32,
+            (p.body_g.clamp(0.0, 1.0) * sss_w) as f32,
+            (p.body_b.clamp(0.0, 1.0) * sss_w) as f32,
+            sss_w as f32,
+        ];
+    }
+    [0.0; 4]
+}
+
+/// Does any body in the current scene participate in diffuse/subsurface/metallic floor GI?
+pub fn any_gi_body(state: &State, clay: bool, multi: bool) -> bool {
+    if clay {
+        return true;
+    }
+    if multi {
+        if let Some(mats) = state.body_materials() {
+            return mats.iter().any(|m| body_gi_albedo(m, false)[3] > 0.0);
+        }
+    }
+    body_gi_albedo(&state.p, false)[3] > 0.0
 }
 
 /// The studio's numbers as the tracer reads them (see stage.wgsl).
@@ -66,11 +138,35 @@ pub struct StageU {
     pub floor: [f32; 4],
     pub k: [f32; 4],
     pub tint: [f32; 4],
+    pub sky0: [f32; 4],
+    pub sky1: [f32; 4],
+    pub sky2: [f32; 4],
+    pub sky3: [f32; 4],
+    pub sky4: [f32; 4],
+    pub gi: [f32; 4],
+    pub gi_floor: [f32; 4],
+    pub gi_albedo: [[f32; 4]; 4],
+    pub gi_room: [[f32; 4]; 9],
+    pub gi_lights: [[f32; 4]; 8],
+    pub cloud0: [f32; 4],
+    pub cloud1: [f32; 4],
+    pub atmo0: [f32; 4],
+    pub atmo1: [f32; 4],
 }
 
 impl StageU {
     /// `height`: where the floor stands in the room; `light`: its colour where nothing shadows it.
     pub fn of(state: &State, stage: &Stage, height: f64, light: &gf_core::stage::FloorLight) -> StageU {
+        Self::of_with_sun_transmittance(state, stage, height, light, 1.0)
+    }
+
+    pub fn of_with_sun_transmittance(
+        state: &State,
+        stage: &Stage,
+        height: f64,
+        light: &gf_core::stage::FloorLight,
+        raw_sun_transmittance: f64,
+    ) -> StageU {
         let m = f32s(&state.room_m());
         let mut u: StageU = Zeroable::zeroed();
         u.room = [[m[0], m[1], m[2], 0.0], [m[3], m[4], m[5], 0.0], [m[6], m[7], m[8], 0.0]];
@@ -98,6 +194,51 @@ impl StageU {
             // an image in a perfectly glossy floor does not fade; in a duller one it is gone a shape's height up
             (u.k[0], u.k[1]) = ((FADE_FROM * f.fade) as f32, (2.2 * (1.0 - f.gloss)) as f32);
         }
+        let sky = gf_core::sky::Sky::of(&state.p);
+        if sky.active && state.hdri.is_none() {
+            let sun = sky.sun_dir();
+            let (ground_lit, sun_ground) = sky.dome_and_sun_ground();
+            let scale = sky.sun_scale_rgb();
+            u.sky0 = [sun[0] as f32, sun[1] as f32, sun[2] as f32, sky.sun_radius() as f32];
+            u.sky1 = [scale[0] as f32, scale[1] as f32, scale[2] as f32, if sky.sun_disc { 1.0 } else { 0.0 }];
+            u.sky2 = [sky.rayleigh as f32, sky.mie as f32, sky.mie_g as f32, sky.ozone as f32];
+            u.sky3 = [ground_lit[0] as f32, ground_lit[1] as f32, ground_lit[2] as f32, sky.gain as f32];
+            u.sky4 = [sun_ground[0] as f32, sun_ground[1] as f32, sun_ground[2] as f32, sky.disc_peak_scale() as f32];
+            let clouds_on = sky.clouds_active();
+            let atmo_on = sky.has_atmo_effects();
+            let sky_space_on = clouds_on || atmo_on;
+            let atten_0 = sky.sun_attenuation(raw_sun_transmittance);
+            u.cloud0 = [
+                sky.clouds.shadow as f32,
+                crate::clouds::FLOOR_KM_PER_UNIT,
+                crate::clouds::SHADOW_SPAN_KM,
+                if clouds_on { 1.0 } else { 0.0 },
+            ];
+            if let Some(f) = &stage.floor {
+                let matched = if stage.backdrop.is_some() { f.matched } else { 0.0 };
+                let k_sun = (1.0 - matched) * 2.2 * sun[1].max(0.0) / std::f64::consts::PI;
+                u.cloud1 = [
+                    (f.albedo[0] * sun_ground[0] * k_sun) as f32,
+                    (f.albedo[1] * sun_ground[1] * k_sun) as f32,
+                    (f.albedo[2] * sun_ground[2] * k_sun) as f32,
+                    atten_0 as f32,
+                ];
+            } else {
+                u.cloud1 = [0.0, 0.0, 0.0, atten_0 as f32];
+            }
+            u.atmo0 = [
+                sky.atmo.haze as f32,
+                sky.atmo.fog_h as f32,
+                sky.atmo.aerial as f32,
+                sky.atmo.sun_rays as f32,
+            ];
+            u.atmo1 = [
+                sky.atmo.sun_ray_g as f32,
+                if sky_space_on { 1.0 } else { 0.0 },
+                if atmo_on { 1.0 } else { 0.0 },
+                if sky.show { 1.0 } else { 0.0 },
+            ];
+        }
         u
     }
 }
@@ -105,25 +246,128 @@ impl StageU {
 /// What the tracer shows where a ray from the camera misses the shape: an expression in the terms of
 /// `sampleAt` in trace.wgsl. `picture`: an environment picture is shown there.
 pub fn background(seen: Seen, picture: bool) -> &'static str {
-    match (seen.floor, seen.mirror, seen.backdrop, picture) {
+    let floor_extra = seen.mirror || seen.atmo;
+    match (seen.floor, floor_extra, seen.sky, seen.backdrop, picture) {
         (true, true, ..) => "stageFloor(ro, rd, &t, &g, &depth, xi, W, fc)",
         (true, false, ..) => "stageFloor(ro, rd, &t, &g, &depth)",
-        (false, _, true, _) => "stageBackdrop(rd)",
-        (false, _, false, true) => "backdrop(rd)",
-        (false, _, false, false) => "vec3f(0.0)",
+        (false, _, true, ..) => "skyBackdrop(rd)",
+        (false, _, false, true, _) => "stageBackdrop(rd)",
+        (false, _, false, false, true) => "backdrop(rd)",
+        (false, _, false, false, false) => "vec3f(0.0)",
     }
+}
+
+/// At the end of a polished conductor reflection, account for the light the shape
+/// adds to or removes from the floor where the escaping ray actually lands.
+pub fn reflect_cast_floor(src: &str, near: bool, material: gf_core::material::Variant) -> String {
+    let sampled = material.rough && material.rough_ref;
+    let worn = material.wear && !material.film;
+    let mut text = src.to_string();
+    if !material.rough || sampled {
+        let reflection = if sampled && material.wear {
+            "let reflected = max(lit + (wr.keep * wr.tint) * metalFloorDelta(p, dir, true), vec3f(0.0));"
+        } else if sampled || !worn {
+            "let reflected = max(lit + metalFloorDelta(p, dir, true), vec3f(0.0));"
+        } else {
+            "var reflected = lit;
+      if (!brushed && wr.sig == 0.0) {
+        let tint = wr.tint * (wr.keep * (1.0 - wr.dust));
+        reflected = max(lit + tint * metalFloorDelta(p, reflect(rd, wr.n), false), vec3f(0.0));
+      }"
+        };
+        text = crate::weave::replace(&text, "stage.metal_reflected", "let reflected = lit;", reflection);
+    }
+    if material.coat {
+        text = crate::weave::replace(&text, "stage.metal_coat", "col += thr * Fc * sharpEnv(mir, p, n, cosi);",
+            "col += thr * Fc * max(sharpEnv(mir, p, n, cosi) + metalCoatFloor(p, n, mir), vec3f(0.0));");
+        text.push_str("
+fn metalCoatFloor(p: vec3f, n: vec3f, dir: vec3f) -> vec3f {
+  let axis = toRoom(dir).y;
+  if (axis >= -1e-5) { return vec3f(0.0); }
+  let distance = (su.mid.w - toRoom(p).y) / axis;
+  if (distance <= 0.0) { return vec3f(0.0); }
+  var bodyDistance: f32;
+  if (outHit(p + n * 0.004, dir, &bodyDistance) && bodyDistance < distance) { return vec3f(0.0); }
+  return metalFloorDelta(p, dir, true);
+}
+");
+    }
+    append_floor_delta(&mut text, near);
+    text
+}
+
+/// A reflected ray from a conductor in an assembly may meet other bodies first.
+/// Only a sharp path that actually escapes into the room receives the local floor radiance.
+pub fn reflect_bodies_floor(src: &str, near: bool) -> String {
+    let mut text = crate::weave::replace(src, "stage.terminal_room", "return seenB(direction, sqrt(spread)); // terminal room",
+        "let radiance = seenB(direction, sqrt(spread));
+  if (reflectingMetalFloor && spread == 0.0) {
+    return max(radiance + metalFloorDelta(origin, direction, true), vec3f(0.0));
+  }
+  return radiance;");
+    text = crate::weave::replace(&text, "stage.metal_reflection", "return beyondB(origin, direction, -1, 550.0, spread); // metal reflection",
+        "let previous = reflectingMetalFloor;
+  reflectingMetalFloor = metalTop && spread == 0.0 && (mb.b[k].surf.z <= 1.001 || hasB(k, 128u)) && mb.b[k].grating.x <= 0.0;
+  let radiance = beyondB(origin, direction, -1, 550.0, spread);
+  reflectingMetalFloor = previous;
+  return radiance;");
+    text = crate::weave::replace(&text, "stage.sampled_metal_escape", "return incident; // sampled metal escaping the scene",
+        "return max(incident + metalFloorDelta(origin, direction, true), vec3f(0.0));");
+    text.push_str("\nvar<private> reflectingMetalFloor: bool;\n");
+    append_floor_delta(&mut text, near);
+    text
+}
+
+fn append_floor_delta(text: &mut String, near: bool) {
+    let mut finite = String::new();
+    if text.contains("fn stageCloudFloorDelta(") {
+        finite.push_str("correction += coverage * (1.0 - gloss) * stageCloudFloorDelta(point) * castFloor(point);\n  ");
+    }
+    if near {
+        finite.push_str(
+            "let hit = origin + direction * distance;
+  let normal = vec3f(su.room0.y, su.room1.y, su.room2.y);
+  let localLamps = lamps.floor.rgb * lampsDiffuse(hit, normal) * 0.31830989;
+  var previous = vec3f(0.0);
+  if (hasLampPool) { previous = lampsFloor(direction); }
+  correction += coverage * (1.0 - gloss) * localLamps - previous;
+  correction *= 1.0 - min(lampsOn(origin, direction, distance, 0.0).a, 1.0);",
+        );
+    }
+    text.push_str(&include_str!("shaders/reflected_stage_floor.wgsl").replace("{{FINITE_FLOOR}}", &finite));
 }
 
 /// The studio's part of the tracer's declarations: nothing unless a backdrop is shown or there is a floor.
 /// `shade`: how the tracer shades the shape (the same text it uses for a ray from the camera).
 pub fn tracer_decl(seen: Seen, picture: bool, shade: &str) -> String {
     if !seen.any() { return String::new(); }
+    let sky_space = seen.sky_space || seen.atmo;
     let mut out = String::with_capacity(STAGE_WGSL.len());
     for line in STAGE_WGSL.trim_end().lines() {
         let kept = if let Some(rest) = line.strip_prefix("//#floor ") {
             seen.floor.then_some(rest)
+        } else if let Some(rest) = line.strip_prefix("//#skyfloor ") {
+            (seen.floor && seen.sky).then_some(rest)
+        } else if let Some(rest) = line.strip_prefix("//#plainfloor ") {
+            (seen.floor && !seen.sky).then_some(rest)
         } else if let Some(rest) = line.strip_prefix("//#mirror ") {
             (seen.floor && seen.mirror).then_some(rest)
+        } else if let Some(rest) = line.strip_prefix("//#gi ") {
+            (seen.floor && seen.gi).then_some(rest)
+        } else if let Some(rest) = line.strip_prefix("//#gimulti ") {
+            (seen.floor && seen.gi && seen.multi).then_some(rest)
+        } else if let Some(rest) = line.strip_prefix("//#gisingle ") {
+            (seen.floor && seen.gi && !seen.multi).then_some(rest)
+        } else if let Some(rest) = line.strip_prefix("//#skyspace ") {
+            sky_space.then_some(rest)
+        } else if let Some(rest) = line.strip_prefix("//#skyspacedome ") {
+            (seen.sky && sky_space).then_some(rest)
+        } else if let Some(rest) = line.strip_prefix("//#atmo ") {
+            seen.atmo.then_some(rest)
+        } else if let Some(rest) = line.strip_prefix("//#flooratmo ") {
+            (seen.floor && seen.atmo).then_some(rest)
+        } else if let Some(rest) = line.strip_prefix("//#sky ") {
+            (seen.sky && !sky_space).then_some(rest)
         } else {
             Some(line)
         };
@@ -132,10 +376,21 @@ pub fn tracer_decl(seen: Seen, picture: bool, shade: &str) -> String {
             out.push('\n');
         }
     }
+    let has_direct = crate::cast::CAST_WGSL.contains("fn castFloorDirect(");
+    let cast_floor = match (seen.cast, seen.gi && has_direct) {
+        (true, true) => "mix(castFloor(p), castFloorDirect(p), min(su.gi.y, 1.0)) + castFloorLight(p)",
+        (true, false) => "castFloor(p) + castFloorLight(p)",
+        (false, _) => "vec3f(1.0)",
+    };
+    let gi_replace_amb = if seen.cast && has_direct { "true" } else { "false" };
     out.replace("{{STAGE_BINDING}}", &BINDING.to_string())
-        .replace("{{MIRROR_PARAMS}}", if seen.mirror { ", xi: f32, W: i32, fc: vec2f" } else { "" })
-        .replace("{{BEHIND}}", if seen.backdrop { "backdropAt(d)" } else if picture { "backdrop(rd)" } else { "vec3f(0.0)" })
-        .replace("{{CAST_FLOOR}}", if seen.cast { "castFloor(p) + castFloorLight(p)" } else { "vec3f(1.0)" })
+        .replace("{{SKY_DOME_BINDING}}", &crate::clouds::DOME_BINDING.to_string())
+        .replace("{{CLOUD_SHADOW_BINDING}}", &crate::clouds::SHADOW_BINDING.to_string())
+        .replace("{{MIRROR_PARAMS}}", if seen.mirror || seen.atmo { ", xi: f32, W: i32, fc: vec2f" } else { "" })
+        .replace("{{FLOOR_BASE}}", if sky_space { "stageFloorBase(p)" } else { "su.floor.rgb" })
+        .replace("{{BEHIND}}", if seen.sky { "skyBackdrop(rd)" } else if seen.backdrop { "backdropAt(d)" } else if picture { "backdrop(rd)" } else { "vec3f(0.0)" })
+        .replace("{{CAST_FLOOR}}", cast_floor)
+        .replace("{{GI_REPLACE_AMB}}", gi_replace_amb)
         .replace("{{MIRROR}}", if seen.mirror { "stageMirror(ro + rd * tf, r, xi, W, fc)" } else { "env(r)" })
         .replace("{{SHADE}}", shade)
 }
@@ -147,7 +402,7 @@ pub fn tracer_decl(seen: Seen, picture: bool, shade: &str) -> String {
 struct LowU {
     /// the direction looked along, in the shape's own frame; samples along a side
     down: [f32; 4],
-    /// distances counted: below this, above this; the width of the volume; unused
+    /// Distance thresholds, full volume width, and the dominant search axis.
     k: [f32; 4],
 }
 
@@ -164,17 +419,20 @@ const LOW_BLOCK: u32 = 16;
 /// the surface comes to p . d - s at least: a ball of radius |s| about p is all glass (inside) or just
 /// touches the glass (outside). The largest of that over the samples near the surface is the reach, and
 /// it is far finer than the grid: a sample's own distance makes up for its not lying on the surface,
-/// and what is left is the grid's spacing squared over the surface's curvature. Three passes: every
-/// column of the grid, the largest of each block of columns, the largest of the blocks; one number is
-/// read back.
+/// and what is left is the grid's spacing squared over the surface's curvature. A subset of columns
+/// provides a lower bound. The remaining columns are searched along the dominant axis until they
+/// cannot improve it. Reductions return the maximum over the same grid as an exhaustive search.
 pub struct Lowest {
     gpu: Gpu,
+    l_seed: wgpu::BindGroupLayout,
     l_rows: wgpu::BindGroupLayout,
     l_from: wgpu::BindGroupLayout,
+    p_seed: wgpu::RenderPipeline,
     p_rows: wgpu::RenderPipeline,
     p_blocks: wgpu::RenderPipeline,
     p_all: wgpu::RenderPipeline,
     rows_view: wgpu::TextureView,
+    seed_view: wgpu::TextureView,
     blocks_view: wgpu::TextureView,
     out: wgpu::Texture,
     out_view: wgpu::TextureView,
@@ -184,7 +442,9 @@ pub struct Lowest {
 impl Lowest {
     pub fn new(gpu: &Gpu) -> Self {
         let frag = wgpu::ShaderStages::FRAGMENT;
-        let l_rows = gpu.bind_layout("lowest: columns", &[uniform_entry(0, frag, false), texture_entry(1, wgpu::TextureViewDimension::D3, true), sampler_entry(2)]);
+        let volume = [uniform_entry(0, frag, false), texture_entry(1, wgpu::TextureViewDimension::D3, true), sampler_entry(2)];
+        let l_seed = gpu.bind_layout("lowest: seed", &volume);
+        let l_rows = gpu.bind_layout("lowest: columns", &[volume[0], volume[1], volume[2], texture_entry(3, wgpu::TextureViewDimension::D2, false)]);
         let l_from = gpu.bind_layout("lowest: largest", &[uniform_entry(0, frag, false), texture_entry(3, wgpu::TextureViewDimension::D2, false)]);
         let module = gpu.shader("lowest", LOWEST_WGSL, false);
         let fmt = wgpu::TextureFormat::R32Float;
@@ -193,10 +453,12 @@ impl Lowest {
         let out = gpu.target("lowest", 1, 1, fmt, &[]);
         Self {
             gpu: gpu.clone(),
+            p_seed: pipe("lowest: seed", "fs_seed", &l_seed),
             p_rows: pipe("lowest: columns", "fs_rows", &l_rows),
             p_blocks: pipe("lowest: blocks", "fs_blocks", &l_from),
             p_all: pipe("lowest: all", "fs_all", &l_from),
-            l_rows, l_from,
+            l_seed, l_rows, l_from,
+            seed_view: view(&gpu.target("lowest: bound", 1, 1, fmt, &[])),
             rows_view: view(&gpu.target("lowest: columns", LOW_N, LOW_N, fmt, &[])),
             blocks_view: view(&gpu.target("lowest: blocks", LOW_N / LOW_BLOCK, LOW_N / LOW_BLOCK, fmt, &[])),
             out_view: view(&out),
@@ -225,18 +487,22 @@ impl Lowest {
         // samples up to one and a half spacings outside the surface and two inside: there is always one
         // of them beside any point of the surface, and that near the surface every volume's distances
         // are true ones
-        let u = LowU { down: [d[0] as f32, d[1] as f32, d[2] as f32, n as f32], k: [(1.5 * spacing) as f32, (-2.0 * spacing) as f32, width as f32, 0.0] };
+        let axis = (0..3).max_by(|&a, &b| d[a].abs().total_cmp(&d[b].abs())).unwrap();
+        let u = LowU { down: [d[0] as f32, d[1] as f32, d[2] as f32, n as f32], k: [(1.5 * spacing) as f32, (-2.0 * spacing) as f32, width as f32, axis as f32] };
         // (a block of numbers of its own for every asking: several may be on their way at once)
         let ub = gpu.uniform_buffer("lowest", std::mem::size_of::<LowU>() as u64);
         gpu.queue.write_buffer(&ub, 0, bytemuck::bytes_of(&u));
-        let g_rows = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("lowest: columns"),
-            layout: &self.l_rows,
-            entries: &[
+        let entries = [
                 wgpu::BindGroupEntry { binding: 0, resource: ub.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&vol.view) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.smp) },
-            ],
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.seed_view) },
+        ];
+        let g_seed = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("lowest: seed"), layout: &self.l_seed, entries: &entries[..3],
+        });
+        let g_rows = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("lowest: columns"), layout: &self.l_rows, entries: &entries,
         });
         let from = |view: &wgpu::TextureView| {
             gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -248,7 +514,13 @@ impl Lowest {
         let (g_blocks, g_all) = (from(&self.rows_view), from(&self.blocks_view));
         let blocks = n.div_ceil(LOW_BLOCK);
         let mut enc = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("lowest") });
-        for (target, pipe, group, size) in [(&self.rows_view, &self.p_rows, &g_rows, n), (&self.blocks_view, &self.p_blocks, &g_blocks, blocks), (&self.out_view, &self.p_all, &g_all, 1)] {
+        for (target, pipe, group, size) in [
+            (&self.blocks_view, &self.p_seed, &g_seed, blocks),
+            (&self.seed_view, &self.p_all, &g_all, 1),
+            (&self.rows_view, &self.p_rows, &g_rows, n),
+            (&self.blocks_view, &self.p_blocks, &g_blocks, blocks),
+            (&self.out_view, &self.p_all, &g_all, 1),
+        ] {
             let mut rp = pass(&mut enc, target, None, true);
             rp.set_viewport(0.0, 0.0, size as f32, size as f32, 0.0, 1.0);
             rp.set_scissor_rect(0, 0, size, size);
@@ -349,18 +621,40 @@ impl StageWork {
     /// What of the studio the tracer draws itself, as the settings stand.
     pub fn seen(state: &State) -> Seen {
         let s = Stage::of(&state.p);
-        Seen { backdrop: s.show, floor: s.floor.is_some(), mirror: s.floor.as_ref().is_some_and(|f| f.mirror), cast: false }
+        let sky_model = gf_core::sky::Sky::of(&state.p);
+        let no_hdri = state.hdri.is_none();
+        let sky = no_hdri && sky_model.show;
+        let sky_space = no_hdri && sky_model.needs_sky_space();
+        let atmo = no_hdri && sky_model.has_atmo_effects();
+        Seen {
+            backdrop: !sky && s.show,
+            floor: s.floor.is_some(),
+            mirror: s.floor.as_ref().is_some_and(|f| f.mirror),
+            cast: false,
+            sky,
+            gi: false,
+            multi: false,
+            sky_space,
+            atmo,
+        }
     }
 
     /// What the painting of the lights' map depends on, of the studio (nothing when there is none).
     pub fn paint_key(state: &State) -> Vec<u64> {
         let s = Stage::of(&state.p);
-        if s.off() { Vec::new() } else { s.paint_key(&state.lights_to_room()) }
+        if s.off() { return Vec::new(); }
+        let mut k = s.paint_key(&state.lights_to_room());
+        if s.floor.is_some() { k.push(u64::from(Self::sky_horizon(state))); }
+        k
     }
 
-    /// Paint the studio into the lights' map (see `Stage::paint`); remembers the floor's own colour.
+    fn sky_horizon(state: &State) -> bool {
+        state.hdri.is_none() && state.p.sky > 0.5 && state.p.sky_show > 0.5
+    }
+
+    /// Paint the studio into the lights' map (see `Stage::paint_with_sky`); remembers the floor's own colour.
     pub fn paint(&mut self, state: &State, px: &mut [f32], w: usize, h: usize, extra: [f64; 3]) {
-        self.light = Stage::of(&state.p).paint(px, w, h, &state.lights_to_room(), extra);
+        self.light = Stage::of(&state.p).paint_with_sky(px, w, h, &state.lights_to_room(), extra, Self::sky_horizon(state));
     }
 
     /// The same for the copy of the lights a mirror reads (`crisp`: a metal or a coat will mirror it):
@@ -368,7 +662,7 @@ impl StageWork {
     pub fn paint_for(&mut self, state: &State, px: &mut [f32], w: usize, h: usize, extra: [f64; 3], crisp: bool) {
         // (what the floor came to is kept from the studio as painted for everything else)
         if crisp {
-            Stage::of(&state.p).crisp().paint(px, w, h, &state.lights_to_room(), extra);
+            Stage::of(&state.p).crisp().paint_with_sky(px, w, h, &state.lights_to_room(), extra, Self::sky_horizon(state));
         } else {
             self.paint(state, px, w, h, extra);
         }
@@ -376,7 +670,7 @@ impl StageWork {
 
     /// The same without remembering anything: for a copy of the map made for another purpose.
     pub fn paint_copy(state: &State, px: &mut [f32], w: usize, h: usize) {
-        Stage::of(&state.p).paint(px, w, h, &state.lights_to_room(), [0.0; 3]);
+        Stage::of(&state.p).paint_with_sky(px, w, h, &state.lights_to_room(), [0.0; 3], Self::sky_horizon(state));
     }
 
     /// Where the floor stands in the room, if there is one.
@@ -424,7 +718,9 @@ impl Engine {
     /// True if anything the picture shows changed.
     pub(crate) fn stage_upkeep(&mut self) -> bool {
         let stage = Stage::of(&self.state.p);
-        if stage.off() {
+        let sky_model = gf_core::sky::Sky::of(&self.state.p);
+        let sky_shown = self.sky_active() && (self.state.p.sky_show > 0.5 || sky_model.needs_sky_space());
+        if stage.off() && !sky_shown {
             self.stage.height = None;
             if self.stage.told.take().is_some() {
                 self.renderer.set_stage(&Zeroable::zeroed());
@@ -479,7 +775,68 @@ impl Engine {
             height = Some(h);
         }
         self.stage.height = height;
-        let u = StageU::of(&self.state, &stage, height.unwrap_or(0.0), &self.stage.light);
+        let mut u = StageU::of_with_sun_transmittance(
+            &self.state,
+            &stage,
+            height.unwrap_or(0.0),
+            &self.stage.light,
+            self.clouds.sun_transmittance(),
+        );
+        if let Some(f) = &stage.floor {
+            let p = &self.state.p;
+            if p.gi > 0.5 && p.gi_strength > 0.0 && !self.state.empty {
+                let clay = p.clay > 0.5;
+                let painted_world = self.layers.combined
+                    && (self.state.layer_count() > 1 || self.layers.projected_face_field(0).is_some())
+                    && self.csg.faces.layers.iter().take(self.state.layer_count()).any(Option::is_some);
+                let multi = !clay && ((self.several_bodies().is_some() && self.state.body_materials().is_some())
+                    || (painted_world && self.state.bodies().len() == 1));
+                if any_gi_body(&self.state, clay, multi) || (!clay && painted_world) {
+                    let room_sh = self.ceramic_room();
+                    u.gi_room = gf_core::env::sh_terms(&room_sh, gf_core::env::SH_MATTE);
+                    let p = &self.state.p;
+                    let shadow_w = if self.cast.on && self.cast.floor { p.cast_shadows.clamp(0.0, 1.0) as f32 } else { 0.0 };
+                    u.gi = [
+                        p.gi_bounces.round().clamp(1.0, 4.0) as f32,
+                        p.gi_strength.clamp(0.0, 4.0) as f32,
+                        p.gi_samples.round().clamp(1.0, 4.0) as f32,
+                        shadow_w,
+                    ];
+                    if multi {
+                        if let Some(mats) = self.state.body_materials() {
+                            for k in 0..gf_core::material::MAX_BODIES {
+                                let mp = mats.get(k).copied().unwrap_or(mats[0]);
+                                u.gi_albedo[k] = body_gi_albedo(mp, false);
+                            }
+                        }
+                    } else {
+                        u.gi_albedo[0] = body_gi_albedo(p, clay);
+                    }
+                    let (rig_on, sky_on) = (self.rig_lit(), self.sky_active());
+                    let (lights, n_lights) = crate::surface::scene_lights_atten(&self.state, rig_on, sky_on, self.sky_sun_atten(), |c| c);
+                    let mut ranked: Vec<(f32, [f32; 4], [f32; 4])> = Vec::new();
+                    for l in lights.iter().take(n_lights) {
+                        let open = crate::surface::light_open_factor(l.a[3] as f64, l.u[3] as f64, l.v[3] as f64);
+                        let irrad = [
+                            l.rgb[0] * open as f32 * std::f32::consts::FRAC_1_PI,
+                            l.rgb[1] * open as f32 * std::f32::consts::FRAC_1_PI,
+                            l.rgb[2] * open as f32 * std::f32::consts::FRAC_1_PI,
+                        ];
+                        let lum = 0.2126 * irrad[0] + 0.7152 * irrad[1] + 0.0722 * irrad[2];
+                        if lum > 1e-6 {
+                            ranked.push((lum, [l.a[0], l.a[1], l.a[2], 0.08], [irrad[0], irrad[1], irrad[2], l.a[3]]));
+                        }
+                    }
+                    ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
+                    ranked.truncate(4);
+                    for (i, (_, l0, l1)) in ranked.iter().enumerate() {
+                        u.gi_lights[2 * i] = *l0;
+                        u.gi_lights[2 * i + 1] = *l1;
+                    }
+                    u.gi_floor = [f.albedo[0] as f32, f.albedo[1] as f32, f.albedo[2] as f32, ranked.len() as f32];
+                }
+            }
+        }
         if self.stage.told == Some(u) { return false; }
         self.renderer.set_stage(&u);
         self.stage.told = Some(u);
@@ -522,7 +879,9 @@ impl Engine {
         let turn = gf_core::math::euler(pl.rot[0], pl.rot[1], pl.rot[2]);
         // the room's down, in the layer's own frame
         let down = gf_core::math::apply(&gf_core::math::transpose(&turn), gf_core::math::apply(&rt, [0.0, -1.0, 0.0]));
-        let (Some(vol), Some(low)) = (self.baker.layer_volume(i), self.stage.lowest.as_ref()) else { return false };
+        // (a csg object whose tree stands for it has no volume of its own: its tree's is measured)
+        let own = self.baker.layer_volume(i).or_else(|| self.csg.layer_vols.get(i).and_then(|v| v.as_ref()).map(|v| &v.1));
+        let (Some(vol), Some(low)) = (own, self.stage.lowest.as_ref()) else { return false };
         let Some(reach) = low.reach(vol, down, gf_core::HB) else { return false };
         // its lowest point's height in the room now, and the move up the room's vertical that sets it on the floor
         let centre = gf_core::math::apply(&r, pl.pos)[1];

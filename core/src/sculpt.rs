@@ -579,30 +579,53 @@ mod tests {
 
 // ---- the studio in the state ----------------------------------------------------------------------
 
-use crate::state::{Detail, State};
+use crate::build::BuildRequest;
+use crate::state::State;
+
+/// The studio of an object with no surface lab.
+static NO_STUDIO: Sculpt = Sculpt { on: true, layers: Vec::new(), round: 0.0, wall: 0.0, crumbs: 0.0, prefilter: true, relative: false };
 
 impl State {
-    /// The selected layer's studio.
+    /// The selected layer's studio (its surface lab's stack; an empty one if it has no lab).
     pub fn sculpt(&self) -> &Sculpt {
-        &self.shape().sculpt
+        self.selected_modifiers().lab().unwrap_or(&NO_STUDIO)
     }
+    /// The same, to change (a surface lab is added to its modifiers if it has none).
     pub fn sculpt_mut(&mut self) -> &mut Sculpt {
-        &mut self.shape_mut().sculpt
+        self.selected_modifiers_mut().lab_mut()
     }
-    /// A layer's studio.
+    /// A layer's studio as it acts: its surface lab's stack while the lab is on and changes something.
     pub fn layer_sculpt(&self, layer: usize) -> Option<&Sculpt> {
-        self.layer_shape(layer).map(|s| &s.sculpt)
+        self.layer_shape(layer).and_then(|s| s.mods.lab_live())
+    }
+    /// A layer's modifiers.
+    pub fn layer_mods(&self, layer: usize) -> Option<&crate::mods::Mods> {
+        self.layer_shape(layer).map(|s| &s.mods)
+    }
+    /// What is applied to a layer's own volume when it is built: its modifiers, for an object read from its
+    /// volume. (An object read as a tree has its modifiers applied to the tree: `tree_mods`.)
+    pub fn layer_bake(&self, layer: usize) -> Option<crate::mods::Bake> {
+        if self.has_tree(layer) { return None; }
+        self.layer_mods(layer)?.bake(&crate::mods::whole_box())
     }
     /// The studio was changed by hand: the shape is built again (unless the animation is doing that
     /// every frame anyway). `quick`: a slider is still being dragged.
     pub fn sculpt_changed(&mut self, quick: bool) {
         if !(self.playing && self.shape_moving()) {
-            self.want = Some(if quick { Detail::Quick } else { Detail::Full });
+            self.request(BuildRequest::slider(quick));
         }
     }
     /// The periods of every layer's evolving studio layers (seconds at speed 1).
     pub fn sculpt_periods(&self) -> Vec<f64> {
-        (0..self.layer_count()).filter_map(|i| self.layer_sculpt(i)).flat_map(|s| s.periods()).collect()
+        let mut periods: Vec<_> = (0..self.layer_count()).filter_map(|i| self.layer_sculpt(i)).flat_map(|s| s.periods()).collect();
+        if let Some(h) = &self.stack.hierarchy {
+            for (_, node) in h.rows() {
+                if let crate::groups::Node::Group(g) = node {
+                    if let Some(lab) = g.mods.lab_live() { periods.extend(lab.periods()); }
+                }
+            }
+        }
+        periods
     }
     /// Each of a layer's studio layers' phase of evolving now, in radians (0 for those that stand still).
     pub fn sculpt_phases(&self, layer: usize) -> Vec<f64> {

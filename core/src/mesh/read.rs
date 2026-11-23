@@ -7,19 +7,21 @@
 //!
 //! What each reader takes, and what it leaves out:
 //!   OBJ    `v` and `f` lines: the `v`, `v/vt`, `v//vn` and `v/vt/vn` forms, negative numbers counting
-//!          back, polygons fanned from their first corner, `\` carrying a line on. Normals, texture
-//!          coordinates, materials, groups, lines and points are passed over.
+//!          back, polygons fanned from their first corner, `\` carrying a line on. Texture
+//!          coordinates and MTL material slots are available through `read_asset`. Groups, lines and points are passed over.
 //!   STL    binary and text. Three positions for every triangle, as the file has them (nothing is
 //!          shared between triangles); the file's normals are ignored.
 //!   PLY    text and both binary byte orders. The `vertex` element's x, y and z and the `face`
 //!          element's list of corners, polygons fanned; every other property and element is stepped over.
 //!   glTF   2.0, as `.gltf` and `.glb`: the triangles, strips and fans of the default scene, each node's
 //!          transform applied. Buffers come from the GLB itself, from base64 `data:` URIs, or from files
-//!          beside the model. Materials, textures, skins, animations, cameras, morph targets, normals
-//!          and UVs are not read; sparse accessors and compressed geometry (Draco, meshopt) are refused
+//!          beside the model. The appearance reader takes PBR factors, UVs, tangents, PNG/JPEG colour and
+//!          normal and metallic-roughness maps. Skins, animations and morphs are omitted. Sparse accessors and compressed geometry are refused
 //!          by name.
 
 use super::Mesh;
+mod appearance;
+pub use appearance::{Appearance, CanonicalFaceUvs, FaceAppearance, ImageMap, ImportedAlphaMode, ImportedCompatibility, ImportedMaterial, MaterialMap, ModelAsset};
 use serde_json::Value;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -58,6 +60,22 @@ impl Format {
 /// Read a model file. The format goes by the extension, and the file's size is checked against
 /// MAX_FILE_BYTES before any of it is read. Every error begins with the file's name.
 pub fn read_file(path: &Path) -> Result<Mesh, String> {
+    read_model(path, false).map(|asset| asset.mesh)
+}
+
+/// Read authored materials and per-corner texture coordinates alongside the geometry.
+pub fn read_asset(path: &Path) -> Result<ModelAsset, String> {
+    match read_model(path, true) {
+        Ok(asset) => Ok(asset),
+        Err(appearance_error) => {
+            let mut asset = read_model(path, false)?;
+            asset.appearance_notice = Some(appearance_error);
+            Ok(asset)
+        }
+    }
+}
+
+fn read_model(path: &Path, materials: bool) -> Result<ModelAsset, String> {
     let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
     let named = |e: String| format!("{name}: {e}");
     let format = Format::from_path(path)
@@ -65,22 +83,28 @@ pub fn read_file(path: &Path) -> Result<Mesh, String> {
     let size = std::fs::metadata(path).map_err(|e| named(format!("the file cannot be opened ({e})")))?.len();
     if size > MAX_FILE_BYTES { return Err(named(too_big(size))); }
     let bytes = std::fs::read(path).map_err(|e| named(format!("the file cannot be read ({e})")))?;
-    parse(&bytes, format, path.parent()).map_err(named)
+    parse_model(&bytes, format, path.parent(), materials).map_err(named)
 }
 
 /// The same from bytes already in memory. `dir` is the folder a .gltf's separate buffer files are looked
 /// for in (None: a .gltf that needs one is an error).
 pub fn parse(bytes: &[u8], format: Format, dir: Option<&Path>) -> Result<Mesh, String> {
+    parse_model(bytes, format, dir, false).map(|asset| asset.mesh)
+}
+
+fn parse_model(bytes: &[u8], format: Format, dir: Option<&Path>, materials: bool) -> Result<ModelAsset, String> {
+    let mut surface = materials.then(Appearance::default);
     if bytes.len() as u64 > MAX_FILE_BYTES { return Err(too_big(bytes.len() as u64)); }
     if bytes.is_empty() { return Err("the file is empty".into()); }
     let mesh = match format {
-        Format::Obj => read_obj(bytes),
+        Format::Obj => read_obj(bytes, dir, surface.as_mut()),
         Format::Stl => read_stl(bytes),
         Format::Ply => read_ply(bytes),
-        Format::Gltf => read_gltf(bytes, dir),
-        Format::Glb => read_glb(bytes, dir),
+        Format::Gltf => read_gltf(bytes, dir, surface.as_mut()),
+        Format::Glb => read_glb(bytes, dir, surface.as_mut()),
     }?;
-    checked(mesh)
+    let mesh = checked(mesh)?;
+    Ok(ModelAsset { mesh, appearance_notice: None, appearance: surface.filter(|s| !s.materials.is_empty() && s.faces.iter().any(|f| f.material.is_some())) })
 }
 
 fn too_big(size: u64) -> String { format!("the file is {size} bytes; the most that can be read is {MAX_FILE_BYTES} (1 GB)") }
@@ -214,7 +238,8 @@ impl Num {
 
 // ---- OBJ ----
 
-fn read_obj(bytes: &[u8]) -> Result<Mesh, String> {
+fn read_obj(bytes: &[u8], dir: Option<&Path>, mut surface: Option<&mut Appearance>) -> Result<Mesh, String> {
+    let mut obj = appearance::ObjMaterials::default();
     let mut mesh = Mesh::default();
     let (mut rest, mut line_no) = (bytes, 0usize);
     let mut joined: Vec<u8> = Vec::new();
@@ -243,6 +268,15 @@ fn read_obj(bytes: &[u8]) -> Result<Mesh, String> {
         }
         let mut words = line.split(u8::is_ascii_whitespace).filter(|w| !w.is_empty());
         match words.next() {
+            Some(b"vt") if surface.is_some() => obj.texcoord(words, at)?,
+            Some(b"mtllib") if surface.is_some() => {
+                let rest = std::str::from_utf8(line).map_err(|_| "the material filename is not UTF-8")?;
+                obj.library(dir, rest.trim_start().strip_prefix("mtllib").unwrap_or("").trim(), surface.as_deref_mut().unwrap())?;
+            }
+            Some(b"usemtl") if surface.is_some() => {
+                let rest = std::str::from_utf8(line).map_err(|_| "the material name is not UTF-8")?;
+                obj.select(rest.trim_start().strip_prefix("usemtl").unwrap_or("").trim());
+            }
             Some(b"v") => {
                 // x y z; a weight or a colour after them is not wanted
                 let mut p = [0f32; 3];
@@ -253,6 +287,7 @@ fn read_obj(bytes: &[u8]) -> Result<Mesh, String> {
             }
             Some(b"f") => {
                 let (mut first, mut prev) = (0u32, 0u32);
+                let mut uv_corner = [[0.0; 2]; 3];
                 for (corner, word) in words.enumerate() {
                     // of v/vt/vn only the first, the position, is wanted
                     let text = word.split(|&b| b == b'/').next().unwrap_or(word);
@@ -270,6 +305,19 @@ fn read_obj(bytes: &[u8]) -> Result<Mesh, String> {
                         return Err(format!("line {at}: a face names vertex {i} but only {have} have been read"));
                     };
                     let v = place as u32;
+                    if let Some(s) = surface.as_deref_mut() {
+                        if corner == 0 { s.faces.resize(mesh.tri.len(), FaceAppearance::default()); }
+                        let uv = obj.corner(word);
+                        match corner {
+                            0 => uv_corner[0] = uv,
+                            1 => uv_corner[1] = uv,
+                            _ => {
+                                uv_corner[2] = uv;
+                                s.faces.push(FaceAppearance { base_uv: uv_corner, normal_uv: uv_corner, canonical_uv: CanonicalFaceUvs { base: uv_corner, normal: uv_corner, ..Default::default() }, material: obj.current, ..Default::default() });
+                                uv_corner[1] = uv;
+                            }
+                        }
+                    }
                     // a polygon is fanned out from its first corner; fewer than three corners make nothing
                     match corner {
                         0 => first = v,
@@ -559,14 +607,14 @@ fn uint(v: &Value) -> Option<usize> {
     usize::try_from(whole?).ok()
 }
 
-fn read_gltf(bytes: &[u8], dir: Option<&Path>) -> Result<Mesh, String> {
+fn read_gltf(bytes: &[u8], dir: Option<&Path>, surface: Option<&mut Appearance>) -> Result<Mesh, String> {
     if bytes.starts_with(b"glTF") { return Err("this is a binary glTF, not a text one (its name should end .glb)".into()); }
-    gltf_scene(bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes), None, dir)
+    gltf_scene(bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes), None, dir, surface)
 }
 
 // The binary container: 12 bytes of header, then chunks of (length, type, data). The first chunk is the
 // JSON; a binary chunk after it is the buffer that has no uri.
-fn read_glb(bytes: &[u8], dir: Option<&Path>) -> Result<Mesh, String> {
+fn read_glb(bytes: &[u8], dir: Option<&Path>, surface: Option<&mut Appearance>) -> Result<Mesh, String> {
     if !bytes.starts_with(b"glTF") {
         let text = bytes.trim_ascii_start().starts_with(b"{");
         return Err(if text { "this is a text glTF, not a binary one (its name should end .gltf)" } else { "not a GLB file (it does not begin with \"glTF\")" }.into());
@@ -589,12 +637,12 @@ fn read_glb(bytes: &[u8], dir: Option<&Path>) -> Result<Mesh, String> {
         }
         at += 8 + data.len();
     }
-    gltf_scene(json.ok_or("there is no JSON chunk")?, bin, dir)
+    gltf_scene(json.ok_or("there is no JSON chunk")?, bin, dir, surface)
 }
 
 // The scene the JSON describes, as one mesh: every node of the default scene walked, each mesh a node
 // uses put through the transforms of the nodes above it.
-fn gltf_scene(json: &[u8], bin: Option<&[u8]>, dir: Option<&Path>) -> Result<Mesh, String> {
+fn gltf_scene(json: &[u8], bin: Option<&[u8]>, dir: Option<&Path>, mut surface: Option<&mut Appearance>) -> Result<Mesh, String> {
     let doc: Value = serde_json::from_slice(json).map_err(|e| format!("its JSON cannot be read ({e})"))?;
     if !doc.is_object() { return Err("its JSON does not describe a glTF scene".into()); }
     if let Some(version) = doc["asset"]["version"].as_str().filter(|v| !v.starts_with("2.")) {
@@ -642,6 +690,11 @@ fn gltf_scene(json: &[u8], bin: Option<&[u8]>, dir: Option<&Path>) -> Result<Mes
     let mut parts = 0usize;
     let too_long = || format!("the scene has more than {MAX_SCENE_PARTS} nodes and primitives, the most that can be followed");
     let mut bufs = Buffers { doc: &doc, bin, dir, loaded: Vec::new(), owned: 0 };
+    let default_material = if let Some(s) = surface.as_deref_mut() {
+        appearance::gltf_materials(&mut bufs, s)?
+    } else {
+        None
+    };
     let mut mesh = Mesh::default();
     while let Some(top) = path.last_mut() {
         let (kids, parent) = (top.kids, top.m);
@@ -668,7 +721,7 @@ fn gltf_scene(json: &[u8], bin: Option<&[u8]>, dir: Option<&Path>) -> Result<Mes
             parts = parts.saturating_add(prims.len());
             if parts > MAX_SCENE_PARTS { return Err(too_long()); }
             for (p, prim) in prims.iter().enumerate() {
-                gltf_primitive(&mut bufs, prim, &m, &mut shared, &mut mesh).map_err(|e| format!("mesh {mesh_no}, primitive {p}: {e}"))?;
+                gltf_primitive(&mut bufs, prim, &m, &mut shared, &mut mesh, surface.as_deref_mut(), default_material).map_err(|e| format!("mesh {mesh_no}, primitive {p}: {e}"))?;
             }
         }
         if parts > MAX_SCENE_PARTS { return Err(too_long()); }
@@ -705,7 +758,7 @@ fn node_matrix(node: &Value) -> Result<Mat, String> {
 }
 
 // One primitive of a mesh, added to `out` with the transform `m` applied to its positions.
-fn gltf_primitive(bufs: &mut Buffers, prim: &Value, m: &Mat, shared: &mut HashMap<usize, usize>, out: &mut Mesh) -> Result<(), String> {
+fn gltf_primitive(bufs: &mut Buffers, prim: &Value, m: &Mat, shared: &mut HashMap<usize, usize>, out: &mut Mesh, mut surface: Option<&mut Appearance>, default_material: Option<usize>) -> Result<(), String> {
     let mode = match prim.get("mode") { Some(v) => uint(v).ok_or("its mode is not a whole number")?, None => 4 };
     if !(4..=6).contains(&mode) { return Ok(()); } // points and lines have no surface
     let pos_no = uint(&prim["attributes"]["POSITION"]).ok_or("it has no POSITION")?;
@@ -757,6 +810,17 @@ fn gltf_primitive(bufs: &mut Buffers, prim: &Value, m: &Mat, shared: &mut HashMa
         }
     };
 
+    let slot = match prim.get("material") {
+        Some(value) => Some(uint(value).ok_or("its material is not a whole number")?),
+        None => default_material,
+    };
+    if let (Some(s), Some(i)) = (surface.as_ref(), slot) {
+        if i >= s.materials.len() { return Err(format!("material slot {i} does not exist")); }
+    }
+    let uvs = if let Some(mat) = surface.as_ref().and_then(|s| slot.and_then(|i| s.materials.get(i))).filter(|m| m.colour.is_some() || m.normal.is_some() || m.metallic_roughness.is_some()) {
+        Some(appearance::read_uvs(bufs, prim, mat, pos.count)?)
+    } else { None };
+    let tangent = if uvs.is_some() { appearance::tangents(bufs, prim, m, pos.count)? } else { None };
     let indices = idx.as_ref().map(|view| (view, bufs.data(view)));
     let corner = |k: usize| -> Result<u32, String> {
         let i = match indices {
@@ -774,7 +838,15 @@ fn gltf_primitive(bufs: &mut Buffers, prim: &Value, m: &Mat, shared: &mut HashMa
             5 => (t, t + 1, t + 2),
             _ => (0, t + 1, t + 2),
         };
-        out.tri.push([corner(a)?, corner(b)?, corner(c)?]);
+        let indices = [corner(a)?, corner(b)?, corner(c)?];
+        out.tri.push(indices);
+        if let Some(s) = surface.as_deref_mut() {
+            let face = if let Some(uvs) = &uvs {
+                let local = indices.map(|i| i as usize - base);
+                FaceAppearance { material: slot, tangent: tangent.as_ref().map_or([[0.;4];3],|t|local.map(|i|t[i])), ..uvs.face(local) }
+            } else { FaceAppearance {material:slot, ..Default::default()} };
+            s.faces.push(face);
+        }
     }
     Ok(())
 }
@@ -815,7 +887,7 @@ impl<'a> Buffers<'a> {
             None => Ok(0),
         };
         let (buffer, bv_at, bv_len) = (field(bv, "buffer")?, field(bv, "byteOffset")?, field(bv, "byteLength")?);
-        let width = ty.size() * if shape == "VEC3" { 3 } else { 1 };
+        let width = ty.size() * match shape { "VEC2" => 2, "VEC3" => 3, "VEC4" => 4, _ => 1 };
         let at = field(acc, "byteOffset")?;
         let stride = match field(bv, "byteStride")? { 0 => width, stride => stride }; // not given: one straight after another
         let have = self.load(buffer)?.len();
@@ -868,28 +940,32 @@ impl<'a> Buffers<'a> {
     // A buffer kept in a file of its own. Only a file in the model's folder or below it is read: the
     // name comes out of the model, and must not be able to point anywhere else on the machine.
     fn file(&self, no: usize, uri: &str) -> Result<Vec<u8>, String> {
-        let refuse = |why: &str| format!("buffer {no} is at \"{}\", which is not read: {why}", show(uri.as_bytes()));
-        let name = percent_decoded(uri).ok_or_else(|| refuse("the name is not readable text"))?;
-        let parts = || name.split(['/', '\\']);
-        if name.contains(':') { return Err(refuse("only files beside the model are read, not drive letters or web addresses")); }
-        if name.starts_with(['/', '\\']) { return Err(refuse("it is an absolute path, and only files beside the model are read")); }
-        if parts().any(|part| part.len() > 1 && part.trim_matches(['.', ' ']).is_empty()) {
-            return Err(refuse("it climbs out of the model's folder with \"..\""));
-        }
-        // names that Windows takes for a device (the console, a serial port) in whatever folder they are
-        let device = |part: &str| {
-            let stem = part.split('.').next().unwrap_or("").trim_end().to_ascii_uppercase();
-            let port = stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT")) && stem.ends_with(|c: char| c.is_ascii_digit());
-            port || matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$")
-        };
-        if parts().any(device) { return Err(refuse("it names a device, not a file")); }
-        let dir = self.dir.ok_or_else(|| format!("buffer {no} is in a file of its own (\"{}\"), and there is no folder to look for it in", show(name.as_bytes())))?;
-        let path = dir.join(&name);
-        let cannot = |e: std::io::Error| format!("buffer {no}'s file \"{}\" cannot be read ({e})", show(name.as_bytes()));
-        let size = std::fs::metadata(&path).map_err(cannot)?.len();
-        if size > MAX_FILE_BYTES { return Err(format!("buffer {no}'s file \"{}\": {}", show(name.as_bytes()), too_big(size))); }
-        std::fs::read(&path).map_err(cannot)
+        relative_bytes(self.dir, uri, &format!("buffer {no}"))
     }
+}
+
+fn relative_bytes(dir: Option<&Path>, uri: &str, label: &str) -> Result<Vec<u8>, String> {
+    let refuse = |why: &str| format!("{label} is at \"{}\", which is not read: {why}", show(uri.as_bytes()));
+    let name = percent_decoded(uri).ok_or_else(|| refuse("the name is not readable text"))?;
+    let parts = || name.split(['/', '\\']);
+    if name.contains(':') { return Err(refuse("only files beside the model are read, not drive letters or web addresses")); }
+    if name.starts_with(['/', '\\']) { return Err(refuse("it is an absolute path, and only files beside the model are read")); }
+    if parts().any(|part| part.len() > 1 && part.trim_matches(['.', ' ']).is_empty()) {
+        return Err(refuse("it climbs out of the model's folder with \"..\""));
+    }
+    // names that Windows takes for a device (the console, a serial port) in whatever folder they are
+    let device = |part: &str| {
+        let stem = part.split('.').next().unwrap_or("").trim_end().to_ascii_uppercase();
+        let port = stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT")) && stem.ends_with(|c: char| c.is_ascii_digit());
+        port || matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$")
+    };
+    if parts().any(device) { return Err(refuse("it names a device, not a file")); }
+    let dir = dir.ok_or_else(|| format!("{label} is in a file of its own (\"{}\"), and there is no folder to look for it in", show(name.as_bytes())))?;
+    let path = dir.join(&name);
+    let cannot = |e: std::io::Error| format!("{label}'s file \"{}\" cannot be read ({e})", show(name.as_bytes()));
+    let size = std::fs::metadata(&path).map_err(cannot)?.len();
+    if size > MAX_FILE_BYTES { return Err(format!("{label}'s file \"{}\": {}", show(name.as_bytes()), too_big(size))); }
+    std::fs::read(&path).map_err(cannot)
 }
 
 // A URI with its %XX escapes turned back into the characters they stand for (%20 a space, and so on).

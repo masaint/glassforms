@@ -122,7 +122,7 @@ fn studio() -> Family {
 fn the_family_has_the_shapes_a_designer_reaches_for() {
     let f = studio();
     let ids: Vec<&str> = f.presets.iter().map(|p| p.id).collect();
-    assert_eq!(ids, ["slab", "bar", "block", "washer", "bandring", "spiralband", "tube", "disc", "cylinder", "rectframe", "arch", "capsule", "lens", "sphere", "cone", "wedge"]);
+    assert_eq!(ids, ["slab", "bar", "block", "washer", "bandring", "spiralband", "tube", "disc", "cylinder", "rectframe", "arch", "capsule", "lens", "sphere", "cone", "wedge", "ellipsoid", "oval"]);
     assert_eq!(f.name, "Studio shapes");
     // every one is an equation that is its own boundary: nothing shaves or rounds it after the fact
     for p in &f.presets {
@@ -137,9 +137,13 @@ fn the_family_has_the_shapes_a_designer_reaches_for() {
 fn every_edge_has_a_flat_and_a_round_and_they_come_last() {
     for p in &studio().presets {
         let ids: Vec<&str> = p.params.iter().map(|d| d.id).collect();
+        // the two shapes with no edge
         if p.id == "capsule" {
-            // the one shape with no edge
             assert_eq!(ids, ["length", "radius"]);
+            continue;
+        }
+        if p.id == "ellipsoid" {
+            assert_eq!(ids, ["rx", "ry", "rz"]);
             continue;
         }
         let n = ids.len();

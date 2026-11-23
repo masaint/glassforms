@@ -55,6 +55,19 @@ fn fs_down(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let k = src(uv + t * vec2f( 1.0, 1.0));
   let l = src(uv + t * vec2f(-1.0, -1.0));
   let m = src(uv + t * vec2f( 1.0, -1.0));
+  if (bl.pad0 > 0.0) {
+    let g0 = (j + k + l + m) * 0.25;
+    let g1 = (a + b + d + e) * 0.25;
+    let g2 = (b + c + e + f) * 0.25;
+    let g3 = (d + e + g + h) * 0.25;
+    let g4 = (e + f + h + i) * 0.25;
+    let w0 = 0.5 / (1.0 + max(g0.r, max(g0.g, g0.b)) * bl.pad0);
+    let w1 = 0.125 / (1.0 + max(g1.r, max(g1.g, g1.b)) * bl.pad0);
+    let w2 = 0.125 / (1.0 + max(g2.r, max(g2.g, g2.b)) * bl.pad0);
+    let w3 = 0.125 / (1.0 + max(g3.r, max(g3.g, g3.b)) * bl.pad0);
+    let w4 = 0.125 / (1.0 + max(g4.r, max(g4.g, g4.b)) * bl.pad0);
+    return vec4f((g0 * w0 + g1 * w1 + g2 * w2 + g3 * w3 + g4 * w4) / max(w0 + w1 + w2 + w3 + w4, 1e-6), 1.0);
+  }
   let o = e * 0.125 + (a + c + g + i) * 0.03125 + (b + d + f + h) * 0.0625 + (j + k + l + m) * 0.125;
   return vec4f(o, 1.0);
 }
@@ -118,6 +131,39 @@ fn hash(p: vec2f) -> f32 {
   return fract((q.x + q.y) * q.z);
 }
 
+// Smooth 9-tap Catmull-Rom reconstruction of the lower-resolution glare/bloom grid, clamped from below
+// by the 2x2 bilinear footprint so negative lobes cannot dig a dark moat in the veil beside bright spikes.
+fn bloomSmooth(uv: vec2f) -> vec3f {
+  let dim = vec2f(textureDimensions(bloomTex));
+  let at = uv * dim;
+  let p1 = floor(at - 0.5) + 0.5;
+  let f = at - p1;
+  let w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+  let w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+  let w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+  let w3 = f * f * (-0.5 + 0.5 * f);
+  let w12 = w1 + w2;
+  let t0 = clamp(p1 - 1.0, vec2f(0.5), dim - 0.5) / dim;
+  let t3 = clamp(p1 + 2.0, vec2f(0.5), dim - 0.5) / dim;
+  let t12 = clamp(p1 + w2 / w12, vec2f(0.5), dim - 0.5) / dim;
+  let r = textureSampleLevel(bloomTex, flin, vec2f(t0.x,  t0.y),  0.0).rgb * (w0.x  * w0.y)
+        + textureSampleLevel(bloomTex, flin, vec2f(t12.x, t0.y),  0.0).rgb * (w12.x * w0.y)
+        + textureSampleLevel(bloomTex, flin, vec2f(t3.x,  t0.y),  0.0).rgb * (w3.x  * w0.y)
+        + textureSampleLevel(bloomTex, flin, vec2f(t0.x,  t12.y), 0.0).rgb * (w0.x  * w12.y)
+        + textureSampleLevel(bloomTex, flin, vec2f(t12.x, t12.y), 0.0).rgb * (w12.x * w12.y)
+        + textureSampleLevel(bloomTex, flin, vec2f(t3.x,  t12.y), 0.0).rgb * (w3.x  * w12.y)
+        + textureSampleLevel(bloomTex, flin, vec2f(t0.x,  t3.y),  0.0).rgb * (w0.x  * w3.y)
+        + textureSampleLevel(bloomTex, flin, vec2f(t12.x, t3.y),  0.0).rgb * (w12.x * w3.y)
+        + textureSampleLevel(bloomTex, flin, vec2f(t3.x,  t3.y),  0.0).rgb * (w3.x  * w3.y);
+  let last = vec2i(dim) - 1;
+  let i = vec2i(p1);
+  let c0 = textureLoad(bloomTex, clamp(i, vec2i(0), last), 0).rgb;
+  let c1 = textureLoad(bloomTex, clamp(i + vec2i(1, 0), vec2i(0), last), 0).rgb;
+  let c2 = textureLoad(bloomTex, clamp(i + vec2i(0, 1), vec2i(0), last), 0).rgb;
+  let c3 = textureLoad(bloomTex, clamp(i + vec2i(1, 1), vec2i(0), last), 0).rgb;
+  return max(r, min(min(c0, c1), min(c2, c3)));
+}
+
 @fragment
 fn fs_final(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let uv = pos.xy / fu.res;
@@ -132,6 +178,7 @@ fn fs_final(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let w = min(0.004 + fwidth(e), 0.03);
 
   var c = s.rgb * fu.glare.rgb + textureSampleLevel(bloomTex, flin, uv, 0.0).rgb * fu.bloom_amt;
+  c += (bloomSmooth(uv) - textureSampleLevel(bloomTex, flin, uv, 0.0).rgb) * fu.bloom_amt;
   let v = uv - 0.5;
   c *= 1.0 - fu.vignette * dot(v, v);
   if (fu.tone.w > 0.5) { c = graded(c * fu.exposure); } else { c = aces(c * fu.exposure); }

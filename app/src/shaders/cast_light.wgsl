@@ -36,9 +36,13 @@ struct BodyL {
   absorb: vec4f,     // rgb: what a unit length of it takes from light passing through
   tint: vec4f,       // rgb: what it reflects, when it reflects
   mask: vec4f,       // which channel of the bodies' volume holds its distance
+  surface: vec4f,     // x: clear coat index, y: measured conducting substrate
+  medium: vec4i,       // raw identity, signed interface priority, two reserved zero lanes
+  optical_constants: array<vec4f, 8>, // n and k of two successive wavelengths per row
 }
 struct LU {
   body: array<BodyL, 4>,
+  spectral_rgb: array<vec4f, 16>,
   k: vec4f,          // x: voxels a side of the bodies' volume   y: a stride as a share of the distance read
                      // z: strides at most outside the bodies   w: and inside one
   lev: vec4f,        // x: voxels a side of the finest volume of arriving light   y: how many volumes, each half the size
@@ -232,16 +236,76 @@ fn normalOf(p: vec3f, m: vec4f) -> vec3f {
 }
 
 fn iorOf(j: i32, lam: f32) -> f32 {
-  return lu.body[j].a.x + lu.body[j].a.y * (1.0e6 / (lam * lam) - 3.3058) / 4.2092;
+  return pbr_medium_ior_at(PbrMedium(lu.body[j].a.x, lu.body[j].a.y, 0u, 0), lam);
 }
-// unpolarised Fresnel reflectance going from index n1 into n2
-fn fresnel(cosi: f32, n1: f32, n2: f32) -> f32 {
-  let sint = n1 / n2 * sqrt(max(0.0, 1.0 - cosi * cosi));
-  if (sint >= 1.0) { return 1.0; }
-  let cost = sqrt(max(0.0, 1.0 - sint * sint));
-  let rs = (n1 * cosi - n2 * cost) / (n1 * cosi + n2 * cost);
-  let rp = (n2 * cosi - n1 * cost) / (n2 * cosi + n1 * cost);
-  return 0.5 * (rs * rs + rp * rp);
+fn airMedium() -> PbrMedium { return PbrMedium(1.0, 0.0, 0u, 0); }
+fn castMedium(j: i32, ior: f32) -> PbrMedium {
+  if (j < 0) { return airMedium(); }
+  let metadata = lu.body[j].medium;
+  return PbrMedium(ior, 0.0, bitcast<u32>(metadata.x), metadata.y);
+}
+fn faceIncident(normal: vec3f, wo: vec3f) -> vec3f {
+  let c = dot(wo, normal);
+  if (c >= 0.0) { return normal; }
+  let proj = normal - wo * c;
+  let len2 = dot(proj, proj);
+  if (len2 > 1e-12) { return normalize(proj + wo * 1e-4); }
+  return wo;
+}
+fn castDielectricHit(normal: vec3f, incident: PbrMedium, destination: PbrMedium) -> PbrSurfaceHit {
+  let seed = select(vec3f(1.0, 0.0, 0.0), vec3f(0.0, 1.0, 0.0), abs(normal.y) < 0.9);
+  let tangent = normalize(cross(seed, normal));
+  return PbrSurfaceHit(
+    PbrFrame(tangent, cross(normal, tangent), normal), incident, destination, 550.0);
+}
+// Dielectric Fresnel and spectral IOR use the same pure optics as camera transport.
+
+// Reflected photons see the same measured conductor and authored tint as camera rays.
+// A coat contributes its own reflection before the ray reaches the substrate.
+fn conductorReflectance(j: i32, cosine: f32, incident: f32) -> vec3f {
+  var c = cosine;
+  var medium = incident;
+  var coatReflection = 0.0;
+  let coat = lu.body[j].surface.x;
+  if (coat > 1.0 && coat != incident) {
+    coatReflection = fresnel(c, incident, coat);
+    if (coatReflection >= 1.0) { return vec3f(1.0); }
+    let eta = incident / coat;
+    c = sqrt(max(0.0, 1.0 - eta*eta*(1.0-c*c)));
+    medium = coat;
+  }
+  var substrate = vec3f(1.0);
+  if (lu.body[j].surface.y > 0.5) {
+    var integral = vec3f(0.0);
+    for (var i=0u; i<16u; i++) {
+      let pair = lu.body[j].optical_constants[i/2u];
+      let nk = select(pair.xy, pair.zw, (i & 1u) != 0u);
+      integral += lu.spectral_rgb[i].rgb * fresMetal(c, medium, nk.x, nk.y);
+    }
+    substrate = clamp(integral, vec3f(0.0), vec3f(1.0));
+  }
+  let tint = mix(lu.body[j].tint.rgb, vec3f(1.0), pow(1.0-c, 5.0));
+  return mix(substrate*tint, vec3f(1.0), coatReflection);
+}
+
+// Sample the visible GGX facets on a rough conductor and follow further facet reflections
+// until the ray escapes. Every encounter uses the actual incident medium and wavelength table.
+fn castConductorWalk(j: i32, incoming: vec3f, n: vec3f, incident: f32, alpha: f32,
+                     state: ptr<function,u32>, weight: ptr<function,vec3f>) -> vec3f {
+  var d = incoming;
+  var height = 1.0;
+  for (var encounter=0; encounter<64; encounter++) {
+    let c = dot(d,n);
+    if (c>=0.999999) { return d; }
+    let logHeight = ggxLogHeight(c, alpha, height, ggxUniform(state));
+    if (logHeight>=0.0 && c>0.0) { return d; }
+    height = exp(min(logHeight,0.0));
+    let facet = ggxVisible(n,-d,alpha,state);
+    *weight *= conductorReflectance(j,clamp(-dot(d,facet),0.0,1.0),incident);
+    d = reflect(d,facet);
+  }
+  *weight = vec3f(0.0);
+  return d;
 }
 
 // What a ray inside body m can meet next: m's own surface from within, and the bodies numbered above it
@@ -298,7 +362,7 @@ fn unpack(c: u32) -> vec3f {
 // One wavelength of a ray, from where it first met a body that bends or reflects light: p on that body's
 // (j's) surface, arriving along d. Followed from surface to surface until it lands on a body that gathers
 // light, is stopped, or leaves.
-fn follow(p_in: vec3f, d_in: vec3f, j_in: i32, n_in: vec3f, lam: f32) -> Hit {
+fn follow(p_in: vec3f, d_in: vec3f, j_in: i32, n_in: vec3f, lam: f32, seed: u32) -> Hit {
   var out = Hit(0.0, 0.0, 0.0, 0u, 0u, 0.0);
   var p = p_in;
   var d = d_in;
@@ -306,6 +370,8 @@ fn follow(p_in: vec3f, d_in: vec3f, j_in: i32, n_in: vec3f, lam: f32) -> Hit {
   var m = -1;                   // the body it is inside (-1: in the open)
   var w = vec3f(1.0);           // how much of it is left
   var sig = 1u;
+  var state = seed;
+  var sampledMetal = false;
   var travel = 0.0;
   let off = 3.0 / lu.k.x;       // a voxel: how far past a surface the next stretch starts
   for (var e = 0; e < EVENTS; e++) {
@@ -325,11 +391,12 @@ fn follow(p_in: vec3f, d_in: vec3f, j_in: i32, n_in: vec3f, lam: f32) -> Hit {
     }
     // from here on n points back to the side the ray came from
     if (dot(d, n) > 0.0) { n = -n; }
+    n = faceIncident(n, -d);
     let role = select(0, i32(lu.body[max(next, 0)].a.w), next >= 0);
     if (next >= 0 && role == 4) {
       // landed on a body that gathers light
       let q = p + n * lu.lev.w;
-      out = Hit(q.x, q.y, q.z, sig * 16u + u32(next) + 11u, pack(w), travel);
+      out = Hit(q.x, q.y, q.z, sig * 16u + u32(next) + 11u, pack(w), select(travel,-max(travel,1e-7),sampledMetal));
       return out;
     }
     if (next >= 0 && role == 3) { return out; }
@@ -337,22 +404,29 @@ fn follow(p_in: vec3f, d_in: vec3f, j_in: i32, n_in: vec3f, lam: f32) -> Hit {
     let cosi = clamp(-dot(d, n), 0.0, 1.0);
     if (next >= 0 && role == 2) {
       // a reflecting body: back the way it came from, coloured
-      w *= lu.body[next].tint.rgb;
-      d = reflect(d, n);
+      let rough = lu.body[next].absorb.w;
+      if (rough>0.002 && lu.body[next].surface.x<=1.0) {
+        sampledMetal = true;
+        d = castConductorWalk(next,d,n,n1,rough*rough,&state,&w);
+      } else {
+        w *= conductorReflectance(next, cosi, n1);
+        d = reflect(d, n);
+      }
       p += n * off;
       sig = sig * 16u + u32(next) + 6u;
       travel = 0.0;
     } else {
       // a clear body, or the open: through, unless it is turned back whole
       let n2 = select(1.0, iorOf(max(next, 0), lam), next >= 0);
-      let F = fresnel(cosi, n1, n2);
+      let split = pbr_dielectric_split(castDielectricHit(n, castMedium(m, n1), castMedium(next, n2)), -d);
+      let F = split.reflectance;
       if (F > 0.999) {
-        d = reflect(d, n);
+        d = split.reflected;
         p += n * off;
         sig = sig * 16u + 10u;
       } else {
-        w *= 1.0 - F;
-        d = refract(d, n, n1 / n2);
+        w *= split.transmission_weight;
+        d = split.transmitted;
         p -= n * off;
         m = next;
         sig = sig * 16u + u32(next + 2);
@@ -372,7 +446,7 @@ fn follow(p_in: vec3f, d_in: vec3f, j_in: i32, n_in: vec3f, lam: f32) -> Hit {
         let q = p + d * tf - lu.fl0.xyz;
         let at = vec2f(dot(q, lu.fl2.xyz), dot(q, lu.fl3.xyz));
         if (tf > 0.0 && max(abs(at.x), abs(at.y)) < 0.9 * lu.fl1.w * exp2(lu.grid.w - 1.0)) {
-          out = Hit(at.x, at.y, 0.0, sig * 16u + 15u, pack(w), travel + tf);
+          out = Hit(at.x, at.y, 0.0, sig * 16u + 15u, pack(w), select(travel+tf,-(travel+tf),sampledMetal));
         }
       }
       return out;
@@ -432,6 +506,7 @@ fn cs_follow(@builtin(global_invocation_id) id: vec3u) {
   let n0 = normalOf(p, lu.body[j].mask);
   for (var k = 0u; k < W; k++) {
     let lam = select(550.0, 400.0 + 300.0 * f32(k) / f32(max(W, 2u) - 1u), W > 1u);
-    hits[base + k] = follow(p, d, j, n0, lam);
+    let seed = pcg(base / W + u32(lu.grid.z)*1013904223u + id.z*2654435769u);
+    hits[base + k] = follow(p, d, j, n0, lam, seed);
   }
 }

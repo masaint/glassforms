@@ -74,12 +74,27 @@ pub enum Part {
 /// What the handles act on: a layer (the selected one) or a lamp.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Target {
-    Layer(usize),
+    Pivot(gf_core::modifier_pivot::PivotOwner, usize),
+    World(gf_core::groups::Item),
     Lamp(usize),
-    /// a part of the tree of formulas (csg.rs), selected in its list: moved within the object
-    Part(usize),
+    /// a part of the tree of formulas (csg.rs), selected in its list: moved within the object. Held by
+    /// its stable identity (`Csg::part_id`), not its place in the list
+    Part(u64),
+    /// The base layer or a nested construction group selected in Object Mode.
+    ConstructionNode,
     /// the tree's object, the whole shape: moved in the scene, its parts with it
     Whole,
+}
+
+impl Target {
+    pub(super) fn construction(self, st: &State) -> Option<gf_core::csg::ConstructionHandle> {
+        match self {
+            Self::Part(id) => st.construction_handle(Some(st.csg.construction_part(id)?)),
+            Self::Whole => st.construction_handle(None),
+            Self::ConstructionNode => st.selected_node_handle(),
+            _ => None,
+        }
+    }
 }
 
 /// A drag in progress.
@@ -87,8 +102,9 @@ pub enum Target {
 pub struct Grab {
     pub part: Part,
     target: Target,
-    /// the numbers when the drag began: x, y, z, three turns, size (and a lamp's second size)
-    start: [f64; 8],
+    /// the numbers when the drag began: x, y, z, three turns, size (and a lamp's second size; a part's
+    /// stretch along its own three axes)
+    start: [f64; 11],
     /// where the pointer was pressed
     at0: Pos2,
     /// the point of the constraint the pointer's ray met at the press (camera frame), or the length
@@ -99,6 +115,37 @@ pub struct Grab {
     /// its axis moves that point this way), and how far that point is from the middle, in points
     tan: Vec2,
     rad: f32,
+    /// what the target's place pointed into when the drag began (see `Seen`)
+    seen: Seen,
+}
+
+/// The lists a drag's target is found in, as they were at the press. A part is held by its identity and
+/// a group by its id, but an object, a lamp, a modifier and a construction node are held by their place;
+/// if any of these lists changes under the drag (something added or removed, another layer or node
+/// selected), the place may name something else, and the drag lets go rather than move it.
+#[derive(Clone, Debug, PartialEq)]
+struct Seen {
+    layer: usize,
+    objects: usize,
+    lamps: usize,
+    parts: usize,
+    node: Vec<usize>,
+    /// a pivot's modifier stack
+    mods: Option<usize>,
+}
+
+impl Seen {
+    fn of(st: &State, t: Target) -> Self {
+        let mods = match t { Target::Pivot(owner, _) => owner.stack_len(st), _ => None };
+        Self { layer: st.stack.sel, objects: st.object_count(), lamps: st.lamps.len(), parts: st.csg.parts.len(), node: st.edit_scope.construction().to_vec(), mods }
+    }
+}
+
+impl Grab {
+    /// The target is still there, and still the one taken hold of.
+    fn holds(&self, st: &State) -> bool {
+        exists(st, self.target) && self.seen == Seen::of(st, self.target)
+    }
 }
 
 /// What the tool bar has chosen.
@@ -126,11 +173,16 @@ pub struct Handles {
     pub local: bool,
     /// the handles move in steps without Ctrl being held
     pub snap: bool,
+    pub move_origin: bool,
+    pub construction_origin: bool,
+    pub snap_reference: Option<gf_core::world_transform::Reference>,
+    pub align_reference: gf_core::world_transform::Reference,
     pub grab: Option<Grab>,
     pub hover: Option<Part>,
     /// they act on this lamp (chosen in the light room, or picked on the picture), otherwise on the
     /// selected layer
     pub lamp: Option<usize>,
+    pub pivot: Option<(gf_core::modifier_pivot::PivotOwner, usize)>,
     /// where each part of them was last painted (for tests that take hold of them)
     pub spots: Vec<(&'static str, Pos2)>,
 }
@@ -151,11 +203,14 @@ fn pill_text(p: &Painter, at: Pos2, anchor: eframe::egui::Align2, text: &str, fo
     p.rect_filled(r.expand2(Vec2::new(5.0, 2.0)), 5, Color32::from_black_alpha(150));
     p.galley(r.min, g, ink);
 }
-/// how long the arrows look, in points, and how near the pointer must come to a handle to take it
+/// how long the arrows look, in points, and how near the pointer must come to a handle to take it: its
+/// drawn half width (the dark edge under the lines is 4 points wide at most) and a little slack
 const ARROW_PT: f64 = 90.0;
-const REACH_PT: f32 = 7.0;
-/// an arrow's whole shaft is a handle: this near to it takes it
-const SHAFT_PT: f32 = 8.0;
+const REACH_PT: f32 = 2.0 + super::pick::SLACK_PT;
+/// an arrow's whole shaft is a handle, taken as near as its other handles are
+const SHAFT_PT: f32 = REACH_PT;
+/// the dot at the handles' middle
+const CENTRE_PT: f32 = 4.0;
 /// the combined handles: where their arrows end (a share of the rings' radius), the pale ring and the size
 /// ring (multiples of the arrows' length on the screen), and the size ring's colour
 const ALL_ARROW: f64 = 0.74;
@@ -192,11 +247,14 @@ impl View {
         let cam = st.camera();
         // a layer stands in the object's frame, a lamp in the lights' frame
         let (m, pos, rot) = match target {
-            Target::Layer(i) => { let p = st.stack.layers.get(i)?.place; (st.view_r(), p.pos, p.rot) }
+            Target::Pivot(layer, i) => (st.view_r(), layer.position(st, i)?, layer.frame(st).placement.rot),
+            Target::World(item) => { let p = st.world_placement(item)?; (st.view_r(), p.pos, p.rot) }
             Target::Lamp(i) => { let l = st.lamps.get(i)?; (st.light_m(), l.pos, l.rot) }
             // (a part is moved in a frame turned with the object: see csg.rs `part_handle`)
-            Target::Part(i) => { let (ro, pos, rot, _) = st.csg.part_handle(i)?; (gf_core::math::mul(&st.view_r(), &ro), pos, rot) }
-            Target::Whole => { let p = st.csg.place; (st.view_r(), p.pos, p.rot) }
+            Target::Part(_) | Target::Whole | Target::ConstructionNode => {
+                let h = target.construction(st)?;
+                (gf_core::math::mul(&st.view_r(), &h.axes), h.pose.pos, h.pose.rot)
+            }
         };
         let c = apply(&m, pos);
         let own = if local { euler(rot[0], rot[1], rot[2]) } else { [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0] };
@@ -332,39 +390,41 @@ fn along_line(o: [f64; 3], d: [f64; 3], c: [f64; 3], a: [f64; 3]) -> Option<f64>
     Some((ad * dot(w, d) - dd * dot(w, a)) / den)
 }
 
-fn values(st: &State, t: Target) -> [f64; 8] {
+fn values(st: &State, t: Target) -> [f64; 11] {
     match t {
-        Target::Layer(i) => {
-            let p = st.stack.layers[i].place;
-            [p.pos[0], p.pos[1], p.pos[2], p.rot[0], p.rot[1], p.rot[2], p.size, 0.0]
+        Target::Pivot(layer, i) => { let p = layer.position(st, i).unwrap_or_default(); [p[0], p[1], p[2], 0., 0., 0., 1., 0., 1., 1., 1.] }
+        Target::World(item) => {
+            let p = st.world_placement(item).unwrap_or_default();
+            [p.pos[0], p.pos[1], p.pos[2], p.rot[0], p.rot[1], p.rot[2], p.size, 0.0, 1., 1., 1.]
         }
         Target::Lamp(i) => {
             let l = st.lamps[i];
-            [l.pos[0], l.pos[1], l.pos[2], l.rot[0], l.rot[1], l.rot[2], l.size[0], l.size[1]]
+            [l.pos[0], l.pos[1], l.pos[2], l.rot[0], l.rot[1], l.rot[2], l.size[0], l.size[1], 1., 1., 1.]
         }
-        Target::Part(i) => {
-            let (_, pos, rot, size) = st.csg.part_handle(i).unwrap_or_default();
-            [pos[0], pos[1], pos[2], rot[0], rot[1], rot[2], size, 0.0]
-        }
-        Target::Whole => {
-            let p = st.csg.place;
-            [p.pos[0], p.pos[1], p.pos[2], p.rot[0], p.rot[1], p.rot[2], p.size, 0.0]
+        Target::Part(_) | Target::Whole | Target::ConstructionNode => {
+            let p = t.construction(st).map(|h| h.pose).unwrap_or_default();
+            let s = match t { Target::Part(id) => st.csg.construction_part(id).and_then(|i| st.csg.parts.get(i)).and_then(|p| p.stretch).unwrap_or([1.0; 3]), _ => [1.0; 3] };
+            [p.pos[0], p.pos[1], p.pos[2], p.rot[0], p.rot[1], p.rot[2], p.size, 0.0, s[0], s[1], s[2]]
         }
     }
 }
 
 fn exists(st: &State, t: Target) -> bool {
     match t {
-        Target::Layer(i) => i < st.object_count(),
+        Target::Pivot(layer, i) => layer.position(st, i).is_some(),
+        Target::World(item) => st.world_placement(item).is_some(),
         Target::Lamp(i) => i < st.lamps.len(),
-        Target::Part(i) => i < st.csg.parts.len(),
-        Target::Whole => !st.csg.parts.is_empty(),
+        Target::Part(id) => st.csg.construction_part(id).is_some(),
+        Target::ConstructionNode => st.selected_node_handle().is_some(),
+        Target::Whole => st.edit_scope.object().is_some(),
     }
 }
 
 /// Which of the numbers a size square along the thing's own axis k changes: a tube's length along its
-/// x and its radius across; a panel's half width and half height. None: a layer (it has one size), a ball.
+/// x and its radius across; a panel's half width and half height; a part's stretch along that axis
+/// (gf_core::stretch). None: a layer (it has one size), a ball.
 fn stretch_slot(st: &State, t: Target, k: usize) -> Option<usize> {
+    if let Target::Part(id) = t { return st.csg.construction_part(id).map(|_| 8 + k); }
     let Target::Lamp(i) = t else { return None };
     match (st.lamps.get(i)?.kind, k) {
         (gf_core::lamps::LampKind::Tube, 0) => Some(7),
@@ -387,12 +447,22 @@ impl Handles {
     /// What is chosen, whether or not the handles show.
     pub fn chosen(&self, st: &State) -> Option<Target> {
         if !self.picked { return None; }
+        if let Some((layer, i)) = self.pivot.filter(|(l, i)| l.selected(st) && l.position(st, *i).is_some()) { return Some(Target::Pivot(layer, i)); }
         if let Some(i) = self.lamp.filter(|i| *i < st.lamps.len()) { return Some(Target::Lamp(i)); }
+        if st.edit_scope.object().is_none() {
+            return st.world_selection().last().copied().map(Target::World);
+        }
         // (a part selected in the tree's list: it is what the handles move)
-        if let Some(i) = st.csg.sel.filter(|i| *i < st.csg.parts.len() && st.plain()) { return Some(Target::Part(i)); }
-        if st.csg.whole && !st.csg.parts.is_empty() && st.plain() { return Some(Target::Whole); }
-        // (with no object there is nothing to move)
-        (st.stack.sel < st.object_count()).then_some(Target::Layer(st.stack.sel))
+        if let Some(i) = st.csg.sel.filter(|i| *i < st.csg.parts.len()) { return st.csg.part_id(i).map(Target::Part); }
+        if !st.edit_scope.construction().is_empty() { return Some(Target::ConstructionNode); }
+        st.csg.whole.then_some(Target::Whole)
+    }
+
+    /// What the corners mark: what is chosen, or, before anything has been clicked, the objects the panel
+    /// shows as selected (the window opens with one selected; its corners say so, while the handles wait
+    /// for a click on it, see `starting`).
+    pub fn marked(&self, st: &State) -> Option<Target> {
+        self.chosen(st).or_else(|| if st.edit_scope.object().is_none() { st.world_selection().last().copied().map(Target::World) } else { None })
     }
 
     /// As the window opens: the "all" tool taken up (docs/view_tools.md), with nothing chosen yet, so that
@@ -424,6 +494,8 @@ impl Handles {
     }
     /// Take up a tool. One with handles puts them on what is selected.
     pub fn set_tool(&mut self, t: Tool) {
+        self.construction_origin = false;
+        self.pivot = None;
         self.grab = None;
         match t {
             Tool::All | Tool::Move | Tool::Turn | Tool::Size => {
@@ -438,8 +510,24 @@ impl Handles {
     }
     /// Choose a layer (None) or a lamp, as a click on it does.
     pub fn pick(&mut self, lamp: Option<usize>) {
+        self.pivot = None;
+        self.construction_origin = false;
         self.lamp = lamp;
         self.picked = true;
+    }
+    /// Show the handles on this lamp (None: on the selected layer), as its "handles" button does.
+    pub fn show_on(&mut self, lamp: Option<usize>) {
+        self.pick(lamp);
+        if !self.on { self.toggle(); }
+    }
+    /// The handles are drawn on this lamp (None: on what is chosen in the scene). Its button reads
+    /// "hide handles" exactly while this holds.
+    pub fn shown_on(&self, st: &State, lamp: Option<usize>) -> bool {
+        match (self.target(st), lamp) {
+            (Some(Target::Lamp(i)), Some(j)) => i == j,
+            (Some(Target::Lamp(_)), None) | (None, _) | (Some(_), Some(_)) => false,
+            (Some(_), None) => true,
+        }
     }
     /// Let go of what is chosen, as a click on nothing does.
     pub fn let_go(&mut self) {
@@ -458,7 +546,7 @@ impl Handles {
         };
         match self.mode {
             Mode::Move => {
-                take((at - c).length() - 3.0, Part::Centre);
+                take((at - c).length() - CENTRE_PT, Part::Centre);
                 for k in 0..3 {
                     take(dist_to_runs(at, &v.arrow(k)), Part::Axis(k));
                     if let Some(sq) = v.square(k) { if inside(at, &sq) { take(REACH_PT - 0.5, Part::Plane(k)); } }
@@ -474,7 +562,7 @@ impl Handles {
             Mode::All => {
                 let rr = v.ring_radius();
                 let r = (at - c).length();
-                take(r - 4.0, Part::Centre);
+                take(r - CENTRE_PT, Part::Centre);
                 for k in 0..3 {
                     // (the whole shaft takes the drag, and a little more than the other handles' reach)
                     let d = dist_to_runs(at, &v.arrow_to(k, ALL_ARROW));
@@ -496,7 +584,7 @@ impl Handles {
     pub fn begin(&mut self, st: &State, rect: Rect, at: Pos2, part: Part) {
         let Some(target) = self.target(st) else { return };
         let Some(v) = View::of(st, rect, target, self.local) else { return };
-        let mut g = Grab { part, target, start: values(st, target), at0: at, hit0: v.c, s0: 0.0, tan: Vec2::X, rad: v.ring_radius().max(20.0) };
+        let mut g = Grab { part, target, start: values(st, target), at0: at, hit0: v.c, s0: 0.0, tan: Vec2::X, rad: v.ring_radius().max(20.0), seen: Seen::of(st, target) };
         if let (Part::Stretch(k), Some(c), Some(q)) = (part, v.screen(v.c), v.stretch_at(part_axis(part))) {
             // the way the thing's own axis runs on the screen
             let _ = k;
@@ -539,7 +627,7 @@ impl Handles {
         // (with snapping left on, Ctrl lets the handle go freely)
         let snap = snap != self.snap;
         let Some(g) = self.grab.clone() else { return };
-        if !exists(st, g.target) { self.grab = None; return; }
+        if !g.holds(st) { self.grab = None; return; }
         // the frame as it was at the press: the middle moves under the drag, the constraint does not
         let Some(mut v) = View::of(st, rect, g.target, self.local) else { return };
         v.c = apply(&v.m, [g.start[0], g.start[1], g.start[2]]);
@@ -617,10 +705,25 @@ impl Handles {
                 out[6] = g.start[6] * f;
                 out[7] = g.start[7] * f;
                 if snap { out[6] = (out[6] / 0.05).round() * 0.05; }
+                out[6] = out[6].max(0.01);
             }
         }
         if snap && matches!(g.part, Part::Axis(_) | Part::Plane(_) | Part::Centre) {
-            for x in out.iter_mut().take(3) { *x = (*x / 0.05).round() * 0.05; }
+            if let Target::World(item) = g.target {
+                use gf_core::world_transform::DragConstraint;
+                if out[..3] != g.start[..3] {
+                    let constraint = match g.part {
+                        Part::Axis(k) => DragConstraint::Axis(v.dirs[k]),
+                        Part::Plane(k) => DragConstraint::Plane { normal: v.dirs[k] },
+                        _ => DragConstraint::Plane { normal: apply(&transpose(&v.m), v.toward_camera(v.c)) },
+                    };
+                    let source = if self.move_origin { Some(gf_core::world_transform::Reference::Origin) } else { self.snap_reference };
+                    let dest = st.world_snap(item, [out[0], out[1], out[2]], constraint, source, v.len * 0.07);
+                    out[..3].copy_from_slice(&dest);
+                }
+            } else {
+                for x in out.iter_mut().take(3) { *x = (*x / 0.05).round() * 0.05; }
+            }
         }
         self.write(st, g.target, &out, true);
     }
@@ -628,7 +731,7 @@ impl Handles {
     /// Let go: the placement is built at full detail.
     pub fn end(&mut self, st: &mut State) {
         if let Some(g) = self.grab.take() {
-            if exists(st, g.target) {
+            if g.holds(st) {
                 let now = values(st, g.target);
                 self.write(st, g.target, &now, false);
             }
@@ -638,34 +741,57 @@ impl Handles {
     /// Esc during a drag: the layer goes back to where the drag began. True if there was a drag.
     pub fn cancel(&mut self, st: &mut State) -> bool {
         let Some(g) = self.grab.take() else { return false };
-        if exists(st, g.target) { self.write(st, g.target, &g.start, false); }
+        if g.holds(st) { self.write(st, g.target, &g.start, false); }
         true
     }
 
     /// Write the numbers through their sliders (so that they are what the sliders say, within their range).
-    fn write(&self, st: &mut State, t: Target, v: &[f64; 8], quick: bool) {
+    fn write(&self, st: &mut State, t: Target, v: &[f64; 11], quick: bool) {
+        let turn = |c: usize| (v[3 + c] + 180.0).rem_euclid(360.0) - 180.0;
+        if let Target::World(item) = t {
+            let pos = [v[0], v[1], v[2]];
+            if self.move_origin { st.set_world_origin(item, pos); } else {
+                let frame = gf_core::layers::Placement { pos, rot: [turn(0), turn(1), turn(2)], size: v[6].max(0.01) };
+                st.transform_world_items(&st.world_selection(), item, frame);
+            }
+            st.request(gf_core::build::BuildRequest::handle(quick));
+            return;
+        }
+        if let Target::Pivot(layer, i) = t {
+            layer.set_position(st, i, [v[0], v[1], v[2]]);
+            st.sculpt_changed(quick);
+            return;
+        }
         // (a layer's sliders: x, y, z, three turns, size; a lamp's begin the same, then its second size)
         // (the tree's placements have no knobs: they are written as they are, within their sliders' ranges)
-        let turn = |c: usize| ((v[3 + c] + 540.0) % 360.0) - 180.0;
-        if let Target::Part(i) = t {
-            st.csg.set_part_handle(i, [v[0], v[1], v[2]], [turn(0), turn(1), turn(2)], v[6]);
-            st.want = Some(if quick { gf_core::state::Detail::Anim } else { gf_core::state::Detail::Full });
+
+        if let Some(h) = t.construction(st) {
+            if self.construction_origin && matches!(t, Target::Part(_) | Target::ConstructionNode) {
+                st.set_construction_origin(apply(&h.axes, [v[0], v[1], v[2]]));
+                st.request(gf_core::build::BuildRequest::handle(quick));
+                return;
+            }
+            let place = h.local(gf_core::layers::Placement { pos: [v[0], v[1], v[2]], rot: [turn(0), turn(1), turn(2)], size: v[6].max(0.01) });
+            match t {
+                Target::Part(id) => if let Some(i) = st.csg.construction_part(id) {
+                    st.csg.parts[i].place = place;
+                    // (its stretch, once it has one or a square has given it one)
+                    let s = [v[8], v[9], v[10]];
+                    if s != [1.0; 3] || st.csg.parts[i].stretch.is_some() { st.csg.parts[i].stretch = Some(s.map(|x| x.max(1e-3))); }
+                },
+                Target::ConstructionNode => {
+                    if let Some(node) = st.csg.edit_construction().node_mut(&st.edit_scope.construction()) { node.place = place; }
+                }
+                _ => {
+                    if !st.has_tree(st.stack.sel) { st.csg.edit_construction(); }
+                    st.csg.place = place;
+                }
+            }
+            st.request(gf_core::build::BuildRequest::handle(quick));
             return;
         }
-        if let Target::Whole = t {
-            let pl = &mut st.csg.place;
-            for c in 0..3 { pl.pos[c] = v[c].clamp(-1.4, 1.4); }
-            pl.rot = [turn(0), turn(1), turn(2)];
-            pl.size = v[6].clamp(0.05, 2.0);
-            st.want = Some(if quick { gf_core::state::Detail::Anim } else { gf_core::state::Detail::Full });
-            return;
-        }
-        let knobs = match t {
-            Target::Part(_) | Target::Whole => unreachable!("written above"),
-            Target::Layer(i) => st.place_knobs(i),
-            Target::Lamp(i) => st.lamp_knobs_of(i).into_iter().take(8).collect(),
-        };
-        for (c, k) in knobs.into_iter().enumerate() {
+        let Target::Lamp(i) = t else { return };
+        for (c, k) in st.lamp_knobs_of(i).into_iter().take(8).enumerate() {
             // a number that is being animated is the animation's: the handle leaves it alone
             if st.tracks.contains_key(&k.key) { continue; }
             let x = if c >= 3 && c <= 5 { ((v[c] + 540.0) % 360.0) - 180.0 } else { v[c] };
@@ -674,29 +800,35 @@ impl Handles {
         }
     }
 
-    /// Corners round what is chosen, where the ball it fits in shows on the screen, and its name over
+    /// Corners round what is chosen, where its box (or the ball it fits in) shows on the screen, and its name over
     /// them: paint only, quiet enough not to be mistaken for part of the picture.
     fn mark(&self, p: &Painter, st: &State, rect: Rect) {
-        let Some(t) = self.chosen(st) else { return };
+        let Some(t) = self.marked(st) else { return };
         let Some((c, r, name)) = (match t {
-            Target::Layer(i) => {
-                let pl = st.stack.layers[i].place;
-                Some((apply(&st.view_r(), pl.pos), gf_core::FIT * pl.size.abs().max(1e-3), if st.layer_count() > 1 { format!("{} · {}", i + 1, st.layer_title(i)) } else { st.layer_title(i) }))
-            }
-            Target::Part(i) => st.csg.part_in_scene(i).map(|(c, size)| (apply(&st.view_r(), c), gf_core::FIT * size.max(1e-3), format!("part {}", i + 1))),
-            Target::Whole => {
-                let pl = st.csg.place;
-                Some((apply(&st.view_r(), pl.pos), gf_core::FIT * pl.size.abs().max(1e-3), "csg shape".to_string()))
-            }
+            Target::World(item) => st.world_framing(item).map(|(p, r)| (apply(&st.view_r(), p), r, st.world_name(item))),
+            Target::Pivot(_, _) => None,
+            Target::Part(_) | Target::Whole | Target::ConstructionNode => t.construction(st).map(|h| {
+                let (c, size) = h.in_scene();
+                let name = match t {
+                    Target::Part(id) => format!("part {}", st.csg.construction_part(id).unwrap_or(0) + super::csg::first_number(st)),
+                    Target::ConstructionNode => st.csg.construction_tree().node(&st.edit_scope.construction()).map(|n| n.name.clone()).unwrap_or_default(),
+                    _ => "csg shape".into(),
+                };
+                (apply(&st.view_r(), c), gf_core::FIT * size.max(1e-3), name)
+            }),
             Target::Lamp(i) => st.lamp_in_view(i).map(|(c, _)| {
                 let l = &st.lamps[i];
                 (c, l.size[0].max(l.size[1]).max(0.05) * 1.15, format!("lamp {}", i + 1))
             }),
         }) else { return };
         let v = View { cam: st.camera(), m: st.view_r(), c, axes: [[0.0; 3]; 3], dirs: [[0.0; 3]; 3], own: [[0.0; 3]; 3], len: 0.4, rect };
-        // the ball's outline, near enough: three great circles round it
+        // an object or group in the world: the eight corners of its box, which hug it far closer than the ball
+        // round the box does (that ball is wider than the window for a shape that fills the view);
+        // otherwise the ball's outline, near enough: three great circles round it
         let (mut lo, mut hi, mut seen, mut all) = (Pos2::new(f32::MAX, f32::MAX), Pos2::new(f32::MIN, f32::MIN), 0, 0);
-        for k in 0..3 {
+        let world_box = if let Target::World(item) = t { world_screen_box(st, item, rect) } else { None };
+        if let Some(b) = world_box { (lo, hi, seen, all) = (b.min, b.max, 1, 1); }
+        for k in 0..if world_box.is_some() { 0 } else { 3 } {
             for i in 0..32 {
                 let a = i as f64 / 32.0 * std::f64::consts::TAU;
                 let mut d = [0.0; 3];
@@ -713,6 +845,8 @@ impl Handles {
         if seen * 2 < all { return; }
         let b = Rect::from_min_max(lo, hi).expand(4.0);
         if !b.intersects(rect) || b.width() > 4.0 * rect.width() { return; }
+        // (kept inside the window, so that the corners of a shape that overflows it still show)
+        let b = b.intersect(rect.shrink(6.0));
         let arm = (b.width().min(b.height()) * 0.18).clamp(5.0, 16.0);
         let ink = Color32::from_white_alpha(150);
         let shade = Stroke::new(3.0, Color32::from_black_alpha(70));
@@ -721,6 +855,7 @@ impl Handles {
             p.add(Shape::line(pts.clone(), shade));
             p.add(Shape::line(pts, Stroke::new(1.2, ink)));
         }
+        // (on a small dark backing, as the line at the foot of the window has: readable over bright glass)
         let font = eframe::egui::FontId::monospace(10.0);
         let at = Pos2::new(b.left().max(rect.left() + 4.0), (b.top() - 3.0).max(rect.top() + 12.0));
         pill_text(p, at + eframe::egui::vec2(5.0, -2.0), eframe::egui::Align2::LEFT_BOTTOM, &name, font, Color32::from_white_alpha(190));
@@ -866,29 +1001,45 @@ impl Handles {
     }
 }
 
-/// The lamp under a point of the screen, if any (the nearest of those whose outline the pointer's ray
-/// passes within): lamps are known exactly, so this is worked out here, not read from the picture.
-pub fn pick_lamp(st: &State, rect: Rect, at: Pos2) -> Option<usize> {
-    let cam = st.camera();
-    let h = rect.height() as f64 / 2.0;
-    let (o, d) = cam.ray([(at.x - rect.center().x) as f64 / h, -(at.y - rect.center().y) as f64 / h])?;
-    let mut best: Option<(f64, usize)> = None;
-    for i in 0..st.lamps.len() {
-        let (c, _) = st.lamp_in_view(i)?;
-        let l = &st.lamps[i];
-        let r = match l.kind { gf_core::lamps::LampKind::Ball => l.size[0], _ => l.size[0].max(l.size[1]) } + 0.03;
-        let oc = sub(c, o);
-        let t = dot(oc, d);
-        if t <= 0.0 { continue; }
-        if dot(oc, oc) - t * t < r * r && best.is_none_or(|(b, _)| t < b) { best = Some((t, i)); }
+/// The shown lamp under a point of the screen, if any, and how far along the pixel's ray: lamps are known
+/// exactly, so this is worked out here with the shapes the tracer draws them with (ui/pick.rs).
+/// Where an object or group of the world shows on the screen: the box round the eight corners of its
+/// bounds as they project (none if fewer than half are in front of the camera).
+pub fn world_screen_box(st: &State, item: gf_core::groups::Item, rect: Rect) -> Option<Rect> {
+    let bx = st.world_bounds(item).filter(|b| b[0] <= b[3])?;
+    let (cam, m, h) = (st.camera(), st.view_r(), rect.height() as f64 / 2.0);
+    let (mut lo, mut hi, mut seen) = (Pos2::new(f32::MAX, f32::MAX), Pos2::new(f32::MIN, f32::MIN), 0);
+    for mask in 0..8 {
+        let p: [f64; 3] = std::array::from_fn(|k| bx[if mask & (1 << k) == 0 { k } else { k + 3 }]);
+        if let Some(uv) = cam.project(apply(&m, p)) {
+            let q = Pos2::new((rect.center().x as f64 + uv[0] * h) as f32, (rect.center().y as f64 - uv[1] * h) as f32);
+            seen += 1;
+            lo = lo.min(q);
+            hi = hi.max(q);
+        }
     }
-    best.map(|(_, i)| i)
+    (seen >= 4).then(|| Rect::from_min_max(lo, hi))
+}
+
+pub fn pick_lamp(st: &State, rect: Rect, at: Pos2) -> Option<(f64, usize)> {
+    let h = rect.height() as f64 / 2.0;
+    let (o, d) = st.camera().ray([(at.x - rect.center().x) as f64 / h, -(at.y - rect.center().y) as f64 / h])?;
+    super::pick::lamp_on_ray(st, o, d)
 }
 
 /// The layer whose shape is under a point of the picture (fx, fy: fractions of its width and height
 /// from the top left), from the distance stored with the picture's pixels and each layer's own volume.
 /// None if the point shows no shape.
 pub fn pick_layer(e: &crate::engine::Engine, fx: f64, fy: f64) -> Option<usize> {
+    pick_occurrence(e, fx, fy).map(|hit| hit.source)
+}
+
+/// The transient occurrence ordinal is useful to the viewport. Editing always
+/// addresses the source layer, whose stored placement is independent of a hit.
+#[derive(Clone, Copy, Debug)]
+pub struct OccurrenceHit { pub source: usize, pub occurrence: usize, /** how far along the pixel's ray the shape is */ pub depth: f64 }
+
+pub fn pick_occurrence(e: &crate::engine::Engine, fx: f64, fy: f64) -> Option<OccurrenceHit> {
     let (_, (tw, th)) = e.renderer.size();
     if tw < 2 || th < 2 { return None; }
     let (x, y) = ((fx * tw as f64).clamp(0.0, tw as f64 - 1.0) as u32, (fy * th as f64).clamp(0.0, th as f64 - 1.0) as u32);
@@ -897,30 +1048,194 @@ pub fn pick_layer(e: &crate::engine::Engine, fx: f64, fy: f64) -> Option<usize> 
     if t <= 0.0 { return None; }
     let st = &e.state;
     let n = st.layer_count();
-    if n < 2 { return Some(0); }
+    if let Some(source) = st.edit_scope.object().filter(|i| *i < n) { return Some(OccurrenceHit { source, occurrence: 0, depth: t }); }
+    if n < 2 && !st.stack.has_world_modifiers() { return Some(OccurrenceHit { source: 0, occurrence: 0, depth: t }); }
     // the point in the camera's frame, then in the object's
     let uv = [((x as f64 + 0.5) * 2.0 - tw as f64) / th as f64, (th as f64 - (y as f64 + 0.5) * 2.0) / th as f64];
     let (o, d) = st.camera().ray(uv)?;
     let p = apply(&transpose(&st.view_r()), add(o, scale(d, t)));
-    let mut best: Option<(f64, usize)> = None;
-    for i in 0..n {
-        if !st.stack.layers[i].show { continue; }
-        let pl = st.stack.layers[i].place;
-        let s = if pl.size != 0.0 { pl.size } else { 1.0 };
-        let q = scale(apply(&transpose(&euler(pl.rot[0], pl.rot[1], pl.rot[2])), sub(p, pl.pos)), 1.0 / s);
-        let hb = gf_core::HB;
-        // read the layer's own volume at the nearest voxel; outside its box, how far outside
-        let dist = match e.baker.layer_volume(i) {
-            Some(vol) if q.iter().all(|c| c.abs() < hb) => {
-                let ix = q.map(|c| (((c / hb + 1.0) * 0.5 * vol.res as f64 - 0.5).round()).clamp(0.0, vol.res as f64 - 1.0) as u32);
-                match e.gpu.read(&vol.tex, ix[0], ix[1], ix[2], 1, 1, 2) {
-                    Ok(b) if b.len() >= 2 => half::f16::from_bits(u16::from_le_bytes([b[0], b[1]])).to_f32() as f64 * s,
-                    _ => continue,
-                }
+    let plan = st.stack.world_plan();
+    let mut best: Option<(f64, OccurrenceHit)> = None;
+    let mut pending = Vec::new();
+    let mut field_probes = Vec::new();
+    let mut consider = |dist: f64, hit| {
+        if best.is_none_or(|(v, _)| dist.abs() < v) { best = Some((dist.abs(), hit)); }
+    };
+    for (source, instances) in plan.placements.iter().enumerate() {
+        if !st.stack.layers[source].show || st.edit_scope.object().is_some_and(|i| i != source) { continue; }
+        if let Some((volume,scene_scale))=e.layers.world_fields.volume(source) {
+            let hb=gf_core::HB*scene_scale;
+            let at=p.map(|x| (((x/hb+1.)*0.5*f64::from(volume.res)-0.5).round()).clamp(0.,f64::from(volume.res-1)) as u32);
+            field_probes.push((e.gpu.read_regions_later(&volume.tex,&[at],1,1,8),source,scene_scale));
+            continue;
+        }
+        let volume = e.csg.layer_vols.get(source).and_then(|v| v.as_ref()).map(|(_, v)| v)
+            .or_else(|| e.baker.layer_volume(source));
+        let mut origins = Vec::new();
+        let mut hits = Vec::new();
+        for (occurrence, pl) in instances.iter().enumerate() {
+            let size = pl.size.abs().max(1e-9);
+            let q = scale(apply(&transpose(&euler(pl.rot[0], pl.rot[1], pl.rot[2])), sub(p, pl.pos)), pl.size.signum() / size);
+            let hb = gf_core::HB;
+            if q.iter().any(|v| v.abs() >= hb) { continue; }
+            let hit = OccurrenceHit { source, occurrence, depth: t };
+            if let Some(vol) = volume {
+                origins.push(q.map(|v| (((v / hb + 1.0) * 0.5 * vol.res as f64 - 0.5).round()).clamp(0.0, vol.res as f64 - 1.0) as u32));
+                hits.push((hit, size));
+            } else {
+                consider((dot(q, q).sqrt() - gf_core::FIT) * size, hit);
             }
-            _ => (dot(q, q).sqrt() - gf_core::FIT) * s,
-        };
-        if best.is_none_or(|(b, _)| dist < b) { best = Some((dist, i)); }
+        }
+        if let Some(vol) = volume.filter(|_| !origins.is_empty()) {
+            pending.push((e.gpu.read_regions_later(&vol.tex, &origins, 1, 1, 2), hits));
+        }
     }
-    best.map(|(_, i)| i)
+    if !pending.is_empty() || !field_probes.is_empty() { e.gpu.wait(); }
+    for (read,source,scale) in field_probes {
+        if let Some(pixels)=read.take(&e.gpu) {
+            let pixel=&pixels[0];
+            let channel=|c:usize| half::f16::from_le_bytes([pixel[c*2],pixel[c*2+1]]).to_f64();
+            let occurrence=channel(1) as usize+1024*channel(2) as usize;
+            consider(channel(0)*scale,OccurrenceHit {source,occurrence,depth:t});
+        }
+    }
+    for (read, hits) in pending {
+        if let Some(texels) = read.take(&e.gpu) {
+            for (value, (hit, size)) in texels.into_iter().zip(hits) {
+                consider(half::f16::from_le_bytes([value[0], value[1]]).to_f64() * size, hit);
+            }
+        }
+    }
+    best.map(|(_, hit)| hit)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gf_core::{groups::Item, layers::Placement, world_transform::Reference};
+
+    #[test]
+    fn snapped_local_arrow_follows_the_same_line_under_the_pointer() {
+        let mut st = State::new();
+        let moving = Item::Object(0);
+        let peer = Item::Group(st.new_world_group(None).unwrap());
+        st.set_world_placement(moving, Placement { rot: [0., 0., 45.], ..Default::default() });
+        st.select_world_item(moving, false);
+        let mut handles = Handles::starting();
+        handles.set_tool(Tool::Move);
+        handles.pick(None);
+        handles.snap = true;
+        handles.local = true;
+        handles.snap_reference = Some(Reference::Origin);
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(1200., 800.));
+        let view = View::of(&st, rect, Target::World(moving), true).unwrap();
+        let on_arrow = |distance| view.screen(add(view.c, scale(view.axes[0], distance))).unwrap();
+        let drag = view.len * 0.4;
+        let guide_x = view.dirs[0][0] * drag + view.len * 0.02;
+        st.set_world_origin(peer, [guide_x, 3., 3.]);
+        handles.begin(&st, rect, on_arrow(view.len * 0.8), Part::Axis(0));
+        handles.drag(&mut st, rect, on_arrow(view.len * 0.8 + drag), false, false);
+        handles.end(&mut st);
+        let [x, y, z] = st.world_placement(moving).unwrap().pos;
+        assert!((x-guide_x).abs() < 1e-8 && (y-x).abs() < 1e-8 && z.abs() < 1e-8, "{x}, {y}, {z}");
+    }
+
+    #[test]
+    fn an_arrow_is_taken_within_its_drawn_width_and_a_little_slack_only() {
+        let mut st = State::new();
+        st.select_world_item(Item::Object(0), false);
+        let mut handles = Handles::starting();
+        handles.set_tool(Tool::Move);
+        handles.pick(None);
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(3840., 2160.));
+        let view = View::of(&st, rect, Target::World(Item::Object(0)), false).unwrap();
+        // halfway along the x arrow, and across it on the screen
+        let a = view.screen(add(view.c, scale(view.axes[0], view.len * 0.5))).unwrap();
+        let b = view.screen(add(view.c, scale(view.axes[0], view.len * 0.6))).unwrap();
+        let across = Vec2::new(-(b - a).y, (b - a).x).normalized();
+        assert_eq!(handles.hit(&st, rect, a + across * (REACH_PT - 0.5)), Some(Part::Axis(0)));
+        // beside it, where the old reach (7 points) still took it, is not the arrow
+        assert_ne!(handles.hit(&st, rect, a + across * 6.0), Some(Part::Axis(0)));
+    }
+
+    #[test]
+    fn scale_snap_never_collapses_csg_or_construction_size_to_zero() {
+        let mut st = State::new();
+        let studio = st.families.iter().position(|f| f.id == "studio").unwrap();
+        st.set_scene(studio);
+        st.shape_mut().trace = gf_core::sdf::Trace::Csg;
+        st.csg.parts = gf_core::csg::parse_arg("studio/sphere@0,0,0@0,0,0@1").unwrap();
+        st.enter_world_item(Item::Object(0));
+        st.csg.sel = Some(0);
+        st.csg.whole = false;
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(1200., 800.));
+        for snap in [false, true] {
+            st.csg.parts[0].place.size = 1.0;
+            let mut handles = Handles::starting();
+            handles.set_tool(Tool::Size);
+            handles.pick(None);
+            let view = View::of(&st, rect, Target::Part(st.csg.part_id(0).unwrap()), false).unwrap();
+            let centre = view.screen(view.c).unwrap();
+            let rim = Pos2::new(centre.x + 80.0, centre.y);
+            handles.begin(&st, rect, rim, Part::Scale);
+            handles.drag(&mut st, rect, centre, snap, false);
+            handles.end(&mut st);
+            assert!(st.csg.parts[0].place.size >= 0.01, "snap={snap}: part size collapsed to {}", st.csg.parts[0].place.size);
+        }
+    }
+
+    /// A csg object of three spheres along x, inside it, the last part chosen, the move tool on.
+    fn three_parts() -> (State, Handles, Rect) {
+        let mut st = State::new();
+        let studio = st.families.iter().position(|f| f.id == "studio").unwrap();
+        st.set_scene(studio);
+        st.shape_mut().trace = gf_core::sdf::Trace::Csg;
+        st.csg.parts = gf_core::csg::parse_arg("studio/sphere@-0.5,0,0@0,0,0@0.3;studio/sphere@0,0,0@0,0,0@0.3;studio/sphere@0.5,0,0@0,0,0@0.3").unwrap();
+        st.csg.edit_construction();
+        st.enter_world_item(Item::Object(0));
+        st.csg.sel = Some(2);
+        st.csg.whole = false;
+        let mut handles = Handles::starting();
+        handles.set_tool(Tool::Move);
+        handles.pick(None);
+        (st, handles, Rect::from_min_size(Pos2::ZERO, Vec2::new(1200., 800.)))
+    }
+
+    #[test]
+    fn a_part_drag_holds_its_part_by_identity_when_the_list_is_reordered() {
+        let (mut st, mut handles, rect) = three_parts();
+        let id = st.csg.part_id(2).unwrap();
+        let t = handles.target(&st).unwrap();
+        assert_eq!(t, Target::Part(id));
+        let c = View::of(&st, rect, t, false).unwrap();
+        let at = c.screen(c.c).unwrap();
+        handles.begin(&st, rect, at, Part::Centre);
+        // the held part moves to the front of the list under the drag
+        let held = st.csg.parts.remove(2);
+        st.csg.parts.insert(0, held);
+        let others: Vec<_> = st.csg.parts[1..].iter().map(|p| p.place).collect();
+        handles.drag(&mut st, rect, at + Vec2::new(60.0, 0.0), false, false);
+        handles.end(&mut st);
+        let i = st.csg.construction_part(id).unwrap();
+        assert_eq!(i, 0);
+        assert!(st.csg.parts[0].place.pos[0] != 0.5, "the held part did not move");
+        assert_eq!(st.csg.parts[1..].iter().map(|p| p.place).collect::<Vec<_>>(), others, "another part moved");
+    }
+
+    #[test]
+    fn a_drag_lets_go_when_a_list_it_points_into_changes() {
+        let (mut st, mut handles, rect) = three_parts();
+        let t = handles.target(&st).unwrap();
+        let c = View::of(&st, rect, t, false).unwrap();
+        let at = c.screen(c.c).unwrap();
+        handles.begin(&st, rect, at, Part::Centre);
+        handles.drag(&mut st, rect, at + Vec2::new(30.0, 0.0), false, false);
+        // a part taken away under the drag: it lets go, and Esc writes nothing anywhere
+        st.csg.parts.remove(0);
+        let now: Vec<_> = st.csg.parts.iter().map(|p| p.place).collect();
+        handles.drag(&mut st, rect, at + Vec2::new(90.0, 0.0), false, false);
+        assert!(handles.grab.is_none());
+        assert!(!handles.cancel(&mut st));
+        assert_eq!(st.csg.parts.iter().map(|p| p.place).collect::<Vec<_>>(), now);
+    }
 }

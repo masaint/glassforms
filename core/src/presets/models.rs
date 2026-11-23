@@ -68,6 +68,7 @@ fn params(up_z: bool, shell: bool) -> Vec<ParamDef> {
         ParamDef::labelled("wall", "wall thickness", 0.04, 0.01, 0.3, 0.002),
         ParamDef::labelled("mode", "solid or shell", if shell { 2.0 } else { 0.0 }, 0.0, 2.0, 1.0),
         ParamDef::labelled("up", "up axis", if up_z { 1.0 } else { 0.0 }, 0.0, 1.0, 1.0),
+        ParamDef::labelled("fileSurface", "use file materials", 1.0, 0.0, 1.0, 1.0),
     ]
 }
 
@@ -122,7 +123,7 @@ impl State {
             if let Some(v) = smooth.and_then(|i| st.vals.get_mut(i)) { *v = SMOOTH_UNSET; }
             st.model = path;
         }
-        self.want = Some(crate::state::Detail::Full);
+        self.request(crate::build::BuildRequest::edit());
         true
     }
     /// The file a layer's shape is, if it is a model: the path as the state has it ("" for the `file`

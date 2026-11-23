@@ -10,10 +10,14 @@
 //!   ease:<knob>=<kind>[,<end>]  its own easing ("all" = as all the others; end = start, finish or both)
 //!   p:<setting>=<v>             a setting chosen with buttons or a menu (lights, planes, lock, spinMode, blades, ease, easeAt, loop)
 //!   fold:<group>                fold a group away, or bring it back: material, light, focus, camera, object,
-//!                               picture, video, file (left); detail, animate (right); material-chooser (the
+//!                               picture, video, file (left); detail, animate (right); lab-material-presets (the
 //!                               named materials); lab-made of, lab-surface, lab-on it, lab-in it and
 //!                               lab-special optics (the layers of the materials lab)
 //!   sculpt:<open|close>         the surface studio
+//!   picker:<open|replace|browse|close>  the shape picker's popup: open to add an object (of the tab's kind) from
+//!                               the "+", open to change the selected object's shape from its card; browse: from the
+//!                               popup to the explorer, as its "browse all…" does; close
+//!   pick:<family>/<preset>      pick a shape in the picker, as a click on its card does (with it closed: add one)
 //!   room:<open|close>           the light room;  lab:<open|close>  the materials lab;  camera:<open|close>  the
 //!                               camera window;  help:<open|close>  the help
 //!   light:<n>                   choose light n (from 1) in the light room
@@ -57,18 +61,23 @@
 //!   cancel                      cancel the video
 //!   bench                       press the benchmark button
 //!   hide:<left|right|both|none> which panels are hidden (the H key hides or shows both)
+//!   select:<invert|visible|invert-visible>  turn the world selection over (Ctrl+I), keep only what is
+//!                               shown (Ctrl+Alt+I), or turn it over among what is shown (Ctrl+Shift+I)
 //!   ui:<name>=<value>           a setting of the settings window: ui:theme=dark|light|system, ui:frost=off|subtle|full,
+//!                               ui:blur=<0..1>, ui:opacity=<0..1> (the panels' glass),
 //!                               ui:scale=auto|<times>, ui:settings=open|close
 //!   scroll:<left|right>=<y>     scroll a panel
 //!   wait:<frames>               let frames go by
 //!   shot:<file.png>             save a picture of the whole window now
 //!   picture:<file.png>          save the renderer's own picture now, as it stands before the window shows it
 //!   error:<words>               show these words as an error over the picture
-//!   hold                        stop drawing the picture: it stays exactly as it is from here on
+//!   hold                        stop drawing the picture: it stays exactly as it is until `release`
+//!   release                     draw the picture again after `hold`
 //!   save-setup:<file>  load-setup:<file>    keep the whole setup in a file; bring one back
 //!   still:<file.png>            save the picture as it stands with 8 bits a channel; still16: with 16
 //!   still                       press the still's "save" button: its own name and folder, the bits chosen
 //!   stillbits:<8|16>            choose how many bits a channel stills are written with
+//!   stillbg:<seen|plate|clear>[,r,g,b]  a still's background: as seen, a plate of that colour, or transparent
 //!   scrub:<seconds>             drag the time slider there
 //!   idle:<seconds>              wait for the picture to settle, then count the frames drawn in that long
 //!   note                        remember how things stand now: what the line at the foot of the window says, the shape
@@ -101,6 +110,12 @@ pub enum Act {
     Room(bool),
     /// the surface studio open or shut
     Sculpt(bool),
+    /// the shape picker: open to add (Some(false)), to change the shape (Some(true)), or closed (None)
+    Picker(Option<bool>),
+    /// the shape picker's explorer, from its popup
+    PickerBrowse,
+    /// a shape picked in the picker: family, preset
+    Pick(String, String),
     Lab(bool),
     Camera(bool),
     Help(bool),
@@ -158,6 +173,7 @@ pub enum Act {
     Cancel,
     Bench,
     Hide(String),
+    Select(String),
     /// a setting of the settings window, by name
     Ui(String, String),
     Scroll(String, f32),
@@ -166,11 +182,13 @@ pub enum Act {
     Picture(String),
     Error(String),
     Hold,
+    Release,
     SaveSetup(String),
     LoadSetup(String),
     /// the file (none: the one the button would choose), and the bits a channel (none: as chosen)
     Still(String, Option<u32>),
     StillBits(u32),
+    StillBg(String, Option<[u8; 3]>),
     Scrub(f64),
     Idle(f32),
     Note,
@@ -216,7 +234,7 @@ pub fn parse(text: &str) -> Result<Vec<Act>, String> {
                 Act::Ease(k.into(), ease, at)
             }
             "p" => { let (k, v) = named(name, arg)?; Act::Setting(k.into(), num(name, v)?) }
-            "fold" => Act::Fold(arg.into()),
+            "fold" => Act::Fold(if arg == "material-chooser" { super::material::CHOOSER.into() } else { arg.into() }),
             "room" | "lab" | "camera" | "help" | "sculpt" => {
                 let open = match arg {
                     "open" => true,
@@ -230,6 +248,17 @@ pub fn parse(text: &str) -> Result<Vec<Act>, String> {
                     "camera" => Act::Camera(open),
                     _ => Act::Help(open),
                 }
+            }
+            "picker" if arg == "browse" => Act::PickerBrowse,
+            "picker" => Act::Picker(match arg {
+                "open" => Some(false),
+                "replace" => Some(true),
+                "close" => None,
+                _ => return Err(format!("picker: \"{arg}\" is not open, replace, browse or close")),
+            }),
+            "pick" => {
+                let (f, p) = arg.split_once('/').ok_or("pick: write it as pick:<family>/<preset>")?;
+                Act::Pick(f.trim().into(), p.trim().into())
             }
             "light" => match num::<usize>(name, arg)? {
                 0 => return Err("light: lights are counted from 1".into()),
@@ -289,9 +318,13 @@ pub fn parse(text: &str) -> Result<Vec<Act>, String> {
             "cancel" => Act::Cancel,
             "bench" => Act::Bench,
             "hide" => Act::Hide(arg.into()),
+            "select" => {
+                if !["invert", "visible", "invert-visible"].contains(&arg) { return Err(format!("select: \"{arg}\" is not invert, visible or invert-visible")); }
+                Act::Select(arg.into())
+            }
             "ui" => {
                 let (k, v) = named(name, arg)?;
-                if !["theme", "frost", "scale", "settings"].contains(&k) { return Err(format!("ui: \"{k}\" is not theme, frost, scale or settings")); }
+                if !["theme", "frost", "blur", "opacity", "scale", "settings"].contains(&k) { return Err(format!("ui: \"{k}\" is not theme, frost, blur, opacity, scale or settings")); }
                 Act::Ui(k.into(), v.into())
             }
             "scroll" => { let (k, v) = named(name, arg)?; Act::Scroll(k.into(), num(name, v)?) }
@@ -300,10 +333,18 @@ pub fn parse(text: &str) -> Result<Vec<Act>, String> {
             "picture" => Act::Picture(arg.into()),
             "error" => Act::Error(arg.into()),
             "hold" => Act::Hold,
+            "release" => Act::Release,
             "save-setup" => Act::SaveSetup(arg.into()),
             "load-setup" | "open-setup" => Act::LoadSetup(arg.into()),
             "still" => Act::Still(arg.into(), (!arg.is_empty()).then_some(8)),
             "still16" => Act::Still(arg.into(), Some(16)),
+            "stillbg" => {
+                let mut it = arg.split(',');
+                let word = it.next().unwrap_or_default().trim().to_owned();
+                if !["seen", "plate", "clear"].contains(&word.as_str()) { return Err(format!("stillbg: \"{word}\" is not seen, plate or clear")); }
+                let rgb: Vec<u8> = it.map(|v| v.trim().parse::<u8>().map_err(|_| format!("stillbg: \"{v}\" is not 0 to 255"))).collect::<Result<_, _>>()?;
+                Act::StillBg(word, (rgb.len() == 3).then(|| [rgb[0], rgb[1], rgb[2]]))
+            }
             "stillbits" => match num::<u32>(name, arg)? {
                 bits @ (8 | 16) => Act::StillBits(bits),
                 other => return Err(format!("stillbits: {other} is not 8 or 16")),
@@ -370,10 +411,15 @@ mod tests {
             Act::Video(3, true), Act::Video(9, false), Act::Wait(2),
         ]);
         assert_eq!(parse("ease:disp=back,finish;ease:disp=all").unwrap(), vec![Act::Ease("disp".into(), 8, Some(1)), Act::Ease("disp".into(), -1, None)]);
+        assert_eq!(parse("hold;wait:2;release").unwrap(), vec![Act::Hold, Act::Wait(2), Act::Release]);
         assert_eq!(parse("fold:video;room:open;help:close").unwrap(), vec![Act::Fold("video".into()), Act::Room(true), Act::Help(false)]);
         assert_eq!(parse("lab:open;lab:close;fold:lab-on it").unwrap(), vec![Act::Lab(true), Act::Lab(false), Act::Fold("lab-on it".into())]);
         assert_eq!(parse("drop:D:/models/a.obj;sdrop:b.stl").unwrap(), vec![Act::Drop("D:/models/a.obj".into(), false), Act::Drop("b.stl".into(), true)]);
         assert!(parse("room:ajar").unwrap_err().contains("not open or close"));
+        assert_eq!(parse("picker:open;picker:replace;picker:browse;picker:close;pick:knots/trefoil").unwrap(), vec![
+            Act::Picker(Some(false)), Act::Picker(Some(true)), Act::PickerBrowse, Act::Picker(None), Act::Pick("knots".into(), "trefoil".into()),
+        ]);
+        assert!(parse("pick:trefoil").unwrap_err().contains("pick:<family>/<preset>"));
         assert_eq!(parse("light:3;arg:light2.az=40;arg:rig=1,2,3,4,5,6,7:8,9,10,11,12,13,14;hdri:D:/maps/sky.exr;hdri:none").unwrap(), vec![
             Act::Light(3), Act::Arg("light2.az".into(), "40".into()), Act::Arg("rig".into(), "1,2,3,4,5,6,7:8,9,10,11,12,13,14".into()),
             Act::Hdri("D:/maps/sky.exr".into()), Act::Hdri(String::new()),

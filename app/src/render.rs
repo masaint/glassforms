@@ -8,17 +8,34 @@ use bytemuck::{Pod, Zeroable};
 use gf_core::material::{self, MU_FLOATS};
 
 use crate::bake::Volume;
+use crate::split_half::Half;
 use crate::denoise::{self, Denoise};
 use crate::dof::{Dof, Focus};
 use crate::frost::{self, Frost};
 use crate::gpu::*;
 
 const TRACE_WGSL: &str = include_str!("shaders/trace.wgsl");
-const TRACE_LIGHT_WGSL: &str = include_str!("shaders/trace_light.wgsl");
+/// The tracer's template as it stands in trace.wgsl (the matcap view weaves its own entry into it: matcap.rs).
+pub(crate) const TRACE_SOURCE: &str = TRACE_WGSL;
+const TRACE_LIGHT_WGSL: &str = concat!(include_str!("shaders/pbr/sh9.wgsl"), include_str!("shaders/light/occlusion.wgsl"), include_str!("shaders/trace_light.wgsl"));
+const DIELECTRIC_FRESNEL_WGSL: &str = concat!(
+    include_str!("shaders/pbr/hash.wgsl"),
+    include_str!("shaders/pbr/types.wgsl"),
+    include_str!("shaders/pbr/dielectric.wgsl"),
+    include_str!("shaders/dielectric_fresnel.wgsl"),
+);
 /// What is put into the tracer for materials other than plain glass (gf_core::material::tracer_parts).
 /// (with everything a rough surface does, which is kept in a file of its own)
-pub const TRACE_MATERIAL_WGSL: &str = concat!(include_str!("shaders/trace_material.wgsl"), include_str!("shaders/film.wgsl"), include_str!("shaders/frost.wgsl"), include_str!("shaders/inner.wgsl"));
-pub const TRACE_BODIES_WGSL: &str = include_str!("shaders/trace_bodies.wgsl");
+pub const TRACE_MATERIAL_WGSL: &str = concat!("//#if LAYER_SERIES\n", include_str!("shaders/paint_interface.wgsl"), include_str!("shaders/pbr/diffuse.wgsl"), include_str!("shaders/pbr/layer.wgsl"), include_str!("shaders/light/rig.wgsl"), "//#endif\n", "//#if PAINT_FILM\n", include_str!("shaders/paint_film.wgsl"), "//#endif\n", include_str!("shaders/pbr/widen.wgsl"), "//#if METAL\n", include_str!("shaders/pbr/energy.wgsl"), "//#endif\n", include_str!("shaders/trace_material.wgsl"), "//#if FILM\n", include_str!("shaders/film_pattern.wgsl"), "//#endif\n", include_str!("shaders/film.wgsl"), include_str!("shaders/frost.wgsl"), include_str!("shaders/frost_direct.wgsl"), "\n//#if RANDOM\n", include_str!("shaders/pcg.wgsl"), "//#endif\n", "//#if FROST_BOUNDARY\n", include_str!("shaders/ggx_microsurface.wgsl"), "//#endif\n", include_str!("shaders/frost_reference.wgsl"), include_str!("shaders/inner.wgsl"), "\n//#if WEAR\n", include_str!("shaders/wear_pigment.wgsl"), include_str!("shaders/wear_marks.wgsl"), "\n//#endif\n", "//#if METAL\n", include_str!("shaders/conductor_fresnel.wgsl"), "//#endif\n", "//#if GGX_SAMPLE\n", include_str!("shaders/pbr/ggx.wgsl"), include_str!("shaders/pbr/rough_conductor.wgsl"), "//#endif\n");
+pub(crate) const PAINT_BODIES_WGSL: &str = concat!(
+    include_str!("shaders/paint_bodies.wgsl"),
+);
+pub const TRACE_BODIES_WGSL: &str = concat!(
+    include_str!("shaders/trace_bodies.wgsl"),
+    include_str!("shaders/frost_bodies.wgsl"),
+    include_str!("shaders/paint_bodies.wgsl"),
+    include_str!("shaders/paint_exchange.wgsl"),
+);
 const GEM_WGSL: &str = include_str!("shaders/gem.wgsl");
 /// The binding of a cut stone's planes (gem.wgsl), read only by tracers built for a stone.
 pub const GEM_BINDING: u32 = 34;
@@ -86,7 +103,7 @@ fn gemCarved(pos: vec3f, dir: vec3f, mOut: ptr<function, vec3f>) -> f32 {
 /// The tracer's text for a reshaped cut stone (`GEM_CARVED_EXIT`); text in which `shade`'s march is not
 /// found is given back as it was.
 pub fn gem_carved_weave(src: &str) -> String {
-    if src.matches(GEM_MARCH).count() != 1 { return src.to_string(); }
+    if crate::weave::found(src, "render.gem_march", GEM_MARCH) != 1 { return src.to_string(); }
     let decl = GEM_WGSL.replace("{{GEM_MAX}}", &gf_core::presets::gems::MAX_PLANES.to_string()).replace("{{GEM_BINDING}}", &GEM_BINDING.to_string());
     // (the last plane's place holds the rim's circle: gem.carve)
     let max = gf_core::presets::gems::MAX_PLANES;
@@ -104,13 +121,49 @@ pub fn gem_fits(v: &Variant) -> bool {
 /// The tracer's text for a cut stone: `shade`'s march through the glass replaced by `gemExit`. Text in
 /// which those lines are not found is given back as it was.
 pub fn gem_weave(src: &str) -> String {
-    if src.matches(GEM_MARCH).count() != 1 { return src.to_string(); }
+    if crate::weave::found(src, "render.gem_march", GEM_MARCH) != 1 { return src.to_string(); }
     let decl = GEM_WGSL.replace("{{GEM_MAX}}", &gf_core::presets::gems::MAX_PLANES.to_string()).replace("{{GEM_BINDING}}", &GEM_BINDING.to_string());
     format!("{}{decl}", src.replace(GEM_MARCH, GEM_EXIT))
 }
 const ACCUM_WGSL: &str = include_str!("shaders/accum.wgsl");
 /// The pass that folds a frame into the picture so far (the denoiser's pass over time is made from it).
 pub const ACCUM_SOURCE: &str = ACCUM_WGSL;
+/// The antialiasing that follows motion, for a frame traced smaller than the picture (keeping the frame
+/// rate: `Renderer::dyn_scale`). The frame lies in the corner of the traced target, `a.pad1` of it per
+/// side: each pixel of the picture reads the frame at its own place within that corner (colour between
+/// the frame's pixels, distance from the nearest one, since distances must not be blended across an
+/// outline), and the neighbourhood that limits the old picture is the frame's 3x3 there. Everything else
+/// is accum.wgsl's. None if the lines it changes are not found (accum.wgsl changed: see the test).
+pub fn accum_dyn(src: &str) -> Option<String> {
+    const CUR: &str = "  let cur = textureLoad(curTex, c, 0);";
+    const TOP: &str = "  let top = vec2i(textureDimensions(curTex)) - 1;";
+    const NEAR: &str = "textureLoad(curTex, clamp(c + vec2i(x, y), vec2i(0), top), 0)";
+    const BLEND: &str = "  var out = vec4f(mix(hist, cur.rgb, a.w), cur.a);";
+    const DYN_CUR: &str = "  let top = vec2i(floor(a.res * a.pad1 + 0.5)) - 1;
+  let sampleOffset = vec2f(a.obj0.w, -a.obj1.w);
+  let atl = clamp((vec2f(c) + 0.5) * vec2f(top + 1) / a.res - sampleOffset, vec2f(0.5), vec2f(top) + 0.5);
+  let cl = min(vec2i(atl), top);
+  let cur = vec4f(sharpImage(atl, curTex, top), textureLoad(curTex, cl, 0).a);";
+    // Give an actually traced native sample more weight than an interpolation between rays.
+    // AccumU carries the ray offset in the otherwise unused fourth lanes of the rotation rows.
+    const DYN_BLEND: &str = "  var weight = a.w;
+  if (a.obj2.w > 0.0 && same && !edge && cur.a > 0.0 && !onFloor) {
+    let offset = abs(atl - (vec2f(cl) + 0.5));
+    let alignment = max(vec2f(1.0) - 2.0 * offset, vec2f(0.0));
+    let confidence = alignment.x * alignment.y;
+    weight = min(1.0, a.w * (0.65 + 1.4 * confidence));
+  }
+  var out = vec4f(mix(hist, cur.rgb, weight), cur.a);";
+    let anchors = [("render.accum_cur", CUR), ("render.accum_top", TOP), ("render.accum_near", NEAR), ("render.accum_blend", BLEND)];
+    if !crate::weave::all_once("render.accum_dyn", &anchors.map(|(name, s)| crate::weave::found(src, name, s))) { return None; }
+    Some(src.replace(TOP, "").replace(CUR, DYN_CUR).replace(BLEND, DYN_BLEND).replace(NEAR, "textureLoad(curTex, clamp(cl + vec2i(x, y), vec2i(0), top), 0)"))
+}
+/// The size a frame traced at share `s` of a `tw` x `th` target takes (as the shader works it out).
+pub fn dyn_region(tw: u32, th: u32, s: f64) -> (u32, u32) {
+    let s = s as f32;
+    let side = |n: u32| ((n as f32 * s).round() as u32).max(2).min(n);
+    (side(tw), side(th))
+}
 const POST_WGSL: &str = include_str!("shaders/post.wgsl");
 
 pub const HDR: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -144,6 +197,8 @@ pub struct TraceU {
     pub nb: i32,
     pub lens_n: i32,
     pub pad: [i32; 3],
+    /// Compiled scene-medium identity and signed interface priority, followed by reserved zero lanes.
+    pub medium: [i32; 4],
     /// where the lens stands across and up from the line through the object's centre (a free camera); unused, unused
     pub eye: [f32; 4],
     /// the lens, for a tracer built to trace its first ray through any lens (camera.wgsl: Cam). The
@@ -164,6 +219,8 @@ pub struct LightU {
     pub clay2: [f32; 4],
     /// the lighting as nine smooth terms a colour: for a matte surface, then for the sheen
     pub nine: [[f32; 4]; 18],
+    pub paint_room: [[f32; 4]; 9],
+    pub paint_lights: [crate::surface::SLight; crate::surface::MAX_LIGHTS],
 }
 
 /// Where reflected and refracted rays find their light. It is one lookup either way: with an
@@ -186,6 +243,8 @@ pub enum LightFrom {
 /// with nothing added.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub struct Variant {
+    pub textured: bool,
+    pub world_faces: bool,
     pub light: LightFrom,
     /// rays from the camera that miss the shape show the environment picture
     pub backdrop: bool,
@@ -209,6 +268,8 @@ pub struct Variant {
     /// an opaque or milky body lit by the surface pass after the tracer (surface.rs): what the tracer
     /// gathers itself changes with it (none: as it always was)
     pub surface: crate::surface::Kind,
+    /// the parts engine's fine bricks are read by `mapN` and the normal (refine.rs)
+    pub refine: bool,
 }
 
 /// How a tracer marches (this differs by family).
@@ -229,8 +290,8 @@ pub struct March {
 pub fn cut_weave(src: &str, cut: f64) -> String {
     if cut == 0.02 { return src.to_string(); }
     let c = format!("{cut:.3}");
-    src.replace("if (b >= u.nb || thr < 0.02) { break; }", &format!("if (b >= u.nb || thr < {c}) {{ break; }}"))
-        .replace("      if (thr < 0.02) { break; }\n      dir = reflect(dir, m);", &format!("      if (thr < {c}) {{ break; }}\n      dir = reflect(dir, m);"))
+    let s = crate::weave::replace(src, "render.cut_bounce", "if (b >= u.nb || thr < 0.02) { break; }", &format!("if (b >= u.nb || thr < {c}) {{ break; }}"));
+    crate::weave::replace(&s, "render.cut_reflected", "      if (thr < 0.02) { break; }\n      dir = exit.reflected;", &format!("      if (thr < {c}) {{ break; }}\n      dir = exit.reflected;"))
 }
 
 /// Light leaving plain glass that carries less than a twentieth of the sample sees the lights at once
@@ -239,7 +300,7 @@ pub fn cut_weave(src: &str, cut: f64) -> String {
 /// glass is traced as it always was.
 pub fn leave_weave(src: &str, on: bool) -> String {
     if !on { return src.to_string(); }
-    src.replacen("        if (LAYERS > 0) {\n          L += thr * (1.0 - F) * att * beyond(", "        if (LAYERS > 0 && thr * (1.0 - F) * max(att.x, max(att.y, att.z)) >= 0.05) {\n          L += thr * (1.0 - F) * att * beyond(", 1)
+    crate::weave::replacen(src, "render.leave", "        if (LAYERS > 0) {\n          L += thr * (1.0 - F) * att * beyond(","        if (LAYERS > 0 && thr * (1.0 - F) * max(att.x, max(att.y, att.z)) >= 0.05) {\n          L += thr * (1.0 - F) * att * beyond(", 1)
 }
 
 pub fn tracer_source(m: &March, v: Variant, profile: bool) -> String {
@@ -252,21 +313,43 @@ pub fn tracer_source_lens(m: &March, v: Variant, profile: bool) -> String {
     crate::camera::finish(tracer_from(&crate::camera::tracer(TRACE_WGSL), m, v, profile))
 }
 
+/// A tracer's text from another template (the matcap view's: matcap.rs), woven as the live tracer is.
+pub(crate) fn tracer_from_template(template: &str, m: &March, v: Variant) -> String {
+    tracer_from(template, m, v, false)
+}
+
 fn tracer_from(template: &str, m: &March, v: Variant, profile: bool) -> String {
     let prof = if profile { ["var<private> prof: vec3f;", "prof.x += 1.0; if (abs(v) > 0.06) { prof.z += 1.0; } ", "prof.y += 1.0; ", "if (true) { return vec4f(prof.x, prof.y, prof.z, depth); } "] } else { [""; 4] };
     let lights = "textureSampleLevel(envTex, envSmp, uv, 0.0).rgb";
     // the lighting's own declarations: none for glass lit by the lights' map
-    let lit = v.light != LightFrom::Lights || v.backdrop || v.clay;
+    let lit = v.light != LightFrom::Lights || v.backdrop || v.clay || v.textured || v.mat.paint_bodies;
     // the material's: none for plain glass, which is then the tracer exactly as it always was
     // (a scene of several bodies with materials of their own has a tracer of its own; clay hides what
     // things are made of, so it is drawn as ever)
+    let mut optics = v.mat;
+    optics.near |= v.near && optics.rough_ref;
     let mat = if v.mat.bodies > 0 && !v.clay {
-        material::bodies_parts(&v.mat, TRACE_MATERIAL_WGSL, TRACE_BODIES_WGSL, v.light == LightFrom::Picture)
+        // A dressed construction cut can introduce another interface at the hit.
+        optics.paint_only &= !v.world_faces;
+        if v.world_faces { optics.paint_shadow_medium = None; }
+        material::bodies_parts(&optics, TRACE_MATERIAL_WGSL, TRACE_BODIES_WGSL, v.light == LightFrom::Picture)
     } else {
-        material::tracer_parts(&v.mat, TRACE_MATERIAL_WGSL, v.light == LightFrom::Picture, v.clay)
+        material::tracer_parts(&optics, TRACE_MATERIAL_WGSL, v.light == LightFrom::Picture, v.clay)
     };
-    let decl = format!("{}{}{}", if lit { TRACE_LIGHT_WGSL.trim_end() } else { "" }, mat.decl, crate::stage::tracer_decl(v.stage, v.backdrop, mat.shade));
+    let shade = if v.textured { "modelOrMaterial(ro, rd, t, xi, W, fc)" } else { mat.shade };
+    let mut decl = format!("{}{}{}", if lit { TRACE_LIGHT_WGSL.trim_end() } else { "" }, mat.decl, crate::stage::tracer_decl(v.stage, v.backdrop, shade));
+    if v.textured {
+        // Imported opaque surfaces share the canonical GGX arithmetic. Reuse material declarations
+        // when an assembly already supplied them rather than compiling duplicate WGSL functions.
+        if !decl.contains("fn fresMetal(") { decl.push_str(include_str!("shaders/conductor_fresnel.wgsl")); }
+        if !decl.contains("fn pbr_ggx_evaluate(") { decl.push_str(include_str!("shaders/pbr/ggx.wgsl")); decl.push_str(include_str!("shaders/pbr/rough_conductor.wgsl")); }
+        decl.push_str(include_str!("shaders/pbr/imported_opaque.wgsl"));
+        let lamps = if v.near { " + lampsDiffuse(p, n) * 0.31830989" } else { "" };
+        decl.push_str(&include_str!("shaders/model_surface.wgsl").replace("{{FILE_DIFFUSE_LAMPS}}", lamps));
+        decl.push_str(&format!("\nfn modelOrMaterial(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32, fc: vec2f) -> vec3f {{\n  let hit = fileSurface(ro + rd*t, rd, 1.0);\n  if (hit.a > 0.0) {{ return hit.rgb; }}\n  return {};\n}}\n",mat.shade));
+    }
     let src = template
+        .replace("{{DIELECTRIC_FRESNEL}}", DIELECTRIC_FRESNEL_WGSL.trim_end())
         .replace("{{PROFILE_DECL}}", prof[0])
         .replace("{{PROFILE_MAP}}", prof[1])
         .replace("{{PROFILE_MAPN}}", prof[2])
@@ -280,12 +363,30 @@ fn tracer_from(template: &str, m: &March, v: Variant, profile: bool) -> String {
             LightFrom::Lights => lights.to_string(),
             LightFrom::Picture => "picture(rd)".to_string(),
         })
-        .replace("{{BACKGROUND_DIR}}", if v.stage.backdrop { "stageBackdrop(rd)" } else if v.backdrop { "backdrop(rd)" } else { "vec3f(0.0)" })
+        .replace("{{BACKGROUND_DIR}}", if v.stage.sky { "skyBackdrop(rd)" } else if v.stage.backdrop { "stageBackdrop(rd)" } else if v.backdrop { "backdrop(rd)" } else { "vec3f(0.0)" })
         .replace("{{BACKGROUND}}", crate::stage::background(v.stage, v.backdrop))
-        .replace("{{SHADE}}", mat.shade)
-        .replace("{{GRAZE}}", mat.graze);
+        .replace("{{SHADE}}", shade)
+        .replace("{{GRAZE}}", if v.stage.any() { "col" } else { mat.graze })
+        // Every subsequent shader edit matches WGSL source lines. A Windows
+        // checkout must initialise the enlarged stage exactly as an LF one does.
+        .replace("\r\n", "\n");
+    let src = if v.stage.atmo {
+        const ATMO_ANCHOR: &str = "  return vec4f(max(col, vec3f(0.0))";
+        assert_eq!(crate::weave::found(&src, "render.atmo", ATMO_ANCHOR), 1, "sampleAt return anchor missing");
+        src.replacen(
+            ATMO_ANCHOR,
+            "  col = stageAtmosphere(ro, rd, t, depth, fc, xi, col);\n  return vec4f(max(col, vec3f(0.0))",
+            1,
+        )
+    } else {
+        src
+    };
+    let src = if v.textured { crate::model_surface::secondary_rays(src) } else { src };
+    let src = if v.world_faces && v.mat.bodies>0 {crate::world_faces::weave(src,v.mat.bodies==1)} else {src};
     // a grown stage: the volume spans a larger box, and the ball that holds the scene is larger
     let src = if v.grown { grown(&src) } else { src };
+    // the parts engine's fine bricks (never in the default tracer)
+    let src = if v.refine { crate::refine::weave(&src) } else { src };
     // a camera off the axis: its rays start where it stands (the default tracer never has this)
     let src = if v.eye || template.contains("  cam: Cam,") { eye_weave(&src) } else { src };
     // (lit by the surface pass: the clay gathers only the room, and leaves the lamps to the pass)
@@ -298,12 +399,71 @@ fn tracer_from(template: &str, m: &March, v: Variant, profile: bool) -> String {
     // (and with both, the lamps' shadows: only where casting went in, which it does not for clay lit by
     // the surface pass, whose shadows the pass draws)
     let src = if cast_in && v.near { crate::lamps::weave_shadows(&src) } else { src };
+    let src = if cast_in && v.stage.cast && v.stage.floor && v.mat.metal && v.mat.bodies == 0 && (!v.mat.rough || v.mat.rough_ref || v.mat.coat) && !v.mat.grating && !v.clay {
+        crate::stage::reflect_cast_floor(&src, v.near, v.mat)
+    } else if cast_in && v.stage.cast && v.stage.floor && v.mat.metal && v.mat.bodies > 0 && !v.clay {
+        crate::stage::reflect_bodies_floor(&src, v.near)
+    } else { src };
     // a rough clear body's tracer also writes, beside the picture, how far what is seen through the
     // surface is to be blurred afterwards (frost.rs)
-    let src = if rough_split(&v, profile) { frost::with_aux(&src) } else { src };
+    let src = if rough_split(&v, profile) {
+        let rough = frost::with_aux(&src);
+        if v.mat.bodies > 0 {
+            crate::weave::replace(&rough, "render.rough_shift", "let shift = vec2f(ign(fc + 19.19), ign(fc.yx + 47.3));",
+                "let shift = select(vec2f(ign(fc + 19.19), ign(fc.yx + 47.3)), vec2f(0.5), u.pad1 != 0);")
+        } else { rough }
+    } else { src };
     // a tracer drawn by chance and denoised also writes, beside the picture, the light it found inside
     // the body, which is noisy (the picture then holds the rest: denoise.rs)
     if v.denoise && !profile { denoise::with_split(&src, v.mat.rough_ref) } else { src }
+}
+
+fn body_uniforms_equal(a: &[f32], b: &[f32]) -> bool {
+    let metadata = (material::MB_HEAD - material::MAX_BODIES * 4)..material::MB_HEAD;
+    a.len() == b.len() && a.iter().zip(b).enumerate().all(|(index, (a, b))| {
+        if metadata.contains(&index) { a.to_bits() == b.to_bits() } else { a == b }
+    })
+}
+
+#[cfg(test)]
+#[test]
+fn body_medium_cache_equality_uses_raw_bits() {
+    let mut a = vec![0.0; material::MB_FLOATS];
+    let mut b = a.clone();
+    a[33] = f32::from_bits((-17i32) as u32);
+    b[33] = a[33];
+    assert!(a[33].is_nan() && body_uniforms_equal(&a, &b));
+    b[33] = f32::from_bits((-18i32) as u32);
+    assert!(!body_uniforms_equal(&a, &b));
+}
+
+#[cfg(test)]
+#[test]
+fn windows_shader_lines_preserve_stage_bounds_and_camera_code() {
+    let march = March { step_scale: 0.95, steps_out: 220, steps_in: 56, layers: 2 };
+    let lf = TRACE_WGSL.replace("\r\n", "\n");
+    let crlf = lf.replace('\n', "\r\n");
+    for lens in [false, true] {
+        for grown in [false, true] {
+            let variant = Variant { grown, ..Default::default() };
+            let build = |src: &str| {
+                if lens {
+                    crate::camera::finish(tracer_from(&crate::camera::tracer(src), &march, variant, false))
+                } else {
+                    tracer_from(src, &march, variant, false)
+                }
+            };
+            let reference = build(&lf);
+            let windows = build(&crlf);
+            assert_eq!(windows.contains("HB = bitcast<f32>(u.pad2);"), grown);
+            assert!(windows == reference, "shader differs for lens={lens}, grown={grown}");
+        }
+    }
+}
+
+/// A 1x1x1 volume of this format (what the bindings of an unused feature read).
+fn standin(gpu: &Gpu, format: wgpu::TextureFormat) -> wgpu::Texture {
+    gpu.device.create_texture(&wgpu::TextureDescriptor { label: Some("stand-in"), size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 }, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D3, format, usage: wgpu::TextureUsages::TEXTURE_BINDING, view_formats: &[] })
 }
 
 /// A tracer's text for a stage larger than ever: the volume's box and the ball the scene fits in, which
@@ -313,9 +473,9 @@ fn tracer_from(template: &str, m: &March, v: Variant, profile: bool) -> String {
 pub fn grown(src: &str) -> String {
     let head = "fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 ";
-    src.replace("const BOUND: f32 = 1.47;", "var<private> BOUND: f32;")
-        .replace("const HB: f32 = 1.5;", "var<private> HB: f32;")
-        .replace(head, &format!("{head}  HB = bitcast<f32>(u.pad2);
+    let s = crate::weave::replace(src, "render.grown_bound", "const BOUND: f32 = 1.47;", "var<private> BOUND: f32;");
+    let s = crate::weave::replace(&s, "render.grown_hb", "const HB: f32 = 1.5;", "var<private> HB: f32;");
+    crate::weave::replace(&s, "render.grown_fs", head, &format!("{head}  HB = bitcast<f32>(u.pad2);
   BOUND = HB * 0.98;
 "))
 }
@@ -325,13 +485,13 @@ pub fn grown(src: &str) -> String {
 /// while the camera stands off that line (and always into the tracer for any lens, which reads it in
 /// camera_trace.wgsl), so that the tracer of plain glass seen from the line stays its old text.
 pub fn eye_weave(src: &str) -> String {
-    let head = "  pad2: i32,\n";
+    let head = "  medium: vec4i,           // raw identity, signed interface priority, two reserved zero lanes\n";
     let s = if src.contains("  eye: vec4f,") { src.to_string() } else {
         assert_eq!(src.matches(head).count(), 1, "the tracer's block has changed");
-        src.replace(head, "  pad2: i32,\n  eye: vec4f,             // xy: where the camera stands across and up from (0, 0, dist)\n")
+        src.replace(head, &format!("{head}  eye: vec4f,             // xy: where the camera stands across and up from (0, 0, dist)\n"))
     };
-    s.replace("var ro = vec3f(0.0, 0.0, u.dist);", "var ro = vec3f(u.eye.xy, u.dist);")
-        .replace("vec3f(0.0, 0.0, u.dist)", "vec3f(u.eye.xy, u.dist)")
+    let s = crate::weave::replace(&s, "render.eye_ro", "var ro = vec3f(0.0, 0.0, u.dist);", "var ro = vec3f(u.eye.xy, u.dist);");
+    crate::weave::replace(&s, "render.eye_rest", "vec3f(0.0, 0.0, u.dist)", "vec3f(u.eye.xy, u.dist)")
 }
 
 /// Is the stage for rough glass run after this tracer? Not when the tracer is denoised: then what is
@@ -360,8 +520,31 @@ fn tracer_pipeline(gpu: &Gpu, layout: &wgpu::BindGroupLayout, cast: Option<&wgpu
         Ok(n) => { nonced = src.replacen("fn ign(p: vec2f) -> f32 { return", &format!("fn ign(p: vec2f) -> f32 {{ if (u.frame == -{}) {{ return 0.5; }} return", n.trim()), 1); nonced.as_str() }
         Err(_) => src,
     };
+    // (measuring only: GLASSFORMS_PROF_EDIT=<file> of `anchor ||| replacement` lines, `\n` for a newline,
+    // edits every tracer before it is made: for timing what a part costs by leaving it out)
+    let edited;
+    let src = match std::env::var_os("GLASSFORMS_PROF_EDIT").and_then(|p| std::fs::read_to_string(p).ok()) {
+        Some(edits) => {
+            let mut s = src.to_string();
+            for (from, to) in edits.lines().filter_map(|l| l.split_once(" ||| ")) {
+                let (from, to) = (from.replace("\\n", "\n"), to.replace("\\n", "\n"));
+                eprintln!("[prof-edit] {} found {} times", from.lines().next().unwrap_or(""), s.matches(&from).count());
+                s = s.replace(&from, &to);
+            }
+            edited = s;
+            edited.as_str()
+        }
+        None => src,
+    };
+    // (measuring only: GLASSFORMS_DUMP_TRACER=<folder> writes each tracer's text there, named by its hash)
+    if let Some(dir) = std::env::var_os("GLASSFORMS_DUMP_TRACER") {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        src.hash(&mut h);
+        let _ = std::fs::write(std::path::Path::new(&dir).join(format!("trace_{:016x}.wgsl", h.finish())), src);
+    }
     let t0 = std::time::Instant::now();
-    let module = gpu.shader("trace", src, true);
+    let module = gpu.shader_in("trace", src, true, &["trace", "cast"]);
     let t1 = std::time::Instant::now();
     let pipe = tracer_pipeline_of(gpu, layout, cast, src, module);
     TRACER_BUILDS[0].fetch_add((t1 - t0).as_nanos() as u64, Relaxed);
@@ -449,6 +632,8 @@ pub struct FinalU {
 /// Everything about a frame that is not the tracer's own block.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Look {
+    /// Revision of the baked geometry visible to this draw.
+    pub shape_no: u64,
     /// antialiasing while moving: how much of the previous picture is kept each frame (0 = off)
     pub smooth: f32,
     pub spread: f32,
@@ -475,6 +660,7 @@ pub struct Look {
 /// What the antialiasing needs to know of the frame before.
 #[derive(Clone, Copy)]
 struct PrevView {
+    shape_no: u64,
     obj: [[f32; 4]; 3],
     env: [[f32; 4]; 3],
     /// the room as the camera saw it, and where the floor stood in it
@@ -496,6 +682,25 @@ struct Mip {
     up: Option<wgpu::BindGroup>,
 }
 
+/// Legacy `bloomKind=1` HDR mip pyramid, allocated lazily only when asked for (`look.glare.pyramid()`).
+struct Pyramid {
+    /// level-0 `BloomU` buffer (`pad[0]` = interactive Karis firefly weight, 0 when settled)
+    u_down0: wgpu::Buffer,
+    down0_res: ([f32; 2], [f32; 2]),
+    last_knee: f32,
+    /// the first bloom level reads accum[i]; the third reads the focused picture instead
+    g_down0: [wgpu::BindGroup; 3],
+    mips: Vec<Mip>,
+    g_final: [wgpu::BindGroup; 3],
+    g_final_deep: Option<[wgpu::BindGroup; 3]>,
+}
+
+struct BloomPipes {
+    layout: wgpu::BindGroupLayout,
+    down: wgpu::RenderPipeline,
+    up: wgpu::RenderPipeline,
+}
+
 struct Targets {
     w: u32,
     h: u32,
@@ -505,20 +710,19 @@ struct Targets {
     trace_view: wgpu::TextureView,
     accum: [wgpu::Texture; 2],
     accum_view: [wgpu::TextureView; 2],
+    focused_view: wgpu::TextureView,
     /// accumulate: read accum[i] as the picture so far (and the new frame), write the other
     g_accum: [wgpu::BindGroup; 2],
     /// the same, reading the traced frame as the stage for rough glass has blurred it
     g_accum_rough: [wgpu::BindGroup; 2],
-    /// the first bloom level reads accum[i]; the third of each of these reads the focused picture instead
-    g_down0: [wgpu::BindGroup; 3],
-    mips: Vec<Mip>,
-    g_final: [wgpu::BindGroup; 3],
-    /// the same, reading the lens's glare in place of the bloom pyramid
+    /// legacy `bloomKind=1` mip pyramid and its final bind groups, built on demand
+    pyramid: Option<Pyramid>,
+    /// final pass bind groups reading the lens's glare (`bloomKind=0`)
     g_final_glare: [wgpu::BindGroup; 3],
     final_tex: wgpu::Texture,
     final_view: wgpu::TextureView,
     /// the screen again in 16-bit floats, with no 8-bit dither, for video with more than 8 bits (when asked for)
-    deep: Option<(wgpu::Texture, wgpu::TextureView, [wgpu::BindGroup; 3], [wgpu::BindGroup; 3])>,
+    deep: Option<(wgpu::Texture, wgpu::TextureView, [wgpu::BindGroup; 3])>,
 }
 
 pub struct Renderer {
@@ -531,13 +735,11 @@ pub struct Renderer {
     l_cast: wgpu::BindGroupLayout,
     g_cast: Option<wgpu::BindGroup>,
     l_accum: wgpu::BindGroupLayout,
-    l_bloom: wgpu::BindGroupLayout,
     l_final: wgpu::BindGroupLayout,
     trace_pipes: HashMap<String, wgpu::RenderPipeline>,
     trace_key: String,
     p_accum: wgpu::RenderPipeline,
-    p_down: wgpu::RenderPipeline,
-    p_up: wgpu::RenderPipeline,
+    bloom: Option<BloomPipes>,
     p_final: wgpu::RenderPipeline,
     u_trace: wgpu::Buffer,
     /// what the tracer is told about the environment picture and the clay
@@ -554,7 +756,13 @@ pub struct Renderer {
     /// the scene has more than one; what stands in for it otherwise; and the bodies' materials
     bodies: Option<(wgpu::TextureView, u32)>,
     no_bodies: wgpu::TextureView,
+    /// the fine bricks' page, atlas and numbers, or stand-ins (refine.rs)
+    refine: Option<(wgpu::TextureView, wgpu::TextureView, wgpu::Buffer)>,
+    no_page: wgpu::TextureView,
+    no_atlas: wgpu::TextureView,
+    no_refine_u: wgpu::Buffer,
     u_bodies: wgpu::Buffer,
+    air_envelope: Option<crate::air_envelope::AirEnvelope>,
     last_bodies: Vec<f32>,
     /// what the tracer is told about what lies inside the body (cracks, grains, fibres, a changing tint)
     u_inner: wgpu::Buffer,
@@ -574,8 +782,13 @@ pub struct Renderer {
     pub wait_builds: bool,
     /// the tracer just changed to the one made on another thread (the picture starts again)
     swapped: bool,
+    pub(crate) world_faces: crate::world_faces::SceneFaces,
+    pub(crate) file_surfaces: crate::model_surface::ModelSurfaces,
     u_sdf: wgpu::Buffer,
+    /// the formula's table (`gf_core::field::table`), for a formula with one
+    s_sdf_tbl: wgpu::Buffer,
     last_sdf: Vec<f32>,
+    last_sdf_tbl: Vec<f32>,
     /// a tree's grid parts' volumes by slot, and what stands in for a slot with none (csg.rs)
     grids: Vec<Option<wgpu::TextureView>>,
     grid_stand_in: crate::csg::GridStandIn,
@@ -600,8 +813,14 @@ pub struct Renderer {
     picture: Option<(wgpu::TextureView, wgpu::TextureView)>,
     picture_smp: wgpu::Sampler,
     no_picture: wgpu::TextureView,
+    /// cached volumetric sky-space dome cubemap and companion 2D ground shadow map (clouds.rs)
+    sky_space: Option<(wgpu::TextureView, wgpu::TextureView)>,
     /// a tracer being built on another thread: which, and where it will arrive
-    building: Option<(String, std::sync::mpsc::Receiver<(wgpu::RenderPipeline, bool)>)>,
+    building: Option<(String, std::sync::mpsc::Receiver<Result<(wgpu::RenderPipeline, bool), String>>)>,
+    /// a DLSS-centred tracer being built on another thread so slider drags do not stall the UI
+    building_centred: Option<(String, std::sync::mpsc::Receiver<Result<wgpu::RenderPipeline, String>>)>,
+    /// tracers whose build failed, each tried again after a wait (build_retry.rs)
+    failed_tracers: crate::build_retry::Failures,
     /// tracers made beforehand on another thread (`warm`): what is on its way, and what has been asked for
     warming: Option<std::sync::mpsc::Receiver<(String, wgpu::RenderPipeline, bool)>>,
     warm_asked: Vec<String>,
@@ -622,6 +841,8 @@ pub struct Renderer {
     /// frames in the running average
     pub accum_n: u32,
     pub frame_no: u32,
+    /// Trace passes submitted, including partial native updates. Read by the session profiler.
+    pub trace_passes: u64,
     jitter_n: u32,
     /// the last frame was folded in by the antialiasing that follows motion
     was_taa: bool,
@@ -650,6 +871,9 @@ pub struct Renderer {
     /// the lens's glare (glare.rs), and whether the last frame drew it (rather than the bloom pyramid)
     glare: crate::glare::Glare,
     glared: bool,
+    glare_motion: (f32, [f32; 2]),
+    glare_cut: bool,
+    pyramid_interactive: bool,
     /// direct light with shadows on opaque and milky bodies, after the tracer (surface.rs)
     surface: crate::surface::Surface,
     /// DLSS while the view moves, when asked for and built in (dlss.rs)
@@ -666,9 +890,30 @@ pub struct Renderer {
     recon: Option<crate::hero::Recon>,
     /// the antialiasing's pipeline has been made with colour kept apart (hero.rs chroma_taa)
     accum_chroma: bool,
+    /// Keeping the frame rate (autoscale.rs): moving frames are traced at this share of the picture's
+    /// size per side (1: all of it), into the corner of the traced frame, and the antialiasing that
+    /// follows motion fills in the full-size picture from them (`ACCUM_DYN`). Only where that
+    /// antialiasing reads the traced frame straight (`dyn_ok`); still frames are always traced whole.
+    pub dyn_scale: f64,
+    /// the share the last frame was traced at
+    pub dyn_used: f64,
+    /// Bounce and wavelength caps submitted to the most recent trace.
+    pub traced_caps: [i32; 2],
+    /// Requested for one live refinement update. Both halves use one sampling sequence entry.
+    pub(crate) split_refine: bool,
+    /// The half last traced: whole, the first set of native columns, or the complementary columns.
+    pub traced_half: crate::split_half::Half,
+    pass_times: Option<crate::pass_times::PassTimes>,
+    p_accum_dyn: Option<wgpu::RenderPipeline>,
+    building_dyn: Option<std::sync::mpsc::Receiver<wgpu::RenderPipeline>>,
     /// adaptive refining: each pixel's own count, and the stencil that leaves pixels whose mean is
     /// certain out of the tracer's passes (adapt.rs)
     pub adapt: crate::adapt::Adapt,
+    /// The matcap view (matcap.rs): its settings while it is what is drawn (None: the full render), and
+    /// whether the stage is grown (the engine says, as it says for the tracer's variant)
+    pub matcap_on: Option<gf_core::view_mode::Matcap>,
+    pub matcap_grown: bool,
+    pub matcap: crate::matcap::Matcap,
 }
 
 /// The tone map of post.wgsl's final pass, done here in 64-bit arithmetic for a 16-bit still: the picture
@@ -688,24 +933,49 @@ pub fn tone_map16(hdr: &[f32], bloom: &(u32, u32, Vec<f32>), w: u32, h: u32, p: 
     // the lens's glare is mixed in (the sharp picture keeping 1 - E of its light), the old bloom added
     let glare = crate::glare::GlareLens::of(p);
     let (amt, keep) = if glare.pyramid() { (p.bloom / levels as f64, [1.0f32; 3]) } else { (1.0, crate::glare::keep(&glare, w, h)) };
-    let texel = |x: usize, y: usize, c: usize| b[(y.min(bh - 1) * bw + x.min(bw - 1)) * 4 + c] as f64;
     // the tone curve and the grade as they are set (with nothing set: the ACES curve, as ever)
     let grade = gf_core::stage::Grade::of(p);
     // the lens's own colour fringing and fall-off of light, when it has any: the picture with its colours
     // drawn apart, and how much light each pixel keeps
     let lens = crate::camera::develop(hdr, w, h, p);
     let mut out = Vec::with_capacity((w * h * 3) as usize);
+    let last_x = bw.saturating_sub(1) as isize;
+    let last_y = bh.saturating_sub(1) as isize;
+    let load = |x: isize, y: isize, c: usize| -> f64 {
+        let cx = x.clamp(0, last_x) as usize;
+        let cy = y.clamp(0, last_y) as usize;
+        b[(cy * bw + cx) * 4 + c] as f64
+    };
+    let catmull = |f: f64| -> [f64; 4] {
+        [
+            f * (-0.5 + f * (1.0 - 0.5 * f)),
+            1.0 + f * f * (-2.5 + 1.5 * f),
+            f * (0.5 + f * (2.0 - 1.5 * f)),
+            f * f * (-0.5 + 0.5 * f),
+        ]
+    };
     for y in 0..h as usize {
         for x in 0..w as usize {
             let (u, v) = ((x as f64 + 0.5) / w as f64, (y as f64 + 0.5) / h as f64);
-            // the bloom level read with interpolation between its texels, edges held
-            let (fx, fy) = ((u * bw as f64 - 0.5).max(0.0), (v * bh as f64 - 0.5).max(0.0));
-            let (x0, y0) = (fx.floor() as usize, fy.floor() as usize);
-            let (tx, ty) = (fx - x0 as f64, fy - y0 as f64);
+            // Smooth Catmull-Rom reconstruction of the bloom level, clamped from below by its 2x2 footprint
+            // (matching post.wgsl's bloomSmooth).
+            let (ax, ay) = (u * bw as f64 - 0.5, v * bh as f64 - 0.5);
+            let (ix, iy) = (ax.floor() as isize, ay.floor() as isize);
+            let wx = catmull(ax - ix as f64);
+            let wy = catmull(ay - iy as f64);
             let vig = 1.0 - p.vignette * ((u - 0.5).powi(2) + (v - 0.5).powi(2));
             let mut exposed = [0.0f64; 3];
             for c in 0..3 {
-                let bl = (texel(x0, y0, c) * (1.0 - tx) + texel(x0 + 1, y0, c) * tx) * (1.0 - ty) + (texel(x0, y0 + 1, c) * (1.0 - tx) + texel(x0 + 1, y0 + 1, c) * tx) * ty;
+                let mut r = 0.0;
+                for jy in 0..4 {
+                    let mut row = 0.0;
+                    for jx in 0..4 {
+                        row += load(ix + jx as isize - 1, iy + jy as isize - 1, c) * wx[jx];
+                    }
+                    r += row * wy[jy];
+                }
+                let lo = load(ix, iy, c).min(load(ix + 1, iy, c)).min(load(ix, iy + 1, c)).min(load(ix + 1, iy + 1, c));
+                let bl = r.max(lo);
                 let at = y * w as usize + x;
                 let (light, kept) = lens.as_ref().map_or((hdr[at * 4 + c], 1.0), |l| (l.0[at * 3 + c], l.1[at] as f64));
                 exposed[c] = (light as f64 * keep[c] as f64 + bl * amt) * vig * kept * p.exposure;
@@ -729,9 +999,9 @@ fn halton(mut i: u32, b: u32) -> f64 {
     r
 }
 
-/// Can the tracer read a tree's grid parts (nine more textures and a sampler than it reads otherwise)?
+/// Can the tracer read a tree's grid parts (eight more textures and a sampler than it reads otherwise)?
 pub fn grids_fit(gpu: &Gpu) -> bool {
-    gpu.device.limits().max_sampled_textures_per_shader_stage >= 24
+    gpu.device.limits().max_sampled_textures_per_shader_stage >= 16 + gf_core::csg::MAX_GRIDS as u32
 }
 
 impl Renderer {
@@ -757,6 +1027,10 @@ impl Renderer {
             texture_entry(24, wgpu::TextureViewDimension::D3, true), texture_entry(25, wgpu::TextureViewDimension::D3, true),
             texture_entry(26, wgpu::TextureViewDimension::D3, true), texture_entry(27, wgpu::TextureViewDimension::D3, true),
             uniform_entry(crate::stage::BINDING, frag, false),
+            texture_entry(crate::clouds::DOME_BINDING, wgpu::TextureViewDimension::Cube, true),
+            texture_entry(crate::clouds::SHADOW_BINDING, d2, true),
+            // (70 to 72: the parts engine's fine bricks: the page (unfiltered: read by texel), the atlas and their numbers, read only by tracers built for them)
+            texture_entry(crate::refine::PAGE_BINDING, wgpu::TextureViewDimension::D3, false), texture_entry(crate::refine::ATLAS_BINDING, wgpu::TextureViewDimension::D3, true), uniform_entry(crate::refine::UNIFORM_BINDING, frag, false),
             // (44: the lamps, read only by tracers built with lamps)
             uniform_entry(crate::lamps::BINDING, frag, false),
             texture_entry(12, wgpu::TextureViewDimension::D3, true), uniform_entry(13, frag, false),
@@ -767,7 +1041,14 @@ impl Renderer {
             uniform_entry(GEM_BINDING, frag, false),
             // (35: the shape's numbers, read only by tracers built to read its formula)
             uniform_entry(gf_core::sdf::BINDING, frag, false),
-        ].into_iter().chain(
+            // (36: the formula's table, read only by tracers built for a formula with one)
+            storage_entry(gf_core::sdf::TABLE_BINDING, frag),
+            storage_entry(crate::world_faces::BINDING,frag),
+            storage_entry(crate::model_surface::DATA_BINDING, frag),
+            storage_entry(crate::model_surface::INSTANCES_BINDING, frag),
+        ].into_iter().chain((0..4).map(|i| {
+            texture_entry(crate::world_faces::PROJECTED_BINDING + i, wgpu::TextureViewDimension::D3, true)
+        })).chain(
             // (50 to 58: the volumes of a tree's grid parts and their sampler, read only by tracers built for
             // a tree with grid parts; only where the device lets a shader read that many textures)
             crate::csg::tree_entries(gf_core::csg::GRID_BINDING_TRACER, frag, grids_fit(gpu))
@@ -803,25 +1084,24 @@ impl Renderer {
             view_formats: &[],
         });
         let l_accum = gpu.bind_layout("accumulate", &[uniform_entry(0, frag, false), texture_entry(1, d2, true), texture_entry(2, d2, true), sampler_entry(3)]);
-        let l_bloom = gpu.bind_layout("bloom", &[uniform_entry(0, frag, false), texture_entry(1, d2, true), sampler_entry(2)]);
         let l_final = gpu.bind_layout("final", &[uniform_entry(4, frag, false), texture_entry(5, d2, true), texture_entry(6, d2, true), sampler_entry(7)]);
         let accum = gpu.shader("accumulate", ACCUM_WGSL, false);
         let post = gpu.shader("post", POST_WGSL, true);
-        let one = wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add };
         let pipe = |label, module, fs, layout: &wgpu::BindGroupLayout, format, blend| gpu.pipeline(&PipeDesc { label, module, vs: "vs", fs, layouts: &[layout], format, blend, strip: false, buffers: &[] });
         Self {
             gpu: gpu.clone(),
             lin: gpu.sampler(wgpu::FilterMode::Linear, wgpu::AddressMode::ClampToEdge),
             env_smp: gpu.sampler(wgpu::FilterMode::Linear, wgpu::AddressMode::Repeat),
             p_accum: pipe("accumulate", &accum, "fs", &l_accum, ACC, None),
-            p_down: pipe("bloom down", &post, "fs_down", &l_bloom, HDR, None),
-            p_up: pipe("bloom up", &post, "fs_up", &l_bloom, HDR, Some(wgpu::BlendState { color: one, alpha: one })),
+            bloom: None,
             p_final: pipe("final", &post, "fs_final", &l_final, LDR, None),
             p_final_deep: pipe("final (deep)", &post, "fs_final", &l_final, HDR, None),
             u_final_deep: gpu.uniform_buffer("final (deep)", std::mem::size_of::<FinalU>() as u64),
             deep: false,
             l_cast: crate::cast::receiver_layout(gpu), g_cast: None,
-            l_trace, l_accum, l_bloom, l_final,
+            l_trace, l_accum, l_final,
+            file_surfaces: crate::model_surface::ModelSurfaces::new(gpu),
+            world_faces: crate::world_faces::SceneFaces::new(gpu),
             trace_pipes: HashMap::new(), trace_key: String::new(),
             u_trace: gpu.uniform_buffer("trace", std::mem::size_of::<TraceU>() as u64),
             u_light: gpu.uniform_buffer("trace: picture and clay", std::mem::size_of::<LightU>() as u64),
@@ -833,7 +1113,12 @@ impl Renderer {
             last_mat: None,
             bodies: None,
             no_bodies: no_bodies.create_view(&wgpu::TextureViewDescriptor::default()),
-            u_bodies: gpu.uniform_buffer("trace: bodies", (material::MB_FLOATS * 4) as u64),
+            refine: None,
+            no_page: standin(gpu, wgpu::TextureFormat::R32Float).create_view(&Default::default()),
+            no_atlas: standin(gpu, wgpu::TextureFormat::R16Float).create_view(&Default::default()),
+            no_refine_u: gpu.uniform_buffer("no refine", 64),
+            u_bodies: gpu.uniform_buffer("trace: bodies", (material::MB_FLOATS * 4 + 16) as u64),
+            air_envelope: None,
             last_bodies: Vec::new(),
             u_inner: gpu.uniform_buffer("trace: inside the body", (gf_core::inner::IU_FLOATS * 4) as u64),
             last_inner: Vec::new(),
@@ -843,7 +1128,9 @@ impl Renderer {
             wait_builds: true,
             swapped: false,
             u_sdf: gpu.uniform_buffer("trace: the shape's formula", (gf_core::field::UNIFORM_SIZE).max(gf_core::csg::UNIFORM_FLOATS * 4) as u64),
+            s_sdf_tbl: gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("trace: the formula's table"), size: (16 * gf_core::field::TABLE_MAX) as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }),
             last_sdf: Vec::new(),
+            last_sdf_tbl: Vec::new(),
             gem: false, gem_carved: false,
             u_inner_bodies: gpu.uniform_buffer("trace: inside each body", (material::MAX_BODIES * gf_core::inner::IU_FLOATS * 4) as u64),
             last_inner_bodies: Vec::new(),
@@ -869,17 +1156,19 @@ impl Renderer {
                 ..Default::default()
             }),
             no_picture: no_picture.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::Cube), ..Default::default() }),
-            building: None, warming: None, warm_asked: Vec::new(), scene: None, march: None, variant: Variant::default(),
+            sky_space: None,
+            building: None, building_centred: None, failed_tracers: Default::default(), warming: None, warm_asked: Vec::new(), scene: None, march: None, variant: Variant::default(),
             u_accum: gpu.uniform_buffer("accumulate", std::mem::size_of::<AccumU>() as u64),
             u_final: gpu.uniform_buffer("final", std::mem::size_of::<FinalU>() as u64),
-            g_trace: None, t: None, acc_idx: 0, accum_n: 0, frame_no: 0, jitter_n: 0, was_taa: false, prev: None, last_final: None, profile: false, cut: 0.02, leave_cut: false,
-            dof: Dof::new(gpu), focused: false, cam: Default::default(), glare: crate::glare::Glare::new(gpu), glared: false,
+            g_trace: None, t: None, acc_idx: 0, accum_n: 0, frame_no: 0, trace_passes: 0, jitter_n: 0, was_taa: false, prev: None, last_final: None, profile: false, cut: 0.02, leave_cut: false,
+            dof: Dof::new(gpu), focused: false, cam: Default::default(), glare: crate::glare::Glare::new(gpu), glared: false, glare_motion: (0.0, [0.0; 2]), glare_cut: false, pyramid_interactive: false,
             frost: Frost::new(gpu),
             dn: Denoise::new(gpu), shown: 0,
             surface: crate::surface::Surface::new(gpu),
             up: Default::default(),
-            hero: Default::default(), hero_cur: None, hero_move: None, split_keys: Default::default(), recon: None, accum_chroma: false,
+            hero: Default::default(), hero_cur: None, hero_move: None, split_keys: Default::default(), recon: None, accum_chroma: false, dyn_scale: 1.0, dyn_used: 1.0, traced_caps: [0; 2], traced_half: Default::default(), split_refine: false, pass_times: crate::pass_times::PassTimes::from_env(gpu), p_accum_dyn: None, building_dyn: None,
             adapt: crate::adapt::Adapt::new(gpu),
+            matcap_on: None, matcap_grown: false, matcap: crate::matcap::Matcap::new(gpu),
             grids: Vec::new(), grid_stand_in: crate::csg::GridStandIn::new(gpu), csg_lists: gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("no csg lists"), size: 64, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false }),
             csg_table: gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("no csg parts"), size: (gf_core::csg::PART_FLOATS * 4) as u64, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false }),
         }
@@ -908,7 +1197,7 @@ impl Renderer {
 
     /// Paint the lights' map: RGBA floats, row 0 (the top of the sky) first.
     pub fn env_paint(&self, tex: &wgpu::Texture, rgba: &[f32], w: u32, h: u32) {
-        let halves: Vec<half::f16> = rgba.iter().map(|&v| half::f16::from_f32(v)).collect();
+        let halves: Vec<half::f16> = { use rayon::prelude::*; rgba.par_iter().map(|&v| half::f16::from_f32(v)).collect() };
         self.gpu.queue.write_texture(
             wgpu::TexelCopyTextureInfo { texture: tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
             bytemuck::cast_slice(&halves),
@@ -917,9 +1206,19 @@ impl Renderer {
         );
     }
 
+    fn update_air_envelope(&mut self, volume: &Volume) {
+        if self.bodies.is_some() && self.sdf.as_ref().is_none_or(|(_, decl)| decl == crate::sdf::GUARD_DECL) {
+            self.air_envelope.get_or_insert_with(|| crate::air_envelope::AirEnvelope::new(&self.gpu))
+                .update(&self.gpu, volume, &self.u_bodies);
+        } else if self.air_envelope.is_some() {
+            self.gpu.queue.write_buffer(&self.u_bodies, (material::MB_FLOATS * 4) as u64, &[0;4]);
+        }
+    }
+
     /// Say which lights and which volume the tracer reads, and how it marches (these differ by family).
     pub fn set_scene(&mut self, env: &wgpu::TextureView, vol: &Volume, step_scale: f64, steps_out: u32, steps_in: u32, layers: u32) {
         self.march = Some(March { step_scale, steps_out, steps_in, layers });
+        self.update_air_envelope(vol);
         self.scene = Some((env.clone(), vol.view.clone()));
         self.build_tracer();
         self.bind_tracer();
@@ -929,6 +1228,7 @@ impl Renderer {
     /// into it, or back to the shape's own); everything else about the scene stays.
     pub fn set_volume(&mut self, vol: &Volume) {
         let Some((env, _)) = self.scene.take() else { return };
+        self.update_air_envelope(vol);
         self.scene = Some((env, vol.view.clone()));
         self.bind_tracer();
     }
@@ -947,7 +1247,7 @@ impl Renderer {
 
     /// The numbers of the bodies' materials (`gf_core::material::bodies_uniforms`). True if they changed.
     pub fn set_bodies_material(&mut self, numbers: &[f32]) -> bool {
-        if self.last_bodies == numbers { return false; }
+        if body_uniforms_equal(&self.last_bodies, numbers) { return false; }
         self.gpu.queue.write_buffer(&self.u_bodies, 0, bytemuck::cast_slice(numbers));
         self.last_bodies = numbers.to_vec();
         true
@@ -1004,6 +1304,14 @@ impl Renderer {
             }
             None => self.sdf = None,
         }
+    }
+
+    /// The formula's table (`gf_core::field::table`), for a formula traced with one.
+    pub fn set_sdf_table(&mut self, table: &[f32]) {
+        if table.is_empty() || self.last_sdf_tbl == table { return; }
+        let n = table.len().min(4 * gf_core::field::TABLE_MAX);
+        self.gpu.queue.write_buffer(&self.s_sdf_tbl, 0, bytemuck::cast_slice(&table[..n]));
+        self.last_sdf_tbl = table.to_vec();
     }
 
     /// The numbers of what lies inside the body (`gf_core::inner::uniforms`). True if they changed.
@@ -1079,6 +1387,13 @@ impl Renderer {
         if fresh { self.bind_tracer(); }
     }
 
+    /// The fine bricks the tracer reads (the page, the atlas, their numbers), or none. Set before `set_scene`; a tracer built for them is
+    /// asked for with `Variant::refine`.
+    pub fn set_refine(&mut self, r: Option<(wgpu::TextureView, wgpu::TextureView, wgpu::Buffer)>) {
+        self.refine = r;
+    }
+    pub fn refine_on(&self) -> bool { self.refine.is_some() }
+
     /// Say what the tracer draws: glass or clay, lit by what, with what behind the shape.
     pub fn set_variant(&mut self, v: Variant) {
         if v == self.variant && !self.lens_pending() { return; }
@@ -1116,9 +1431,18 @@ impl Renderer {
             Some(k) => src.replace("let fc = vec2f(pos.x, u.res.y - pos.y);", &format!("let fc = floor(vec2f(pos.x, u.res.y - pos.y) / {k}.0) * {k}.0 + 0.5;")),
             None => src,
         };
-        match sdf {
+        let src = match sdf {
             Some((_, decl)) if crate::sdf::fits(&v) => crate::sdf::weave(&src, decl),
+            _ if v.mat.metal && v.mat.bodies == 0 && !v.clay => crate::sdf::conductor_volume_normal(&src, self.profile),
             _ => src,
+        };
+        // Exact construction faces are generated after the ordinary casting pass.
+        // Attach any remaining paint receivers now, including when the host itself
+        // needed no cast implementation. `cast::weave` will not duplicate it.
+        if v.cast && src.contains(crate::cast::PAINT_FOCUS_STUB) {
+            crate::cast::weave(&src).unwrap_or(src)
+        } else {
+            src
         }
     }
     /// What names the formula the tracer is given, if it is given one.
@@ -1146,6 +1470,12 @@ impl Renderer {
     /// levels (shown behind the shape), and the cube made ready for the glass.
     pub fn set_picture(&mut self, cubes: Option<(&wgpu::TextureView, &wgpu::TextureView)>) {
         self.picture = cubes.map(|(behind, glass)| (behind.clone(), glass.clone()));
+        self.bind_tracer();
+    }
+
+    /// Bind or clear the cached volumetric sky-space dome cubemap and companion 2D cloud shadow map.
+    pub fn set_sky_space(&mut self, views: Option<(&wgpu::TextureView, &wgpu::TextureView)>) {
+        self.sky_space = views.map(|(dome, shadow)| (dome.clone(), shadow.clone()));
         self.bind_tracer();
     }
 
@@ -1260,10 +1590,9 @@ impl Renderer {
     fn build_tracer(&mut self) {
         let Some(m) = self.march else { return };
         let key = self.tracer_key(&m, self.variant);
-        // a tree of several parts: made on another thread (`prepare` takes it up), unless there is no
-        // tracer yet to go on with
-        let slow = self.sdf.as_ref().is_some_and(|s| s.0.starts_with("csg:")) && crate::sdf::fits(&self.variant);
-        if !self.trace_pipes.contains_key(&key) && slow && !self.wait_builds && self.trace_pipes.contains_key(&self.trace_key) {
+        // Any uncached tracer compiles asynchronously when an active pipeline already exists so slider
+        // interactions keep drawing without stalling the UI thread.
+        if !self.trace_pipes.contains_key(&key) && !self.wait_builds && self.trace_pipes.contains_key(&self.trace_key) {
             let _ = self.prepare(self.variant);
             return;
         }
@@ -1290,13 +1619,77 @@ impl Renderer {
         format!("{}|centred", self.trace_key)
     }
 
+    fn build_centred_pipeline(
+        gpu: &Gpu,
+        l_trace: &wgpu::BindGroupLayout,
+        l_cast: Option<&wgpu::BindGroupLayout>,
+        src: &str,
+    ) -> wgpu::RenderPipeline {
+        // DLSS traces every low-resolution pixel into one colour target, without the
+        // full-resolution stencil used to skip converged pixels during refinement.
+        let module = gpu.shader("trace (DLSS)", src, true);
+        let mut layouts = vec![l_trace];
+        if let Some(cast) = l_cast { layouts.push(cast); }
+        gpu.pipeline(&PipeDesc {
+            label: "trace (DLSS)", module: &module, vs: "vs", fs: "fs", layouts: &layouts,
+            format: HDR, blend: None, strip: false, buffers: &[],
+        })
+    }
+
+    fn poll_centred(&mut self) {
+        if let Some((key, rx)) = &self.building_centred {
+            match rx.try_recv() {
+                Ok(Ok(pipe)) => {
+                    self.failed_tracers.built(key);
+                    self.trace_pipes.insert(key.clone(), pipe);
+                    self.building_centred = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Ok(Err(message)) => {
+                    self.failed_tracers.failed(key, message, std::time::Instant::now());
+                    self.building_centred = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.failed_tracers.failed(key, "The DLSS material shader compiler stopped.".into(), std::time::Instant::now());
+                    self.building_centred = None;
+                }
+            }
+        }
+    }
+
     /// Build the tracer for DLSS that goes with the tracer in use, if it is not built (and can be).
     fn build_centred(&mut self) {
+        self.poll_centred();
         let Some(m) = self.march else { return };
         let key = self.centred_key();
-        if self.trace_pipes.contains_key(&key) || self.cam.active || self.split_keys.contains(&self.trace_key) { return; }
+        let waiting = matches!(self.failed_tracers.standing(&key, std::time::Instant::now()), crate::build_retry::Standing::Waiting(_));
+        if self.trace_pipes.contains_key(&key) || waiting
+            || self.cam.active || self.split_keys.contains(&self.trace_key)
+            || self.profile || self.variant.denoise || rough_split(&self.variant, self.profile) { return; }
         if let Some(src) = crate::dlss::centre(&self.tracer_text(&m, self.variant)) {
-            let pipe = tracer_pipeline(&self.gpu, &self.l_trace, self.variant.cast.then_some(&self.l_cast), &src);
+            if src.contains(denoise::MARK) || src.contains("struct FrOut") || src.contains(crate::hero::SPLIT_MARK) { return; }
+            if !self.wait_builds {
+                if self.building_centred.is_none() {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let (gpu, l_trace) = (self.gpu.clone(), self.l_trace.clone());
+                    let l_cast = self.variant.cast.then(|| self.l_cast.clone());
+                    let spawned = std::thread::Builder::new().name("tracer-dlss".into()).spawn(move || {
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            Self::build_centred_pipeline(&gpu, &l_trace, l_cast.as_ref(), &src)
+                        })).map_err(|payload| {
+                            let detail = payload.downcast_ref::<String>().map(String::as_str)
+                                .or_else(|| payload.downcast_ref::<&str>().copied()).unwrap_or("unknown compiler error");
+                            format!("The DLSS material shader could not be built. {detail}")
+                        });
+                        let _ = tx.send(result);
+                    });
+                    if spawned.is_ok() {
+                        self.building_centred = Some((key, rx));
+                    }
+                }
+                return;
+            }
+            let pipe = Self::build_centred_pipeline(&self.gpu, &self.l_trace, self.variant.cast.then_some(&self.l_cast), &src);
             self.trace_pipes.insert(key, pipe);
         }
     }
@@ -1315,17 +1708,32 @@ impl Renderer {
     /// about half a second, too long to hold a frame up for) and the answer is no until it is there;
     /// `set_variant` then takes no time. One is built at a time.
     pub fn prepare(&mut self, v: Variant) -> bool {
+        self.try_prepare(v).unwrap_or(false)
+    }
+
+    /// A rejected pipeline stays attached to the shader key that produced it.
+    /// Editing the construction or selecting another finish can still build its own pipeline.
+    pub fn try_prepare(&mut self, v: Variant) -> Result<bool, &str> {
+        self.poll_centred();
         // (before there is a shape there is nothing to build for: `set_scene` builds what is set by then)
-        let Some(m) = self.march else { return true };
+        let Some(m) = self.march else { return Ok(true) };
         if let Some((key, rx)) = &self.building {
             match rx.try_recv() {
-                Ok((pipe, split)) => {
+                Ok(Ok((pipe, split))) => {
                     if split { self.split_keys.insert(key.clone()); }
+                    self.failed_tracers.built(key);
                     self.trace_pipes.insert(key.clone(), pipe);
                     self.building = None;
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.building = None,
+                Ok(Err(message)) => {
+                    self.failed_tracers.failed(key, message, std::time::Instant::now());
+                    self.building = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.failed_tracers.failed(key, "The material shader compiler stopped.".into(), std::time::Instant::now());
+                    self.building = None;
+                }
             }
         }
         let key = self.tracer_key(&m, v);
@@ -1334,27 +1742,41 @@ impl Renderer {
             if v == self.variant && self.trace_key != key {
                 self.trace_key = key;
                 self.swapped = true;
+                if self.up.scale.is_some() { self.build_centred(); }
             }
-            return true;
+            return Ok(true);
         }
-        if self.building.is_none() {
+        // (a failed tracer is tried again once its wait is up; its message shows until it builds)
+        use crate::build_retry::Standing;
+        let standing = self.failed_tracers.standing(&key, std::time::Instant::now());
+        if self.building.is_none() && !matches!(standing, Standing::Waiting(_)) {
             let (tx, rx) = std::sync::mpsc::channel();
             let (gpu, layout, src) = (self.gpu.clone(), self.l_trace.clone(), self.tracer_text(&m, v));
             let cast = v.cast.then(|| self.l_cast.clone());
             let spawned = std::thread::Builder::new().name("tracer".into()).spawn(move || {
                 let split = src.contains(crate::hero::SPLIT_MARK);
-                let _ = tx.send((tracer_pipeline(&gpu, &layout, cast.as_ref(), &src), split));
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    (tracer_pipeline(&gpu, &layout, cast.as_ref(), &src), split)
+                })).map_err(|payload| {
+                    let detail = payload.downcast_ref::<String>().map(String::as_str)
+                        .or_else(|| payload.downcast_ref::<&str>().copied()).unwrap_or("unknown compiler error");
+                    format!("The material shader could not be built. {detail}")
+                });
+                let _ = tx.send(result);
             });
             match spawned {
-                Ok(_) => self.building = Some((key, rx)),
+                Ok(_) => self.building = Some((key.clone(), rx)),
                 // no thread to be had: build it here after all
-                Err(_) => return true,
+                Err(_) => return Ok(true),
             }
         }
-        false
+        match self.failed_tracers.standing(&key, std::time::Instant::now()) {
+            Standing::Waiting(why) | Standing::Due(why) => Err(why),
+            Standing::Clear => Ok(false),
+        }
     }
 
-    fn bind_tracer(&mut self) {
+    pub(crate) fn bind_tracer(&mut self) {
         // (the surface pass reads the same volume: its group is made again when next drawn)
         self.surface.unbind();
         let Some((env, vol)) = &self.scene else { return };
@@ -1379,14 +1801,28 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 26, resource: wgpu::BindingResource::TextureView(self.glow[2].as_ref().unwrap_or(&self.no_glow)) },
                 wgpu::BindGroupEntry { binding: 27, resource: wgpu::BindingResource::TextureView(self.glow[3].as_ref().unwrap_or(&self.no_glow)) },
                 wgpu::BindGroupEntry { binding: crate::stage::BINDING, resource: self.u_stage.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: crate::clouds::DOME_BINDING, resource: wgpu::BindingResource::TextureView(self.sky_space.as_ref().map_or(&self.no_picture, |s| &s.0)) },
+                wgpu::BindGroupEntry { binding: crate::clouds::SHADOW_BINDING, resource: wgpu::BindingResource::TextureView(self.sky_space.as_ref().map_or(&self.no_soft, |s| &s.1)) },
                 wgpu::BindGroupEntry { binding: crate::lamps::BINDING, resource: self.u_lamps.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: crate::refine::PAGE_BINDING, resource: wgpu::BindingResource::TextureView(self.refine.as_ref().map_or(&self.no_page, |r| &r.0)) },
+                wgpu::BindGroupEntry { binding: crate::refine::ATLAS_BINDING, resource: wgpu::BindingResource::TextureView(self.refine.as_ref().map_or(&self.no_atlas, |r| &r.1)) },
+                wgpu::BindGroupEntry { binding: crate::refine::UNIFORM_BINDING, resource: self.refine.as_ref().map_or(&self.no_refine_u, |r| &r.2).as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(self.bodies.as_ref().map_or(&self.no_bodies, |b| &b.0)) },
                 wgpu::BindGroupEntry { binding: 13, resource: self.u_bodies.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 32, resource: self.u_inner.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 33, resource: self.u_inner_bodies.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: GEM_BINDING, resource: self.u_gem.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: gf_core::sdf::BINDING, resource: self.u_sdf.as_entire_binding() },
-            ].into_iter().chain(
+                wgpu::BindGroupEntry { binding: gf_core::sdf::TABLE_BINDING, resource: self.s_sdf_tbl.as_entire_binding() },
+                wgpu::BindGroupEntry {binding:crate::world_faces::BINDING,resource:self.world_faces.buffer.as_entire_binding()},
+                wgpu::BindGroupEntry { binding: crate::model_surface::DATA_BINDING, resource: self.file_surfaces.data.buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: crate::model_surface::INSTANCES_BINDING, resource: self.file_surfaces.instances.buf.as_entire_binding() },
+            ].into_iter().chain(self.world_faces.projected.iter().enumerate().map(|(i, view)| {
+                wgpu::BindGroupEntry {
+                    binding: crate::world_faces::PROJECTED_BINDING + i as u32,
+                    resource: wgpu::BindingResource::TextureView(view.as_ref().unwrap_or(&self.no_bodies)),
+                }
+            })).chain(
                 self.grid_stand_in.entries(gf_core::csg::GRID_BINDING_TRACER, &self.grids, &self.csg_lists, &self.csg_table, grids_fit(&self.gpu))
             ).collect::<Vec<_>>(),
         }));
@@ -1426,8 +1862,8 @@ impl Renderer {
         // the focus stage reads either picture and writes one of its own, which the bloom and the screen
         // read in its place (the third of each of their groups below)
         self.dof.resize(tw, th, [&accum_view[0], &accum_view[1]]);
-        let focused = self.dof.view().expect("the focus stage has just been sized").clone();
-        let source = |i: usize| if i < 2 { &accum_view[i] } else { &focused };
+        let focused_view = self.dof.view().expect("the focus stage has just been sized").clone();
+        let source = |i: usize| if i < 2 { &accum_view[i] } else { &focused_view };
         fn tex_entry<'a>(binding: u32, v: &'a wgpu::TextureView) -> wgpu::BindGroupEntry<'a> {
             wgpu::BindGroupEntry { binding, resource: wgpu::BindingResource::TextureView(v) }
         }
@@ -1451,35 +1887,6 @@ impl Renderer {
         self.frost.resize(tw, th, &trace_view);
         let g_accum_rough = accum_groups(self.frost.view().expect("the stage for rough glass has just been sized"));
         self.dn.resize(tw, th, [&accum_view[0], &accum_view[1]], &self.u_accum);
-        // bloom: a chain of pictures each half the size of the one before
-        let bloom_group = |src: &wgpu::TextureView, sw: u32, sh: u32, dw: u32, dh: u32| {
-            let u = gpu.uniform_buffer("bloom", std::mem::size_of::<BloomU>() as u64);
-            gpu.queue.write_buffer(&u, 0, bytemuck::bytes_of(&BloomU { texel: [1.0 / sw as f32, 1.0 / sh as f32], dst_res: [dw as f32, dh as f32], gain: 1.0, pad: [0.0; 3] }));
-            gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("bloom"),
-                layout: &self.l_bloom,
-                entries: &[wgpu::BindGroupEntry { binding: 0, resource: u.as_entire_binding() }, tex_entry(1, src), wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.lin) }],
-            })
-        };
-        let mut sizes = Vec::new();
-        let (mut mw, mut mh) = (tw, th);
-        for _ in 0..7 {
-            mw = (mw >> 1).max(1);
-            mh = (mh >> 1).max(1);
-            sizes.push((mw, mh));
-            if mw < 8 || mh < 8 { break; }
-        }
-        let texs: Vec<wgpu::Texture> = sizes.iter().map(|&(a, b)| gpu.target("bloom", a, b, HDR, &[])).collect();
-        let views: Vec<wgpu::TextureView> = texs.iter().map(&view).collect();
-        let g_down0 = [0, 1, 2].map(|i| bloom_group(source(i), tw, th, sizes[0].0, sizes[0].1));
-        let mut mips = Vec::new();
-        for (i, &(a, b)) in sizes.iter().enumerate() {
-            // down: read the level above into this one (level 0 reads the picture itself: see g_down0)
-            let down = if i == 0 { g_down0[0].clone() } else { bloom_group(&views[i - 1], sizes[i - 1].0, sizes[i - 1].1, a, b) };
-            // up: read this level while drawing onto the next larger one
-            let up = (i > 0).then(|| bloom_group(&views[i], a, b, sizes[i - 1].0, sizes[i - 1].1));
-            mips.push(Mip { tex: texs[i].clone(), view: views[i].clone(), w: a, h: b, down, up });
-        }
         let final_tex = gpu.target("screen", w, h, LDR, &[wgpu::TextureFormat::Rgba8UnormSrgb]);
         let final_view = view(&final_tex);
         self.glare.resize(tw, th, [source(0), source(1), source(2)]);
@@ -1496,24 +1903,104 @@ impl Renderer {
                 ],
             })
         });
-        let g_final = final_groups(&self.u_final, &views[0]);
         let g_final_glare = final_groups(&self.u_final, &glare_view);
         let deep = self.deep.then(|| {
             let tex = gpu.target("screen (deep)", w, h, HDR, &[]);
             let v = view(&tex);
-            (tex, v, final_groups(&self.u_final_deep, &views[0]), final_groups(&self.u_final_deep, &glare_view))
+            (tex, v, final_groups(&self.u_final_deep, &glare_view))
         });
-        self.t = Some(Targets { w, h, tw, th, trace_tex, trace_view, accum, accum_view, g_accum, g_accum_rough, g_down0, mips, g_final, g_final_glare, final_tex, final_view, deep });
+        self.t = Some(Targets { w, h, tw, th, trace_tex, trace_view, accum, accum_view, focused_view, g_accum, g_accum_rough, pyramid: None, g_final_glare, final_tex, final_view, deep });
         self.acc_idx = 0;
         self.shown = 0;
         self.accum_n = 0;
         self.prev = None;
+        self.glare_motion = (0.0, [0.0; 2]);
+        self.glare_cut = false;
+        self.pyramid_interactive = false;
         #[cfg(feature = "dlss")]
         {
             self.up.ready(&self.gpu, tw, th, &self.u_accum);
             self.up.live = false;
         }
         true
+    }
+
+    /// Lazily build the legacy `bloomKind=1` pipelines and HDR mip pyramid when `look.glare.pyramid()` is requested.
+    fn ensure_pyramid(&mut self) {
+        let gpu = &self.gpu;
+        let bl = self.bloom.get_or_insert_with(|| {
+            let frag = wgpu::ShaderStages::FRAGMENT;
+            let d2 = wgpu::TextureViewDimension::D2;
+            let layout = gpu.bind_layout("bloom", &[uniform_entry(0, frag, false), texture_entry(1, d2, true), sampler_entry(2)]);
+            let post = gpu.shader("post", POST_WGSL, true);
+            let one = wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add };
+            let pipe = |label, fs, blend| gpu.pipeline(&PipeDesc { label, module: &post, vs: "vs", fs, layouts: &[&layout], format: HDR, blend, strip: false, buffers: &[] });
+            BloomPipes {
+                down: pipe("bloom down", "fs_down", None),
+                up: pipe("bloom up", "fs_up", Some(wgpu::BlendState { color: one, alpha: one })),
+                layout,
+            }
+        });
+        let Some(t) = self.t.as_mut() else { return };
+        if t.pyramid.as_ref().is_some_and(|p| p.g_final_deep.is_some() == t.deep.is_some()) { return; }
+        let (tw, th) = (t.tw, t.th);
+        let source = |i: usize| if i < 2 { &t.accum_view[i] } else { &t.focused_view };
+        fn tex_entry<'a>(binding: u32, v: &'a wgpu::TextureView) -> wgpu::BindGroupEntry<'a> {
+            wgpu::BindGroupEntry { binding, resource: wgpu::BindingResource::TextureView(v) }
+        }
+        let bloom_group = |src: &wgpu::TextureView, sw: u32, sh: u32, dw: u32, dh: u32| {
+            let u = gpu.uniform_buffer("bloom", std::mem::size_of::<BloomU>() as u64);
+            gpu.queue.write_buffer(&u, 0, bytemuck::bytes_of(&BloomU { texel: [1.0 / sw as f32, 1.0 / sh as f32], dst_res: [dw as f32, dh as f32], gain: 1.0, pad: [0.0; 3] }));
+            gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("bloom"),
+                layout: &bl.layout,
+                entries: &[wgpu::BindGroupEntry { binding: 0, resource: u.as_entire_binding() }, tex_entry(1, src), wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.lin) }],
+            })
+        };
+        let mut sizes = Vec::new();
+        let (mut mw, mut mh) = (tw, th);
+        for _ in 0..7 {
+            mw = (mw >> 1).max(1);
+            mh = (mh >> 1).max(1);
+            sizes.push((mw, mh));
+            if mw < 8 || mh < 8 { break; }
+        }
+        let view = |tex: &wgpu::Texture| tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let texs: Vec<wgpu::Texture> = sizes.iter().map(|&(a, b)| gpu.target("bloom", a, b, HDR, &[])).collect();
+        let views: Vec<wgpu::TextureView> = texs.iter().map(view).collect();
+        let down0_res = ([1.0 / tw as f32, 1.0 / th as f32], [sizes[0].0 as f32, sizes[0].1 as f32]);
+        let u_down0 = gpu.uniform_buffer("bloom down0", std::mem::size_of::<BloomU>() as u64);
+        gpu.queue.write_buffer(&u_down0, 0, bytemuck::bytes_of(&BloomU { texel: down0_res.0, dst_res: down0_res.1, gain: 1.0, pad: [0.0; 3] }));
+        let g_down0 = [0, 1, 2].map(|i| {
+            gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("bloom"),
+                layout: &bl.layout,
+                entries: &[wgpu::BindGroupEntry { binding: 0, resource: u_down0.as_entire_binding() }, tex_entry(1, source(i)), wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.lin) }],
+            })
+        });
+        let mut mips = Vec::with_capacity(sizes.len());
+        for (i, &(a, b)) in sizes.iter().enumerate() {
+            // down: read the level above into this one (level 0 reads the picture itself: see g_down0)
+            let down = if i == 0 { g_down0[0].clone() } else { bloom_group(&views[i - 1], sizes[i - 1].0, sizes[i - 1].1, a, b) };
+            // up: read this level while drawing onto the next larger one
+            let up = (i > 0).then(|| bloom_group(&views[i], a, b, sizes[i - 1].0, sizes[i - 1].1));
+            mips.push(Mip { tex: texs[i].clone(), view: views[i].clone(), w: a, h: b, down, up });
+        }
+        let final_groups = |u: &wgpu::Buffer| [0, 1, 2].map(|i| {
+            gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("final"),
+                layout: &self.l_final,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 4, resource: u.as_entire_binding() },
+                    tex_entry(5, source(i)),
+                    tex_entry(6, &views[0]),
+                    wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::Sampler(&self.lin) },
+                ],
+            })
+        });
+        let g_final = final_groups(&self.u_final);
+        let g_final_deep = t.deep.is_some().then(|| final_groups(&self.u_final_deep));
+        t.pyramid = Some(Pyramid { u_down0, down0_res, last_knee: 0.0, g_down0, mips, g_final, g_final_deep });
     }
 
     /// The picture on screen, as a texture whose bytes are already display-ready (sRGB-encoded).
@@ -1536,11 +2023,57 @@ impl Renderer {
         }
     }
 
+    /// Moving frames can be traced smaller than the picture (`dyn_scale`): the antialiasing that follows
+    /// motion can read its traced region. Rough glass and direct surface lighting follow that region too.
+    pub fn dyn_ok(&self) -> bool {
+        !self.variant.denoise && !self.split_keys.contains(&self.trace_key) && !self.cam.active && !self.profile && self.hero_move.is_none() && self.up.scale.is_none()
+    }
+
+    pub(crate) fn can_split_refine(&self) -> bool {
+        self.variant.mat.bodies > 0 && rough_split(&self.variant, self.profile)
+            && self.dyn_ok() && !self.surface.on() && self.size().1.0 >= 2
+    }
+
+    fn dyn_pipeline(gpu: &Gpu, layout: &wgpu::BindGroupLayout) -> wgpu::RenderPipeline {
+        let src = accum_dyn(ACCUM_WGSL).expect("accum.wgsl has the lines the smaller frame's antialiasing changes");
+        let module = gpu.shader("accumulate (traced smaller)", &src, false);
+        gpu.pipeline(&PipeDesc { label: "accumulate (traced smaller)", module: &module, vs: "vs", fs: "fs", layouts: &[layout], format: ACC, blend: None, strip: false, buffers: &[] })
+    }
+
+    /// Prepare reduced-resolution accumulation synchronously for callers that require it immediately.
+    pub fn ready_dyn(&mut self) {
+        if let Some(rx) = self.building_dyn.take() { self.p_accum_dyn = rx.recv().ok(); }
+        self.p_accum_dyn.get_or_insert_with(|| Self::dyn_pipeline(&self.gpu, &self.l_accum));
+    }
+
+    /// A live frame keeps drawing at full size while its smaller-frame pipeline is compiled.
+    fn request_dyn(&mut self) {
+        if self.p_accum_dyn.is_some() { return; }
+        if let Some(rx) = &self.building_dyn {
+            match rx.try_recv() {
+                Ok(pipeline) => { self.p_accum_dyn = Some(pipeline); self.building_dyn = None; }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.ready_dyn(),
+            }
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (gpu, layout) = (self.gpu.clone(), self.l_accum.clone());
+        let spawned = std::thread::Builder::new().name("moving frame accumulation".into()).spawn(move || {
+            let _ = tx.send(Self::dyn_pipeline(&gpu, &layout));
+        });
+        if spawned.is_ok() { self.building_dyn = Some(rx); } else { self.ready_dyn(); }
+    }
+
     /// Trace one frame and fold it into the picture so far.
     ///   moving: something moved since the last frame, so the picture so far is out of date
     ///   cut: something changed outright, so the picture so far is useless
     ///   skip_post: leave out the bloom and the screen (more frames are about to be averaged in)
     pub fn frame(&mut self, tu: &TraceU, look: &Look, moving: bool, cut: bool, skip_post: bool) {
+        if let Some(s) = self.matcap_on.clone() { self.frame_matcap(tu, &s, moving || cut, skip_post); return; }
+        let split = std::mem::take(&mut self.split_refine) && !moving && !cut && !skip_post && self.can_split_refine();
+        // (which half this is: kept only once the frame is sure to be traced, below)
+        let half = self.traced_half.after(split);
         // one wavelength inside the glass, for this kind of frame (hero.rs): the tracer with it or without
         // (while moving, the split hero where the engine asks for it: three wavelengths and dispersion only)
         let moving_taa = moving && !cut && look.smooth > 0.0;
@@ -1559,9 +2092,11 @@ impl Renderer {
             self.hero_cur = hero;
             self.build_tracer();
         }
+        if moving_taa && self.dyn_scale < 0.999 && self.dyn_ok() { self.request_dyn(); }
         let Some(t) = self.t.as_ref() else { return };
         if self.g_trace.is_none() { return; }
         if self.variant.cast && self.g_cast.is_none() { return; }
+        self.traced_half = half;
         // How to treat the picture so far.
         let taa = moving && !cut && look.smooth > 0.0;
         let weight: f64;
@@ -1571,7 +2106,11 @@ impl Renderer {
             // (and adaptive refining's counts start afresh: carried on, the pixels it held certain would be
             // left out of the trace and keep what they showed before, which a cut makes useless: an object
             // taken away, or a new one made, left its old picture where nothing is now)
-            if cut { self.adapt.valid = false; }
+            if cut {
+                self.adapt.valid = false;
+                self.glare.reset();
+                self.pyramid_interactive = false;
+            }
         } else if taa {
             weight = 1.0 - look.smooth as f64;
             self.accum_n = ((1.0 / weight + 0.5).floor() as u32).saturating_sub(1);      // then carry on averaging from here
@@ -1585,17 +2124,43 @@ impl Renderer {
             // keeps a running mean of its own (denoise.rs): that is started afresh instead.
             if self.was_taa {
                 self.accum_n = if self.variant.denoise { 0 } else { self.accum_n.min(1) };
+                // Align heroClamp=5 so the 6 signed passes precede the 7x clamp-compensating heroFull pass:
+                // a 1-frame mouse-drag pause never fires heroFull at w=0.5, and pass 7 cancels the 6 signed
+                // passes at equal weight in the running mean.
+                if let Some(h) = hero.filter(|h| h.clamp == 5) {
+                    let e = u32::from(h.every.max(2));
+                    self.frame_no = self.frame_no.wrapping_add((e + 1 - self.frame_no % e) % e);
+                }
             }
             weight = 1.0 / (self.accum_n as f64 + 1.0);
         }
         self.was_taa = taa;
-        self.jitter_n = (self.jitter_n % 4096) + 1;
+        if half != Half::Second { self.jitter_n = (self.jitter_n % 4096) + 1; }
         // always jitter unless antialiasing is off and the view is moving
         let jit = weight < 1.0 || look.smooth > 0.0;
         let mut u = *tu;
         u.res = [t.tw as f32, t.th as f32];
         u.frame = self.frame_no as i32;
+        // Rotation uses xyz. The rough floor uses this spare component to stratify moving samples.
+        u.env[0][3] = if taa { 1.0 } else { 0.0 };
         u.jitter = if jit { [(halton(self.jitter_n, 2) - 0.5) as f32, (halton(self.jitter_n, 3) - 0.5) as f32] } else { [0.0, 0.0] };
+        // (keeping the frame rate: a moving frame traced smaller, into the target's corner, when asked for
+        // and where the antialiasing reads the traced frame straight; the picture stays full size)
+        let dyn_s = if taa && self.dyn_scale < 0.999 && self.p_accum_dyn.is_some() && self.dyn_ok() { self.dyn_scale.max(0.25) } else { 1.0 };
+        let region = (dyn_s < 1.0).then(|| dyn_region(t.tw, t.th, dyn_s));
+        let full = u;
+        if let Some((rw, rh)) = region {
+            u.res = [rw as f32, rh as f32];
+            if self.variant.mat.bodies > 0 && rough_split(&self.variant, self.profile) && u.ns == 1 && u.lens <= 0.0 {
+                // At half scale these four offsets trace each native pixel once per four frames.
+                // Use a common ray offset across the frame so reconstruction knows where each ray landed.
+                const OFFSETS: [[f32; 2]; 4] = [[-0.25, 0.25], [0.25, -0.25], [0.25, 0.25], [-0.25, -0.25]];
+                u.jitter = OFFSETS[self.frame_no as usize % OFFSETS.len()];
+                u.pad[1] = 1;
+            }
+        }
+        self.dyn_used = dyn_s;
+        self.traced_caps = [u.nb, u.nw];
         self.gpu.queue.write_buffer(&self.u_trace, 0, bytemuck::bytes_of(&u));
 
         // DLSS in place of the antialiasing that follows motion, when asked for (dlss.rs)
@@ -1603,12 +2168,30 @@ impl Renderer {
         {
             // (GLASSFORMS_DLSS_FORCE=1: a still picture too, after its first frame: for checking DLSS's inputs)
             let forced = !cut && self.accum_n > 0 && self.up.scale.is_some() && std::env::var_os("GLASSFORMS_DLSS_FORCE").is_some();
-            if (taa || forced) && self.frame_dlss(tu, look, skip_post) { return; }
+            if (taa || forced) && self.frame_dlss(tu, look, skip_post) {
+                // (DLSS drew the whole frame)
+                self.traced_half = Half::Whole;
+                return;
+            }
             self.up.live = false;
         }
         let Some(t) = self.t.as_ref() else { return };
         let Some(g_trace) = self.g_trace.as_ref() else { return };
-        let (now, au) = self.accum_u(&u, weight, taa, look);
+        // (the antialiasing works at the picture's own size; told the share the frame was traced at)
+        let (now, mut au) = self.accum_u(&full, weight, taa, look);
+        self.glare_cut = cut;
+        self.glare_motion = match self.prev.filter(|_| !cut) {
+            Some(was) => Self::view_motion(&now, &was, t.tw, t.th),
+            None => (0.0, [0.0; 2]),
+        };
+        if region.is_some() {
+            au.pad = dyn_s as f32;
+            if u.pad[1] != 0 {
+                au.obj[0][3] = u.jitter[0];
+                au.obj[1][3] = u.jitter[1];
+                au.obj[2][3] = 1.0;
+            }
+        }
         self.gpu.queue.write_buffer(&self.u_accum, 0, bytemuck::bytes_of(&au));
 
         let mut enc = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
@@ -1626,11 +2209,24 @@ impl Renderer {
         let masked = folded && self.adapt.begin(&self.gpu, &mut enc, (!self.adapt.valid).then_some(self.accum_n), look.exposure);
         let (stencil, clear) = (self.adapt.stencil(), if masked { crate::adapt::NOT_TRACED } else { wgpu::Color::TRANSPARENT });
         let pipe = &self.trace_pipes[&self.trace_key];
+        // (once a sample: a first half does not advance frame_no, so it would be counted twice)
+        let measured = self.pass_times.is_some() && self.frame_no % 16 == 0 && half != Half::First;
+        if measured { if let Some(log) = &self.pass_times { log.mark(&mut enc, 0); } }
         let mut frosted = false;
         match self.frost.aux().filter(|_| rough) {
             Some(aux) => {
                 let views: Vec<&wgpu::TextureView> = [&t.trace_view, aux[0], aux[1]].into_iter().chain(dn.as_ref()).collect();
-                crate::adapt::trace_pass(&mut enc, &views, clear, stencil, masked, pipe, g_trace, second);
+                // Spread expensive material paths across both visible updates. Integer endpoints
+                // cover an odd-sized target exactly and leave the sample position unchanged.
+                let pairs = (t.tw / 32).clamp(1, 12);
+                let count = if half == Half::Whole { 0 } else { pairs };
+                let columns = (0..count).map(|pair| {
+                    let band = 2 * pair + u32::from(half == Half::Second);
+                    let start = t.tw * band / (2 * pairs);
+                    let end = t.tw * (band + 1) / (2 * pairs);
+                    (start, end - start, t.th)
+                });
+                crate::adapt::trace_regions(&mut enc, &views, clear, stencil, masked, pipe, g_trace, second, region, columns);
                 frosted = true;
             }
             None if dn.is_some() => {
@@ -1644,8 +2240,11 @@ impl Renderer {
                 crate::adapt::trace_pass(&mut enc, &views, clear, stencil, masked, pipe, g_trace, second);
                 recon.encode(&mut enc, &t.trace_view);
             }
-            None => crate::adapt::trace_pass(&mut enc, &[&t.trace_view], clear, stencil, masked, pipe, g_trace, second),
+            // (GLASSFORMS_SLOW=k: the pass is traced k times over, the same each time, to stand in for a GPU k
+            // times slower when trying out the frame-rate keeping: autoscale.rs; never set otherwise)
+            None => for _ in 0..crate::autoscale::slow() { crate::adapt::trace_pass_in(&mut enc, &[&t.trace_view], clear, stencil, masked, pipe, g_trace, second, region) },
         }
+        if measured { if let Some(log) = &self.pass_times { log.mark(&mut enc, 1); } }
         // direct light with shadows on an opaque or milky body, onto the traced frame before anything reads
         // it (not through another lens than the plain one: the pass finds the surface along a plain ray)
         if self.surface.on() && !self.cam.active && !self.profile {
@@ -1654,7 +2253,10 @@ impl Renderer {
                 self.surface.encode(&self.gpu, &mut enc, &t.trace_tex, &t.trace_view, vol, &self.lin, &self.u_lamps, &u, hb, self.variant.near);
             }
         }
-        if frosted { self.frost.encode(&mut enc, u.tan_fov); }
+        if measured { if let Some(log) = &self.pass_times { log.mark(&mut enc, 2); } }
+        if frosted { self.frost.encode(&mut enc, u.tan_fov, region); }
+        if measured { if let Some(log) = &self.pass_times { log.mark(&mut enc, 3); } }
+
         if folded {
             self.adapt.fold(&mut enc, self.acc_idx);
         } else {
@@ -1662,7 +2264,7 @@ impl Renderer {
             let mut rp = pass(&mut enc, &t.accum_view[1 - self.acc_idx], None, true);
 
             // (through any lens but the plain one, the surface is followed by the camera's own arithmetic)
-            rp.set_pipeline(if self.cam.active { self.cam.accum(&self.gpu, ACCUM_WGSL, &self.l_accum, ACC) } else { &self.p_accum });
+            rp.set_pipeline(if self.cam.active { self.cam.accum(&self.gpu, ACCUM_WGSL, &self.l_accum, ACC) } else if let (Some(_), Some(p)) = (region, &self.p_accum_dyn) { p } else { &self.p_accum });
             rp.set_bind_group(0, if rough { &t.g_accum_rough[self.acc_idx] } else { &t.g_accum[self.acc_idx] }, &[]);
             rp.draw(0..3, 0..1);
         }
@@ -1678,11 +2280,76 @@ impl Renderer {
         self.prev = Some(now);
         self.acc_idx = 1 - self.acc_idx;
         // (a pass for a share of the pixels only is not counted as a frame of the picture)
-        if !(masked && self.adapt.share < 1.0) { self.accum_n += 1; }
-
-        self.frame_no += 1;
-        if !skip_post { self.encode_post(&mut enc, &u, look, !moving && !cut); }
+        if half != Half::First {
+            if !(masked && self.adapt.share < 1.0) { self.accum_n += 1; }
+            self.frame_no += 1;
+        }
+        if measured { if let Some(log) = &self.pass_times { log.mark(&mut enc, 4); } }
+        if !skip_post { self.encode_post(&mut enc, &full, look, !moving && !cut); }
+        if measured { if let Some(log) = &self.pass_times { log.mark(&mut enc, 5); } }
         self.gpu.queue.submit([enc.finish()]);
+        // The first half is visible immediately. Keep the old mean as the source until the
+        // second half completes the same sample and its full-image frost filter.
+        self.trace_passes += 1;
+        if half == Half::First { self.acc_idx = 1 - self.acc_idx; }
+        if measured { if let Some(log) = &mut self.pass_times { log.record(&self.gpu, self.frame_no, moving, dyn_s); } }
+    }
+
+    /// A frame of the matcap view (matcap.rs): the first surface along each ray shaded by the matcap, into
+    /// the picture so far (as a running mean of jittered frames while nothing moves), then onto the screen.
+    /// `afresh`: the view moved or changed, the picture starts again.
+    fn frame_matcap(&mut self, tu: &TraceU, s: &gf_core::view_mode::Matcap, afresh: bool, skip_post: bool) {
+        let Some(m) = self.march else { return };
+        let (Some(t), Some(g_trace)) = (self.t.as_ref(), self.g_trace.as_ref()) else { return };
+        if afresh { self.accum_n = 0; }
+        let n = self.accum_n;
+        self.jitter_n = (self.jitter_n % 4096) + 1;
+        let mut u = *tu;
+        u.res = [t.tw as f32, t.th as f32];
+        u.frame = self.frame_no as i32;
+        u.jitter = if n > 0 { [(halton(self.jitter_n, 2) - 0.5) as f32, (halton(self.jitter_n, 3) - 0.5) as f32] } else { [0.0; 2] };
+        self.gpu.queue.write_buffer(&self.u_trace, 0, bytemuck::bytes_of(&u));
+        let grown = self.matcap_grown;
+        let fits = crate::sdf::fits(&Variant { grown, mat: self.variant.mat, ..Default::default() });
+        let reading = crate::matcap::Reading { grown, sdf: self.sdf.clone().filter(|_| fits) };
+        let bodies = self.bodies.as_ref().map_or(0, |b| b.1);
+        let picture = match &s.source {
+            gf_core::view_mode::MatcapSource::Image(p) => self.matcap.picture.as_deref() == Some(p.as_str()),
+            gf_core::view_mode::MatcapSource::Material => self.matcap.picture.as_deref().is_some_and(|p| p.starts_with(crate::matcap::MATERIAL)),
+            gf_core::view_mode::MatcapSource::Builtin(_) => false,
+        };
+        self.matcap.write(&self.gpu, &crate::matcap::McU::of(s, picture, 1.0 / (n as f32 + 1.0), bodies, tu.cam[0]));
+        let mut enc = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame (matcap)") });
+        let measured = self.pass_times.is_some() && self.frame_no % 16 == 0;
+        if measured { if let Some(log) = &self.pass_times { log.mark(&mut enc, 0); } }
+        {
+            let pipe = self.matcap.pipeline(&self.gpu, &self.l_trace, &m, &reading).clone();
+            let g = self.matcap.group(&self.gpu, &t.accum_view[self.acc_idx]);
+            let mut rp = pass(&mut enc, &t.accum_view[1 - self.acc_idx], None, true);
+            rp.set_pipeline(&pipe);
+            rp.set_bind_group(0, g_trace, &[]);
+            rp.set_bind_group(1, &g, &[]);
+            rp.draw(0..3, 0..1);
+        }
+        if measured { if let Some(log) = &self.pass_times { for k in 1..=4 { log.mark(&mut enc, k); } } }
+        self.acc_idx = 1 - self.acc_idx;
+        self.shown = self.acc_idx;
+        self.focused = false;
+        self.prev = None;
+        self.adapt.valid = false;
+        self.dn.live = false;
+        self.accum_n += 1;
+        self.frame_no += 1;
+        self.trace_passes += 1;
+        if !skip_post { self.show_matcap(&mut enc); }
+        if measured { if let Some(log) = &self.pass_times { log.mark(&mut enc, 5); } }
+        self.gpu.queue.submit([enc.finish()]);
+        if measured { if let Some(log) = &mut self.pass_times { log.record(&self.gpu, self.frame_no, afresh, 1.0); } }
+    }
+
+    fn show_matcap(&self, enc: &mut wgpu::CommandEncoder) {
+        let Some(t) = self.t.as_ref() else { return };
+        self.matcap.encode_show(&self.gpu, enc, &t.accum_view[self.shown], (&t.final_view, t.w, t.h), t.deep.as_ref().map(|d| &d.1));
     }
 
     /// What the antialiasing is told for a frame traced with these numbers, and what it keeps of the view.
@@ -1690,17 +2357,49 @@ impl Renderer {
         // (a studio's backdrop stands in the room, not in the lights' frame: where one is shown, it is the
         // room that says where a piece of the background was at the previous frame)
         let seen = self.variant.stage;
-        let now = PrevView { obj: u.obj, env: if seen.backdrop { self.stage.room } else { u.env }, room: self.stage.room, floor: self.stage.mid[3], cam: [u.dist, u.tan_fov], eye: [u.eye[0], u.eye[1]], shift: u.shift, lens: u.cam };
+        let room_sky = seen.backdrop || seen.sky || seen.atmo;
+        let now = PrevView { shape_no: look.shape_no, obj: u.obj, env: if room_sky { self.stage.room } else { u.env }, room: self.stage.room, floor: self.stage.mid[3], cam: [u.dist, u.tan_fov], eye: [u.eye[0], u.eye[1]], shift: u.shift, lens: u.cam };
         let was = self.prev.unwrap_or(now);
-        let au = AccumU {
+        let mut au = AccumU {
             res: u.res, cam: now.cam, cam_p: was.cam, shift: now.shift, shift_p: was.shift, w: weight as f32, moving: if taa { 1.0 } else { 0.0 },
-            obj: now.obj, objp: was.obj, debug: look.debug, spread: look.spread, sky: if self.variant.backdrop || seen.backdrop { 1.0 } else { 0.0 }, pad: 0.0,
+            obj: now.obj, objp: was.obj, debug: look.debug, spread: look.spread, sky: if self.variant.backdrop || room_sky { 1.0 } else { 0.0 }, pad: 0.0,
             env: now.env, envp: was.env,
-            room: now.room, roomp: was.room, floor: [if seen.floor { 1.0 } else { 0.0 }, now.floor, was.floor, 0.0],
+            room: now.room, roomp: was.room, floor: [if seen.floor { 1.0 } else { 0.0 }, now.floor, was.floor, self.stage.tint[3]],
             eye: [now.eye[0], now.eye[1], was.eye[0], was.eye[1]],
             lens: now.lens, lens_p: was.lens,
         };
+        // The fourth lane is free in the accumulator: previous light rotation uses xyz.
+        au.envp[2][3] = (now.shape_no != was.shape_no) as u8 as f32;
         (now, au)
+    }
+
+    fn view_motion(now: &PrevView, was: &PrevView, tw: u32, th: u32) -> (f32, [f32; 2]) {
+        let (tw_f, th_f) = (tw as f32, th as f32);
+        let center_fc = |v: &PrevView| -> [f32; 2] {
+            let denom = (v.cam[0] * v.cam[1]).max(1e-4);
+            let uv_x = -v.eye[0] / denom - v.shift[0];
+            let uv_y = -v.eye[1] / denom - v.shift[1];
+            [(uv_x * th_f + tw_f) * 0.5, (uv_y * th_f + th_f) * 0.5]
+        };
+        let c_now = center_fc(now);
+        let c_was = center_fc(was);
+        let shift_px = [c_was[0] - c_now[0], c_now[1] - c_was[1]];
+        let row_diff = |a: &[[f32; 4]; 3], b: &[[f32; 4]; 3]| -> f32 {
+            (0..3).map(|r| {
+                let dx = a[r][0] - b[r][0];
+                let dy = a[r][1] - b[r][1];
+                let dz = a[r][2] - b[r][2];
+                (dx * dx + dy * dy + dz * dz).sqrt()
+            }).sum()
+        };
+        let rot = row_diff(&now.obj, &was.obj).max(row_diff(&now.env, &was.env));
+        let scale_now = (now.cam[0] * now.cam[1]).max(0.05);
+        let scale_was = (was.cam[0] * was.cam[1]).max(0.05);
+        let rot_px = 0.45 * rot * (0.55 / scale_now) * (th_f * 0.5);
+        let zoom_px = ((scale_now - scale_was).abs() / scale_now) * (th_f * 0.25)
+            + (now.lens[0][3] - was.lens[0][3]).abs() * (th_f * 0.2);
+        let morph_px = if now.shape_no != was.shape_no { th_f * (1.2 / 720.0) } else { 0.0 };
+        (rot_px.max(zoom_px).max(morph_px), shift_px)
     }
 
     /// Fold this frame in through DLSS: trace a smaller picture with every pixel's ray at the frame's
@@ -1708,7 +2407,7 @@ impl Renderer {
     /// False (nothing done) when it cannot be done this frame.
     #[cfg(feature = "dlss")]
     fn frame_dlss(&mut self, tu: &TraceU, look: &Look, skip_post: bool) -> bool {
-        if self.up.scale.is_none() || self.cam.active || self.profile { return false; }
+        if self.up.scale.is_none() || self.cam.active || self.profile || self.split_keys.contains(&self.trace_key) { return false; }
         // (not with the stages that work on the full-size traced frame: rough glass's blur, the denoiser)
         if rough_split(&self.variant, self.profile) || self.variant.denoise { return false; }
         if self.variant.cast && self.g_cast.is_none() { return false; }
@@ -1721,9 +2420,9 @@ impl Renderer {
         u.frame = self.frame_no as i32;
         // the tracer's offsets count up from the bottom; DLSS's down from the top
         u.jitter = [f.jitter[0], -f.jitter[1]];
-        self.gpu.queue.write_buffer(&self.u_trace, 0, bytemuck::bytes_of(&u));
         let (now, au) = self.accum_u(&u, 1.0, true, look);
-        self.gpu.queue.write_buffer(&self.u_accum, 0, bytemuck::bytes_of(&au));
+        // (nothing the frame shares with the plain path is written until DLSS is sure to draw it: a false
+        // return leaves the caller tracing the full-size frame with its own numbers)
         let (Some(t), Some(g_trace)) = (self.t.as_ref(), self.g_trace.as_ref()) else { return false };
         let Some((small_tex, small_view)) = self.up.small() else { return false };
         let mut enc = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame (dlss)") });
@@ -1743,8 +2442,18 @@ impl Renderer {
         self.up.encode_prep(&mut enc);
         let target = t.accum_view[1 - self.acc_idx].clone();
         let Some(cb) = self.up.upscale(&self.gpu, &mut enc, &f) else { return false };
+        // DLSS draws this frame: the small trace's numbers go in (written before the submit below, so the
+        // passes recorded above read them)
+        self.gpu.queue.write_buffer(&self.u_trace, 0, bytemuck::bytes_of(&u));
+        self.glare_cut = false;
+        self.glare_motion = match self.prev {
+            Some(was) => Self::view_motion(&now, &was, tw, th),
+            None => (0.0, [0.0; 2]),
+        };
+        self.gpu.queue.write_buffer(&self.u_accum, 0, bytemuck::bytes_of(&au));
         let mut after = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame (after dlss)") });
         self.up.encode_resolve(&mut after, &target);
+        self.adapt.valid = false;
         self.dn.live = false;
         self.up.live = true;
         self.up.drawn += 1;
@@ -1757,12 +2466,21 @@ impl Renderer {
         full.res = [tw as f32, th as f32];
         if !skip_post { self.encode_post(&mut after, &full, look, false); }
         self.gpu.queue.submit([enc.finish(), cb, after.finish()]);
+        self.trace_passes += 1;
         true
     }
 
     /// Bloom the picture so far and put it on the screen, without tracing anything.
     pub fn present(&mut self, tu: &TraceU, look: &Look) {
         if self.t.is_none() { return; }
+        if self.matcap_on.is_some() {
+            let mut enc = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("present (matcap)") });
+            self.show_matcap(&mut enc);
+            self.gpu.queue.submit([enc.finish()]);
+            return;
+        }
+        self.glare_cut = false;
+        self.glare_motion = (0.0, [0.0; 2]);
         let mut enc = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("present") });
         self.encode_post(&mut enc, tu, look, true);
         self.gpu.queue.submit([enc.finish()]);
@@ -1771,14 +2489,36 @@ impl Renderer {
     /// `settled`: the picture did not move for this frame (the focus stage then takes more care).
     fn encode_post(&mut self, enc: &mut wgpu::CommandEncoder, tu: &TraceU, look: &Look, settled: bool) {
         if self.t.is_none() { return; }
+        let cut = std::mem::take(&mut self.glare_cut);
         // the lens's glare, unless the old bloom is asked for: the share of light the sharp picture keeps
         let glared = !look.glare.pyramid();
+        if !glared {
+            self.ensure_pyramid();
+            if cut { self.pyramid_interactive = false; }
+            let knee = if !settled {
+                self.pyramid_interactive = true;
+                0.08 * look.exposure.max(0.05)
+            } else if !self.pyramid_interactive || self.accum_n >= 8 {
+                self.pyramid_interactive = false;
+                0.0
+            } else {
+                0.08 * look.exposure.max(0.05) * (1.0 - self.accum_n as f32 / 8.0).max(0.0)
+            };
+            if let Some(pyr) = self.t.as_mut().and_then(|t| t.pyramid.as_mut()) {
+                if (knee - pyr.last_knee).abs() > 1e-6 {
+                    let (texel, dst_res) = pyr.down0_res;
+                    self.gpu.queue.write_buffer(&pyr.u_down0, 0, bytemuck::bytes_of(&BloomU { texel, dst_res, gain: 1.0, pad: [knee, 0.0, 0.0] }));
+                    pyr.last_knee = knee;
+                }
+            }
+        }
         let keep = if glared { self.glare.keep_for(&look.glare) } else { [1.0; 3] };
         let Some(t) = self.t.as_ref() else { return };
+        let mips_len = t.pyramid.as_ref().map_or(1, |p| p.mips.len());
         let fu = FinalU {
             res: [t.w as f32, t.h as f32],
             exposure: look.exposure,
-            bloom_amt: if glared { 1.0 } else { look.bloom / t.mips.len() as f32 },
+            bloom_amt: if glared { 1.0 } else { look.bloom / mips_len as f32 },
             glare: [keep[0], keep[1], keep[2], 0.0],
             vignette: look.vignette,
             grain: look.grain,
@@ -1817,30 +2557,39 @@ impl Renderer {
         };
         self.glared = glared;
         if glared {
-            self.glare.encode(enc, src, &look.glare);
-        }
-        // bloom: walk down the chain, then back up adding each level
-        for (i, m) in t.mips.iter().enumerate().filter(|_| !glared) {
-            let mut rp = pass(enc, &m.view, None, true);
-            rp.set_pipeline(&self.p_down);
-            rp.set_bind_group(0, if i == 0 { &t.g_down0[src] } else { &m.down }, &[]);
-            rp.draw(0..3, 0..1);
-        }
-        for i in (1..t.mips.len()).rev().filter(|_| !glared) {
-            let mut rp = pass(enc, &t.mips[i - 1].view, None, false);
-            rp.set_pipeline(&self.p_up);
-            rp.set_bind_group(0, t.mips[i].up.as_ref().unwrap(), &[]);
-            rp.draw(0..3, 0..1);
+            let (motion_px, shift_px) = if settled { (0.0, [0.0; 2]) } else { self.glare_motion };
+            self.glare.encode(enc, src, &look.glare, crate::glare::GlareTemporal {
+                settled,
+                cut,
+                accum_n: self.accum_n,
+                exposure: look.exposure,
+                motion_px,
+                shift_px,
+            });
+        } else if let (Some(pyr), Some(bl)) = (&t.pyramid, &self.bloom) {
+            // bloom: walk down the chain, then back up adding each level
+            for (i, m) in pyr.mips.iter().enumerate() {
+                let mut rp = pass(enc, &m.view, None, true);
+                rp.set_pipeline(&bl.down);
+                rp.set_bind_group(0, if i == 0 { &pyr.g_down0[src] } else { &m.down }, &[]);
+                rp.draw(0..3, 0..1);
+            }
+            for i in (1..pyr.mips.len()).rev() {
+                let mut rp = pass(enc, &pyr.mips[i - 1].view, None, false);
+                rp.set_pipeline(&bl.up);
+                rp.set_bind_group(0, pyr.mips[i].up.as_ref().unwrap(), &[]);
+                rp.draw(0..3, 0..1);
+            }
         }
         // tone map to the screen
         {
             let mut rp = pass(enc, &t.final_view, None, true);
             rp.set_pipeline(if lens { self.cam.last(&self.gpu, POST_WGSL, &self.l_final, [LDR, HDR], false) } else { &self.p_final });
-            rp.set_bind_group(0, if glared { &t.g_final_glare[src] } else { &t.g_final[src] }, &[]);
+            rp.set_bind_group(0, if glared { &t.g_final_glare[src] } else { &t.pyramid.as_ref().expect("bloom pyramid built").g_final[src] }, &[]);
             rp.draw(0..3, 0..1);
         }
-        if let Some((_, view, groups, groups_glare)) = &t.deep {
-            let groups = if glared { groups_glare } else { groups };
+        if let Some((_, view, groups_glare)) = &t.deep {
+            let groups = if glared { groups_glare } else { t.pyramid.as_ref().and_then(|p| p.g_final_deep.as_ref()).expect("deep bloom pyramid built") };
             let mut rp = pass(enc, view, None, true);
             rp.set_pipeline(if lens { self.cam.last(&self.gpu, POST_WGSL, &self.l_final, [LDR, HDR], true) } else { &self.p_final_deep });
             rp.set_bind_group(0, &groups[src], &[]);
@@ -1851,7 +2600,7 @@ impl Renderer {
     /// What is on screen with 16 bits a channel and no 8-bit dither: RGBA, top row first. Needs `deep`.
     pub fn read_screen16(&self) -> R<(u32, u32, Vec<u16>)> {
         let t = self.t.as_ref().ok_or("nothing has been drawn yet")?;
-        let (tex, _, _, _) = t.deep.as_ref().ok_or("the 16-bit screen was not asked for")?;
+        let (tex, _, _) = t.deep.as_ref().ok_or("the 16-bit screen was not asked for")?;
         let bytes = self.gpu.read(tex, 0, 0, 0, t.w, t.h, 8)?;
         let halves: &[half::f16] = bytemuck::cast_slice(&bytes);
         Ok((t.w, t.h, halves.iter().map(|v| (v.to_f32().clamp(0.0, 1.0) * 65535.0 + 0.5) as u16).collect()))
@@ -1860,7 +2609,6 @@ impl Renderer {
     /// The first (largest) level of the bloom as it stands: RGBA 16-bit floats as f32, its width and height.
     pub fn read_bloom(&self) -> R<(u32, u32, Vec<f32>)> {
         let t = self.t.as_ref().ok_or("nothing has been drawn yet")?;
-        let m = &t.mips[0];
         if self.glared {
             let tex = self.glare.texture().ok_or("the glare has not been sized")?;
             let (w, h) = (tex.width(), tex.height());
@@ -1868,6 +2616,7 @@ impl Renderer {
             let halves: &[half::f16] = bytemuck::cast_slice(&bytes);
             return Ok((w, h, halves.iter().map(|v| v.to_f32()).collect()));
         }
+        let m = &t.pyramid.as_ref().ok_or("nothing has been drawn yet")?.mips[0];
         let bytes = self.gpu.read(&m.tex, 0, 0, 0, m.w, m.h, 8)?;
         let halves: &[half::f16] = bytemuck::cast_slice(&bytes);
         Ok((m.w, m.h, halves.iter().map(|v| v.to_f32()).collect()))
@@ -1888,4 +2637,104 @@ impl Renderer {
         let bytes = self.gpu.read(picture, x, y, 0, w, h, 16)?;
         Ok(bytemuck::pod_collect_to_vec(&bytes))
     }
+}
+
+#[cfg(test)]
+#[test]
+fn legacy_bloom_pyramid_is_lazy_until_requested() {
+    let Ok(gpu) = Gpu::headless("auto") else { return };
+    let mut r = Renderer::new(&gpu);
+    assert!(r.bloom.is_none());
+    assert!(r.resize(64, 48, 1.0));
+    assert!(r.t.as_ref().unwrap().pyramid.is_none());
+
+    let p = gf_core::settings::Settings::default();
+    let tu = TraceU { dist: 6.0, tan_fov: 0.25, ..Zeroable::zeroed() };
+    let mut look = Look {
+        shape_no: 0,
+        smooth: 0.0,
+        spread: 1.0,
+        debug: 0.0,
+        exposure: 1.0,
+        bloom: 0.35,
+        vignette: 0.0,
+        grain: 0.0,
+        raw: 0.0,
+        planes: [0.0; 3],
+        still_grain: true,
+        focus: Focus::OFF,
+        grade: gf_core::stage::Grade::of(&p).uniforms(),
+        lens: crate::camera::Lens::of(&p),
+        glare: crate::glare::GlareLens::of(&p),
+    };
+    assert!(!look.glare.pyramid());
+    r.present(&tu, &look);
+    assert!(r.bloom.is_none() && r.t.as_ref().unwrap().pyramid.is_none());
+    assert!(r.read_bloom().is_ok());
+
+    look.glare.kind = 1;
+    assert!(look.glare.pyramid());
+    r.present(&tu, &look);
+    assert!(r.bloom.is_some() && r.t.as_ref().unwrap().pyramid.is_some());
+    let (bw, bh, bl) = r.read_bloom().unwrap();
+    assert_eq!((bw, bh, bl.len()), (32, 24, 32 * 24 * 4));
+    assert_eq!(r.read_screen().unwrap().2.len(), 64 * 48 * 4);
+}
+
+#[cfg(test)]
+#[test]
+fn hero_settle_aligns_after_taa_without_first_frame_full_comb() {
+    let Ok(gpu) = Gpu::headless("auto") else { return };
+    let mut r = Renderer::new(&gpu);
+    r.resize(64, 48, 1.0);
+    let env = r.env_texture(&vec![1.0f32; 16 * 8 * 4], 16, 8);
+    let vol = Volume::new(&gpu, 16, false);
+    r.hero = crate::hero::Hero::settling(true);
+    r.set_scene(&env, &vol, 0.95, 64, 32, 1);
+
+    let p = gf_core::settings::Settings::default();
+    let tu = TraceU {
+        dist: 6.0,
+        tan_fov: 0.25,
+        ior: 2.4,
+        disp: 0.044,
+        vres: 16.0,
+        nw: 7,
+        ns: 1,
+        nb: 4,
+        obj: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]],
+        env: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]],
+        ..Zeroable::zeroed()
+    };
+    let look = Look {
+        shape_no: 0,
+        smooth: 0.9,
+        spread: 2.0,
+        debug: 0.0,
+        exposure: 1.0,
+        bloom: 0.35,
+        vignette: 0.0,
+        grain: 0.0,
+        raw: 0.0,
+        planes: [0.0; 3],
+        still_grain: true,
+        focus: Focus::OFF,
+        grade: gf_core::stage::Grade::of(&p).uniforms(),
+        lens: crate::camera::Lens::of(&p),
+        glare: crate::glare::GlareLens::of(&p),
+    };
+
+    // Put `frame_no` right on a multiple of `hero.every` (7) at the end of a moving TAA frame, then step
+    // into a 1-frame pause (`moving = false`): pass 1 must align `frame_no % 7 == 1` rather than firing
+    // `heroFull` (`frame_no % 7 == 0`) at weight 0.5.
+    let e = u32::from(r.hero.every.max(2));
+    r.frame_no = e * 7 - 1;
+    r.frame(&tu, &look, true, false, false);
+    assert_eq!(r.frame_no % e, 0);
+    r.frame(&tu, &look, false, false, false);
+    // Pass 1 used `frame_no % e == 1` and then incremented `frame_no` to `2 mod e`, so `heroFull` waits
+    // until pass 7 (`ahead == e - 2`).
+    assert_eq!(r.frame_no % e, 2 % e);
+    assert_eq!(r.pass_cost(0, 7, true), 1.0);
+    assert!(r.pass_cost(e - 2, 7, true) > 1.0);
 }

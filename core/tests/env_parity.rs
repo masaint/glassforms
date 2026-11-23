@@ -199,3 +199,22 @@ fn rounding_to_half_floats() {
         assert_eq!(env::paint_half(&fam_lights, three(&f["ambient"]), 16, 8).len(), 16 * 8 * 4);
     }
 }
+
+#[test]
+fn extreme_light_sizes_stay_finite_and_within_one_hemisphere() {
+    let weird = [
+        Light { az: 0.0, el: 0.0, w: 0.0, h: 0.0, rgb: [4.0, 3.0, 2.0], soft: 0.5 },
+        Light { az: 0.0, el: 0.0, w: -10.0, h: f64::NAN, rgb: [2.0, 2.0, 2.0], soft: 0.0 },
+        Light { az: 0.0, el: 0.0, w: 90.0, h: 135.0, rgb: [3.0, 1.0, 0.5], soft: 0.6 },
+    ];
+    let mut px = env::paint(&weird, [0.0; 3], 64, 32);
+    assert!(px.iter().all(|v| v.is_finite()), "env::paint emitted non-finite values");
+    // Opposite direction (az = 180°, i.e. ph = +pi/2 at i = 48, j = 16 -> d = [0, 0, 1], da = -1) must stay unlit.
+    let back = (16 * 64 + 48) * 4;
+    assert_eq!(&px[back..back + 4], &[0.0, 0.0, 0.0, 1.0]);
+
+    let (tint, lvl) = gf_core::room::level(&weird);
+    assert!(tint.iter().all(|v| v.is_finite()) && lvl.is_finite());
+    gf_core::room::paint(&mut px, 64, 32, &weird, &gf_core::math::I3, 1.0);
+    assert!(px.iter().all(|v| v.is_finite()), "room::paint emitted non-finite values");
+}

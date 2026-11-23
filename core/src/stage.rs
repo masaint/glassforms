@@ -49,10 +49,7 @@ pub fn room_orbit(roll: f64, elev: f64, azim: f64) -> Mat3 {
     mul(&room_m(roll, elev), &axis_angle(0.0, 1.0, 0.0, azim * DEG))
 }
 
-fn sstep(x: f64) -> f64 {
-    let x = x.clamp(0.0, 1.0);
-    x * x * (3.0 - 2.0 * x)
-}
+use crate::math::sstep;
 
 // ---- the backdrop ------------------------------------------------------------------------------------
 
@@ -193,7 +190,15 @@ impl Floor {
 
     /// How far the floor has become backdrop at distance `r` from the middle of the room (0 = floor, 1 = backdrop).
     pub fn melt(&self, r: f64) -> f64 {
-        sstep((r - FADE_FROM * self.fade) / ((1.0 - FADE_FROM) * self.fade))
+        if r >= self.fade { return 1.0; }
+        let r0 = (0.2 * self.fade).min(3.0);
+        if r <= r0 { return 0.0; }
+        let rs = (0.11 * self.fade).max(0.1);
+        let u_end = 1.0 / (1.0 + (self.fade - r0).max(0.0) / rs);
+        let u_vis = 1.0 / (1.0 + (r - r0).max(0.0) / rs);
+        let t = ((u_vis - u_end) / (1.0 - u_end).max(1e-5)).clamp(0.0, 1.0);
+        let s = sstep(t);
+        1.0 - s * s.sqrt()
     }
 
     /// The share of light a glossy floor mirrors, seen at the cosine `c` of the angle from straight down.
@@ -285,6 +290,17 @@ impl Stage {
     /// replaced by the floor as the glass sees it (lights down there are hidden by it, as a real floor
     /// hides them). Returns what the floor came to (see `FloorLight`; all zero when there is no floor).
     pub fn paint(&self, px: &mut [f32], w: usize, h: usize, l2r: &Mat3, extra: [f64; 3]) -> FloorLight {
+        self.paint_with_sky(px, w, h, l2r, extra, false)
+    }
+
+    /// Like `paint`, but when `sky_horizon` is true (physical sky with no studio backdrop), blends
+    /// distant/glancing floor directions into the sky dome just above the horizon instead of black.
+    ///
+    /// The per-texel work runs on all cores; the three sums (the backdrop's share, the light falling on
+    /// the floor) stay in one thread, in texel order, so the result is the same to the last bit as a
+    /// single-threaded paint.
+    pub fn paint_with_sky(&self, px: &mut [f32], w: usize, h: usize, l2r: &Mat3, extra: [f64; 3], sky_horizon: bool) -> FloorLight {
+        use rayon::prelude::*;
         use std::f64::consts::PI;
         let mut light = FloorLight::default();
         if self.off() { return light; }
@@ -293,34 +309,28 @@ impl Stage {
         let glow = self.backdrop.as_ref().map(|b| apply(&r2l, b.glow_dir)).unwrap_or([0.0; 3]);
         let behind = apply(&r2l, [0.0, 0.0, -1.0]);
         let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-        // every texel's direction in the lights' frame, and how far above the room's horizon it is
-        let mut dirs = Vec::with_capacity(w * h);
-        for j in 0..h {
-            for i in 0..w {
-                let d = crate::env::paint_dir((i as f64 + 0.5) / w as f64, (j as f64 + 0.5) / h as f64);
-                dirs.push((d, dot(d, up)));
-            }
-        }
+        // every texel's direction in the lights' frame (kept per size), and how far above the room's
+        // horizon it is
+        let dirs = crate::env::paint_dirs(w, h);
+        let ys: Vec<f64> = dirs.par_iter().map(|d| dot(*d, up)).collect();
         // the patch of sky a texel of each row covers
-        let patch = |j: usize| (2.0 * PI / w as f64) * ((j as f64 / h as f64 * PI).cos() - ((j + 1) as f64 / h as f64 * PI).cos());
+        let patches: Vec<f64> = (0..h).map(|j| (2.0 * PI / w as f64) * ((j as f64 / h as f64 * PI).cos() - ((j + 1) as f64 / h as f64 * PI).cos())).collect();
         if let Some(b) = &self.backdrop {
-            for (o, (d, y)) in dirs.iter().enumerate() {
-                let c = b.at(*y, dot(*d, glow), dot(*d, behind));
-                for q in 0..3 {
-                    px[o * 4 + q] += c[q] as f32;
-                    // (its own share of the light falling on a floor, kept apart)
-                    if *y > 0.0 { light.backdrop[q] += c[q] * y * patch(o / w) / PI; }
-                }
+            let cs: Vec<[f64; 3]> = dirs.par_iter().zip(ys.par_iter()).map(|(d, y)| b.at(*y, dot(*d, glow), dot(*d, behind))).collect();
+            px.par_chunks_mut(4).zip(cs.par_iter()).for_each(|(p, c)| for q in 0..3 { p[q] += c[q] as f32; });
+            // (its own share of the light falling on a floor, kept apart)
+            for (o, (c, y)) in cs.iter().zip(ys.iter()).enumerate() {
+                if *y > 0.0 { for q in 0..3 { light.backdrop[q] += c[q] * y * patches[o / w] / PI; } }
             }
         }
         let Some(f) = &self.floor else { return FloorLight::default() };
         // the light falling on the floor: everything above the horizon, weighed by how steeply it arrives
         let mut e = [0.0f64; 3];
         for j in 0..h {
-            let patch = patch(j);
+            let patch = patches[j];
             for i in 0..w {
                 let o = j * w + i;
-                let y = dirs[o].1;
+                let y = ys[o];
                 if y <= 0.0 { continue; }
                 for q in 0..3 { e[q] += px[o * 4 + q] as f64 * y * patch; }
             }
@@ -330,12 +340,14 @@ impl Stage {
         let matched = if self.backdrop.is_some() { f.matched } else { 0.0 };
         light.base = [0, 1, 2].map(|q| f.albedo[q] * (e[q] / PI + extra[q]) * (1.0 - matched));
         light.tint = f.albedo.map(|a| a * matched);
+        let (base, tint) = (light.base, light.tint);
         let own = |y: f64| -> [f64; 3] {
             let sweep = self.backdrop.as_ref().map_or([0.0; 3], |b| b.sweep(y));
-            [0, 1, 2].map(|q| light.base[q] + light.tint[q] * sweep[q])
+            [0, 1, 2].map(|q| base[q] + tint[q] * sweep[q])
         };
-        // what a glossy floor mirrors is the map above the horizon, read at the mirrored direction
-        let above = if f.gloss > 0.0 { px.to_vec() } else { Vec::new() };
+        // what a glossy floor mirrors (or a physical sky horizon) is the map above the horizon
+        let sky_blend = sky_horizon && self.backdrop.is_none();
+        let above = if f.gloss > 0.0 || sky_blend { px.to_vec() } else { Vec::new() };
         let read = |d: [f64; 3]| -> [f64; 3] {
             let u = (d[2].atan2(d[0]) / (2.0 * PI) + 0.5) * w as f64 - 0.5;
             let v = (d[1].clamp(-1.0, 1.0).acos() / PI * h as f64 - 0.5).clamp(0.0, h as f64 - 1.0);
@@ -344,21 +356,42 @@ impl Stage {
             let at = |i: f64, j: f64, q: usize| above[((j as usize).min(h - 1) * w + (i.rem_euclid(w as f64) as usize)) * 4 + q] as f64;
             [0, 1, 2].map(|q| (at(i0, j0, q) * (1.0 - fx) + at(i0 + 1.0, j0, q) * fx) * (1.0 - fy) + (at(i0, j0 + 1.0, q) * (1.0 - fx) + at(i0 + 1.0, j0 + 1.0, q) * fx) * fy)
         };
-        for (o, (d, y)) in dirs.iter().enumerate() {
-            if *y >= 0.0 { continue; }
+        px.par_chunks_mut(4).zip(dirs.par_iter().zip(ys.par_iter())).for_each(|(p, (d, y))| {
+            let (d, y) = (d, *y);
+            if y >= 0.0 { return; }
             // where a ray going this way from the middle of the shape meets the floor, and what lies
-            // beyond the floor there (the backdrop, or nothing)
+            // beyond the floor there (the backdrop, the physical sky horizon, or black)
             let r = EYE_HEIGHT * (1.0 - y * y).max(0.0).sqrt() / -y;
-            let m = f.melt(r);
-            let beyond = self.backdrop.as_ref().map_or([0.0; 3], |b| b.at(*y, dot(*d, glow), dot(*d, behind)));
-            let mut c = own(*y);
+            let m = if sky_blend {
+                let aerial = 1.0 - (-r * (1.8 / f.fade.max(4.0))).exp();
+                aerial.max(1.0 - sstep(-y / 0.004))
+            } else {
+                f.melt(r)
+            };
+            let beyond = if let Some(b) = &self.backdrop {
+                b.at(y, dot(*d, glow), dot(*d, behind))
+            } else if sky_blend {
+                let h_raw = [0, 1, 2].map(|q| d[q] - y * up[q]);
+                let h_len = (h_raw[0] * h_raw[0] + h_raw[1] * h_raw[1] + h_raw[2] * h_raw[2]).sqrt();
+                let elev = (1.5 * PI / h as f64).max(0.015);
+                let hd_raw = if h_len > 1e-6 {
+                    [0, 1, 2].map(|q| h_raw[q] / h_len + elev * up[q])
+                } else {
+                    up
+                };
+                let hd_len = (hd_raw[0] * hd_raw[0] + hd_raw[1] * hd_raw[1] + hd_raw[2] * hd_raw[2]).sqrt().max(1e-8);
+                read(hd_raw.map(|v| v / hd_len))
+            } else {
+                [0.0; 3]
+            };
+            let mut c = own(y);
             if f.gloss > 0.0 {
                 let k = f.mirrors(-y);
                 let mirrored = read([d[0] - 2.0 * y * up[0], d[1] - 2.0 * y * up[1], d[2] - 2.0 * y * up[2]]);
                 for q in 0..3 { c[q] = c[q] * (1.0 - k) + mirrored[q] * k; }
             }
-            for q in 0..3 { px[o * 4 + q] = (c[q] + (beyond[q] - c[q]) * m) as f32; }
-        }
+            for q in 0..3 { p[q] = (c[q] + (beyond[q] - c[q]) * m) as f32; }
+        });
         light.own = own(-1.0);
         light
     }
@@ -451,6 +484,9 @@ impl Grade {
 
     /// An exposed colour to what the screen shows (before encoding): balance, contrast, curve, saturation.
     pub fn apply(&self, c: [f64; 3]) -> [f64; 3] {
+        // The display's default filmic path passes signed spectral RGB directly
+        // to ACES. Match it for high-bit-depth stills of saturated glass.
+        if self.plain() { return c.map(aces); }
         let mut c = c;
         if self.balance != [1.0; 3] { for q in 0..3 { c[q] *= self.balance[q]; } }
         if self.contrast != 1.0 { c = c.map(|v| GREY * (v.max(0.0) / GREY).powf(self.contrast)); }
@@ -505,7 +541,7 @@ pub const KNOBS: &[(&str, &str, f64, f64, f64, bool)] = &[
     ("floorR", "floor red", 0.0, 1.0, 0.005, true),
     ("floorG", "floor green", 0.0, 1.0, 0.005, true),
     ("floorB", "floor blue", 0.0, 1.0, 0.005, true),
-    ("floorFade", "floor reach", 2.0, 60.0, 0.1, true),
+    ("floorFade", "floor reach", 2.0, 250.0, 0.5, true),
     ("floorGloss", "floor gloss", 0.0, 1.0, 0.01, true),
     ("floorBlur", "floor blur", 0.0, 0.5, 0.005, true),
     ("wbTemp", "warmth", -1.0, 1.0, 0.01, true),
@@ -550,6 +586,7 @@ impl Studio {
             if *n == "elev" || *n == "azim" { continue; }
             if let Some(v) = fresh.get(n) { p.set(n, v); }
         }
+        p.sky = 0.0;
         for (n, v) in self.settings { p.set(n, *v); }
     }
 }
@@ -576,7 +613,7 @@ pub const STUDIOS: &[Studio] = &[
             ("backTopR", 0.60), ("backTopG", 0.60), ("backTopB", 0.93),
             ("backMidR", 0.80), ("backMidG", 0.87), ("backMidB", 0.98),
             ("backLowR", 0.70), ("backLowG", 0.71), ("backLowB", 0.95),
-            ("floor", 1.0), ("floorFade", 16.0),
+            ("floor", 1.0), ("floorFade", 120.0),
             ("tone", 1.0), ("exposure", 1.0), ("bloom", 0.08), ("vignette", 0.15), ("saturation", 1.05),
         ],
     },
@@ -595,7 +632,7 @@ pub const STUDIOS: &[Studio] = &[
             ("backTopR", 0.62), ("backTopG", 0.76), ("backTopB", 0.97),
             ("backMidR", 0.88), ("backMidG", 0.94), ("backMidB", 1.0),
             ("backLowR", 0.72), ("backLowG", 0.82), ("backLowB", 0.97),
-            ("floor", 1.0), ("floorFade", 16.0),
+            ("floor", 1.0), ("floorFade", 120.0),
             ("tone", 1.0), ("exposure", 1.0), ("bloom", 0.08), ("vignette", 0.12), ("saturation", 1.0),
         ],
     },
@@ -614,7 +651,7 @@ pub const STUDIOS: &[Studio] = &[
             ("backTopR", 0.86), ("backTopG", 0.86), ("backTopB", 0.88),
             ("backMidR", 0.95), ("backMidG", 0.95), ("backMidB", 0.96),
             ("backLowR", 0.88), ("backLowG", 0.88), ("backLowB", 0.9),
-            ("floor", 1.0), ("floorFade", 18.0),
+            ("floor", 1.0), ("floorFade", 120.0),
             ("tone", 1.0), ("exposure", 1.0), ("bloom", 0.06), ("vignette", 0.1), ("saturation", 1.0),
         ],
     },
@@ -634,13 +671,13 @@ pub const STUDIOS: &[Studio] = &[
             ("backTopR", 0.02), ("backTopG", 0.02), ("backTopB", 0.06),
             ("backMidR", 0.10), ("backMidG", 0.07), ("backMidB", 0.20),
             ("backLowR", 0.03), ("backLowG", 0.025), ("backLowB", 0.07),
-            ("floor", 1.0), ("floorFade", 12.0), ("floorGloss", 0.6), ("floorMirror", 1.0),
+            ("floor", 1.0), ("floorFade", 120.0), ("floorGloss", 0.6), ("floorMirror", 1.0),
             ("tone", 0.0), ("exposure", 1.0), ("bloom", 0.25), ("vignette", 0.5), ("saturation", 1.0),
         ],
     },
 ];
 
-/// Studios for what is not glass, chosen for a material when a studio is up (`State::set_material`).
+/// Studio lighting options for viewing metals and translucent materials.
 /// A mirror shows only its surroundings, so metal is lit as a product photographer lights it: tall
 /// strip lights whose light falls off along their length, and the rest of the room dark (black flags at
 /// the sides and behind the camera), so that the reflections run from white to near black across the
@@ -665,7 +702,7 @@ pub const STUDIOS_MORE: &[Studio] = &[
             ("backLowR", 0.02), ("backLowG", 0.02), ("backLowB", 0.022),
             // (a satin-gloss floor that mirrors the shape, softly and more so the higher above it: a metal
             // on a matte floor floated; on this it stands, as on a product photographer's acrylic sheet)
-            ("floor", 1.0), ("floorFade", 10.0), ("floorGloss", 0.35), ("floorMirror", 1.0), ("floorBlur", 0.05),
+            ("floor", 1.0), ("floorFade", 120.0), ("floorGloss", 0.35), ("floorMirror", 1.0), ("floorBlur", 0.05),
             ("tone", 1.0), ("exposure", 1.0), ("bloom", 0.1), ("vignette", 0.25), ("saturation", 1.0),
         ],
     },
@@ -685,7 +722,7 @@ pub const STUDIOS_MORE: &[Studio] = &[
             ("backTopR", 0.003), ("backTopG", 0.003), ("backTopB", 0.0035),
             ("backMidR", 0.007), ("backMidG", 0.0065), ("backMidB", 0.007),
             ("backLowR", 0.005), ("backLowG", 0.005), ("backLowB", 0.0055),
-            ("floor", 1.0), ("floorFade", 12.0),
+            ("floor", 1.0), ("floorFade", 120.0),
             ("tone", 1.0), ("exposure", 1.0), ("bloom", 0.12), ("vignette", 0.3), ("saturation", 1.0),
         ],
     },
@@ -719,9 +756,11 @@ impl crate::state::State {
     /// Take the studio away again: the family's own lights, no backdrop, no floor, the picture toned as ever.
     pub fn clear_studio(&mut self) {
         self.reset_rig();
-        let (fresh, elev) = (Settings::default(), self.p.elev);
-        for n in NAMES { if let Some(v) = fresh.get(n) { self.p.set(n, v); } }
-        self.p.elev = elev;
+        let fresh = Settings::default();
+        for n in NAMES {
+            if *n == "elev" || *n == "azim" { continue; }
+            if let Some(v) = fresh.get(n) { self.p.set(n, v); }
+        }
     }
     /// A studio given as text: its id (`lavender`), its place in the list, or `none`.
     pub fn studio_arg(&mut self, v: &str) -> bool {
@@ -730,18 +769,7 @@ impl crate::state::State {
             return true;
         }
         match studio_index(v).or_else(|| v.trim().parse::<usize>().ok()) {
-            Some(i) => {
-                let done = self.apply_studio(i);
-                // a studio made for glass, asked for with a metal or a milky body: the studio for that
-                // material instead (as choosing the material while a studio is up does), whichever of the
-                // two was given first
-                if done && i < STUDIOS.len() {
-                    let m = crate::material::Variant::of(&self.p);
-                    let want = if m.metal { Some("metal") } else if m.sss && !m.ceramic { Some("translucent") } else { None };
-                    if let Some(j) = want.and_then(studio_index) { self.apply_studio(j); }
-                }
-                done
-            }
+            Some(i) => self.apply_studio(i),
             None => false,
         }
     }
@@ -931,5 +959,220 @@ mod tests {
         let up = apply(&m, [0.0, 1.0, 0.0]);
         assert!(up[0].abs() < 1e-12 && up[1].abs() < 1e-12 && (up[2] - 1.0).abs() < 1e-12);
         assert_eq!(room_m(0.0, 0.0), crate::math::I3);
+    }
+
+    // The single-threaded paint as it was before it ran on all cores: the reference the parallel one
+    // must match to the bit.
+    fn serial_paint(st: &Stage, px: &mut [f32], w: usize, h: usize, l2r: &Mat3, extra: [f64; 3], sky_horizon: bool) -> FloorLight {
+        use std::f64::consts::PI;
+        let mut light = FloorLight::default();
+        if st.off() { return light; }
+        let r2l = transpose(l2r);
+        let up = apply(&r2l, [0.0, 1.0, 0.0]);
+        let glow = st.backdrop.as_ref().map(|b| apply(&r2l, b.glow_dir)).unwrap_or([0.0; 3]);
+        let behind = apply(&r2l, [0.0, 0.0, -1.0]);
+        let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        // every texel's direction in the lights' frame, and how far above the room's horizon it is
+        let mut dirs = Vec::with_capacity(w * h);
+        for j in 0..h {
+            for i in 0..w {
+                let d = crate::env::paint_dir((i as f64 + 0.5) / w as f64, (j as f64 + 0.5) / h as f64);
+                dirs.push((d, dot(d, up)));
+            }
+        }
+        // the patch of sky a texel of each row covers
+        let patch = |j: usize| (2.0 * PI / w as f64) * ((j as f64 / h as f64 * PI).cos() - ((j + 1) as f64 / h as f64 * PI).cos());
+        if let Some(b) = &st.backdrop {
+            for (o, (d, y)) in dirs.iter().enumerate() {
+                let c = b.at(*y, dot(*d, glow), dot(*d, behind));
+                for q in 0..3 {
+                    px[o * 4 + q] += c[q] as f32;
+                    // (its own share of the light falling on a floor, kept apart)
+                    if *y > 0.0 { light.backdrop[q] += c[q] * y * patch(o / w) / PI; }
+                }
+            }
+        }
+        let Some(f) = &st.floor else { return FloorLight::default() };
+        // the light falling on the floor: everything above the horizon, weighed by how steeply it arrives
+        let mut e = [0.0f64; 3];
+        for j in 0..h {
+            let patch = patch(j);
+            for i in 0..w {
+                let o = j * w + i;
+                let y = dirs[o].1;
+                if y <= 0.0 { continue; }
+                for q in 0..3 { e[q] += px[o * 4 + q] as f64 * y * patch; }
+            }
+        }
+        // The floor's own colour, in two parts: what the light falling on it makes it (the same
+        // everywhere), and what it takes of the backdrop's sweep (by the direction it is seen in).
+        let matched = if st.backdrop.is_some() { f.matched } else { 0.0 };
+        light.base = [0, 1, 2].map(|q| f.albedo[q] * (e[q] / PI + extra[q]) * (1.0 - matched));
+        light.tint = f.albedo.map(|a| a * matched);
+        let own = |y: f64| -> [f64; 3] {
+            let sweep = st.backdrop.as_ref().map_or([0.0; 3], |b| b.sweep(y));
+            [0, 1, 2].map(|q| light.base[q] + light.tint[q] * sweep[q])
+        };
+        // what a glossy floor mirrors (or a physical sky horizon) is the map above the horizon
+        let sky_blend = sky_horizon && st.backdrop.is_none();
+        let above = if f.gloss > 0.0 || sky_blend { px.to_vec() } else { Vec::new() };
+        let read = |d: [f64; 3]| -> [f64; 3] {
+            let u = (d[2].atan2(d[0]) / (2.0 * PI) + 0.5) * w as f64 - 0.5;
+            let v = (d[1].clamp(-1.0, 1.0).acos() / PI * h as f64 - 0.5).clamp(0.0, h as f64 - 1.0);
+            let (i0, j0) = (u.floor(), v.floor());
+            let (fx, fy) = (u - i0, v - j0);
+            let at = |i: f64, j: f64, q: usize| above[((j as usize).min(h - 1) * w + (i.rem_euclid(w as f64) as usize)) * 4 + q] as f64;
+            [0, 1, 2].map(|q| (at(i0, j0, q) * (1.0 - fx) + at(i0 + 1.0, j0, q) * fx) * (1.0 - fy) + (at(i0, j0 + 1.0, q) * (1.0 - fx) + at(i0 + 1.0, j0 + 1.0, q) * fx) * fy)
+        };
+        for (o, (d, y)) in dirs.iter().enumerate() {
+            if *y >= 0.0 { continue; }
+            // where a ray going this way from the middle of the shape meets the floor, and what lies
+            // beyond the floor there (the backdrop, the physical sky horizon, or black)
+            let r = EYE_HEIGHT * (1.0 - y * y).max(0.0).sqrt() / -y;
+            let m = if sky_blend {
+                let aerial = 1.0 - (-r * (1.8 / f.fade.max(4.0))).exp();
+                aerial.max(1.0 - sstep(-y / 0.004))
+            } else {
+                f.melt(r)
+            };
+            let beyond = if let Some(b) = &st.backdrop {
+                b.at(*y, dot(*d, glow), dot(*d, behind))
+            } else if sky_blend {
+                let h_raw = [0, 1, 2].map(|q| d[q] - y * up[q]);
+                let h_len = (h_raw[0] * h_raw[0] + h_raw[1] * h_raw[1] + h_raw[2] * h_raw[2]).sqrt();
+                let elev = (1.5 * PI / h as f64).max(0.015);
+                let hd_raw = if h_len > 1e-6 {
+                    [0, 1, 2].map(|q| h_raw[q] / h_len + elev * up[q])
+                } else {
+                    up
+                };
+                let hd_len = (hd_raw[0] * hd_raw[0] + hd_raw[1] * hd_raw[1] + hd_raw[2] * hd_raw[2]).sqrt().max(1e-8);
+                read(hd_raw.map(|v| v / hd_len))
+            } else {
+                [0.0; 3]
+            };
+            let mut c = own(*y);
+            if f.gloss > 0.0 {
+                let k = f.mirrors(-y);
+                let mirrored = read([d[0] - 2.0 * y * up[0], d[1] - 2.0 * y * up[1], d[2] - 2.0 * y * up[2]]);
+                for q in 0..3 { c[q] = c[q] * (1.0 - k) + mirrored[q] * k; }
+            }
+            for q in 0..3 { px[o * 4 + q] = (c[q] + (beyond[q] - c[q]) * m) as f32; }
+        }
+        light.own = own(-1.0);
+        light
+    }
+
+    fn identity_case(p: &Settings, sky_horizon: bool, l2r: &Mat3, w: usize, h: usize) {
+        let st = Stage::of(p);
+        // a sky with structure in it: a bright patch, a gradient, a dark band
+        let mut base = vec![0.0f32; w * h * 4];
+        for j in 0..h {
+            for i in 0..w {
+                let o = (j * w + i) * 4;
+                let (u, v) = (i as f32 / w as f32, j as f32 / h as f32);
+                base[o] = 0.3 + 2.0 * (u * 6.0).sin().abs() * (1.0 - v);
+                base[o + 1] = 0.5 + v * 0.7 + if (i / 7 + j / 5) % 3 == 0 { 3.0 } else { 0.0 };
+                base[o + 2] = 0.9 - 0.4 * v;
+                base[o + 3] = 1.0;
+            }
+        }
+        let (mut a, mut b) = (base.clone(), base);
+        let la = serial_paint(&st, &mut a, w, h, l2r, [0.01, 0.02, 0.03], sky_horizon);
+        let lb = st.paint_with_sky(&mut b, w, h, l2r, [0.01, 0.02, 0.03], sky_horizon);
+        assert_eq!(la, lb, "floor light differs (sky_horizon={sky_horizon})");
+        let diff = a.iter().zip(&b).filter(|(x, y)| x.to_bits() != y.to_bits()).count();
+        assert_eq!(diff, 0, "{diff} texels differ (sky_horizon={sky_horizon}, {w}x{h})");
+    }
+
+    #[test]
+    fn parallel_paint_matches_serial_to_the_bit() {
+        let tilt = crate::math::axis_angle(0.3, 1.0, 0.2, 0.4);
+        for (floor, gloss, back) in [(1.0, 0.0, 0.0), (1.0, 0.6, 0.0), (1.0, 0.3, 1.0), (0.0, 0.0, 1.0)] {
+            let mut p = Settings::default();
+            p.floor = floor;
+            p.floor_gloss = gloss;
+            p.floor_fade = 8.0;
+            p.backdrop = back;
+            p.back_glow = back * 0.5;
+            for sky in [false, true] {
+                for l2r in [crate::math::I3, tilt] {
+                    identity_case(&p, sky, &l2r, 256, 128);
+                    identity_case(&p, sky, &l2r, 1024, 512);
+                }
+            }
+        }
+    }
+
+    // `cargo test -p gf-core --release paint_timing -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn paint_timing() {
+        let mut p = Settings::default();
+        p.floor = 1.0;
+        p.floor_gloss = 0.3;
+        let st = Stage::of(&p);
+        let (w, h) = (1024, 512);
+        let base = vec![1.0f32; w * h * 4];
+        let time = |f: &dyn Fn(&mut [f32])| {
+            let mut best = f64::MAX;
+            for _ in 0..7 {
+                let mut px = base.clone();
+                let t = std::time::Instant::now();
+                f(&mut px);
+                best = best.min(t.elapsed().as_secs_f64() * 1e3);
+            }
+            best
+        };
+        let s = time(&|px| { serial_paint(&st, px, w, h, &crate::math::I3, [0.0; 3], true); });
+        let q = time(&|px| { st.paint_with_sky(px, w, h, &crate::math::I3, [0.0; 3], true); });
+        let e0 = time(&|_| { let _ = crate::env::paint(&[], [0.0; 3], w, h); });
+        println!("paint_with_sky 1024x512: serial {s:.2} ms, parallel {q:.2} ms; env::paint {e0:.2} ms");
+    }
+
+    #[test]
+    fn sky_horizon_paint_blends_below_horizon_instead_of_black() {
+        let mut p = Settings::default();
+        p.floor = 1.0;
+        p.floor_fade = 8.0;
+        let st = Stage::of(&p);
+        let (w, h) = (64, 32);
+        let mut px = vec![0.0f32; w * h * 4];
+        // Bright sky upper hemisphere, black below horizon before stage paint
+        for j in 0..h / 2 {
+            for i in 0..w {
+                let o = (j * w + i) * 4;
+                px[o] = 2.0;
+                px[o + 1] = 1.5;
+                px[o + 2] = 0.8;
+                px[o + 3] = 1.0;
+            }
+        }
+        let mut plain = px.clone();
+        st.paint_with_sky(&mut plain, w, h, &crate::math::I3, [0.0; 3], false);
+        st.paint_with_sky(&mut px, w, h, &crate::math::I3, [0.0; 3], true);
+        // Just below the horizon (row h/2), sky_horizon blends into the sky horizon instead of dropping to black
+        let just_below = ((h / 2) * w) * 4;
+        assert!(px[just_below] > 1.8 && plain[just_below] < 0.05, "plain={} sky={}", plain[just_below], px[just_below]);
+    }
+
+    #[test]
+    fn bare_floor_melt_is_perspective_smooth_without_spotlight_or_cliff() {
+        let mut p = Settings::default();
+        p.floor = 1.0;
+        let f = Floor::of(&p).unwrap();
+        // Full floor under and around the subject (no small spotlight disc)
+        for r in [0.0, 1.0, 2.5, 3.0] {
+            assert_eq!(f.melt(r), 0.0, "r={r}");
+        }
+        assert_eq!(f.melt(f.fade), 1.0);
+        // Smooth across uniform screen-angle steps from horizon (dy -> 0) downward (no horizon cliff)
+        let mut prev = 1.0;
+        for row in 1..=384 {
+            let dy = row as f64 / 384.0 * 0.25;
+            let m = f.melt(1.25 / dy);
+            assert!(m <= prev + 1e-12 && prev - m < 0.015, "row={row} prev={prev} m={m}");
+            prev = m;
+        }
     }
 }

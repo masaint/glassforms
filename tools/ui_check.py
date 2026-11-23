@@ -43,14 +43,17 @@ OUT = os.path.join(ROOT, 'out', next((a.split('=', 1)[1] for a in sys.argv[1:] i
 W, H = 1280, 720
 # a window in which both panels are in view from top to bottom
 BIG = (1600, 900)
+# A render target tall enough to inspect every expanded material layer without scrolling.
+FULL_LAB = (1600, 1800)
 runs = 0
 
 # the groups that fold, from the top of each panel, and the ones folded when nothing is remembered
 LEFT_GROUPS = ['material', 'light', 'camera', 'quality', 'output']
 RIGHT_GROUPS = ['placement', 'joins', 'animate']
-FOLDED = ['animate-more', 'camera', 'camera-bokeh', 'camera-character', 'camera-grade', 'lab-casts', 'lab-in it', 'lab-special optics', 'material-chooser', 'output', 'placement', 'quality', 'video']
-# the chooser of named materials opened in the panel (it is folded at first)
-CHOOSER = 'fold:material-chooser;'
+FOLDED = ['animate-more', 'camera', 'camera-bokeh', 'camera-character', 'camera-grade', 'lab-advanced', 'lab-canonical', 'lab-casts', 'lab-in it', 'lab-special optics', 'output', 'placement', 'quality', 'video']
+# Open the Lab as a person would; its preset families are visible on first opening.
+CHOOSER = 'key:M;wait:3;'
+EDIT_OBJECT = 'wait:3;press:scope:edit;wait:5;'
 
 
 def command(script='', pairs=(), frames=5, shot=None, flags=(), size=(W, H), scale=1, dump=None):
@@ -116,6 +119,11 @@ def pull(x, y, dx, dy):
     return 'pdown:%.1f,%.1f;pmove:%.1f,%.1f;pmove:%.1f,%.1f;pup' % (x, y, x + dx / 2, y + dy / 2, x + dx, y + dy)
 
 
+def plus(r, shape='gems/brilliant'):
+    """The "+" of the objects pressed, and a shape picked in the popup it opens: one more object."""
+    return '%s;wait:3;pick:%s' % (press(r['layer:add']), shape)
+
+
 def within(inner, outer, slack=0.5):
     return inner[0] >= outer[0] - slack and inner[1] >= outer[1] - slack and inner[2] <= outer[2] + slack and inner[3] <= outer[3] + slack
 
@@ -125,7 +133,11 @@ def apart(a, b):
 
 
 def same_turn(a, b, tol=1e-6):
-    return all(close(x, y, tol) for x, y in zip(a['orientation']['r'], b['orientation']['r']))
+    return (
+        all(close(x, y, tol) for x, y in zip(a['orientation']['r'], b['orientation']['r']))
+        and close(a['settings']['azim'], b['settings']['azim'], tol)
+        and close(a['settings']['elev'], b['settings']['elev'], tol)
+    )
 
 
 def look(script, name, frames=48, **how):
@@ -138,12 +150,18 @@ def look(script, name, frames=48, **how):
     how['pairs'] = ('grain=0',) + tuple(how.get('pairs', ()))
     d = run(script, shot=path, frames=frames, **how)
     seen = np.asarray(Image.open(path).convert('RGB')).astype(float)
+    return d, seen, picture_mask(d, seen)
+
+
+def picture_mask(d, seen):
+    """Pixels in the window photograph showing the render itself."""
+    import numpy as np
     free = np.ones(seen.shape[:2], dtype=bool)
     for part in ('left', 'right', 'room', 'lab', 'help', 'foot', 'help mark', 'camera bar', 'tool bar', 'view cube'):
         if part in d['rects']:
             x0, y0, x1, y1 = d['rects'][part]
             free[max(0, int(y0) - 4):int(y1) + 5, max(0, int(x0) - 4):int(x1) + 5] = False
-    return d, seen, free
+    return free
 
 
 def apart_by(a, b):
@@ -238,6 +256,75 @@ def a_scripted_window_stays_out_of_the_way():
 
 
 @check
+def the_tier_row_has_its_round_buttons_and_a_click_lights_the_right_one():
+    d = run('wait:14')
+    r = d['rects']
+    for name in ('tier:matcap', 'tier:live', 'tier:full', 'tier:menu', 'tier bar'):
+        assert name in r, '%s was not drawn' % name
+    assert 'tier:draft' not in r, 'draft is in the row of a build that cannot draw it'
+    assert [e['id'] for e in d['tiers']['row'] if e['shown'] == 'hidden'] == ['draft'], d['tiers']['row']
+    assert d['tiers']['lit'] == 'full' and d['tiers']['mode'] == 'Render', d['tiers']
+    # under the camera's bar, at its left edge, and the buttons in order, round and the same size
+    cam, bar = r['camera bar'], r['tier bar']
+    assert close(bar[0], cam[0], 0.6) and bar[1] >= cam[3], (cam, bar)
+    xs = [r['tier:' + n][0] for n in ('matcap', 'live', 'full', 'menu')]
+    assert xs == sorted(xs), xs
+    assert all(close(r['tier:' + n][3] - r['tier:' + n][1], 26.0, 0.6) for n in ('matcap', 'live', 'full')), 'the buttons are not 26 points'
+    e = run('wait:14;' + press(r['tier:matcap']) + ';wait:3')
+    assert e['tiers']['lit'] == 'matcap' and e['tiers']['mode'] == 'Matcap', e['tiers']
+    e = run('wait:14;' + press(r['tier:matcap']) + ';wait:3;' + press(r['tier:live']) + ';wait:3')
+    assert e['tiers']['lit'] == 'live' and e['tiers']['rest'] == 'live' and e['tiers']['mode'] == 'Render', e['tiers']
+    e = run('wait:14;' + press(r['tier:live']) + ';wait:3;' + press(r['tier:full']) + ';wait:3')
+    assert e['tiers']['lit'] == 'full', e['tiers']
+    return 'matcap, live glass and full render under the camera bar (draft hidden); clicks light matcap, live and full in turn'
+
+
+@check
+def z_and_shift_z_move_through_the_tiers():
+    d = run('wait:14;key:z;wait:3')
+    assert d['tiers']['lit'] == 'matcap', d['tiers']
+    d = run('wait:14;key:z;wait:2;key:z;wait:3')
+    assert d['tiers']['lit'] == 'full', d['tiers']
+    # shift+Z: full -> matcap -> (draft is hidden) live -> full
+    d = run('wait:14;key:shift+z;wait:3')
+    assert d['tiers']['lit'] == 'matcap' and d['tiers']['mode'] == 'Matcap', d['tiers']
+    d = run('wait:14;key:shift+z;wait:2;key:shift+z;wait:3')
+    assert d['tiers']['lit'] == 'live', d['tiers']
+    d = run('wait:14;key:shift+z;wait:2;key:shift+z;wait:2;key:shift+z;wait:3')
+    assert d['tiers']['lit'] == 'full', d['tiers']
+    return 'Z toggles the matcap; shift+Z goes full, matcap, live glass, full (draft skipped where it is hidden)'
+
+
+@check
+def the_tier_row_dims_live_glass_with_its_reason_on_a_gem_scene_and_shows_draft_when_asked():
+    d = run('wait:14', pairs=('scene=gems', 'preset=brilliant'))
+    live = next(e for e in d['tiers']['row'] if e['id'] == 'live')
+    assert live['shown'] == 'dimmed' and live['reason'], live
+    assert 'tier:live' in d['rects'], 'a dimmed tier is still in the row'
+    e = run('wait:14', pairs=('tierAll=1',))
+    assert 'tier:draft' in e['rects'], 'tierAll=1 did not show draft'
+    xs = [e['rects']['tier:' + n][0] for n in ('matcap', 'draft', 'live', 'full', 'menu')]
+    assert xs == sorted(xs), xs
+    # shift+Z with draft shown: full -> matcap -> draft
+    f = run('wait:14;key:shift+z;wait:2;key:shift+z;wait:3', pairs=('tierAll=1',))
+    assert f['tiers']['lit'] == 'draft', f['tiers']
+    return 'live glass dimmed on gems (%s); tierAll=1 shows draft between matcap and live glass, and shift+Z reaches it' % live['reason'][:50]
+
+
+@check
+def the_chevron_opens_the_tier_settings_and_auto_can_be_turned_on():
+    d = run('wait:14;' + press(run('wait:14')['rects']['tier:menu']) + ';wait:6')
+    assert d['tiers']['menu'] and 'tier/menu' in d['rects'], d['tiers']
+    assert 'tier/auto:on' in d['rects'], 'no auto choice in the dropdown'
+    e = run('wait:14;' + press(d['rects']['tier:menu']) + ';wait:6;' + press(d['rects']['tier/auto:on']) + ';wait:6')
+    assert e['tiers']['auto'] and 'tier/motion:same' in e['rects'] and 'tier/motion:matcap' in e['rects'], e['tiers']
+    assert 'tier/motion:draft' not in e['rects'], 'draft is offered while moving on a build that has none'
+    f = run('wait:14;' + press(d['rects']['tier:menu']) + ';wait:6;' + press(d['rects']['tier:menu']) + ';wait:4')
+    assert not f['tiers']['menu'], 'a second press did not close it'
+    return 'the chevron opens a window with auto; auto on offers same | matcap while moving; a second press closes it'
+
+
+@check
 def a_wave_lights_a_track_with_sensible_stops():
     d = run('wave:P.ior')
     t = d['tracks']['P.ior']
@@ -325,9 +412,10 @@ def a_slider_is_dragged_with_the_pointer():
     d4 = run('lab:open;wait:4;' + press(d['rects']['wave:P.disp']))
     assert d4['tracks'].get('P.disp', {}).get('on'), 'pressing the wave button did not light it'
     # a slider of the shape, in the right panel
-    b = d['rects']['slot:attractors/thomas/b']
-    assert within(b, d['rects']['right']), b
-    d5 = run('lab:open;wait:4;pdown:%.2f,%.2f;pup;wait:3' % (b[2] - 4.5, (b[1] + b[3]) / 2))
+    edit = run(EDIT_OBJECT, size=BIG)
+    b = edit['rects']['slot:attractors/thomas/b']
+    assert within(b, edit['rects']['right']), b
+    d5 = run(EDIT_OBJECT + 'pdown:%.2f,%.2f;pup;wait:3' % (b[2] - 4.5, (b[1] + b[3]) / 2), size=BIG)
     assert d5['knobs']['attractors/thomas/b'] > d['knobs']['attractors/thomas/b'], 'a press at the end of the shape\'s slider left it at %s' % d5['knobs']['attractors/thomas/b']
     return 'a press sets 0.300, a drag past the end %.3f, with shift a drag of 35.5 points moves a tenth as far (%.3f); the wave button lights; the shape\'s b goes to %.4f' % (
         most, fine['knobs']['P.disp'], d5['knobs']['attractors/thomas/b'])
@@ -364,8 +452,8 @@ def the_keys_work():
     assert run('key:left;key:right')['preset'] == first, 'stepping back from the first shape does not wrap round'
     turned = run('drag:120,40;wheel:300;pan:30,10')
     back = run('drag:120,40;wheel:300;pan:30,10;key:r')
-    assert turned['orientation']['euler'] != base['orientation']['euler']
-    assert same_turn(back, base, 1e-9) and close(back['settings']['dist'], base['settings']['dist']) and back['settings']['shift'] == [0, 0], 'R did not put the view back'
+    assert not close(turned['settings']['azim'], base['settings']['azim']) and not close(turned['settings']['elev'], base['settings']['elev'])
+    assert same_turn(back, base, 1e-9) and close(back['settings']['dist'], base['settings']['dist']) and back['settings']['shift'] == [0, 0] and close(back['settings']['eyeX'], 0) and close(back['settings']['eyeY'], 0), 'R did not put the view back'
     # H hides both panels and everything that floats, and brings them back
     h = run('room:open;key:h;wait:2')
     assert h['hidden'] == {'left': True, 'right': True} and not any(k in h['rects'] for k in ('left', 'right', 'room', 'perf')), 'H left %s showing' % sorted(h['rects'])
@@ -382,15 +470,17 @@ def the_keys_work():
 def dragging_turns_slides_and_rolls():
     base = run()
     d = run('drag:100,0')
-    want = mat_mul(axis(0, 1, 0, 100 * 0.006), base['orientation']['r'])
-    assert all(close(a, b, 1e-6) for a, b in zip(d['orientation']['r'], want)), 'a drag of 100 points did not turn the shape by 0.6 radians about the vertical'
-    assert run('drag:0,60')['orientation']['euler'] != base['orientation']['euler']
+    assert close(d['settings']['azim'], math.degrees(100 * 0.006), 1e-6) and close(d['settings']['elev'], base['settings']['elev'], 1e-6), 'a drag of 100 points did not orbit the view by 0.6 radians in azimuth'
+    assert close(run('drag:0,60')['settings']['elev'], math.degrees(60 * 0.006), 1e-6)
+    half = base['settings']['dist'] * math.tan(math.radians(base['settings']['fov']) / 2)
+    k = 2 * half / H
     for script in ('pan:50,20', 'sdrag:50,20'):
-        s = run(script)['settings']['shift']
-        assert close(s[0], -50 * 2 / H) and close(s[1], 20 * 2 / H), '%s gave shift %s' % (script, s)
+        st = run(script)
+        assert st['settings']['shift'] == [0, 0], '%s sheared shift: %s' % (script, st['settings']['shift'])
+        assert close(st['settings']['eyeX'], -50 * k, 1e-6) and close(st['settings']['eyeY'], 20 * k, 1e-6), '%s gave eye (%s, %s)' % (script, st['settings']['eyeX'], st['settings']['eyeY'])
     for script in ('roll:50,0', 'cdrag:50,0'):
         assert close(run(script)['settings']['roll'], 15.0), script
-    return 'left drag turns (0.6 rad per 100 pt), right or shift drag slides, middle or ctrl drag rolls (15 degrees per 50 pt)'
+    return 'left drag orbits (0.6 rad per 100 pt), right or shift drag translates camera, middle or ctrl drag rolls (15 degrees per 50 pt)'
 
 
 @check
@@ -559,7 +649,7 @@ def an_environment_picture_lights_the_shape():
     opened = 'room:open;wait:4'
     load = 'room:open;hdri:%s;wait:4' % SAMPLE
     behind = lambda shot: float(shot[1][4:40][:, shot[2][4:40].all(axis=0)].mean())      # the top edge of the picture, where no glass is
-    before = look(opened, 'picture_before')
+    before = look(opened, 'picture_before', flags=('--ui-reference',))
     assert before[0]['hdri']['name'] is None and 'room/clear' not in before[0]['rects'] and 'slot:P.hdriGain' not in before[0]['rects'], before[0]['hdri']
     # loaded, it lights the shape in place of the lights, and is not shown behind it
     lit = look(load, 'picture_lit')
@@ -593,7 +683,7 @@ def an_environment_picture_lights_the_shape():
     wrong = os.path.join(OUT, 'not a picture.exr')
     with open(wrong, 'wb') as f:
         f.write(b'this is not a picture' * 40)
-    bad = look('room:open;hdri:%s;wait:8' % wrong, 'picture_bad')
+    bad = look('room:open;hdri:%s;wait:8' % wrong, 'picture_bad', flags=('--ui-reference',))
     why = bad[0]['hdri']['error']
     assert why and 'not a picture.exr' in why and bad[0]['hdri']['name'] is None and bad[0]['hdri']['path'] is None, bad[0]['hdri']
     assert apart_by(before, bad) < 0.01, 'a file that could not be read changed the picture by %.3f' % apart_by(before, bad)
@@ -617,10 +707,10 @@ def an_environment_picture_lights_the_shape():
 def clay_is_drawn_instead_of_the_material():
     glass = look('lab:open;wait:4', 'clay_glass')
     r = glass[0]['rects']
-    assert glass[0]['settings']['clay'] == 0 and glass[0]['settles'] == 1024 and within(r['drawn:clay'], r['left']) and within(r['slot:P.ior'], r['lab']), 'the clay switch is not at the head of the material group'
+    assert glass[0]['settings']['clay'] == 0 and glass[0]['settles'] == 1024 and within(r['drawn:clay'], r['lab']) and within(r['slot:P.ior'], r['lab']), 'the clay switch is not at the head of the material group'
     clay = look('lab:open;wait:4;%s;wait:3' % press(r['drawn:clay']), 'clay_clay')
     d = clay[0]
-    assert d['settings']['clay'] == 1 and d['settles'] == 96 and re.search(r' · refining \d+/96 · ', d['says']['perf']), 'pressed, clay is %s and the line says %r' % (d['settings']['clay'], d['says']['perf'])
+    assert d['settings']['clay'] == 1 and d['settles'] == 96 and re.search(r' · settling \d+/96 · ', d['says']['perf']), 'pressed, clay is %s and the line says %r' % (d['settings']['clay'], d['says']['perf'])
     assert apart_by(glass, clay) > 5, 'clay looks like glass (%.2f grey levels apart)' % apart_by(glass, clay)
     # the sliders of the glass are still there, greyed; a press on one does not move it
     dim = []
@@ -663,7 +753,7 @@ MATERIALS = None
 @check
 def a_material_is_chosen_by_name():
     named = materials()
-    groups = list(dict.fromkeys(m['group'] for m in named))
+    groups = list(dict.fromkeys(['glass', 'opaque', *(m['group'] for m in named)]))
     of = lambda g: [m['id'] for m in named if m['group'] == g]
     listed = lambda d: [k[4:] for k in d['rects'] if k.startswith('mat:')]
     glass = look(CHOOSER + 'wait:3', 'mat_glass')
@@ -673,15 +763,15 @@ def a_material_is_chosen_by_name():
     # at the head of the material group: the one chosen in words, the groups as a block of buttons, the group's
     # materials, and the recipe: what is on at present
     tabs = [r['mat-group:' + g] for g in groups]
-    assert all(within(t, r['left']) for t in tabs) and [(t[1], t[0]) for t in tabs] == sorted((t[1], t[0]) for t in tabs), 'the groups are out of order or out of view: %s' % tabs
-    order = [r['group:material'][3], r['mat-name'][1], r['mat-name'][3], tabs[0][1], tabs[-1][3], r['materials'][1], r['materials'][3], r['recipe'][1], r['recipe'][3], r['drawn:material'][1]]
+    assert all(within(t, r['lab']) for t in tabs) and [(t[1], t[0]) for t in tabs] == sorted((t[1], t[0]) for t in tabs), 'the groups are out of order or out of view: %s' % tabs
+    order = [r['drawn:material'][1], r['group:lab-material-presets'][1], r['mat-name'][1], tabs[0][1], tabs[-1][3], r['materials'][1], r['materials'][3], r['recipe'][1], r['recipe'][3]]
     assert order == sorted(order), 'the head of the material group is out of order: %s' % order
     assert [x['words'] for x in m['recipe']] == ['glass'] and m['recipe'][0]['off'] == [] and 'recipe:0' in r and 'recipe:0:x' not in r, 'plain glass has the recipe %s' % m['recipe']
     assert 'glass' in listed(d) and set(listed(d)) <= set(of('glass')), 'the list shows %s' % listed(d)
-    # a group's button brings up its materials and chooses nothing
+    # A different family assigns the first finish and displays that family's options.
     browse = '%s;wait:3' % press(r['mat-group:metal'])
     b = run(CHOOSER + 'wait:3;' + browse, size=BIG)
-    assert b['material']['showing'] == 'metal' and b['material']['id'] == 'glass' and b['settings']['metal'] == 0, b['material']
+    assert b['material']['showing'] == 'metal' and b['material']['id'] == of('metal')[0] and b['settings']['metal'] >= 1, b['material']
     assert 'gold' in listed(b) and set(listed(b)) <= set(of('metal')), 'the metal button shows %s' % listed(b)
     # each has a dot of its own colour: gold's is yellow, silver's is not
     metals = look(CHOOSER + 'wait:3;' + browse, 'mat_metals')
@@ -710,8 +800,8 @@ def a_material_is_chosen_by_name():
     # every group's button brings up that group, its first material in view
     for grp in groups:
         t = run(CHOOSER + 'wait:3;%s;wait:3' % press(r['mat-group:' + grp]), size=BIG)
-        assert t['material']['showing'] == grp and of(grp)[0] in listed(t) and set(listed(t)) <= set(of(grp)), 'the %s button shows %s' % (grp, listed(t))
-        assert within(t['rects']['materials'], t['rects']['left']) and all(within(t['rects']['mat:' + i], t['rects']['materials']) for i in listed(t)), 'the %s list is out of place' % grp
+        assert t['material']['id'] == of(grp)[0] and t['material']['showing'] == grp and of(grp)[0] in listed(t) and set(listed(t)) <= set(of(grp)), 'the %s button shows %s' % (grp, listed(t))
+        assert within(t['rects']['materials'], t['rects']['lab']) and all(within(t['rects']['mat:' + i], t['rects']['materials']) for i in listed(t)), 'the %s list is out of place' % grp
     # a long group scrolls inside the list: the wheel over it brings the last metal up, where it can be pressed
     last = of('metal')[-1]
     lx, ly = mid(b['rects']['materials'])
@@ -725,14 +815,13 @@ def a_material_is_chosen_by_name():
     far = of('metal')[-3]
     j = run(CHOOSER + 'arg:material=%s;ready;wait:70' % far, size=BIG)
     assert j['material']['id'] == far and j['material']['showing'] == 'metal' and 'mat:' + far in j['rects'], 'chosen by a script, %s is not in view: %s' % (far, listed(j))
-    # the chooser is folded at first in the panel; a press on the line that names the material folds it away
-    # again, and another brings it back; folded, the sliders move up and the choice is remembered
+    # The normal editor launches the Lab. Inside, the labelled preset header folds the chooser.
     assert 'mat-group:glass' not in run('wait:3', size=BIG)['rects'], 'the chooser is open at first in the panel'
-    fold = press(r['mat-name'])
+    fold = press(r['group:lab-material-presets'])
     f1 = run(CHOOSER + 'wait:3;%s;wait:3' % fold, size=BIG)
-    assert not f1['material']['chooser'] and 'material-chooser' in f1['closed'] and not listed(f1) and 'mat-group:glass' not in f1['rects'], 'a press on the name did not fold the chooser'
+    assert not f1['material']['chooser'] and 'lab-material-presets' in f1['closed'] and not listed(f1) and 'mat-group:glass' not in f1['rects'], 'a press on the name did not fold the chooser'
     assert f1['rects']['recipe'][1] < r['recipe'][1] - 100, 'folded, the rows under it did not move up'
-    f2 = run(CHOOSER + 'wait:3;%s;wait:3;%s;wait:3' % (fold, press(f1['rects']['mat-name'])), size=BIG)
+    f2 = run(CHOOSER + 'wait:3;%s;wait:3;%s;wait:3' % (fold, press(f1['rects']['group:lab-material-presets'])), size=BIG)
     assert f2['material']['chooser'] and 'glass' in listed(f2), 'a second press did not bring the chooser back'
     # a setup keeps it, changed or not
     setup = os.path.join(OUT, 'material_setup.json')
@@ -778,7 +867,7 @@ def every_named_material_can_be_chosen_and_draws():
 @check
 def what_does_not_go_with_a_material_is_greyed_and_says_why():
     opened = 'lab:open;wait:4'
-    d = run(opened, size=BIG)
+    d = run(opened, size=FULL_LAB)
     r = d['rects']
     by = lambda dump: {c['name']: c for c in dump['material']['controls']}
     c = by(d)
@@ -788,8 +877,8 @@ def what_does_not_go_with_a_material_is_greyed_and_says_why():
     assert c['film']['acts'] and not c['filmIor']['shown'] and c['filmIor']['wants'] == 'needs thin film nm' and 'slot:P.filmIor' not in r, c['filmIor']
     # with a film: its controls are there; the one that needs its unevenness too is greyed and does not answer until that is given
     film = 'lab:open;set:film=300;ready;wait:4'
-    even = look(film, 'grey_film')
-    uneven = look('lab:open;set:film=300;set:filmVar=0.3;ready;wait:4', 'grey_film_uneven')
+    even = look(film, 'grey_film', size=FULL_LAB)
+    uneven = look('lab:open;set:film=300;set:filmVar=0.3;ready;wait:4', 'grey_film_uneven', size=FULL_LAB)
     e, u = by(even[0]), by(uneven[0])
     assert e['filmFlow']['shown'] and not e['filmFlow']['acts'] and e['filmFlow']['wants'] == 'needs film unevenness' and u['filmFlow']['acts'], e['filmFlow']
     slot = even[0]['rects']['slot:P.filmFlow']
@@ -799,28 +888,28 @@ def what_does_not_go_with_a_material_is_greyed_and_says_why():
     assert dim < 0.8, 'the film flow is not greyed on an even film: %.2f of its brightness' % dim
     try_it = on(even[0], 'P.filmFlow', 0.5, '') + ';wait:2'
     # a press on it greyed does not move it: it puts on what it needs (the unevenness, at 0.5)
-    woke = run(film + ';' + try_it, size=BIG)
+    woke = run(film + ';' + try_it, size=FULL_LAB)
     assert woke['knobs']['P.filmFlow'] == even[0]['knobs']['P.filmFlow'] and close(woke['settings']['filmVar'], 0.5), 'pressed greyed, the film flow: %s, unevenness %s' % (woke['knobs']['P.filmFlow'], woke['settings']['filmVar'])
-    assert close(run('lab:open;set:film=300;set:filmVar=0.3;wait:4;' + try_it, size=BIG)['knobs']['P.filmFlow'], 0.5, 0.006), 'on an uneven film the film flow does not answer'
+    assert close(run('lab:open;set:film=300;set:filmVar=0.3;wait:4;' + try_it, size=FULL_LAB)['knobs']['P.filmFlow'], 0.5, 0.006), 'on an uneven film the film flow does not answer'
     # a metal has no index, no tint and nothing inside; the colour of its body is lit
-    gold = run('lab:open;arg:material=gold;ready;wait:4', size=BIG)
+    gold = run('lab:open;arg:material=gold;ready;wait:4', size=FULL_LAB)
     g, glassy = by(gold), {x['name']: x['acts'] for x in gold['material']['glass']}
     assert not glassy['ior'] and not glassy['disp'] and not g['density']['acts'] and not g['sss']['acts'] and g['bodyR']['acts'] and g['rough']['acts'], 'on gold: %s' % glassy
     assert g['density']['wants'] == 'not with metal' and g['bubbles']['wants'] == 'not with metal', (g['density']['wants'], g['bubbles']['wants'])
     for where in ('', ''):
-        tried = run('lab:open;arg:material=gold;wait:4;' + on(gold, 'P.ior', 2.0, where) + ';wait:2', size=BIG)
+        tried = run('lab:open;arg:material=gold;wait:4;' + on(gold, 'P.ior', 2.0, where) + ';wait:2', size=FULL_LAB)
         assert tried['knobs']['P.ior'] == gold['knobs']['P.ior'] and tried['settings']['metal'] == 0, 'pressing the greyed index on gold (%s): index %s, metal %s' % (where or 'the left panel', tried['knobs']['P.ior'], tried['settings']['metal'])
-    assert close(run('lab:open;arg:material=gold;wait:4;' + on(gold, 'P.rough', 0.5) + ';wait:2', size=BIG)['knobs']['P.rough'], 0.5, 0.011), 'frost does not answer on gold'
+    assert close(run('lab:open;arg:material=gold;wait:4;' + on(gold, 'P.rough', 0.5) + ';wait:2', size=FULL_LAB)['knobs']['P.rough'], 0.5, 0.011), 'frost does not answer on gold'
     # drawn as clay, only what lies on the clay stays lit, and the recipe begins with the clay
-    clay = run('lab:open;p:clay=1;ready;wait:4', size=BIG)
+    clay = run('lab:open;p:clay=1;ready;wait:4', size=FULL_LAB)
     k = by(clay)
     lit = sorted(n for n, x in k.items() if x['acts'])
     assert lit == ['coat', 'film'], 'lit in clay: %s' % lit
     assert k['sss']['wants'] == 'not while drawn as clay' and not any(x['acts'] for x in clay['material']['glass']), k['sss']
-    bare = run('lab:open;p:clay=1;wait:4;' + on(clay, 'P.rough', 0.5) + ';wait:2', size=BIG)
+    bare = run('lab:open;p:clay=1;wait:4;' + on(clay, 'P.rough', 0.5) + ';wait:2', size=FULL_LAB)
     assert bare['knobs']['P.rough'] == 0 and bare['settings']['film'] == 360, 'pressing frost on bare clay: frost %s, film %s' % (bare['knobs']['P.rough'], bare['settings']['film'])
-    assert close(run('lab:open;p:clay=1;wait:4;' + on(clay, 'P.coat', 0.5) + ';wait:2', size=BIG)['knobs']['P.coat'], 0.5, 0.011), 'the clear coat does not answer on clay'
-    unclayed = run('p:clay=1;wait:4;%s;wait:3' % press(clay['rects']['recipe:0:x']), size=BIG)
+    assert close(run('lab:open;p:clay=1;wait:4;' + on(clay, 'P.coat', 0.5) + ';wait:2', size=FULL_LAB)['knobs']['P.coat'], 0.5, 0.011), 'the clear coat does not answer on clay'
+    unclayed = run('lab:open;p:clay=1;wait:4;%s;wait:3' % press(clay['rects']['recipe:0:x']), size=FULL_LAB)
     assert unclayed['settings']['clay'] == 0, 'the cross on "clay" in the recipe did not bring the material back'
     return 'as glass the body\'s colour is out of sight, waiting ("%s"), and a film\'s own controls are not shown until there is a film; then the film flow is greyed (to %.0f%%), saying "%s", and a press on it makes the film uneven instead of moving it; on gold the index, tint and inside are greyed ("%s") in the panel and in the lab, a press on the index takes the metal off, and the body\'s colour is lit; as clay only %s stay lit, and the recipe\'s first cross takes the clay off' % (
         c['bodyR']['wants'], 100 * dim, e['filmFlow']['wants'], g['density']['wants'], ', '.join(lit))
@@ -828,11 +917,12 @@ def what_does_not_go_with_a_material_is_greyed_and_says_why():
 
 @check
 def the_materials_lab_is_the_material_layer_by_layer():
-    w, h = BIG
-    base = run('wait:2', size=BIG)
+    # This check deliberately opens every layer at once and clicks its deepest controls.
+    w, h = FULL_LAB
+    base = run('wait:2', size=FULL_LAB)
     assert within(base['rects']['lab button'], base['rects']['left']) and 'lab' not in base['rects'] and 'slot:P.ior' not in base['rects'], 'the panel does not hold only which material it is, and the way into the lab'
     # every part of it in view at once: its sub-groups (in it, special optics, casts) opened
-    d = run('lab:open;wait:4', size=BIG)
+    d = run('lab:open;wait:4', size=FULL_LAB)
     lab, r = d['rects'].get('lab'), d['rects']
     # the stack: the layers from the body outwards, each with its rows in order, each row drawn as its kind.
     # A part that is off is the one row of its switch: what stands under a switch that is off is not shown
@@ -858,10 +948,10 @@ def the_materials_lab_is_the_material_layer_by_layer():
                 hidden.append(name)
     assert ys == sorted(ys) and hidden, 'the lab is out of order: %s' % ys
     assert mat['says'] == {'made of': 'glass', 'surface': 'polished', 'on it': 'nothing', 'in it': 'nothing', 'special optics': 'none'}, mat['says']
-    assert within(r['recipe:0'], r['left']) and within(r['mat-reset'], r['left']) and not mat['changed'], 'the head of the material is not in the panel, or its reset is missing'
+    assert within(r['recipe:0'], lab) and within(r['mat-reset'], lab) and not mat['changed'], 'the recipe is outside the Lab, or its reset is missing'
     assert all(within(r[k], lab) for k in ('slot:P.ior', 'group:lab-made of')), 'the sliders are not in the lab'
     # a part switched on shows the rest of its controls under its switch, set in a little
-    filmed = run('lab:open;wait:4;%s;wait:4' % on(d, 'P.film', 300, ''), size=BIG)
+    filmed = run('lab:open;wait:4;%s;wait:4' % on(d, 'P.film', 300, ''), size=FULL_LAB)
     fr = filmed['rects']
     assert close(filmed['knobs']['P.film'], 300, 1.0) and all('slot:P.' + n in fr for n in ('filmIor', 'filmVar', 'filmScale', 'filmFlow', 'filmDrain', 'filmSky')), 'the film\'s own controls did not appear'
     assert fr['slot:P.film'][3] <= fr['slot:P.filmIor'][1] < fr['slot:P.coat'][1] and filmed['material']['says']['on it'].startswith('film 3'), filmed['material']['says']
@@ -871,55 +961,55 @@ def the_materials_lab_is_the_material_layer_by_layer():
     assert run('key:m;wait:3')['lab']['open'] and not run('key:m;wait:3;key:m;wait:3')['lab']['open'], 'M did not open and close the materials lab'
     opened = 'lab:open;wait:4'
     # a slider
-    sl = run('%s;%s;wait:2' % (opened, on(d, 'P.bubbles', 0.3, '')), size=BIG)
+    sl = run('%s;%s;wait:2' % (opened, on(d, 'P.bubbles', 0.3, '')), size=FULL_LAB)
     assert close(sl['knobs']['P.bubbles'], 0.3, 0.006), 'the bubbles slider gave %s' % sl['knobs']['P.bubbles']
     # a switch
-    sw = run('%s;%s;wait:2' % (opened, press(r['hollow:on'])), size=BIG)
-    off = run('%s;%s;wait:2;%s;wait:2' % (opened, press(r['hollow:on']), press(r['hollow:off'])), size=BIG)
+    sw = run('%s;%s;wait:2' % (opened, press(r['hollow:on'])), size=FULL_LAB)
+    off = run('%s;%s;wait:2;%s;wait:2' % (opened, press(r['hollow:on']), press(r['hollow:off'])), size=FULL_LAB)
     assert sw['settings']['hollow'] == 1 and off['settings']['hollow'] == 0, 'the thin wall switch gave %s, then %s' % (sw['settings']['hollow'], off['settings']['hollow'])
     # a list: pressed, it opens; an item pressed is the choice
-    menu = run('%s;%s;wait:4' % (opened, press(r['list:metal'])), size=BIG)
+    menu = run('%s;%s;wait:4' % (opened, press(r['list:metal'])), size=FULL_LAB)
     assert d['menu'] == [] and len(menu['menu']) == len(rows['metal']['choices']) >= 3 and menu['settings']['metal'] == 0, 'the metal list opened %d items' % len(menu['menu'])
-    chosen = run('%s;%s;wait:4;%s;wait:4' % (opened, press(r['list:metal']), press(menu['menu'][3])), size=BIG)
+    chosen = run('%s;%s;wait:4;%s;wait:4' % (opened, press(r['list:metal']), press(menu['menu'][3])), size=FULL_LAB)
     assert chosen['settings']['metal'] == 3 and chosen['menu'] == [], 'the fourth item of the metal list gave %s' % chosen['settings']['metal']
     # a whole number: stepped by the buttons at the ends of its slider (the bubbles' arrangement, once there are bubbles)
     bub = 'lab:open;set:bubbles=0.3;wait:4'
-    b0 = run(bub, size=BIG)
+    b0 = run(bub, size=FULL_LAB)
     more, less = b0['rects']['more:P.bubbleSeed'], b0['rects']['less:P.bubbleSeed']
-    up = run('%s;%s;wait:2;%s;wait:2' % (bub, press(more), press(more)), size=BIG)
-    down = run('%s;%s;wait:2' % (bub, press(less)), size=BIG)
+    up = run('%s;%s;wait:2;%s;wait:2' % (bub, press(more), press(more)), size=FULL_LAB)
+    down = run('%s;%s;wait:2' % (bub, press(less)), size=FULL_LAB)
     seed = b0['knobs']['P.bubbleSeed']
     assert up['knobs']['P.bubbleSeed'] == seed + 2 and down['knobs']['P.bubbleSeed'] == seed - 1, 'stepped twice up and once down from %s: %s, %s' % (seed, up['knobs']['P.bubbleSeed'], down['knobs']['P.bubbleSeed'])
     # a colour: its bar opens to hue, saturation and brightness, and the hue sets all three parts
     jade = 'lab:open;arg:material=jade;ready;wait:4'
-    j0 = run(jade, size=BIG)
+    j0 = run(jade, size=FULL_LAB)
     cbar = j0['rects']['colour:bodyR']
-    j1 = run('%s;%s;wait:3' % (jade, press(cbar)), size=BIG)
+    j1 = run('%s;%s;wait:3' % (jade, press(cbar)), size=FULL_LAB)
     hue = j1['rects'].get('slot:bodyR.hue')
     assert hue and 'slot:bodyR.hue' not in j0['rects'] and within(hue, j1['rects']['lab']), 'the body colour did not open'
-    j2 = run('%s;%s;wait:3;pdown:%.1f,%.1f;pup;wait:2' % (jade, press(cbar), at(hue, 0, 360, 240), mid(hue)[1]), size=BIG)
+    j2 = run('%s;%s;wait:3;pdown:%.1f,%.1f;pup;wait:2' % (jade, press(cbar), at(hue, 0, 360, 240), mid(hue)[1]), size=FULL_LAB)
     k = j2['knobs']
     assert k['P.bodyB'] > k['P.bodyR'] + 0.02 and k['P.bodyB'] > k['P.bodyG'] + 0.02 and j2['material']['changed'], 'hue 240 gave the body %s' % [k['P.body' + ch] for ch in 'RGB']
     # ... or to its three parts as sliders, each of which can be set travelling; while one travels it stays in parts
     parts = '%s;%s;wait:3;%s;wait:3' % (jade, press(cbar), press(j1['rects']['colour:bodyR:parts']))
-    j3 = run(parts, size=BIG)
+    j3 = run(parts, size=FULL_LAB)
     assert all('slot:P.body' + ch in j3['rects'] for ch in 'RGB') and 'slot:bodyR.hue' not in j3['rects'], 'the body colour did not open in parts'
     waved = '%s;%s;wait:3' % (parts, press(j3['rects']['wave:P.bodyG']))
-    j4 = run(waved, size=BIG)
-    j5 = run('%s;%s;wait:3' % (waved, press(j4['rects']['colour:bodyR:hue'])), size=BIG)
+    j4 = run(waved, size=FULL_LAB)
+    j5 = run('%s;%s;wait:3' % (waved, press(j4['rects']['colour:bodyR:hue'])), size=FULL_LAB)
     assert j4['tracks']['P.bodyG']['on'] and 'slot:P.bodyG' in j5['rects'] and 'slot:bodyR.hue' not in j5['rects'], 'with its green travelling the colour went back to hue'
     # reset: every setting back to what the named material sets
-    q = run('lab:open;arg:material=jade;set:rough=0.55;ready;wait:4', size=BIG)
-    q2 = run('lab:open;arg:material=jade;set:rough=0.55;ready;wait:4;%s;wait:3' % press(q['rects']['mat-reset']), size=BIG)
+    q = run('lab:open;arg:material=jade;set:rough=0.55;ready;wait:4', size=FULL_LAB)
+    q2 = run('lab:open;arg:material=jade;set:rough=0.55;ready;wait:4;%s;wait:3' % press(q['rects']['mat-reset']), size=FULL_LAB)
     assert q['material']['changed'] and not q2['material']['changed'] and q2['knobs']['P.rough'] == j0['knobs']['P.rough'], 'reset left frost at %s' % q2['knobs']['P.rough']
     # a sub-group folds from its title, and that is remembered
     store = os.path.join(OUT, 'lab_remembered.json')
     folded = 'lab-' + layers[-1]
     last = [n for n in mat['stack'][-1]['rows'] if rows[n]['shown']][0]
     gone = where[rows[last]['kind']] % last
-    f1 = run('%s;%s;wait:40' % (opened, press(r['group:' + folded])), size=BIG, flags=('--ui-store', store))
+    f1 = run('%s;%s;wait:40' % (opened, press(r['group:' + folded])), size=FULL_LAB, flags=('--ui-store', store))
     assert folded in f1['closed'] and gone in r and gone not in f1['rects'], 'a press on the title of %s did not fold it' % layers[-1]
-    f2 = run('wait:3', size=BIG, flags=('--ui-store', store))
+    f2 = run('wait:3', size=FULL_LAB, flags=('--ui-store', store))
     assert folded in f2['closed'], 'the fold of %s was not remembered: %s' % (layers[-1], f2['closed'])
     lab = [round(v) for v in lab]
     return 'a window of its own (%d tall with every part in view), the panel holding which material it is; M opens it; %d layers (%s) with %d rows shown and %d waiting under switches that are off; a film switched on brings its six controls up under it; a slider, a switch, a list, a stepped number and a colour (by hue, or in parts that can travel) all answer the pointer; reset (shown once it is changed) puts the material back; the fold of a sub-group is remembered' % (
@@ -929,39 +1019,39 @@ def the_materials_lab_is_the_material_layer_by_layer():
 @check
 def a_material_is_put_together_part_by_part_and_taken_apart_again():
     words = lambda dump: [x['words'] for x in dump['material']['recipe']]
-    glass = look('lab:open;wait:4', 'recipe_glass')
+    glass = look('lab:open;wait:4', 'recipe_glass', flags=('--ui-reference',), size=FULL_LAB)
     d, r = glass[0], glass[0]['rects']
     assert words(d) == ['glass'] and not d['material']['changed'], words(d)
     gold_at = [c for c in d['material']['controls'] if c['name'] == 'metal'][0]['choices'].index('gold')
     # from plain glass to frosted gold under a clear coat with a film on it, with nothing but the stack:
     # the body from its list, then a slider in each of three layers; the recipe follows each step
     steps = ['lab:open;wait:4']
-    menu = run(steps[-1] + ';%s;wait:4' % press(r['list:metal']), size=BIG)
+    menu = run(steps[-1] + ';%s;wait:4' % press(r['list:metal']), size=FULL_LAB)
     steps.append(steps[-1] + ';%s;wait:4;%s;ready;wait:4' % (press(r['list:metal']), press(menu['menu'][gold_at])))
-    a = run(steps[-1], size=BIG)
+    a = run(steps[-1], size=FULL_LAB)
     assert words(a) == ['gold'] and a['material']['says']['made of'] == 'gold', 'gold chosen from the list of metals: %s' % words(a)
     steps.append(steps[-1] + ';%s;ready;wait:3' % on(a, 'P.rough', 0.6, ''))
-    b = run(steps[-1], size=BIG)
+    b = run(steps[-1], size=FULL_LAB)
     assert words(b) == ['gold', 'frosted 0.60'] and b['material']['says']['surface'] == 'frosted 0.60', words(b)
     steps.append(steps[-1] + ';%s;ready;wait:3' % on(b, 'P.coat', 1.0, ''))
-    c = run(steps[-1], size=BIG)
+    c = run(steps[-1], size=FULL_LAB)
     assert words(c) == ['gold', 'frosted 0.60', 'clear coat'], words(c)
     steps.append(steps[-1] + ';%s;ready;wait:3' % on(c, 'P.film', 360, ''))
-    made = look(steps[-1], 'recipe_made')
+    made = look(steps[-1], 'recipe_made', size=FULL_LAB)
     e = made[0]
     assert words(e) == ['gold', 'frosted 0.60', 'film %d nm' % round(e['knobs']['P.film']), 'clear coat'] and 350 <= e['knobs']['P.film'] <= 370, words(e)
     assert e['material']['says'] == {'made of': 'gold', 'surface': 'frosted 0.60', 'on it': '%s · clear coat' % words(e)[2], 'in it': 'nothing', 'special optics': 'none'}, e['material']['says']
     assert e['material']['changed'] and e['material']['id'] == 'glass', 'put together by hand it is still called %s' % e['material']['id']
     assert apart_by(glass, made) > 5, 'frosted gold under a coat and a film looks like glass (%.2f grey levels apart)' % apart_by(glass, made)
-    # the same words stand in the left panel, each with its cross
-    assert all(k in e['rects'] for k in ('recipe:0', 'recipe:3:x', 'recipe:0:x', 'recipe:3:x')) and within(e['rects']['recipe'], e['rects']['left']), 'the recipe is not in both places'
+    # The recipe and its removable parts live together in the Lab.
+    assert all(k in e['rects'] for k in ('recipe:0', 'recipe:3:x', 'recipe:0:x')) and within(e['rects']['recipe'], e['rects']['lab']), 'the recipe is outside the Lab'
     # and back, a part at a time, with the crosses: from the outside in, in the lab and in the panel by turns
     now, back = e, steps[-1]
     for where, left in (('', ['gold', 'frosted 0.60', words(e)[2]]), ('', ['gold', 'frosted 0.60']), ('', ['gold']), ('', ['glass'])):
         back += ';%s;ready;wait:3' % press(now['rects']['%srecipe:%d:x' % (where, len(words(now)) - 1)])
-        now = run(back, size=BIG)
+        now = run(back, size=FULL_LAB)
         assert words(now) == left, 'after a cross %s the recipe is %s, not %s' % ('in the lab' if where else 'in the panel', words(now), left)
-    again = look(back, 'recipe_glass_again')
+    again = look(back, 'recipe_glass_again', flags=('--ui-reference',), size=FULL_LAB)
     s0, s1 = d['settings'], again[0]['settings']
     assert all(s1[k] == s0[k] for k in ('metal', 'rough', 'coat', 'film', 'ior', 'disp')) and not again[0]['material']['changed'], 'taken apart, it is not the glass it was'
     assert apart_by(glass, again) < 1.5, 'taken apart again it is %.2f grey levels from the glass it began as (settings that differ: %s)' % (apart_by(glass, again), {k: (v, s1.get(k)) for k, v in s0.items() if s1.get(k) != v})
@@ -997,7 +1087,8 @@ def focus_is_blurred_afterwards_or_traced_through_the_lens():
     again = look('%s;%s;wait:8;%s;wait:3' % (lens, press(r['focus:exact']), press(e['focus:clean'])), 'focus_clean_again', pairs=filling)
     assert again[0]['settings']['dof'] == 1 and apart_by(clean, again) < apart_modes / 3, 'clean again is %.2f from clean before (the two modes are %.2f apart)' % (apart_by(clean, again), apart_modes)
     # with no lens the two modes are the same picture
-    none_a, none_b = look('wait:3', 'focus_none_1', pairs=filling), look('wait:3', 'focus_none_0', pairs=filling + ('dof=0',))
+    none_a = look('wait:3', 'focus_none_1', pairs=filling, flags=('--ui-reference',))
+    none_b = look('wait:3', 'focus_none_0', pairs=filling + ('dof=0',), flags=('--ui-reference',))
     assert apart_by(none_a, none_b) < 0.01, 'with no lens the two modes differ by %.3f' % apart_by(none_a, none_b)
     # rays through the lens count only when rays go through the lens: greyed and unanswering otherwise,
     # in the camera group and in the video group
@@ -1039,6 +1130,345 @@ TWO_PAIRS = ('scene=solids', 'preset=superellipsoid')
 
 
 @check
+def materials_lab_reset_restores_the_familys_glass_for_index_or_tint_edits():
+    scene = ('scene=solids', 'preset=ring', 'material=glass', 'res=128')
+    start = 'wait:4;key:m;wait:4;press:group:lab-material-presets;wait:4;'
+    base = run(start, pairs=scene, size=(960, 640))
+    assert base['material']['id'] == 'glass' and not base['material']['changed']
+    controls = {
+        'ior': 'press:group:lab-advanced;wait:4;press:slot:P.ior',
+        'tintR': 'press:colour:tintR;wait:4;press:colour:tintR:parts;wait:4;press:slot:P.tintR',
+    }
+    for name, click in controls.items():
+        edit = start + click + ';wait:4'
+        edited = run(edit, pairs=scene, size=(960, 640))
+        assert not close(edited['knobs']['P.' + name], base['knobs']['P.' + name]), name
+        assert edited['material']['changed'], name
+        reset = run(edit + ';press:mat-reset;wait:4', pairs=scene, size=(960, 640))
+        assert not reset['material']['changed'] and reset['settings'] == base['settings'], name
+    return 'index-only and tint-only changes mark family glass as edited and enable a complete reset'
+
+
+@check
+def materials_lab_family_click_assigns_a_finish_and_retains_edits():
+    scene = ('scene=solids', 'preset=ring', 'material=crown', 'clay=1', 'res=128')
+    start = ('set:ior=1.7;wait:4;key:m;wait:4;shot:' + os.path.join(OUT, 'first-open.png')
+             + ';press:mat-group:opaque;ready;wait:4')
+    family = run(start, pairs=scene, size=(960, 640), shot=os.path.join(OUT, 'family-click.png'))
+    mat = family['material']
+    assert family['settings']['clay'] == 0 and mat['id'] == 'modelclay'
+    assert mat['says']['made of'] == mat['recipe'][0]['words'] == 'modelling clay'
+    assert 'colour:bodyR' in family['rects'] and 'slot:P.glazeHaze' in family['rects']
+    plastic = run(start + ';press:mat:moulded;ready;wait:4;press:slot:P.glazeHaze;wait:4'
+                  + ';press:mat-group:opaque;wait:4', pairs=scene, size=(960, 640),
+                  shot=os.path.join(OUT, 'edited-plastic.png'))
+    assert plastic['material']['id'] == 'moulded' and plastic['material']['changed']
+    assert plastic['material']['says']['made of'] == plastic['material']['recipe'][0]['words'] == 'moulded plastic'
+    return 'one family click replaces edited Crown in clay preview; reselecting the family preserves edited plastic'
+
+
+@check
+def materials_lab_keeps_advanced_optics_available_on_demand():
+    scene = ('scene=solids', 'preset=ring', 'material=crown', 'res=128')
+    start = 'wait:4;key:m;wait:4;press:mat-group:opaque;ready;wait:4'
+    simple = run(start, pairs=scene, size=(960, 640), shot=os.path.join(OUT, 'simple-clay.png'))
+    assert not simple['material']['advanced'] and 'group:lab-made of' not in simple['rects']
+    for key in ('group:lab-advanced', 'colour:bodyR', 'slot:P.glazeHaze', 'mat:moulded'):
+        assert within(simple['rects'][key], simple['rects']['lab']), key
+    advanced = run(start + ';press:group:lab-advanced;wait:4', pairs=scene, size=(960, 640),
+                   shot=os.path.join(OUT, 'advanced-clay.png'))
+    assert advanced['material']['advanced'] and 'slot:P.ior' in advanced['rects']
+    assert advanced['settings'] == simple['settings']
+    return 'the compact Lab keeps pigment and finish in reach; its advanced fold exposes the optical controls without changing the material'
+
+
+@check
+def materials_lab_assigns_and_keeps_the_selected_bodys_finish():
+    scene = ('scene=solids', 'preset=ring', 'material=crown', 'clay=1',
+             'layer=solids:superellipsoid', 'J12.op=apart', 'L2.x=0.8', 'res=128')
+    setup = os.path.join(OUT, 'lab-material-owners.json')
+    start = 'wait:4;key:m;wait:4;press:lab:body;wait:3;press:lab:body:2;wait:4'
+    edited = run(start + ';press:mat-group:opaque;wait:3;press:mat:moulded;ready;wait:4'
+                 + ';press:colour:bodyR;wait:3;press:slot:bodyR.hue;wait:3;press:colour:bodyR;wait:3'
+                 + ';press:slot:B2.glazeHaze;wait:3;save-setup:' + setup, pairs=scene, size=(1120, 740))
+    mat = edited['material']
+    assert mat['targetBody'] == 2 and edited['settings']['clay'] == 0
+    assert [m['material'] for m in mat['bodies']] == ['crown', 'moulded'] and mat['bodies'][1]['own']
+    assert mat['changed'] and mat['quick'] == ['bodyR', 'glazeHaze']
+    assert mat['groups'][:2] == ['glass', 'opaque'] and mat['groupLabels'][1] == 'clay, plastic & paint'
+    back = run('load-setup:' + setup + ';wait:4;key:m;wait:4;press:lab:body;wait:3'
+               + ';press:lab:body:2;wait:4', size=(1120, 740))
+    assert back['material']['bodies'] == mat['bodies']
+    for knob in ('bodyR', 'bodyG', 'bodyB', 'glazeHaze'):
+        assert back['knobs']['B2.' + knob] == edited['knobs']['B2.' + knob]
+    return 'M opens the preset families, editing the second body leaves Crown on the first, and pigment and finish survive reopening'
+
+
+@check
+def materials_lab_edits_a_painted_subtractive_face_and_restores_inheritance():
+    def path(name):
+        return os.path.join(OUT, 'lab-cut-' + name + '.json')
+
+    def read(name):
+        with open(path(name), encoding='utf-8') as stream:
+            return json.load(stream)
+
+    # Use a normal saved block, then place one sphere across its front face.
+    scene = ('scene=studio', 'preset=block', 'trace=csg', 'material=crown',
+             'rx=0', 'ry=0', 'rz=0', 'res=128')
+    run('wait:4;save-setup:' + path('fixture'), pairs=scene)
+    fixture = read('fixture')
+    fixture['csg'] = [dict(construction_id=1, family='studio', preset='sphere', values={}, puff=0,
+                           place=dict(pos=[0, 0, 0.71], rot=[0, 0, 0], size=0.58),
+                           op='subtract', smooth=0, level=0)]
+    fixture['construction'] = {'roots': [
+        dict(name='Base', source='base', op='union', blend=0, mods=[], cut_material='subtractor'),
+        dict(name='Spherical recess', source={'part': 1}, op='subtract', blend=0,
+             mods=[], cut_material='subtractor'),
+    ]}
+    with open(path('fixture'), 'w', encoding='utf-8') as stream:
+        json.dump(fixture, stream)
+
+    select = (EDIT_OBJECT + 'key:o;wait:4;press:construction:[1];wait:4;press:outline:close;wait:4;'
+              'key:m;wait:4;press:lab:construction-layer;wait:5;')
+    edit = (select + 'save-setup:' + path('original') + ';press:mat-group:opaque;ready;wait:4;'
+            'save-setup:' + path('family') + ';press:mat:moulded;ready;wait:4;'
+            'press:lab:layer:finish;key:ctrl+a;type:0.61;key:enter;wait:4;save-setup:' + path('saved'))
+    assigned = run(edit, flags=('--setup', path('fixture')), size=(1120, 740),
+                   shot=os.path.join(OUT, 'lab-cut-assigned.png'))
+    original, family, saved = (read(k) for k in ('original', 'family', 'saved'))
+    assert assigned['error'] is None and assigned['material']['id'] == 'crown'
+    assert original['settings'] == family['settings'] == saved['settings']
+    family_face, face = (s['construction']['roots'][1]['material'] for s in (family, saved))
+    assert family_face['ceramic'] == face['ceramic'] == 1
+    assert family_face['mat'] != face['mat'] and close(face['glazeHaze'], 0.61)
+
+    # Choosing the cut object's material hides the cutter's controls and keeps its
+    # assigned finish. Removing the layer override is a separate edit.
+    recipient = run(select + 'save-setup:' + path('reopened') +
+                    ';press:lab:cut:recipient;ready;wait:4;save-setup:' + path('recipient'),
+                    flags=('--setup', path('saved')), size=(1120, 740))
+    assert recipient['error'] is None and 'lab:layer:finish' not in recipient['rects']
+    assert read('reopened')['construction']['roots'][1]['material'] == face
+    receiving = read('recipient')
+    receiving_node = receiving['construction']['roots'][1]
+    assert receiving_node['cut_material'] == 'recipient' and receiving_node['material'] == face
+    assert receiving['settings'] == original['settings']
+
+    resume = (select + 'press:lab:cut:subtractor;ready;wait:4;save-setup:' + path('restored') +
+              ';press:lab:inherit-layer;wait:4;save-setup:' + path('inherited'))
+    reopened = run(resume, flags=('--setup', path('recipient')), size=(1120, 740))
+    assert reopened['error'] is None and reopened['material']['id'] == 'crown'
+    restored = read('restored')['construction']['roots'][1]
+    assert restored['cut_material'] == 'subtractor' and restored['material'] == face
+    inherited = read('inherited')
+    assert 'material' not in inherited['construction']['roots'][1]
+    assert inherited['settings'] == original['settings']
+    return 'the cut switches to its receiving material, restores the typed cutter finish after reopen, and clears its override on Inherit'
+
+
+@check
+def canonical_material_developer_view_add_edit_fold_and_reload():
+    def path(name):
+        return os.path.join(OUT, '16-material-inspector-' + name + '.json')
+
+    def shot(name):
+        return os.path.join(OUT, '16-material-inspector-' + name + '.png')
+
+    def read(name):
+        with open(path(name), encoding='utf-8') as stream:
+            return json.load(stream)
+
+    store = path('store')
+    remembered = ('--ui-store', store)
+    select_scene = 'press:lab:body;wait:2;press:lab:body:1;wait:4;'
+    opened = ('key:m;wait:4;fold:lab-material-presets;fold:lab-canonical;wait:3;' + select_scene)
+    actions = []
+    before = run(TWO_BODIES + opened + 'shot:' + shot('before') + ';save-setup:' + path('before'),
+                 pairs=TWO_PAIRS, size=FULL_LAB, flags=remembered)
+    actions.append('open Lab; close preset chooser; open Canonical material (developer); select scene body 1; capture before; save setup')
+    canonical = before['material']['canonical']
+    assert before['error'] is None and canonical['open'] and canonical['source'] == 'MaterialSpec::from_legacy(settings)'
+    assert canonical['owned'] and canonical['inheritance'] == 'full body'
+    complete = {'schema_version', 'id', 'name', 'preset', 'base', 'specular', 'coat', 'sheen', 'film',
+                'transvolume', 'subsurface', 'emission', 'coverage', 'geometry', 'wear', 'special_optics',
+                'fields', 'textures', 'compatibility'}
+    assert complete <= canonical['spec'].keys(), complete - canonical['spec'].keys()
+    assert not canonical['spec']['coat']['enabled'] and 'weight' in canonical['spec']['coat']['values']
+    assert canonical['spec']['schema_version'] == 1 and canonical['error'] is None
+    assert not any(a['path'] in ('sheen', 'coverage', 'geometry', 'fields', 'textures') for a in canonical['availableAttributes'])
+
+    edit = ('wait:5;' + select_scene +
+            'press:canonical:add;wait:2;press:canonical:add:specular.roughness;wait:3;'
+            'press:canonical:edit:specular.roughness;key:ctrl+a;type:0.37;key:enter;wait:5;'
+            'shot:' + shot('after') + ';fold:lab-canonical;wait:40;save-setup:' + path('edited'))
+    changed = run(edit, pairs=TWO_PAIRS, size=FULL_LAB, flags=remembered + ('--setup', path('before')))
+    actions.append('Add attribute > specular.roughness; type 0.37; capture after; collapse canonical section; save setup')
+    canonical = changed['material']['canonical']
+    assert changed['error'] is None and canonical['error'] is None
+    assert close(canonical['spec']['specular']['values']['roughness']['value'], 0.37), canonical['spec']['specular']
+    assert canonical['source'] == 'canonical owner' and not canonical['open']
+    assert 'specular.roughness' in canonical['activeAttributes']
+    assert read('edited')['version'] == 2
+
+    reopened = run('wait:5;' + select_scene + 'load-setup:' + path('edited') + ';wait:5;' + select_scene
+                   + 'save-setup:' + path('roundtrip')
+                   + ';fold:lab-canonical;wait:5;shot:' + shot('reopened'),
+                   pairs=TWO_PAIRS, size=FULL_LAB, flags=remembered + ('--setup', path('edited')))
+    actions.append('new process with persisted fold and edited setup; reload; save roundtrip; reopen canonical section; capture')
+    canonical = reopened['material']['canonical']
+    assert canonical['open'] and close(canonical['spec']['specular']['values']['roughness']['value'], 0.37)
+    with open(path('edited'), encoding='utf-8') as stream:
+        assert stream.read() == open(path('roundtrip'), encoding='utf-8').read()
+
+    inherited = run('wait:5;press:lab:body;wait:2;press:lab:body:2;wait:5;shot:' + shot('inherited'),
+                    pairs=TWO_PAIRS, size=FULL_LAB, flags=remembered + ('--setup', path('roundtrip')))
+    actions.append('switch to body 2; capture its inherited effective canonical material')
+    canonical = inherited['material']['canonical']
+    assert inherited['material']['body'] == 2 and not canonical['owned'] and canonical['inheritance'] == 'scene'
+    assert canonical['spec']['id'] == 'material:scene'
+    assert close(canonical['spec']['specular']['values']['roughness']['value'], 0.37)
+
+    # Let egui's animated scroll settle before press resolves a named row rectangle. At high frame rates
+    # 20 frames can expire mid-scroll, moving a following row under the click (strength/depth instead of GRIN).
+    special = ('press:canonical:add;wait:2;wheelat:450,600,900;wait:2;'
+               'wheelat:450,600,900;wait:120;')
+    own = ('wait:5;press:lab:body;wait:2;press:lab:body:2;wait:4;'
+           'press:canonical:add;wait:2;press:canonical:add:specular.ior;wait:3;'
+           'press:canonical:edit:specular.ior;key:ctrl+a;type:1.62;key:enter;wait:4;'
+           + special + 'press:canonical:add:special_optics.birefringence;wait:4;'
+           'save-setup:' + path('body-birefringence'))
+    owned = run(own, pairs=TWO_PAIRS, size=FULL_LAB, flags=remembered + ('--setup', path('roundtrip')))
+    actions.append('on inherited body 2 add/edit specular.ior to 1.62; scroll the Add attribute menu; enable birefringence; save')
+    canonical = owned['material']['canonical']
+    assert canonical['owned'] and canonical['inheritance'] == 'full body'
+    assert canonical['spec']['id'] == 'material:body:2'
+    assert close(canonical['spec']['specular']['values']['ior']['value'], 1.62)
+    assert close(canonical['spec']['transvolume']['values']['ior']['value'], 1.62)
+    assert canonical['spec']['special_optics']['birefringence']['enabled']
+    assert not canonical['spec']['special_optics']['grin']['enabled'] and canonical['error'] is None
+
+    rejected = run('wait:5;press:lab:body;wait:2;press:lab:body:2;wait:4;' + special
+                   + 'press:canonical:add:special_optics.grin;wait:4;shot:' + shot('owned-rejected')
+                   + ';save-setup:' + path('body'),
+                   pairs=TWO_PAIRS, size=FULL_LAB, flags=remembered + ('--setup', path('body-birefringence')))
+    actions.append('new process; select owned body 2; scroll the Add attribute menu; attempt incompatible GRIN; capture rejection; save')
+    canonical = rejected['material']['canonical']
+    assert rejected['material']['body'] == 2 and canonical['owned']
+    assert close(canonical['spec']['specular']['values']['ior']['value'], 1.62)
+    assert canonical['spec']['special_optics']['birefringence']['enabled']
+    assert not canonical['spec']['special_optics']['grin']['enabled']
+    assert canonical['error'] and 'separate transport variants' in canonical['error'], canonical['error']
+
+    final = run('wait:5;press:lab:body;wait:2;press:lab:body:2;wait:4;save-setup:' + path('body-roundtrip'),
+                pairs=TWO_PAIRS, size=FULL_LAB, flags=remembered + ('--setup', path('body')))
+    actions.append('new process; reload owned body 2; save final roundtrip')
+    canonical = final['material']['canonical']
+    assert canonical['owned'] and close(canonical['spec']['specular']['values']['ior']['value'], 1.62)
+    assert canonical['spec']['special_optics']['birefringence']['enabled']
+    assert not canonical['spec']['special_optics']['grin']['enabled'] and canonical['error'] is None
+    saved = read('body')
+    assert saved['canonical']['bodies']['2']['specular']['values']['ior']['value'] == 1.62
+    assert close(saved['canonical']['scene']['specular']['values']['roughness']['value'], 0.37)
+    assert close(saved['canonical']['scene']['specular']['values']['ior']['value'], 1.5)
+    with open(path('body'), encoding='utf-8') as stream:
+        assert stream.read() == open(path('body-roundtrip'), encoding='utf-8').read()
+
+    evidence = {
+        'actions': actions,
+        'results': {
+            'completeSpecGroups': sorted(complete),
+            'sceneRoughness': 0.37,
+            'bodyIor': 1.62,
+            'inheritedBeforeBodyEdit': True,
+            'ownedAfterBodyEdit': True,
+            'invalidGrinRolledBack': True,
+            'foldPersistedAcrossProcesses': True,
+            'scenePersistenceRoundtrip': 'byte-for-byte',
+            'bodyPersistenceRoundtrip': 'byte-for-byte',
+        },
+        'screenshots': [shot(name) for name in ('before', 'after', 'reopened', 'inherited', 'owned-rejected')],
+        'limitations': [
+            'Only renderer-projectable constant scalar/colour values and feature switches are editable.',
+            'Enums, non-constant inputs, fields, textures, compatibility, identity/schema and medium metadata are read-only.',
+            'Sheen, coverage, geometry and film flakes remain canonical-only; no shader or WGSL changes are claimed.',
+        ],
+    }
+    with open(path('actions-results'), 'w', encoding='utf-8') as stream:
+        json.dump(evidence, stream, indent=2)
+    return 'complete effective spec, real add/edit, persistent fold, inherited-to-owned body edit, rejected GRIN rollback, and byte-for-byte scene/body save/reload'
+
+
+@check
+def canonical_materials_survive_materials_lab_save_and_reopen():
+    def scalar(value):
+        return {'source': 'constant', 'value': value}
+
+    def path(name):
+        return os.path.join(OUT, 'canonical-' + name + '.json')
+
+    def read(name):
+        with open(path(name), encoding='utf-8') as stream:
+            return json.load(stream)
+
+    # A hand-authored v2 setup may use serde defaults for a complete clear-glass owner. Keep a
+    # disabled coat payload that no legacy setting can represent, and give body two its own owner.
+    run(TWO_BODIES + 'wait:4;save-setup:' + path('legacy'), pairs=TWO_PAIRS, size=(1120, 740))
+    fixture = read('legacy')
+    fixture['version'] = 2
+    fixture['canonical'] = {
+        'scene': {'coat': {'values': {'weight': scalar(0.73), 'roughness': scalar(0.28)}}},
+        'bodies': {'2': {}},
+    }
+    with open(path('fixture'), 'w', encoding='utf-8') as stream:
+        json.dump(fixture, stream, indent=2)
+
+    select_body = 'key:m;wait:4;press:lab:body;wait:3;press:lab:body:%d;wait:4;'
+    scene = run('wait:4;' + select_body % 1
+                + 'press:slot:P.rough;wait:3;save-setup:' + path('scene'),
+                flags=('--setup', path('fixture')), size=(1120, 740))
+    assert scene['error'] is None
+    edited = run('wait:4;' + select_body % 2
+                 + 'press:mat-group:opaque;wait:3;press:mat:moulded;ready;wait:4;'
+                 + 'press:slot:B2.glazeHaze;wait:3;save-setup:' + path('edited'),
+                 flags=('--setup', path('scene')), size=(1120, 740),
+                 shot=os.path.join(OUT, 'canonical-materials-lab.png'))
+    assert edited['error'] is None
+    assert edited['material']['bodies'][1]['material'] == 'moulded'
+    saved = read('edited')
+    assert saved['version'] == 2
+    owner = saved['canonical']
+    coat = owner['scene']['coat']
+    assert not coat['enabled'] and coat['values']['weight'] == scalar(0.73)
+    assert coat['values']['roughness'] == scalar(0.28)
+    assert close(owner['scene']['specular']['values']['roughness']['value'], edited['settings']['rough'])
+    body = owner['bodies']['2']
+    assert body['base']['values']['diffuse_weight']['value'] > 0
+
+    run('load-setup:' + path('edited') + ';wait:5;save-setup:' + path('roundtrip'), size=(1120, 740))
+    with open(path('edited'), encoding='utf-8') as stream:
+        before = stream.read()
+    with open(path('roundtrip'), encoding='utf-8') as stream:
+        after = stream.read()
+    assert after == before, 'canonical setup changed on save/reopen/save'
+    return 'real Lab edits update scene and body owners, retain dormant canonical values, and save/reopen/save byte-for-byte'
+
+
+@check
+def materials_lab_requires_one_body_for_a_world_selection():
+    scene = ('scene=solids', 'preset=ring', 'material=crown', 'layer=studio:sphere', 'J12.op=apart', 'res=128')
+    start = 'wait:4;key:o;wait:4;press:outline:object:1;wait:4'
+    pos = mid(run(start, pairs=scene, size=BIG)['rects']['outline:object:2'])
+    selected = start + ';spdown:%.1f,%.1f;wait:2;pup;wait:3' % pos
+    for scope in (selected, selected + ';press:outline:add-group;wait:4'):
+        d = run(scope + ';press:outline:close;wait:4;key:m;wait:4', pairs=scene, size=BIG)
+        assert d['lab']['open'] and d['material']['targetBody'] is None
+        assert 'lab:body' in d['rects'] and 'mat-group:opaque' not in d['rects']
+        assert [m['material'] for m in d['material']['bodies']] == ['crown', 'crown']
+    return 'a World group and a multiple-body selection both ask for an explicit target'
+
+
+@check
 def each_body_has_a_material_of_its_own():
     base = run(TWO_BODIES + 'wait:6', size=BIG, pairs=TWO_PAIRS)
     r = base['rects']
@@ -1047,7 +1477,7 @@ def each_body_has_a_material_of_its_own():
     d = run(TWO_BODIES + 'wait:6;%s;wait:4' % press(r['layer:2:material']), size=BIG, pairs=TWO_PAIRS)
     lr, mat = d['rects'], d['material']
     assert 'material' not in d['closed'] and mat['body'] == 2 and not mat['own'] and not any(k.startswith('body:') for k in lr), 'the material does not show the second body: %s' % mat['body']
-    assert 'own:on' in lr, 'the left material group does not follow the selected body'
+    assert d['lab']['open'] and within(lr['own:on'], lr['lab']), 'the Lab did not open on the selected body'
     # given a material of its own, then gold by name: the first body stays glass
     g = run(TWO_BODIES + 'wait:6;%s;wait:4;%s;wait:6' % (press(r['layer:2:material']), press(lr['own:on'])), size=BIG, pairs=TWO_PAIRS)
     assert g['material']['own'] and g['material']['bodies'][1]['own'] and g['error'] is None, 'switching "own material" on did not give the body one: %s' % g['material']['bodies']
@@ -1094,6 +1524,7 @@ def shadows_and_caustics_are_switched_for_all_and_for_each_body():
 @check
 def a_greyed_control_pressed_switches_on_what_it_needs():
     base = run('lab:open;wait:4', size=BIG)
+    assert not base['material']['canonical']['open'], 'opening every material layer also opened the developer inspector'
     r = base['rects']
     # what only waits for a part to be switched on is out of sight until it is (true scattering, on milkiness)
     walk = next(c for c in base['material']['controls'] if c['name'] == 'sssWalk')
@@ -1102,6 +1533,7 @@ def a_greyed_control_pressed_switches_on_what_it_needs():
     gold = 'lab:open;arg:material=gold;ready;wait:4'
     g = run(gold, size=BIG)
     assert 'wake:ior' in g['rects'], 'the index on gold is not greyed in sight'
+    assert within(g['rects']['wake:ior'], g['rects']['lab']), 'the greyed index is outside the visible Lab'
     d = run('%s;%s;wait:4' % (gold, press(g['rects']['wake:ior'])), size=BIG)
     s = d['settings']
     assert s['metal'] == 0 and d['error'] is None, 'pressed, the greyed index left metal at %s' % s['metal']
@@ -1217,14 +1649,14 @@ def a_video_is_written_and_plays():
 
 @check
 def a_render_keeps_hands_off_and_no_ffmpeg_is_said_plainly():
-    base = run()
+    base = run(EDIT_OBJECT)
     d = run('vopt:size=320x180;vopt:samples=4;video-start:100;wait:3;key:2;drag:60,0;wheel:300;wait:2;cancel;wait:3')
     assert d['family'] == base['family'] and d['orientation']['euler'] == base['orientation']['euler'] and d['settings']['dist'] == base['settings']['dist'], \
         'keys or the mouse got through during a render'
-    # nor do the controls of the right panel answer: a family's button and the play button
+    # nor do the controls of the right panel answer: the shape card (which opens the shape picker) and the play button
     r = base['rects']
-    d = run('vopt:size=320x180;vopt:samples=4;video-start:100;wait:3;%s;%s;wait:2;cancel;wait:3' % (press(r['family:knots']), press(r['play'])))
-    assert d['family'] == 'attractors' and not d['playing'], 'the right panel answered during a render'
+    d = run(EDIT_OBJECT + 'vopt:size=320x180;vopt:samples=4;video-start:100;wait:3;%s;wait:2;%s;%s;wait:2;cancel;wait:3' % (press(r['shape card']), press(r['shape card']), press(r['play'])))
+    assert d['family'] == 'attractors' and not d['playing'] and 'picker' not in d['rects'], 'the right panel answered during a render'
     # with no ffmpeg to be found the window says so, and a script that asks for a video is refused
     global runs
     runs += 1
@@ -1337,7 +1769,10 @@ def a_setup_is_saved_and_loaded_again():
     assert b['says']['moves'] == a['says']['moves'] and 'dispersion' in b['says']['moves'], b['says']['moves']
     assert b['says']['plan'] == a['says']['plan'] and b['says']['plan'].startswith('one loop: 20.00 s'), b['says']['plan']
     assert b['says']['frames'] == a['says']['frames'] and '1200 frames' in b['says']['frames'], b['says']['frames']
-    assert b['says']['built'] == a['says']['built'] and 'segments' in b['says']['built'], b['says']['built']
+    built = b['shape']['built']
+    assert built['res'] > 0 and b['says']['built'] == a['says']['built'] and f"{built['res']}³ voxels" in b['says']['built'], b['says']['built']
+    if built['segments']:
+        assert f"{built['segments']:,} segments" in b['says']['built'], b['says']['built']
     c = run(flags=('--setup', path))
     assert c['preset'] == 'borromean' and close(c['knobs']['P.ior'], 1.9), 'started with --setup, the setup is not up'
     bad = run('load-setup:%s' % os.path.join(OUT, 'no_such_file.json'))
@@ -1374,9 +1809,10 @@ def a_still_is_saved_with_8_or_16_bits():
         assert fmt(named16) == '%d,%d,rgb48be' % (W, H) and fmt(deep) == '%d,%d,rgb48be' % (W, H), 'ffprobe says the 16-bit stills are %s and %s' % (fmt(named16), fmt(deep))
         assert fmt(named8) == '%d,%d,rgba' % (W, H), 'ffprobe says the 8-bit still is %s' % fmt(named8)
         probed = '; ffprobe: rgba and rgb48be'
-    # with 8 bits it is the picture on screen, bit for bit
+    # The saved still contains the render. The window also shows its navigation controls.
     a, b = np.asarray(Image.open(first).convert('RGB')), np.asarray(Image.open(win).convert('RGB'))
-    assert (a == b).all(), 'the 8-bit still is not what the window shows'
+    visible = picture_mask(d, b)
+    assert visible.mean() > 0.9 and (a[visible] == b[visible]).all(), 'the 8-bit still is not what the window shows'
     # with 16 it is the same picture, finer: within the half step of rounding and dither of the 8-bit one
     note = '; ffmpeg is not on the PATH, so the 16-bit still was only looked at through 8 bits'
     fine = np.asarray(Image.open(deep).convert('RGB')).astype(float)
@@ -1437,7 +1873,7 @@ def families_shapes_and_detail():
 @check
 def every_family_opens_and_every_shape_draws():
     listed = json.loads(subprocess.run([EXE, '--list'], capture_output=True, text=True, timeout=60, encoding='utf-8').stdout)
-    base = run('wait:2', size=BIG)
+    base = run(EDIT_OBJECT, size=BIG)
     assert [f['id'] for f in listed] == base['families'] and len(listed) >= 7, [f['id'] for f in listed]
     # sliders that count things: they must step in whole numbers and show a whole number
     counting = {'solids': ('n', 'sides', 'rings'), 'forms': ('m', 'mv', 'l', 'balls', 'foci', 'sides', 'twist', 'ridges')}
@@ -1464,25 +1900,34 @@ def every_family_opens_and_every_shape_draws():
         shapes += len(notes)
     missing = [('%s %s' % (f, n)) for f, names in counting.items() for n in names if ('%s %s' % (f, n)) not in counted]
     assert not missing, 'no shape has these counting sliders: %s' % missing
-    # the three newer families from their buttons, by the pointer
+    # the three newer families by the pointer: the shape card opens the picker's popup, a family's chip shows its
+    # shapes, a press on the first one puts it in
+    card = EDIT_OBJECT + '%s;wait:4' % press(base['rects']['shape card'])
+    pop = run(card, size=BIG)
     for fam in ('gems', 'solids', 'forms'):
-        d = run('wait:2;%s;wait:4' % press(base['rects']['family:' + fam]), size=BIG)
-        assert d['family'] == fam and d['error'] is None and within(d['rects']['family:' + fam], d['rects']['right']), 'pressing %s gave %s' % (fam, d['family'])
+        first = next(f for f in listed if f['id'] == fam)['presets'][0]
+        chip = '%s;%s;wait:4' % (card, press(pop['rects']['picker:family:' + fam]))
+        c = run(chip, size=BIG)
+        assert within(c['rects']['pick:%s/%s' % (fam, first)], c['rects']['picker']), 'the %s chip did not show its shapes' % fam
+        d = run('%s;%s;wait:4' % (chip, press(c['rects']['pick:%s/%s' % (fam, first)])), size=BIG)
+        assert d['family'] == fam and d['preset'] == first and d['error'] is None and 'picker' not in d['rects'], 'picking %s gave %s / %s' % (fam, d['family'], d['preset'])
     # a counting slider, pressed between two whole numbers, lands on one
-    s = run('family:solids;set:spin=0;wait:4', size=BIG)
+    s = run(EDIT_OBJECT + 'family:solids;set:spin=0;wait:4', size=BIG)
     key = 'solids/%s/n' % s['preset']
     lo, hi, _ = s['ranges'][key]
-    t = run('family:solids;set:spin=0;wait:4;%s;wait:3' % on(s, key, lo + 1.4), size=BIG)
+    t = run(EDIT_OBJECT + 'family:solids;set:spin=0;wait:4;%s;wait:3' % on(s, key, lo + 1.4), size=BIG)
     assert t['knobs'][key] == lo + 1, 'pressed at %s the slider n reads %s' % (lo + 1.4, t['knobs'][key])
-    # a long list of shapes scrolls inside the panel: the last one is out of view until it is chosen
+    # a long family scrolls inside the popup: its last shape is out of view until it is the one up (stepped to
+    # with the arrow, which still steps through the family with the popup closed)
     most = max(listed, key=lambda f: len(f['presets']))
-    a = run('family:%s;set:spin=0;wait:4' % most['id'], size=BIG)
-    seen = [k for k in a['rects'] if k.startswith('shape:')]
-    assert len(seen) < len(most['presets']) and ('shape:' + most['presets'][-1]) not in a['rects'], '%d of %d shapes of %s are in view' % (len(seen), len(most['presets']), most['id'])
-    b = run('family:%s;set:spin=0;wait:4;key:left;wait:70' % most['id'], size=BIG)      # (the list glides to it over a few tenths of a second)
-    assert b['preset'] == most['presets'][-1] and ('shape:' + most['presets'][-1]) in b['rects'], 'stepping back to the last shape of %s did not bring it into view' % most['id']
-    assert within(b['rects']['shape:' + most['presets'][-1]], b['rects']['shapes']) and within(b['rects']['shapes'], b['rects']['right'])
-    return '%d families, %d shapes, every one built without complaint%s; %d counting sliders step in whole numbers; gems, solids and forms open from their buttons; the %d shapes of %s scroll in their list' % (
+    last = 'pick:%s/%s' % (most['id'], most['presets'][-1])
+    a = run(EDIT_OBJECT + 'family:%s;set:spin=0;wait:4;%s;wait:6' % (most['id'], press(base['rects']['shape card'])), size=BIG)
+    seen = [k for k in a['rects'] if k.startswith('pick:')]
+    assert 0 < len(seen) < len(most['presets']) and last not in a['rects'], '%d of %d shapes of %s are in view' % (len(seen), len(most['presets']), most['id'])
+    b = run(EDIT_OBJECT + 'family:%s;set:spin=0;wait:4;key:left;wait:4;%s;wait:40' % (most['id'], press(base['rects']['shape card'])), size=BIG)
+    assert b['preset'] == most['presets'][-1] and last in b['rects'], 'stepping back to the last shape of %s did not bring it into view' % most['id']
+    assert within(b['rects'][last], b['rects']['picker'])
+    return '%d families, %d shapes, every one built without complaint%s; %d counting sliders step in whole numbers; gems, solids and forms are picked from the popup; the %d shapes of %s scroll in it' % (
         len(listed), shapes, ' (%d waiting for a file of the user\'s)' % waiting if waiting else '', len(counted), len(most['presets']), most['id'])
 
 
@@ -1492,7 +1937,7 @@ def a_model_is_a_file_loaded_examined_and_drawn():
     gear, pawn = os.path.join(models, 'gear.stl'), os.path.join(models, 'pawn.glb')
     plain = look('wait:4', 'model_none')
     # the family of models: a sample is read in the background and drawn, and what was found is said under the shapes
-    up = 'family:models;set:spin=0;ready;wait:4'
+    up = EDIT_OBJECT + 'family:models;set:spin=0;ready;wait:4'
     t = look(up, 'model_teapot')
     d, r = t[0], t[0]['rects']
     m = d['model']
@@ -1500,7 +1945,7 @@ def a_model_is_a_file_loaded_examined_and_drawn():
     assert m['file'].startswith('teapot.obj · ') and ' triangles · ' in m['file'] and m['line'] and m['tip'] and m['reading'] is None, m
     assert apart_by(plain, t) > 3, 'the teapot looks like the shape before it (%.2f grey levels apart)' % apart_by(plain, t)
     size, smooth, wall = 'models/teapot/size', 'models/teapot/smooth', 'models/teapot/wall'
-    order = [r['shapes'][3], r['model load'][1], r['model lines'][1], r['model lines'][3], r['choice:mode:0'][1], r['choice:up:0'][1], r['slot:' + size][1], r['slot:' + smooth][1],
+    order = [r['shape card'][3], r['model load'][1], r['model lines'][1], r['model lines'][3], r['choice:mode:0'][1], r['choice:up:0'][1], r['slot:' + size][1], r['slot:' + smooth][1],
              r['model smooth own'][1], r['slot:' + wall][1]]
     assert order == sorted(order) and all(within(r[k], r['right']) for k in ('model load', 'model lines', 'choice:mode:0', 'choice:mode:2', 'choice:up:1')), 'a model\'s part of the panel is out of order: %s' % order
     assert all(k in r for k in ('choice:mode:1', 'slot:models/teapot/@puff')) and 'slot:models/teapot/mode' not in r and 'slot:models/teapot/up' not in r, 'the choices are drawn as sliders'
@@ -1547,7 +1992,7 @@ def a_model_is_a_file_loaded_examined_and_drawn():
     cleared = run('set:spin=0;drop:%s;wait:4;drop:%s;wait:4' % (bad, gear), size=BIG)
     assert cleared['model']['error'] is None and cleared['preset'] == 'file', cleared['model']
     # the shape that stands for a file, with none chosen: it says so, builds nothing and complains of nothing
-    none = run('family:models;set:spin=0;preset:file;ready;wait:6', size=BIG)
+    none = run(EDIT_OBJECT + 'family:models;set:spin=0;preset:file;ready;wait:6', size=BIG)
     assert none['model']['needsFile'] and not none['model']['known'] and none['model']['error'] is None, none['model']
     assert 'model load' in none['rects'] and 'model lines' in none['rects'], 'with no file yet there is no button to load one'
     # a setup keeps a file of the user's
@@ -1560,193 +2005,297 @@ def a_model_is_a_file_loaded_examined_and_drawn():
 
 
 @check
-def layers_are_added_selected_hidden_exchanged_and_removed():
-    one = look('wait:3', 'layers_one')
-    r, L = one[0]['rects'], one[0]['layers']
-    assert len(L['list']) == 1 and L['plain'] and L['bodies'] == [[1]], L
-    assert within(r['layer:1'], r['right']) and within(r['layer:add'], r['right']) and r['layer:1'][3] <= min(v[1] for k, v in r.items() if k.startswith('family:')), 'the layers are not at the head of the right panel'
-    assert not any(k in r for k in ('group:joins', 'group:placement', 'layer:1:x', 'layer:2')), 'one layer shows controls for several'
-    # "+": a second layer, selected, joined to the first, and their join open to be seen
-    add = 'wait:3;%s;wait:5' % press(r['layer:add'])
-    two = look(add, 'layers_two')
-    d, r2, L2 = two[0], two[0]['rects'], two[0]['layers']
-    # with two layers the right panel still needs no scrolling at 1600 x 900: the joins and the animation are in view
-    assert d['panels']['right'] <= d['panels']['room'] + 0.5 and within(r2['group:joins'], r2['right']) and within(r2['group:animate'], r2['right']), 'with two layers the right panel scrolls: %s' % d['panels']
-    assert len(L2['list']) == 2 and L2['selected'] == 2 and L2['bodies'] == [[1, 2]] and not L2['plain'] and L2['open'] == '12', L2
-    assert L2['combos'][0]['op'] == 'join' and L2['combos'][0]['title'] == '%s + %s' % (L2['list'][0]['title'], L2['list'][1]['title']), L2['combos']
-    assert d['family'] == L2['list'][1]['family'] != 'attractors' and d['error'] is None, 'the picker below does not show the new layer\'s shape: %s' % d['family']
-    assert apart_by(one, two) > 2, 'a second layer changes the picture by only %.2f' % apart_by(one, two)
-    for part in ('layer:2', 'layer:2:eye', 'layer:2:x', 'group:joins', 'join:12', 'join:12:join', 'join:12:apart', 'slot:J12.radius'):
-        assert within(r2[part], r2['right']), '%s is not in view' % part
-    assert close(r2['layer:2'][1], r2['layer:1'][3], 0.01), 'two layers of one body do not touch: %s %s' % (r2['layer:1'], r2['layer:2'])
-    assert r2['layer:2'][3] < min(v[1] for k, v in r2.items() if k.startswith('family:')) and max(v[3] for k, v in r2.items() if k.startswith('family:')) < r2['group:joins'][1] < r2['join:12'][1] < r2['group:animate'][1], 'the joins are not after the shape and before the animation'
-    # a press on a row selects its layer: the picker below then shows that layer's shape
-    s = run('%s;%s;wait:4' % (add, press(r2['layer:1'])), size=BIG)
-    assert s['layers']['selected'] == 1 and s['family'] == 'attractors' and s['preset'] == 'thomas' and 'layer:1:x' in s['rects'], 'pressing row 1 selected %s' % s['layers']['selected']
-    # the keys and the shape buttons act on the selected layer only
-    k = run('%s;key:right;wait:4' % add, size=BIG)['layers']['list']
-    assert k[0]['preset'] == 'thomas' and k[1]['preset'] != L2['list'][1]['preset'], 'the arrow key changed %s' % [x['preset'] for x in k]
-    # the eye hides the layer and shows it again
-    eye = press(r2['layer:2:eye'])
-    hidden = look('%s;%s;wait:4' % (add, eye), 'layers_hidden')
-    assert hidden[0]['layers']['list'][1]['show'] is False and len(hidden[0]['layers']['list']) == 2 and apart_by(two, hidden) > 2, 'the eye did not hide layer 2'
-    shown = look('%s;%s;wait:8;%s;wait:4' % (add, eye, eye), 'layers_shown')
-    assert shown[0]['layers']['list'][1]['show'] is True and apart_by(two, shown) < 2.5, 'shown again it is %.2f from before' % apart_by(two, shown)
-    # the cross takes the selected layer away, and with one layer left everything is as it began
-    gone = look('%s;%s;wait:5' % (add, press(r2['layer:2:x'])), 'layers_gone')
-    g = gone[0]
-    assert len(g['layers']['list']) == 1 and g['layers']['plain'] and 'group:joins' not in g['rects'] and g['family'] == 'attractors', g['layers']
-    assert apart_by(one, gone) < 2.5, 'with the second layer gone the picture is %.2f from where it began' % apart_by(one, gone)
-    # four at most
-    four = run('wait:3;' + ';'.join([press(r['layer:add']) + ';wait:5'] * 3), size=BIG)
-    assert len(four['layers']['list']) == 4 and 'layer:add' not in four['rects'] and len(four['layers']['combos']) == 11, 'three presses of "+" gave %d layers and %d combinations' % (len(four['layers']['list']), len(four['layers']['combos']))
-    assert [x['title'] for x in four['layers']['list']] == [x for x in dict.fromkeys(x['title'] for x in four['layers']['list'])], 'two layers have the same name'
-    # a row dragged onto another exchanges the two
-    (x1, y1), (x2, y2) = mid(r2['layer:1']), mid(r2['layer:2'])
-    swapped = run('%s;%s;wait:5' % (add, pull(x2 - 40, y2, 0, y1 - y2)), size=BIG)['layers']['list']
-    assert [x['title'] for x in swapped] == [L2['list'][1]['title'], L2['list'][0]['title']], 'dragging row 2 onto row 1 left %s' % [x['title'] for x in swapped]
-    # kept apart, the two are two bodies: their rows stand apart
-    ap = run('%s;%s;wait:5' % (add, press(r2['join:12:apart'])), size=BIG)
-    assert ap['layers']['bodies'] == [[1], [2]] and ap['rects']['layer:2'][1] - ap['rects']['layer:1'][3] >= 4, 'apart: bodies %s, rows %s %s' % (ap['layers']['bodies'], ap['rects']['layer:1'], ap['rects']['layer:2'])
-    # the detail buttons set every layer
-    det = run('%s;fold:quality;wait:3' % add, size=BIG)
-    det2 = run('%s;fold:material;fold:quality;wait:3;scroll:left=2000;wait:3' % add, size=BIG)
-    fine = run('%s;fold:material;fold:quality;wait:3;scroll:left=2000;wait:3;%s;wait:5' % (add, press(det2['rects']['detail:384'])), size=BIG)
-    assert [x['res'] for x in det['layers']['list']] == [768, 768] and [x['res'] for x in fine['layers']['list']] == [384, 384] and fine['layers']['joined'] == 384, 'the detail button gave %s' % [x['res'] for x in fine['layers']['list']]
-    # a setup keeps the layers
-    setup = os.path.join(OUT, 'layers_setup.json')
-    a = run('%s;%s;wait:3;save-setup:%s' % (add, press(r2['join:12:overlap']), setup), size=BIG)
-    b = run('load-setup:%s;wait:5' % setup, size=BIG)
-    strip = lambda L: ([(x['family'], x['preset'], x['show'], x['size']) for x in L['list']], [(c['tag'], c.get('op'), c.get('radius')) for c in L['combos']], L['bodies'])
-    assert strip(b['layers']) == strip(a['layers']) and len(b['layers']['list']) == 2 and b['layers']['combos'][0]['op'] == 'overlap', 'the setup brought back %s' % (strip(b['layers']),)
-    return ('one layer is one row and a "+"; "+" adds %s joined to %s, selected, with their join open (the picture changes by %.1f grey levels); rows select; the eye hides and shows; '
-            'the cross removes (back to within %.1f of the start); four at most (11 combinations); a drag exchanges two; kept apart they are two bodies; detail sets every layer; a setup keeps them' % (
-                L2['list'][1]['title'], L2['list'][0]['title'], apart_by(one, two), apart_by(one, gone)))
+def world_and_object_modes_keep_navigation_and_construction_separate():
+    start = 'wait:4;press:scope:edit;wait:5'
+    obj = run(start, pairs=['scene=studio', 'preset=sphere', 'trace=csg'], size=BIG)
+    assert 'scope:exit' in obj['rects'] and 'shape card' in obj['rects'], obj['rects'].keys()
+    palette = start + ';key:o;wait:5'
+    inside = run(palette, pairs=['scene=studio', 'preset=sphere', 'trace=csg'], size=BIG)
+    assert 'construction:[0]' in inside['rects'] and 'outline:add-object' not in inside['rects']
+    back = run(palette + ';press:scope:exit;wait:6', pairs=['scene=studio', 'preset=sphere', 'trace=csg'], size=BIG)
+    assert 'outline:add-object' in back['rects'] and 'scope:edit' in back['rects']
+    assert 'shape card' not in back['rects'] and 'construction:[0]' not in back['rects']
+    return 'opened an object, inspected its construction, and returned to the world hierarchy'
 
 
 @check
-def every_join_has_its_own_options():
-    first = run('wait:3', size=BIG)
-    add = 'wait:3;%s;wait:5' % press(first['rects']['layer:add'])
-    two = look(add, 'joins_two')
-    d, r = two[0], two[0]['rects']
-    names = [x['title'] for x in d['layers']['list']]
-    # each operation, pressed: the sliders that mean something for it and no others
-    expect = {'join': ['radius'], 'overlap': ['radius'], 'a_cuts_b': ['gap', 'radius'], 'b_cuts_a': ['gap', 'radius'], 'morph': ['amount'], 'apart': []}
-    seen = {}
-    for op, sliders in expect.items():
-        o = run('%s;%s;wait:5' % (add, press(r['join:12:' + op])), size=BIG)
-        c = o['layers']['combos'][0]
-        shown = sorted(k.split('.')[1] for k in o['rects'] if k.startswith('slot:J12.'))
-        assert c['op'] == op and shown == sliders, '%s: the join is %s with sliders %s' % (op, c['op'], shown)
-        assert ('join:12:smooth' in o['rects']) == ('radius' in sliders), '%s: the seam\'s profile is %s' % (op, 'shown' if 'join:12:smooth' in o['rects'] else 'not shown')
-        assert o['error'] is None and o['layers']['bodies'] == ([[1], [2]] if op == 'apart' else [[1, 2]]), '%s: bodies %s' % (op, o['layers']['bodies'])
-        seen[op] = o
-    # the cuts are named with the layers' own names
-    cut = seen['a_cuts_b']['layers']['combos'][0]['says']
-    assert cut.startswith('%s cuts %s' % (names[0], names[1])), cut
-    # a slider of the join changes the picture
-    wide = look('%s;%s;wait:4' % (add, on(d, 'J12.radius', 0.5)), 'joins_wide')
-    assert wide[0]['layers']['combos'][0]['radius'] == 0.5 and apart_by(two, wide) > 1.5, 'the seam radius at 0.5 changes the picture by %.2f' % apart_by(two, wide)
-    # an option that does not apply is kept: apart and back finds the radius where it was
-    kept = run('%s;%s;wait:3;%s;wait:4;%s;wait:4' % (add, on(d, 'J12.radius', 0.5), press(r['join:12:apart']), press(seen['apart']['rects']['join:12:join'])), size=BIG)['layers']['combos'][0]
-    assert kept['op'] == 'join' and kept['radius'] == 0.5, kept
-    # the seam's profile, and the reset
-    bevel = run('%s;%s;wait:4' % (add, press(r['join:12:bevel'])), size=BIG)
-    assert bevel['layers']['combos'][0]['profile'] == 'bevel', bevel['layers']['combos'][0]
-    back = run('%s;%s;%s;wait:3;%s;wait:4' % (add, on(d, 'J12.radius', 0.5), press(r['join:12:bevel']), press(r['join:12:reset'])), size=BIG)['layers']['combos'][0]
-    assert (back['op'], back['radius'], back['profile']) == ('join', 0.12, 'smooth'), 'reset left %s' % back
-    # a seam animates like any slider: its wave lit, it travels while the animation plays
-    wave = run('%s;%s;wait:3;play;wait:50' % (add, press(r['wave:J12.radius'])), size=BIG)
-    t = wave['tracks'].get('J12.radius')
-    assert t and t['on'] and wave['playing'] and wave['knobs']['J12.radius'] != 0.12 and min(t['from'], t['to']) <= wave['knobs']['J12.radius'] <= max(t['from'], t['to']), 'the seam radius did not travel: %s' % wave['knobs']['J12.radius']
-    assert ('%s + %s: seam radius' % (names[0], names[1])) in wave['says']['moves'], 'what moves does not name the seam: %r' % wave['says']['moves']
-    # three layers: three pairs, each with its own options, and one row for where the three meet
-    # (the right panel scrolled to its foot: the joins come after the shape, above the animation)
-    three = '%s;%s;wait:5;scroll:right=3000;wait:4' % (add, press(r['layer:add']))
-    t3 = run(three, size=BIG)
-    r3 = t3['rects']
-    assert [c['tag'] for c in t3['layers']['combos']] == ['12', '13', '23', '123'] and t3['layers']['open'] in ('13', '23'), t3['layers']['combos']
-    own = run('%s;%s;wait:3;%s;wait:4' % (three, press(r3['join:12']), ''), size=BIG)
-    ro = own['rects']
-    assert own['layers']['open'] == '12' and 'join:12:overlap' in ro and not any(k.startswith('join:13:') or k.startswith('join:23:') for k in ro), 'opening one join left another open'
-    changed = run('%s;%s;wait:3;%s;wait:4' % (three, press(r3['join:12']), press(ro['join:12:overlap'])), size=BIG)['layers']['combos']
-    assert [c.get('op') for c in changed] == ['overlap', 'join', 'join', None], 'changing one pair changed another: %s' % [c.get('op') for c in changed]
-    # where three meet: under its heading, with a fill and a reach
-    assert 'joins:3' in r3 and 'join:123' not in r3, 'the three\'s row is not folded under its heading'
-    opened = run('%s;%s;wait:3' % (three, press(r3['joins:3'])), size=BIG)
-    meet = run('%s;%s;wait:3;%s;wait:4' % (three, press(r3['joins:3']), press(opened['rects']['join:123'])), size=BIG)
-    assert meet['layers']['open'] == '123' and all(k in meet['rects'] for k in ('slot:J123.fill', 'slot:J123.reach')), 'the three\'s row did not open to a fill and a reach'
-    filled = run('%s;%s;wait:3;%s;wait:4;%s;wait:4' % (three, press(r3['joins:3']), press(opened['rects']['join:123']), on(meet, 'J123.fill', 0.5)), size=BIG)['layers']['combos'][3]
-    assert filled['fill'] == 0.5 and filled['oneBody'], filled
-    # when the three are not one body there is nowhere for them to meet: its sliders do not answer
-    loose = 'arg:J12.op=apart;arg:J13.op=apart;arg:J23.op=apart;wait:4'
-    lone = run('%s;%s;%s;wait:3;%s;wait:4;%s;wait:4' % (three, loose, press(r3['joins:3']), press(opened['rects']['join:123']), on(meet, 'J123.fill', 0.5)), size=BIG)
-    assert lone['layers']['bodies'] == [[1], [2], [3]] and lone['layers']['combos'][3]['fill'] == 0 and not lone['layers']['combos'][3]['oneBody'], lone['layers']['combos'][3]
-    return ('join, overlap, the two cuts, morph and apart each show their own sliders (radius; radius and clearance; amount; none) and the seam\'s profile only where there is a seam; '
-            'the radius at 0.5 changes the picture by %.1f grey levels and survives apart and back; reset; the seam travels when its wave is lit ("%s"); with three layers each pair keeps its own, and where three meet has a fill and a reach that answer only when the three are one body' % (
-                apart_by(two, wide), wave['says']['moves']))
+def world_group_selection_keeps_the_selected_objects_and_undoes_as_one_action():
+    scene = ('scene=studio', 'preset=sphere', 'layer=studio:sphere', 'layer=studio:sphere',
+             'J12.op=apart', 'J13.op=apart', 'J23.op=apart', 'L1.x=-0.5', 'L2.x=0', 'L3.x=0.5')
+    start = 'wait:3;key:o;wait:4;press:outline:object:1;wait:3'
+    rects = run(start, pairs=scene, size=BIG)['rects']
+    x, y = mid(rects['outline:object:3'])
+    selected = start + f';spdown:{x},{y};wait:2;pup;wait:3;press:outline:add-group;wait:6'
+    grouped, undone, redone = [os.path.join(OUT, 'world-selection-' + tag + '.json')
+                               for tag in ('grouped', 'undone', 'redone')]
+    run(selected + ';save-setup:' + grouped + ';undo;wait:4;save-setup:' + undone
+        + ';redo;wait:4;save-setup:' + redone, pairs=scene, size=BIG)
+    def stack(path):
+        with open(path, encoding='utf-8') as f:
+            return json.load(f)['layers']['stack']
+    group = stack(grouped)
+    assert group['hierarchy'][0]['group']['children'] == [{'object': 0}, {'object': 1}]
+    assert group['hierarchy'][1] == {'object': 2}
+    assert [layer['place']['pos'][0] for layer in group['layers']] == [-0.5, 0.5, 0]
+    assert not stack(undone).get('hierarchy')
+    assert stack(redone) == group
+
+
+@check
+def moving_the_first_world_object_keeps_the_authored_studio_lights():
+    scene = ('scene=solids', 'preset=ring', 'layer=studio:sphere', 'J12.op=apart',
+             'L1.x=-0.45', 'L2.x=0.45', 'L1.size=0.42', 'L2.size=0.42',
+             'rig=110,35,23,18,8,2,1', 'ambient=0.12,0.08,0.05')
+    start = 'wait:3;key:o;wait:4;press:outline:add-group;wait:4'
+    before = run(start, pairs=scene, size=BIG)['rects']
+    x, y = mid(before['outline:object:1'])
+    tx, ty = mid(before['outline:group:1'])
+    files = [os.path.join(OUT, 'world-lighting-' + name + '.json')
+             for name in ('before', 'moved', 'undone', 'reopened')]
+    script = (start + ';save-setup:' + files[0] + ';' + pull(x, y, tx-x, ty-y)
+              + ';wait:6;save-setup:' + files[1] + ';undo;wait:6;save-setup:' + files[2]
+              + ';load-setup:' + files[1] + ';wait:6;save-setup:' + files[3])
+    run(script, pairs=scene, size=BIG)
+    scenes = []
+    for path in files:
+        with open(path, encoding='utf-8') as f:
+            scenes.append(json.load(f))
+    assert [s['family'] for s in scenes] == ['solids', 'studio', 'solids', 'studio']
+    assert [s.get('rig_family') for s in scenes] == [None, 'solids', None, 'solids']
+    assert all(s['rig'] == scenes[0]['rig'] for s in scenes)
+    return 'kept the studio lights through a World drag, undo and reopening the saved scene'
+
+
+@check
+def the_layer_palette_nests_objects_and_groups_and_undoes_a_drop():
+    path = os.path.join(OUT, 'grouped.json')
+    undone = os.path.join(OUT, 'ungrouped.json')
+    start = 'wait:3;key:o;wait:4;press:outline:add-group;wait:4;press:outline:add-group;wait:4'
+    before = run(start, size=BIG)['rects']
+    x, y = mid(before['outline:object:1'])
+    tx, ty = mid(before['outline:group:2'])
+    move = pull(x, y, tx - x, ty - y)
+    script = start + ';' + move + ';wait:8'
+    run(script + ';save-setup:' + path + ';key:ctrl+z;wait:6;save-setup:' + undone, size=BIG)
+    def hierarchy(filename):
+        with open(filename, encoding='utf-8') as f:
+            return json.load(f)['layers']['stack']['hierarchy']
+    tree = hierarchy(path)
+    assert len(tree) == 1 and tree[0]['group']['children'][0]['group']['children'] == [{'object': 0}], tree
+    old = hierarchy(undone)
+    assert old[0] == {'object': 0} and old[1]['group']['children'][0]['group']['children'] == [], old
+    loaded = run('load-setup:' + path + ';key:o;wait:5', size=BIG)['rects']
+    assert loaded['outline:object:1'][0] > loaded['outline:group:2'][0] > loaded['outline:group:1'][0], loaded
+    return 'dragged an object into a nested group, reopened it, and undid the drop in one step'
+
+
+@check
+def a_construction_group_has_its_own_editing_level():
+    scene = ('scene=studio', 'preset=sphere', 'trace=csg')
+    opened = EDIT_OBJECT + 'key:o;wait:5'
+    entered = opened + ';press:construction:[0];wait:3;press:construction:group;wait:3;press:construction:enter;wait:4'
+    within_group = run(entered, pairs=scene, size=BIG)
+    assert 'scope:construction:[0]' in within_group['rects']
+    nested = entered + ';press:construction:[0, 0];wait:3;press:construction:group;wait:3;press:construction:enter;wait:4'
+    added = nested + ';press:csg add;wait:4'
+    within_child = run(added, pairs=scene, size=BIG)
+    assert 'scope:construction:[0, 0]' in within_child['rects']
+    assert 'construction:[0, 0, 1]' in within_child['rects']
+    returned = run(added + ';press:scope:construction:[0];wait:4', pairs=scene, size=BIG)
+    assert 'scope:construction:[0]' in returned['rects'] and 'scope:construction:[0, 0]' not in returned['rects']
+    world = run(added + ';press:scope:exit;wait:4', pairs=scene, size=BIG)
+    assert 'scope:edit' in world['rects'] and 'scope:object' not in world['rects']
+    return 'opened two group levels, added a primitive to the inner group, and returned by breadcrumb and exit object'
+
+
+@check
+def a_construction_origin_can_be_edited_in_the_panel_and_viewport():
+    scene = ('scene=studio', 'preset=sphere', 'trace=csg')
+    start = (EDIT_OBJECT + 'press:construction:[0];wait:3;press:construction:group;wait:4;'
+             'press:construction:edit-origin;wait:4')
+    r = run(start, pairs=scene, size=BIG)['rects']
+    setup = os.path.join(OUT, 'moved-construction-origin.json')
+    def after(script):
+        d = run(script + ';save-setup:' + setup, pairs=scene, size=BIG)
+        with open(setup, encoding='utf-8') as stream:
+            group = json.load(stream)['construction']['roots'][0]
+        assert 'place' not in group, group
+        assert len(group['source']['group']) == 1, group
+        return d, group['local_origin']
+    x, y = mid(r['construction:origin:X'])
+    numeric = start + ';' + pull(x, y, 34, 0) + ';wait:4'
+    changed, origin = after(numeric)
+    assert origin[0] > 0.04 and origin[1:] == [0, 0], origin
+    x, y = mid(changed['rects']['handle:y'])
+    cx, cy = mid(changed['rects']['handle:centre'])
+    moved, gizmo = after(numeric + ';' + pull(x, y, (x-cx)*0.5, (y-cy)*0.5) + ';wait:4')
+    assert close(gizmo[0], origin[0]) and gizmo[1] > 0.04 and close(gizmo[2], 0), (gizmo, origin)
+    assert 'scope:object' in moved['rects']
+    return 'moved the origin along X numerically and along Y with its gizmo while the group retained its placement'
+
+
+@check
+def a_world_object_opens_from_its_row():
+    scene = ('scene=studio', 'preset=sphere', 'trace=csg')
+    r = run('wait:3', pairs=scene, size=BIG)['rects']
+    click = press(r['layer:1'])
+    opened = run(click + ';' + click + ';wait:4', pairs=scene, size=BIG)['rects']
+    assert 'scope:object' in opened and 'construction:[0]' in opened
+    assert 'scope:edit' not in opened
+    return 'double-clicking the World object row opened its construction'
+
+
+@check
+def layers_are_added_selected_hidden_exchanged_and_removed():
+    render = dict(flags=('--ui-reference',), pairs=('res=192',))
+    one = look('wait:3', 'layers_one', **render)
+    right, first = one[0]['rects'], one[0]['layers']
+    assert len(first['list']) == 1 and first['plain'] and first['bodies'] == [[1]]
+    assert within(right['layer:1'], right['right']) and within(right['layer:add'], right['right'])
+    assert 'scope:edit' in right and 'shape card' not in right
+    add = 'wait:3;' + plus(right) + ';wait:5'
+    two = look(add, 'layers_two', **render)
+    r, layers = two[0]['rects'], two[0]['layers']
+    assert layers['selected'] == 2 and layers['bodies'] == [[1], [2]], layers
+    assert layers['combos'][0]['op'] == 'apart' and 'group:joins' not in r
+    assert r['layer:2'][1] - r['layer:1'][3] >= 4
+    for key in ('layer:2', 'layer:2:eye', 'layer:2:x', 'scope:edit', 'group:animate'):
+        assert within(r[key], r['right']), key
+    assert apart_by(one, two) > 2
+    selected = run(add + ';' + press(r['layer:1']) + ';wait:4', size=BIG)['layers']
+    assert selected['selected'] == 1 and selected['list'][0]['preset'] == 'thomas'
+    first_edit = add + ';' + press(r['layer:1']) + ';wait:4;press:scope:edit;wait:4'
+    for offset in (0, 200, 400, 600, 900, 1300):
+        detail_script = first_edit + f';scroll:right={offset};wait:3'
+        detail = run(detail_script, size=BIG)['rects']
+        if 'detail:384' in detail and within(detail['detail:384'], detail['right']):
+            break
+    fine = run(detail_script + ';press:detail:384;wait:4', size=BIG)['layers']
+    assert [layer['res'] for layer in fine['list']] == [384, 384] and fine['joined'] == 384, fine
+    saved = os.path.join(OUT, 'two-world-objects.json')
+    entered = run(add + ';press:scope:edit;wait:4;save-setup:' + saved, size=BIG)
+    assert 'shape card' in entered['rects'] and 'scope:exit' in entered['rects']
+    assert entered['preset'] == layers['list'][1]['preset']
+    edited = run(add + ';press:scope:edit;wait:3;key:right;wait:4', size=BIG)['layers']['list']
+    assert edited[0]['preset'] == 'thomas' and edited[1]['preset'] != layers['list'][1]['preset'], edited
+    eye = press(r['layer:2:eye'])
+    hidden = look(add + ';' + eye + ';wait:4', 'layers_hidden', **render)
+    assert not hidden[0]['layers']['list'][1]['show'] and apart_by(two, hidden) > 2
+    shown = look(add + ';' + eye + ';wait:8;' + eye + ';wait:4', 'layers_shown', **render)
+    assert shown[0]['layers']['list'][1]['show'] and apart_by(two, shown) < 2.5
+    removed = look(add + ';' + press(r['layer:2:x']) + ';wait:5', 'layers_gone', **render)
+    assert removed[0]['layers']['bodies'] == [[1]] and removed[0]['layers']['plain']
+    assert apart_by(one, removed) < 2.5
+    x, y = mid(r['layer:2'])
+    swapped = run(add + ';' + pull(x - 40, y, 0, mid(r['layer:1'])[1] - y) + ';wait:5', size=BIG)['layers']
+    assert [v['title'] for v in swapped['list']] == [v['title'] for v in reversed(layers['list'])]
+    reopened = run('load-setup:' + saved + ';wait:4', size=BIG)['layers']
+    assert reopened['bodies'] == [[1], [2]] and reopened['combos'][0]['op'] == 'apart'
+    assert [v['title'] for v in reopened['list']] == [v['title'] for v in layers['list']]
+    four = run('wait:3;' + ';'.join(plus(right, shape) + ';wait:5' for shape in
+               ('gems/brilliant', 'knots/trefoil', 'solids/icosahedron')), size=BIG)
+    assert four['layers']['bodies'] == [[1], [2], [3], [4]] and 'layer:add' not in four['rects']
+    assert len({v['title'] for v in four['layers']['list']}) == 4
+    return 'added four independent objects, edited one, hid and restored it, changed row order, removed it and reopened the saved scene'
+
+
+@check
+def ordered_construction_layers_own_their_boolean_blend_and_cut_material():
+    scene = ('scene=studio', 'preset=sphere', 'trace=csg', 'material=clay', 'res=128')
+    add = EDIT_OBJECT + 'press:csg add;wait:5'
+    saved = os.path.join(OUT, 'construction-layer-options.json')
+    def capture(script, label):
+        photo = look(script + ';save-setup:' + saved, label, pairs=scene)
+        with open(saved, encoding='utf-8') as stream:
+            nodes = json.load(stream)['construction']['roots']
+        assert photo[0]['error'] is None
+        return nodes, photo
+    added, union = capture(add + ';press:construction:union;wait:5', 'construction_add')
+    assert len(added) == 2 and added[0]['source'] == 'base'
+    shape = added[1]['source']
+    assert 'part' in shape and added[1]['op'] == 'union'
+    cut = add + ';press:construction:subtract;wait:5'
+    cut_nodes, subtraction = capture(cut, 'construction_subtract')
+    assert cut_nodes[1]['op'] == 'subtract' and cut_nodes[1]['cut_material'] == 'subtractor'
+    assert apart_by(union, subtraction) > 0.5, 'adding and cutting gave the same viewport'
+    x, y = mid(subtraction[0]['rects']['construction:blend'])
+    edit = cut + ';press:construction:cut:Recipient;wait:3;press:construction:relative;wait:3;' + pull(x, y, 45, 0) + ';wait:4'
+    changed, _ = capture(edit, 'construction_blend')
+    assert changed[0] == added[0] and changed[1]['cut_material'] == 'recipient'
+    assert changed[1]['blend_relative'] and changed[1]['blend'] > cut_nodes[1]['blend']
+    intersect, _ = capture(edit + ';press:construction:intersect;wait:4', 'construction_intersect')
+    assert intersect[1]['op'] == 'intersect' and intersect[1]['blend'] == changed[1]['blend']
+    lowered, _ = capture(edit + ';press:construction:Lower;wait:4', 'construction_lower')
+    assert lowered == changed[::-1], (lowered, changed)
+    raised, _ = capture(edit + ';press:construction:Lower;wait:4;press:construction:Raise;wait:4', 'construction_raise')
+    assert raised == changed
+    reopened, _ = capture('load-setup:' + saved + ';wait:6', 'construction_reopened')
+    assert reopened == changed
+    undone, _ = capture(edit + ';press:construction:Lower;wait:4;key:ctrl+z;wait:4', 'construction_undo')
+    assert undone == changed
+    return 'edited layer operations, blend units and cut ownership, reordered the layers, undid the move and reopened the saved construction'
 
 
 @check
 def a_layer_is_placed_among_the_others():
-    one = run('wait:3', size=BIG)
-    assert 'group:placement' not in one['rects'], 'a single shape is offered a placement'
-    add = 'wait:3;%s;wait:5' % press(one['rects']['layer:add'])
-    two = look(add + ';join:none;wait:3', 'place_two')
-    d = two[0]
-    assert 'placement' in d['closed'] and 'group:placement' in d['rects'] and 'slot:L2.x' not in d['rects'], 'the placement group is not folded to begin with'
-    # (two layers' controls are taller than a window 900 points high: the panel is scrolled until the
-    # whole placement, down to its reset, is in view)
-    unscrolled = run(add + ';join:none;fold:placement;wait:4', size=BIG)['rects']
-    off = max(0.0, unscrolled['placement:reset'][3] - (unscrolled['right'][3] - 12))
-    placed = '%s;join:none;fold:placement;wait:4;scroll:right=%d;wait:4' % (add, math.ceil(off))
-    opened = run(placed, size=BIG)
-    r = opened['rects']
-    keys = ['L2.x', 'L2.y', 'L2.z', 'L2.rx', 'L2.ry', 'L2.rz', 'L2.size']
-    assert all(within(r['slot:' + k], r['right']) for k in keys) and within(r['placement:reset'], r['right']) and 'slot:L1.x' not in r, 'the placement\'s seven sliders and its reset are not in view'
-    start = opened['layers']['list'][1]
-    moved = look('%s;%s;%s;wait:4' % (placed, on(opened, 'L2.x', 0.5), on(opened, 'L2.rz', 90)), 'place_moved')
-    m = moved[0]['layers']['list'][1]
-    assert m['pos'] == [0.5, 0, 0] and m['rot'] == [0, 0, 90] and m['size'] == start['size'] and moved[0]['layers']['list'][0]['pos'] == [0, 0, 0], m
-    assert apart_by(two, moved) > 1.5, 'moving a layer changes the picture by only %.2f' % apart_by(two, moved)
-    back = run('%s;%s;wait:3;%s;wait:4' % (placed, on(opened, 'L2.x', 0.5), press(r['placement:reset'])), size=BIG)['layers']['list'][1]
-    assert back['pos'] == [0, 0, 0] and back['size'] == 1, 'reset left %s' % back
-    # the first layer has its own, shown when it is the one selected
-    firsts = run('%s;join:none;fold:placement;wait:3;%s;wait:4' % (add, press(unscrolled['layer:1'])), size=BIG)['rects']
-    assert 'slot:L1.x' in firsts and 'slot:L2.x' not in firsts, 'selecting layer 1 did not show its placement'
-    # a placement animates like any slider
-    w = run('%s;%s;wait:3;play;wait:40' % (placed, press(r['wave:L2.ry'])), size=BIG)
-    assert w['tracks'].get('L2.ry', {}).get('on') and w['layers']['list'][1]['rot'][1] != 0, 'the turn about y did not travel'
-    return 'folded to begin with and not offered to a single shape; seven sliders for the selected layer; moved 0.5 and turned 90 degrees the picture changes by %.1f grey levels; reset puts it back; each layer has its own; a turn travels when its wave is lit' % apart_by(two, moved)
+    render = dict(pairs=('res=192',), flags=('--ui-reference',))
+    initial = run('wait:3', size=BIG)['rects']
+    assert all(key in initial for key in ('world:Position:X', 'world:Rotation:Y', 'world:Scale'))
+    add = 'wait:3;' + plus(initial) + ';wait:5'
+    base = look(add, 'world_place_two', **render)
+    r = base[0]['rects']
+    for field in ('Position', 'Rotation'):
+        assert all(within(r[f'world:{field}:{axis}'], r['right']) for axis in 'XYZ')
+    assert within(r['world:Scale'], r['right'])
+    def change(key, distance):
+        return pull(*mid(r[key]), distance, 0)
+    begin = base[0]['layers']['list']
+    translated = add + ';' + change('world:Position:X', 44) + ';wait:4'
+    turned = translated + ';' + change('world:Rotation:Z', 56) + ';wait:4'
+    scaled = turned + ';' + change('world:Scale', 30) + ';wait:4'
+    after = look(scaled, 'world_place_moved', **render)
+    first, second = after[0]['layers']['list']
+    assert first['pos'] == begin[0]['pos'] and first['rot'] == begin[0]['rot'] and first['size'] == begin[0]['size']
+    assert second['pos'][0] > begin[1]['pos'][0] + 0.05 and second['pos'][1:] == begin[1]['pos'][1:], second
+    assert second['rot'][2] > 3 and second['rot'][:2] == begin[1]['rot'][:2], second
+    assert second['size'] > begin[1]['size'] + 0.03 and apart_by(base, after) > 1.5, second
+    undone = run(scaled + ';key:ctrl+z;wait:5', size=BIG)['layers']['list'][1]
+    assert close(undone['size'], begin[1]['size']) and undone['pos'] == second['pos'] and undone['rot'] == second['rot'], undone
+    reselect = run(scaled + ';press:layer:1;wait:4', size=BIG)
+    assert reselect['layers']['selected'] == 1 and reselect['layers']['list'][1]['pos'] == second['pos']
+    opened = add + ';press:world:placement-animation;wait:4'
+    wave = run(opened + ';press:wave:L2.ry;wait:4;play;wait:25', size=BIG)
+    assert wave['tracks']['L2.ry']['on'] and wave['layers']['list'][1]['rot'][1] != begin[1]['rot'][1]
+    assert wave['layers']['list'][0]['rot'] == begin[0]['rot']
+    return 'translated, rotated, scaled and animated the selected object, then undid a scale independently'
 
 
 @check
 def families_and_the_animation_work_from_the_right_panel():
-    base = run('wait:2', size=BIG)
+    base = run(EDIT_OBJECT, size=BIG)
     r, right = base['rects'], base['rects']['right']
-    # every family has a button at the head of the right panel, in whole lines that fill its width
-    tabs = [r['family:' + f] for f in base['families']]
-    assert all(within(t, right) for t in tabs) and max(t[3] for t in tabs) < r['shapes'][1], 'the families are not at the head of the right panel: %s' % tabs
+    # the selected object's shape is a card under the objects; the families are in the picker it opens, every one a
+    # chip in its popup
+    assert within(r['shape card'], right) and r['scope:exit'][3] <= r['shape card'][1], 'the shape card is not below the object breadcrumb'
+    assert not any(k.startswith(('family:', 'shape:', 'picker')) for k in r), 'the picker or the old family buttons are drawn while it is shut'
+    card = EDIT_OBJECT + '%s;wait:4' % press(r['shape card'])
+    pop = run(card, size=BIG)
+    rp = pop['rects']
+    tabs = [rp['picker:family:' + f] for f in base['families']]
+    assert all(within(t, rp['picker']) for t in tabs) and len(tabs) == len(base['families']), 'the popup does not show every family'
     lines = sorted({t[1] for t in tabs})
-    for y in lines:
-        line = sorted(t for t in tabs if t[1] == y)
-        assert close(line[0][0], right[0] + 13, 1.0) and close(line[-1][2], right[2] - 13, 1.0), 'a line of families does not fill the panel: %s' % line
-        assert all(close(a[2] + 4, b[0], 0.01) for a, b in zip(line, line[1:])), 'families overlap or leave a gap: %s' % line
-    assert len(lines) <= math.ceil(len(tabs) / 2), '%d families take %d lines' % (len(tabs), len(lines))
-    assert not any(k.startswith('family:') for k in r if not within(r[k], right)), 'a family is outside the right panel'
     # pressed with the pointer: a family, then one of its shapes
-    d = run('wait:2;%s;wait:3' % press(r['family:knots']), size=BIG)
-    assert d['family'] == 'knots' and 'shape:borromean' in d['rects'], 'pressing the Knots button gave %s' % d['family']
-    d2 = run('wait:2;%s;wait:3;set:spin=0;%s;wait:3' % (press(r['family:knots']), press(d['rects']['shape:borromean'])), size=BIG)
-    assert d2['family'] == 'knots' and d2['preset'] == 'borromean', 'pressing a shape gave %s / %s' % (d2['family'], d2['preset'])
+    d = run('%s;%s;wait:3' % (card, press(rp['picker:family:knots'])), size=BIG)
+    assert 'pick:knots/borromean' in d['rects'], 'pressing the knots chip did not show the knots'
+    d2 = run('%s;%s;wait:3;set:spin=0;%s;wait:3' % (card, press(rp['picker:family:knots']), press(d['rects']['pick:knots/borromean'])), size=BIG)
+    assert d2['family'] == 'knots' and d2['preset'] == 'borromean' and 'picker' not in d2['rects'], 'pressing a shape gave %s / %s' % (d2['family'], d2['preset'])
     # the animation: its group is the foot of the right panel, open; the play button plays what the waves have lit
     for name in ('group:animate', 'play', 'slot:time', 'slot:P.speed', 'group:animate-more'):
         assert within(r[name], right), '%s is not in the right panel: %s' % (name, r[name])
-    assert r['group:animate'][1] > r['slot:attractors/thomas/b'][1] > r['shapes'][3], 'the right panel is out of order'
-    p = run('wait:2;%s;wait:40' % press(r['play']), size=BIG)
+    assert r['group:animate'][1] > r['slot:attractors/thomas/b'][1] > r['shape card'][3], 'the right panel is out of order'
+    p = run(EDIT_OBJECT + '%s;wait:40' % press(r['play']), size=BIG)
     assert p['playing'] and p['clock'] > 0.05 and p['shape']['travel'] > 0, 'pressing play: playing %s, clock %s' % (p['playing'], p['clock'])
-    p2 = run('wait:2;%s;wait:20;%s;wait:3' % (press(r['play']), press(r['play'])), size=BIG)
+    p2 = run(EDIT_OBJECT + '%s;wait:20;%s;wait:3' % (press(r['play']), press(r['play'])), size=BIG)
     assert not p2['playing'] and p2['clock'] > 0, 'pressing it again did not pause'
     # speed and spin, by their sliders
     # the view's spin is the camera's motion, in the left panel
@@ -1755,16 +2304,60 @@ def families_and_the_animation_work_from_the_right_panel():
     assert 'group:cam-motion' in cam['rects'] and within(cam['rects']['slot:P.spin'], cam['rects']['left']), 'the spin is not with the camera'
     sp = run('fold:material;fold:camera;wait:2;scroll:left=3000;wait:3;%s;wait:2' % on(cam, 'P.spin', 0.75), size=BIG)
     assert close(sp['settings']['spin'], 0.75, 0.011), 'the spin slider gave %s' % sp['settings']['spin']
-    sd = run('wait:2;%s;wait:2' % on(base, 'P.speed', 2.0), size=BIG)
+    sd = run(EDIT_OBJECT + '%s;wait:2' % on(base, 'P.speed', 2.0), size=BIG)
     assert close(sd['settings']['speed'], 2.0, 0.051), 'the speed slider gave %s' % sd['settings']['speed']
-    # how finely the shape is built is in the left panel's output, not here
-    assert 'group:detail' not in r and not any(k.startswith('detail:') for k in r), 'the shape\'s detail is still in the right panel'
+    # how finely the object is built is the object's: in the right panel (among its controls), never the left
+    assert not any(k.startswith(('detail:', 'motion:')) and not within(r[k], r['right']) for k in r), 'the shape\'s detail is outside the right panel'
     # nothing of the shape or the animation is left in the left panel
     left = r['left']
-    astray = [k for k in r if (k.startswith(('family:', 'shape:', 'slot:attractors', 'group:animate')) or k in ('play', 'slot:time', 'loop', 'slot:P.speed')) and not apart(r[k], left)]
+    astray = [k for k in r if (k.startswith(('slot:attractors', 'group:animate')) or k in ('shape card', 'play', 'slot:time', 'loop', 'slot:P.speed')) and not apart(r[k], left)]
     assert not astray, 'in the left panel: %s' % astray
-    return '%d families in %d full lines at its head; a press chooses Knots, then Borromean rings; play plays and pauses (travel %.3f after %.2f s); the spin (with the camera) and speed sliders give %.2f and %.2f; the shape\'s detail is not here' % (
+    return '%d families in %d lines of chips in the shape card\'s popup; a press chooses knots, then Borromean rings; play plays and pauses (travel %.3f after %.2f s); the spin (with the camera) and speed sliders give %.2f and %.2f; the shape\'s detail is not here' % (
         len(tabs), len(lines), p['shape']['travel'], p['clock'], sp['settings']['spin'], sd['settings']['speed'])
+
+
+@check
+def the_shape_picker_is_a_small_popup_with_the_explorer_behind_it():
+    base = run('wait:2', size=BIG)
+    r, full = base['rects'], (0, 0, BIG[0], BIG[1])
+    # the "+" opens a small popup hanging below it, its right edge with the button's, inside the window
+    o = run('wait:2;%s;wait:4' % press(r['layer:add']), size=BIG)
+    p, plusr = o['rects']['picker'], r['layer:add']
+    pw, ph = p[2] - p[0], p[3] - p[1]
+    assert close(p[2], plusr[2], 1.0) and plusr[3] < p[1] < plusr[3] + 12 and within(p, full), 'the popup does not hang below the "+": %s, %s' % (p, plusr)
+    assert pw < 420 and ph < 560, 'the popup is not small: %.0f x %.0f' % (pw, ph)
+    assert 'picker:browse' in o['rects'] and 'picker:search' in o['rects'] and len(o['layers']['list']) == 1, 'the popup lacks its search or its "browse all", or the "+" added at once'
+    # one press on a picture adds that shape, of the tab's kind, and closes the popup
+    first = next(k for k in o['rects'] if k.startswith('pick:'))
+    fam, preset = first[5:].split('/')
+    a = run('wait:2;%s;wait:4;%s;wait:5' % (press(r['layer:add']), press(o['rects'][first])), size=BIG)
+    assert len(a['layers']['list']) == 2 and (a['family'], a['preset']) == (fam, preset) and 'picker' not in a['rects'], 'a press on %s gave %s / %s' % (first, a['family'], a['preset'])
+    # the keys: they are the popup's while it is open (the arrows do not step the shape up); enter adds, esc closes
+    k = run('wait:2;%s;wait:4;key:right;key:right;wait:3' % press(r['layer:add']), size=BIG)
+    assert k['preset'] == base['preset'] and 'picker' in k['rects'], 'the arrows reached the window with the popup open'
+    e = run('wait:2;%s;wait:4;key:right;key:enter;wait:5' % press(r['layer:add']), size=BIG)
+    assert len(e['layers']['list']) == 2 and 'picker' not in e['rects'], 'enter did not add'
+    x = run('wait:2;%s;wait:4;key:escape;wait:3' % press(r['layer:add']), size=BIG)
+    assert len(x['layers']['list']) == 1 and 'picker' not in x['rects'], 'esc did not close the popup'
+    # typing searches: only shapes whose names hold the word
+    s = run('wait:2;%s;wait:4;type:ring;wait:4' % press(r['layer:add']), size=BIG)
+    found = [k for k in s['rects'] if k.startswith('pick:')]
+    assert 0 < len(found) < 30 and any('ring' in k for k in found), 'searching for ring showed %s' % found
+    assert not any(k.startswith('picker:family:') for k in s['rects']), 'the family chips stay while searching'
+    # "browse all…" opens the explorer: the big window, with its families down the side and the same shape lit
+    b = run('wait:2;%s;wait:4;%s;wait:6' % (press(r['layer:add']), press(o['rects']['picker:browse'])), size=BIG)
+    q = b['rects']['picker']
+    assert (q[2] - q[0]) > 1.6 * pw and 'picker:close' in b['rects'] and within(q, full), 'browse all did not open the explorer: %s' % q
+    # the shape card opens the popup to change the shape: below the card, the shape changed in place
+    obj = run(EDIT_OBJECT, size=BIG)
+    card = obj['rects']['shape card']
+    c = run(EDIT_OBJECT + '%s;wait:4' % press(card), size=BIG)
+    pc = c['rects']['picker']
+    assert card[3] < pc[1] < card[3] + 12, 'the popup does not hang below the shape card: %s' % pc
+    knot = run(EDIT_OBJECT + '%s;wait:4;%s;wait:4;%s;wait:5' % (press(card), press(c['rects']['picker:family:knots']), 'pick:knots/trefoil'), size=BIG)
+    assert len(knot['layers']['list']) == 1 and (knot['family'], knot['preset']) == ('knots', 'trefoil'), 'the card\'s popup did not change the shape in place'
+    return 'the "+" opens a %.0f x %.0f popup below it; a press adds %s and closes it; arrows and enter work in it, esc closes it, the window\'s keys wait; "ring" finds %d shapes; "browse all" opens a %.0f wide explorer; the shape card\'s popup changes the shape in place' % (
+        pw, ph, first[5:], len(found), q[2] - q[0])
 
 
 @check
@@ -1779,9 +2372,9 @@ def the_arrangement_is_as_designed():
         ys = [r['group:' + g][1] for g in LEFT_GROUPS]
         assert ys == sorted(ys) and all(within(r['group:' + g], left) for g in LEFT_GROUPS), 'the left panel\'s groups are out of order or out of view: %s' % ys
         assert close(r['group:material'][1], left[1] + 20, 1.0), 'the material is not at the head of the left panel'
-        for name in ('mat-name', 'recipe', 'mat-reset', 'drawn:material', 'drawn:clay', 'lab button', 'room button', 'group:light', 'group:camera', 'group:quality', 'group:output'):
+        for name in ('lab button', 'room button', 'group:light', 'group:camera', 'group:quality', 'group:output'):
             assert within(r[name], left), '%s is not in view in the left panel' % name
-        hidden = [k for k in ('slot:P.dist', 'slot:R.0', 'slot:P.ior', 'slot:P.ev', 'render', 'slot:P.av', 'slot:P.zoom', 'lens:0', 'detail:384') if k in r]
+        hidden = [k for k in ('mat-name', 'recipe', 'mat-reset', 'drawn:material', 'drawn:clay', 'slot:P.dist', 'slot:R.0', 'slot:P.ior', 'slot:P.ev', 'render', 'slot:P.av', 'slot:P.zoom', 'lens:0', 'detail:384') if k in r]
         assert not hidden, 'shown although their groups are folded (or do not apply): %s' % hidden
         # the right panel: its two groups in order
         assert within(r['group:animate'], right) and 'group:detail' not in r, 'the right panel\'s groups are out of order'
@@ -1934,7 +2527,7 @@ def main():
     failed, ran = 0, 0
     for f in chosen:
         name = f.__name__.replace('_', ' ')
-        if only and only not in name:
+        if only and only.replace('_', ' ') not in name:
             continue
         ran += 1
         take_turns()
@@ -1944,6 +2537,9 @@ def main():
             failed += 1
             print('FAIL  %s: %s' % (name, e))
         sys.stdout.flush()
+    if only and not ran:
+        print('no UI checks matched ' + repr(only))
+        return 2
     of = ' (part %s of the %d there are)' % (part, len(checks)) if part else ''
     print(('%d of %d checks failed, %d windows opened' % (failed, ran, runs) if failed else 'all %d checks passed, %d windows opened' % (ran, runs)) + of)
     return 1 if failed else 0

@@ -159,8 +159,6 @@ pub fn sync(p: &mut Settings) {
     if p.fstop > 0.0 { p.aperture = focal_mm(p) / (2.0 * p.fstop) / unit_mm(p); }
 }
 
-/// The names this file answers to besides the stored settings.
-pub const VIEWS: [&str; 9] = ["focus", "band", "focusDist", "ev", "shiftX", "shiftY", "av", "zoom", "subjectLog"];
 /// `av` when there is no lens opening at all: the far end of the ring.
 const AV_SHUT: f64 = 12.0;
 
@@ -398,8 +396,15 @@ impl Camera {
                     (v[0] / r * rho / t, v[1] / r * rho / t)
                 }
             }
-            Projection::Panorama => (v[0].atan2(-v[2]) / t, v[1].atan2(v[0].hypot(v[2])) / t),
-            Projection::Cylindrical => (v[0].atan2(-v[2]) / t, v[1] / (v[0].hypot(v[2]) * t)),
+            Projection::Panorama => {
+                if v[0] == 0.0 && v[1] == 0.0 && v[2] == 0.0 { return None; }
+                (v[0].atan2(-v[2]) / t, v[1].atan2(v[0].hypot(v[2])) / t)
+            }
+            Projection::Cylindrical => {
+                let h = v[0].hypot(v[2]);
+                if h < 1e-9 { return None; }
+                (v[0].atan2(-v[2]) / t, v[1] / (h * t))
+            }
         };
         let r = x.hypot(y);
         let k = if r > 0.0 { self.warp_in(r)? / r } else { 1.0 };
@@ -423,13 +428,13 @@ impl Camera {
 
     /// How deep a point is, the way focus measures it (what `fnear`, `ffar` and `focus` are compared
     /// with): for a lens that focuses on a plane, its depth from the object's centre along the axis,
-    /// less what the plane of focus has gained by its slope where the point is; for one that focuses
-    /// on a sphere, its distance from the lens less the camera's.
+    /// less what the plane of focus has gained by its slope from the lens's own axis where the point
+    /// is; for one that focuses on a sphere, its distance from the lens less the camera's.
     pub fn depth_of(&self, p: [f64; 3]) -> f64 {
         if self.proj.radial() {
             self.along(p) - self.dist
         } else {
-            -p[2] - (self.tilt[0] * p[0] + self.tilt[1] * p[1])
+            -p[2] - (self.tilt[0] * (p[0] - self.eye[0]) + self.tilt[1] * (p[1] - self.eye[1]))
         }
     }
     /// The same for glass found `t` along the ray through a point of the picture.
@@ -442,9 +447,9 @@ impl Camera {
     pub fn reach(&self, uv: [f64; 2], e: f64) -> Option<f64> {
         let (o, d) = self.ray(uv)?;
         if self.proj.radial() { return Some((self.dist + e).max(1e-6)); }
-        // -(o.z + d.z s) - tilt . (o.xy + d.xy s) = e
+        // -(o.z + d.z s) - tilt . ((o.xy - eye) + d.xy s) = e
         let slope = -d[2] - (self.tilt[0] * d[0] + self.tilt[1] * d[1]);
-        let s = (e + o[2] + self.tilt[0] * o[0] + self.tilt[1] * o[1]) / slope;
+        let s = (e + o[2] + self.tilt[0] * (o[0] - self.eye[0]) + self.tilt[1] * (o[1] - self.eye[1])) / slope;
         (slope > 1e-9 && s > 0.0).then_some(s)
     }
 
@@ -468,7 +473,9 @@ impl Camera {
     pub fn blur(&self, uv: [f64; 2], t: f64, h: f64) -> Option<f64> {
         if self.lens <= 0.0 { return Some(0.0); }
         let e = self.depth_at(uv, t)?;
-        let f = self.reach(uv, e.clamp(self.near, self.far))?;
+        let ec = e.clamp(self.near, self.far);
+        let f = self.reach(uv, ec)?;
+        if (e - ec).abs() < 1e-12 { return Some(0.0); }
         Some(if self.proj == Projection::Orthographic {
             self.lens / self.cone_at() * (t - f) / self.pixel(h)
         } else {
@@ -685,8 +692,6 @@ pub fn focal_text(mm: f64) -> String {
 pub fn stop_text(n: f64) -> String {
     if n < 1.0 { format!("{n:.2}") } else if n < 10.0 { format!("{n:.1}") } else { format!("{n:.0}") }
 }
-/// The full stops of a lens's ring, and the thirds between them, for a slider that moves by stops.
-pub const STOPS: [f64; 14] = [0.7, 1.0, 1.4, 2.0, 2.8, 4.0, 5.6, 8.0, 11.0, 16.0, 22.0, 32.0, 45.0, 64.0];
 /// The f-number `thirds` thirds of a stop along the ring from f/1 (negative = faster).
 pub fn stop_at(thirds: f64) -> f64 {
     2f64.powf(thirds / 6.0)
@@ -795,12 +800,6 @@ impl State {
         done
     }
 
-    /// Bring what follows from the photographer's settings up to date (after settings were written
-    /// some other way than by name: a setup read from a file).
-    pub fn camera_sync(&mut self) {
-        sync(&mut self.p);
-    }
-
     /// Change the lens and move the camera so that the subject stays the size it is in the picture: what
     /// changes is the perspective. (An ordinary lens only; the others keep the camera where it is.)
     pub fn dolly_zoom(&mut self, focal: f64) {
@@ -814,14 +813,55 @@ impl State {
         sync(&mut self.p);
     }
 
+    /// Scale an orthographic view by the mouse wheel (`d` in browser wheel units, ~100 per notch; `d < 0`
+    /// zooms in): scales `half_height` via the lens's field of view / focal length while keeping the
+    /// camera plane well in front of the scene so close-up zooming never clips the front of the shape.
+    pub fn ortho_wheel(&mut self, d: f64) {
+        if !d.is_finite() { return; }
+        let k = (d * 0.001).exp();
+        let want_half = (self.camera().half_height() * k).clamp(0.01, 200.0);
+        let min_dist = 3.5 * self.box_k();
+        if self.p.dist < min_dist {
+            self.p.dist = min_dist;
+        }
+        let new_t = (want_half / self.p.dist.abs().max(1e-3)).clamp((0.2 * DEG / 2.0).tan(), (160.0 * DEG / 2.0).tan());
+        let new_fov = 2.0 * new_t.atan() / DEG;
+        if self.p.focal > 0.0 {
+            let s = sensor_mm(&self.p);
+            set(&mut self.p, "focal", focal_of(new_fov, s));
+        } else {
+            self.p.fov = new_fov;
+            sync(&mut self.p);
+            self.p.hold_hard();
+        }
+    }
+
     /// Choose the kind of lens (a place in `Projection::ALL`). A fisheye or a cylindrical lens shows what it
     /// is only over a wide field: on a long focal length it draws much what an ordinary lens draws (at 50 mm a
     /// fisheye takes in 27 degrees, and bends nothing that can be seen). Chosen while the lens is long, it
     /// is given a short one of its kind, and the camera comes in part of the way, so that the subject is
-    /// smaller but still the subject.
+    /// smaller but still the subject. An orthographic lens whose camera stood inside the scene's bound steps
+    /// back outside it while keeping the exact view height.
     pub fn lens_kind(&mut self, i: usize) {
         let was = self.camera();
         if !self.camera_arg("proj", &i.to_string()) { return; }
+        if self.camera().proj == Projection::Orthographic {
+            let min_dist = 3.5 * self.box_k();
+            if self.p.dist < min_dist && was.proj != Projection::Panorama && was.t > 0.0 {
+                let want_half = was.half_height().clamp(0.01, 200.0);
+                self.p.dist = min_dist;
+                let new_fov = 2.0 * (want_half / min_dist).clamp((0.2 * DEG / 2.0).tan(), (160.0 * DEG / 2.0).tan()).atan() / DEG;
+                if self.p.focal > 0.0 {
+                    let s = sensor_mm(&self.p);
+                    set(&mut self.p, "focal", focal_of(new_fov, s));
+                } else {
+                    self.p.fov = new_fov;
+                    sync(&mut self.p);
+                    self.p.hold_hard();
+                }
+            }
+            return;
+        }
         let short = match self.camera().proj {
             Projection::Equidistant | Projection::Equisolid | Projection::Stereographic => Some(12.0),
             Projection::Cylindrical => Some(18.0),

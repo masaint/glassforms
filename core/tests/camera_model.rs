@@ -562,3 +562,82 @@ fn a_fisheye_chosen_on_a_long_lens_is_given_a_short_one() {
     s.lens_kind(Projection::Perspective.index());
     assert!((s.camera().focal - 14.0).abs() < 1e-6);
 }
+
+#[test]
+fn cylindrical_and_panorama_poles_do_not_divide_by_zero() {
+    let mut st = State::new();
+    (st.p.eye_x, st.p.eye_y) = (0.6, -0.35);
+    st.p.proj = Projection::Cylindrical.index() as f64;
+    let c = st.camera();
+    // Directly on or vertically above/below the camera's axis (`hypot(x, z) < 1e-9`), cylindrical projection
+    // has no horizontal direction and must return None rather than dividing by zero into NaN / Inf.
+    for dy in [-5.0, -1.0, 0.0, 1.0, 5.0] {
+        assert!(c.project([c.eye[0], c.eye[1] + dy, c.dist]).is_none());
+        assert!(c.project([c.eye[0] + 1e-12, c.eye[1] + dy, c.dist - 1e-12]).is_none());
+    }
+    let near_axis = c.project([c.eye[0] + 1e-6, c.eye[1] + 0.5, c.dist - 1e-6]).unwrap();
+    assert!(near_axis[0].is_finite() && near_axis[1].is_finite());
+
+    st.p.proj = Projection::Panorama.index() as f64;
+    let cp = st.camera();
+    assert!(cp.project([cp.eye[0], cp.eye[1], cp.dist]).is_none());
+}
+
+#[test]
+fn tilted_focus_from_an_off_axis_camera_tracks_the_optical_axis() {
+    for proj in Projection::ALL {
+        if proj.radial() { continue; }
+        let mut st = State::new();
+        st.p = lens(proj, 0.0);
+        st.p.shift = [0.0; 2];
+        (st.p.aperture, st.p.fnear, st.p.ffar) = (0.06, 0.0, 0.0);
+        (st.p.tilt_x, st.p.tilt_y) = (24.0, -14.0);
+        (st.p.eye_x, st.p.eye_y) = (0.75, -0.45);
+        let c = st.camera();
+        assert!(c.eye[0].abs() > 0.1 && c.eye[1].abs() > 0.1, "{:?}", c.eye);
+        // At uv = [0, 0], the central ray hits [eye.x, eye.y, 0] at t = dist: zero offset from the optical axis,
+        // so depth_at and reach must be unaffected by eye != [0, 0].
+        assert!(close(c.depth_at([0.0, 0.0], c.dist).unwrap(), 0.0, 1e-12), "{proj:?}");
+        assert!(close(c.reach([0.0, 0.0], 0.0).unwrap(), c.dist, 1e-12), "{proj:?}");
+        for uv in [[0.0, 0.0], [0.3, -0.2]] {
+            let tf = c.along_focus(uv);
+            assert!(c.blur(uv, tf, 1080.0).unwrap().abs() < 1e-9, "{proj:?}");
+            let (got, _) = spread(&c, uv, tf + 0.8, 1080.0);
+            let want = c.blur(uv, tf + 0.8, 1080.0).unwrap();
+            assert!((got / want.abs() - 1.0).abs() < 0.035, "{proj:?} uv {uv:?}: traced {got}, formula {want}");
+        }
+        // Clicking to focus from an off-axis camera puts the clicked point at zero blur.
+        let (x, y, w, h, t) = (430.5, 240.5, 640.0, 360.0, 3.6);
+        st.focus_at(t, x, y, w, h);
+        let uv = [(2.0 * x - w) / h, (2.0 * y - h) / h];
+        assert!(st.camera().blur(uv, t, h).unwrap().abs() < 1e-9, "{proj:?}");
+    }
+}
+
+#[test]
+fn orthographic_wheel_and_mode_switch_scale_without_clipping() {
+    // Switching into orthographic when close to the origin steps dist out past the shape while preserving half_height.
+    let mut st = State::with_args(&args(&[("fov", "42"), ("dist", "2.1")]), true);
+    let want_h = st.camera().half_height();
+    st.lens_kind(Projection::Orthographic.index());
+    let c = st.camera();
+    assert_eq!(c.proj, Projection::Orthographic);
+    assert!(st.p.dist >= 3.5 && close(c.half_height(), want_h, 1e-9), "dist={} h={} want={}", st.p.dist, c.half_height(), want_h);
+
+    // Scrolling the wheel in orthographic mode (`d < 0` zooms in, matching `State::wheel`) scales `half_height`
+    // smoothly in and out without pushing `dist` inside the shape, and keeps focal & f-stop synchronized.
+    st.set(&KnobRef::P("focal"), 50.0);
+    st.set(&KnobRef::P("fstop"), 4.0);
+    let h0 = st.camera().half_height();
+    st.ortho_wheel(-300.0);
+    let h_in = st.camera().half_height();
+    assert!(h_in < h0 && st.p.dist >= 3.5, "h_in={h_in} h0={h0} dist={}", st.p.dist);
+    assert!(close(st.p.aperture, st.p.focal / 8.0 / (100.0 / camera::SPAN), 1e-12));
+    st.ortho_wheel(300.0);
+    assert!(close(st.camera().half_height(), h0, 1e-9));
+
+    for _ in 0..25 {
+        st.ortho_wheel(-400.0);
+    }
+    assert!(st.p.dist >= 3.5 && st.camera().half_height() > 0.0);
+}

@@ -13,6 +13,8 @@
 //!
 //!   --setup file.json        start from a saved setup (settings given as name=value are laid over it)
 //!   --save-setup file.json   with --still: also save the setup the still was made from
+//!   --motion-seq folder play=N after=N   capture moving and stopped updates with matched references.
+//!                            In a motion sequence or video, B1.play sets the primary material's opal colour.
 //!   --16                     with --still: a 16-bit PNG, tone-mapped as on screen but without the grain
 //!   --preview file.png       with --still: also save the small picture of the lighting a light room shows
 //!   glassforms --hdri-info picture.exr                what an environment picture is, and how long it takes to read
@@ -23,8 +25,9 @@
 //! Every setting can be given as name=value, with the names the web version takes in its URL: scene, preset,
 //! any setting (ior, disp, dist, fov, aperture, ...), thick, len, melt, puff, travel, beads, res, p.<name>,
 //! rx, ry, rz. For the modes that make no window: w, h (size of the picture), frames (how many are
-//! averaged), anim (seconds into the animation), backend (vulkan, dx12, auto), seed (a whole number: the
-//! same picture made from other rays, to see how far two renders of it agree), drift (name:step, for
+//! averaged), anim (seconds into the animation), backend (vulkan, dx12, auto), preseed (set the whole-number
+//! sequence before a still's render), seed (render the same picture again from other rays to compare them),
+//! drift (name:step, for
 //! --still: after the still, as many frames again are drawn with that setting moving on by the step
 //! each frame, or with drift=turn:degrees the shape turning: the picture as it looks in motion).
 //!
@@ -77,7 +80,7 @@ use glassforms::engine::Engine;
 use glassforms::gpu::Gpu;
 
 /// Names given as name=value that are not settings of the picture.
-const NOT_SETTINGS: [&str; 42] = ["live", "shot", "events", "switches", "heroInside", "heroK", "heroClamp", "heroSeq", "heroEvery", "heroTaa", "upscale", "upscaleScale", "refine", "refineMost", "refineRays", "hz", "w", "h", "frames", "anim", "backend", "fps", "samples", "lensRays", "shutter", "codec", "crf", "detail", "play", "seed", "drift", "turn", "rounds", "rebuild", "stride", "inPlace", "noWide", "refineTime", "adapt", "adaptTol", "adaptMin", "adaptShow"];
+const NOT_SETTINGS: [&str; 50] = ["tier", "tierAuto", "tierMotion", "keepRate", "keepLog", "shots", "shotFrom", "shotTo", "shotAt", "live", "shot", "events", "switches", "heroInside", "heroK", "heroClamp", "heroSeq", "heroEvery", "heroTaa", "upscale", "upscaleScale", "refine", "refineMost", "refineRays", "hz", "w", "h", "frames", "anim", "backend", "fps", "samples", "lensRays", "shutter", "codec", "crf", "detail", "seed", "drift", "turn", "rounds", "rebuild", "stride", "inPlace", "noWide", "refineTime", "adapt", "adaptTol", "adaptMin", "adaptShow"];
 
 struct Args {
     flags: Vec<(String, Option<String>)>,
@@ -104,6 +107,12 @@ impl Args {
         }
         Self { flags, pairs }
     }
+    // These two commands consume bare play as a frame count or playback switch.
+    // B1.play and B2.play remain material settings in every command.
+    fn scene_pairs(&self) -> Vec<(String, String)> {
+        let playback = self.flag("motion-seq").is_some() || self.flag("video").is_some();
+        self.pairs.iter().filter(|(name, _)| !playback || name != "play").cloned().collect()
+    }
     fn flag(&self, k: &str) -> Option<&Option<String>> {
         self.flags.iter().find(|f| f.0 == k).map(|f| &f.1)
     }
@@ -113,6 +122,24 @@ impl Args {
     fn text(&self, k: &str) -> Option<&str> {
         self.pairs.iter().rev().find(|p| p.0 == k).map(|p| p.1.as_str())
     }
+}
+
+#[test]
+fn playback_arguments_preserve_the_materials_play_of_colour() {
+    let make = |mode: &str, pairs: &[(&str, &str)]| Args {
+        flags: vec![(mode.to_owned(), None)],
+        pairs: pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+    };
+    for mode in ["motion-seq", "video"] {
+        let args = make(mode, &[("scene", "studio"), ("preset", "sphere"), ("play", "20")]);
+        assert_eq!(args.num("play"), Some(20.0));
+        assert_eq!(State::with_args(&args.scene_pairs(), true).p.play, 0.0);
+        let explicit = make(mode, &[("material", "glass"), ("B1.play", "0.35"), ("play", "20")]);
+        assert_eq!(State::with_args(&explicit.scene_pairs(), true).p.play, 0.35);
+    }
+    let still = make("still", &[("play", "0.4")]);
+    assert_eq!(State::with_args(&still.scene_pairs(), true).p.play, 0.4);
+    assert!(!NOT_SETTINGS.contains(&"play"), "a still may override a saved material");
 }
 
 fn write_png(path: &str, w: u32, h: u32, rgba: &[u8]) -> Result<(), String> {
@@ -147,18 +174,21 @@ fn headless(args: &Args) -> Result<Engine, String> {
     let upscale = glassforms::dlss::asked(args.text("upscale"), args.num("upscaleScale"));
     let backend = args.text("backend").unwrap_or("vulkan");
     let gpu = if upscale.is_some() { glassforms::dlss::headless_gpu(backend)? } else { Gpu::headless(backend)? };
-    let mut state = State::with_args(&args.pairs, true);
+    let scene_pairs = args.scene_pairs();
+    let mut state = State::with_args(&scene_pairs, true);
     if let Some(Some(path)) = args.flag("setup") {
         // a saved setup first, then whatever was given on the command line over it
         let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
         state.apply_setup_json(&text)?;
-        for (k, v) in &args.pairs {
+        for (k, v) in &scene_pairs {
             if !NOT_SETTINGS.contains(&k.as_str()) && !state.apply_arg(k, v) {
                 eprintln!("ignoring {k}={v}: no such setting");
             }
         }
     }
     let mut e = Engine::new(gpu, state, true);
+    e.parts_wanted = args.pairs.iter().any(|p| p.0 == "tier" && p.1 == "live");
+    e.parts_refine = args.num("refine").is_none_or(|v| v != 0.0);
     // refineMost=N: at most N rays a pixel a refining frame (1: one, as before there were more)
     if let Some(m) = args.num("refineMost") { e.refine_most = m.max(1.0) as u32; }
     if upscale.is_some() { e.renderer.set_upscale(upscale); }
@@ -170,6 +200,9 @@ fn headless(args: &Args) -> Result<Engine, String> {
     }
     // adapt=0: no adaptive refining (every pixel traced every pass); adaptTol=: how uncertain a mean may be
     // and count as certain, in levels of an 8-bit screen; adaptMin=: samples before it may (adapt.rs)
+    // keepRate=F: keep the frame rate at F frames a second while moving (autoscale.rs; the window's own
+    // setting). Only a live session or an interaction script uses it: stills and videos never do
+    if let Some(fps) = args.num("keepRate").filter(|f| *f > 0.0) { e.keep = Some(glassforms::autoscale::Keep::new(&e.gpu, fps)); }
     if let Some(a) = args.num("adapt") { e.adapt = a >= 0.5; }
     if let Some(t) = args.num("adaptTol") { e.renderer.adapt.tol = (t / 255.0) as f32; }
     if let Some(m) = args.num("adaptMin") { e.renderer.adapt.nmin = m.max(2.0) as f32; }
@@ -181,8 +214,8 @@ fn headless(args: &Args) -> Result<Engine, String> {
     let (w, h) = (args.num("w").unwrap_or(1280.0) as u32, args.num("h").unwrap_or(720.0) as u32);
     e.size_override = None;
     e.resize(w, h);
-    if let Some(mode) = e.state.want.take() {
-        e.bake(mode)?;
+    if let Some(r) = e.state.take_request() {
+        e.bake(r.detail)?;
     }
     // an environment picture, if one was asked for, is read before anything is drawn; one that cannot
     // be read is said so, and the lighting stays as it was
@@ -320,7 +353,7 @@ fn run() -> Result<(), String> {
             e.state.clock = t;
             e.state.apply_clock(true);
             e.bake(Detail::Hq)?;
-            e.state.want = None;
+            e.state.drop_request();
         }
         let d = e.export_mesh(&out)?.wait()?;
         println!(
@@ -340,7 +373,7 @@ fn run() -> Result<(), String> {
             e.state.clock = t;
             e.state.apply_clock(true);
             e.bake(Detail::Hq)?;
-            e.state.want = None;
+            e.state.drop_request();
         }
         if let Some(Some(path)) = args.flag("preview") {
             // the small picture of the lighting: asking for it is what gets it drawn
@@ -351,6 +384,12 @@ fn run() -> Result<(), String> {
             write_png(path, tex.width(), tex.height(), &rgba)?;
         }
         let t1 = Instant::now();
+        let preseed = args.num("preseed").filter(|s| *s >= 1.0).map(|s| s as u32);
+        if let Some(seed) = preseed {
+            // Capture tools can choose the sequence before their one render instead of rendering twice.
+            e.renderer.reseed(seed * 7919);
+        }
+        let mut render_passes = 0u32;
         // turn=N: first draw N frames of a turning view. Alone, the still is the last of them (what a
         // moving view shows); with frames given as well, that view is then rendered afresh and averaged.
         let turn = args.num("turn").map(|n| n.max(0.0) as u32);
@@ -363,23 +402,33 @@ fn run() -> Result<(), String> {
             // (refineRays=R: until R rays a pixel instead; hz=60: each frame takes at least a display's
             // refresh, as the window's frames do with vsync)
             let n = args.num("refine").unwrap_or(1e9).max(1.0) as u64;
-            let rays = args.num("refineRays").unwrap_or(1e9) as u32;
+            let ray_target = args.num("refineRays").map(|r| r as u32);
             let period = args.num("hz").filter(|h| *h > 0.0).map(|h| 1.0 / h);
             // (refineTime=T: until T seconds have gone by)
             let until = args.num("refineTime").unwrap_or(1e9);
             e.restart();
             let t = Instant::now();
             let mut frames = 0u64;
-            while frames < n && e.renderer.accum_n < rays && t.elapsed().as_secs_f64() < until {
+            let motion = (e.state.p.spin, e.state.p.lspin, e.state.playing);
+            if ray_target.is_some() {
+                // A still samples one pose even when the saved scene rotates or plays.
+                e.state.p.spin = 0.0;
+                e.state.p.lspin = 0.0;
+                e.state.set_playing(false);
+            }
+            while frames < n && ray_target.is_none_or(|r| e.renderer.accum_n < r) && t.elapsed().as_secs_f64() < until {
 
                 let f0 = Instant::now();
-                e.frame(w, h, 1.0 / 90.0);
+                e.frame_with_sample_limit(w, h, 1.0 / 90.0, ray_target);
                 e.gpu.wait();
                 if let Some(p) = period {
                     let took = f0.elapsed().as_secs_f64();
                     if took < p { std::thread::sleep(std::time::Duration::from_secs_f64(p - took)); }
                 }
                 frames += 1;
+            }
+            if ray_target.is_some() {
+                (e.state.p.spin, e.state.p.lspin, e.state.playing) = motion;
             }
             eprintln!("refine: {} frames in {:.3} s, {} rays a pixel, {} at the end", frames, t.elapsed().as_secs_f64(), e.renderer.accum_n, e.refine_n);
             // adaptShow=path: a picture of adaptive refining as it ended: red where the pixel is still traced
@@ -400,11 +449,17 @@ fn run() -> Result<(), String> {
                 }
             }
 
-        } else if turn.is_none() || args.num("frames").is_some() { e.render(frames); }
+        } else if turn.is_none() || args.num("frames").is_some() {
+            e.render(frames);
+            render_passes += 1;
+        }
         if let Some((fx, fy)) = args.text("pick").and_then(|p| p.split_once(',')).and_then(|(a, b)| Some((a.parse::<f64>().ok()?, b.parse::<f64>().ok()?))) {
             // pick=x,y: focus on the glass under that point of the picture (fractions of its width and
             // height from the top left), as a click in the window does, and render again
-            if e.pick_focus(fx, fy).is_some() { e.render(frames); }
+            if e.pick_focus(fx, fy).is_some() {
+                e.render(frames);
+                render_passes += 1;
+            }
         }
         if let Some((name, step)) = args.text("drift").and_then(|d| d.split_once(':')).and_then(|(n, s)| Some((n, s.parse::<f64>().ok()?))) {
             // the picture as it is while something moves: every frame a setting moves on by a step
@@ -429,6 +484,7 @@ fn run() -> Result<(), String> {
             // the same picture from other rays: start the sequences elsewhere and render again
             e.renderer.reseed(seed as u32 * 7919);
             e.render(frames);
+            render_passes += 1;
         }
         let per = t1.elapsed().as_secs_f64() * 1e3 / frames as f64;
         let (w, h, rgba) = e.screenshot()?;
@@ -460,9 +516,10 @@ fn run() -> Result<(), String> {
             std::fs::write(path, e.state.setup_json()).map_err(|e| format!("{path}: {e}"))?;
         }
         let m = &e.state.shape().meta;
+        let preseed_json = preseed.map_or_else(|| "null".to_string(), |s| s.to_string());
         println!(
-            "{{\"scene\":\"{}\",\"preset\":\"{}\",\"adapter\":\"{}\",\"size\":[{w},{h}],\"frames\":{frames},\"msPerFrame\":{per:.3},\"setupMs\":{setup:.0},\"volume\":{},\"volumeMs\":{:.1},\"segments\":{}{},\"studioSize\":{:.4},\"out\":\"{}\",{}}}",
-            e.state.family().id, e.state.preset().id, e.gpu.name, m.res, m.ms, m.segments, format!("{}{}", e.layers_json(), e.cast_json()), e.sculptor.last.size, out.replace('\\', "/"), hdri_json(&e)
+            "{{\"scene\":\"{}\",\"preset\":\"{}\",\"adapter\":\"{}\",\"size\":[{w},{h}],\"frames\":{frames},\"preseed\":{preseed_json},\"renderPasses\":{render_passes},\"msPerFrame\":{per:.3},\"setupMs\":{setup:.0},\"volume\":{},\"volumeMs\":{:.1},\"segments\":{}{},\"studioSize\":{:.4},\"mods\":\"{}\",\"out\":\"{}\",{}}}",
+            e.state.family().id, e.state.preset().id, e.gpu.name, m.res, m.ms, m.segments, format!("{}{}", e.layers_json(), e.cast_json()), e.sculptor.last.size, e.mods_json(), out.replace('\\', "/"), hdri_json(&e)
         );
         return Ok(());
     }
@@ -478,7 +535,7 @@ fn run() -> Result<(), String> {
         use glassforms::video::{self, Codec, VideoOpts};
         let mut e = headless(&args)?;
         // by default a still does not spin; a video of nothing moving would be no use, so honour what was asked
-        if args.num("play").unwrap_or(1.0) > 0.5 { e.state.set_playing(true); e.state.want = None; }
+        if args.num("play").unwrap_or(1.0) > 0.5 { e.state.set_playing(true); e.state.drop_request(); }
         let opts = VideoOpts {
             width: args.num("w").unwrap_or(1920.0) as u32,
             height: args.num("h").unwrap_or(1080.0) as u32,
@@ -515,7 +572,7 @@ fn run() -> Result<(), String> {
         // a fingerprint of the distance field, to compare two ways of building the same shape:
         // a hash of every bit, and the mean and extremes of the distances
         let mut e = headless(&args)?;
-        if let Some(mode) = match args.text("detail") { Some("anim") => Some(Detail::Anim), Some("quick") => Some(Detail::Quick), Some("hq") => Some(Detail::Hq), _ => None } {
+        if let Some(mode) = Some(Detail::parse(args.text("detail"))).filter(|d| *d != Detail::Full) {
             e.bake(mode)?;
         }
         let (res, bits) = e.read_volume()?;
@@ -545,14 +602,14 @@ fn run() -> Result<(), String> {
         let mut e = headless(&args)?;
         e.time_bakes = true;
         e.layers.force = args.num("rebuild").unwrap_or(0.0) > 0.5;
-        let mode = match args.text("detail") { Some("anim") => Detail::Anim, Some("quick") => Detail::Quick, Some("hq") => Detail::Hq, _ => Detail::Full };
+        let mode = Detail::parse(args.text("detail"));
         e.bake(mode)?;
         let mut sum = [0.0f64; 3];
         let mut csg_ms = 0.0;
         for i in 0..n {
             // nudge the clock so that an animated shape really changes between builds
             e.state.clock = i as f64 / 60.0;
-            if mode == Detail::Anim { e.state.apply_clock(false); e.state.want = None; }
+            if mode == Detail::Anim { e.state.apply_clock(false); e.state.drop_request(); }
             e.bake(mode)?;
             for k in 0..3 { sum[k] += e.last_bake_parts[k] / n as f64; }
             csg_ms += e.csg.last_ms / n as f64;
@@ -566,7 +623,7 @@ fn run() -> Result<(), String> {
         // the layers' combining step alone, each run timed to the end
         let n = n.as_ref().and_then(|v| v.parse().ok()).unwrap_or(20u32);
         let mut e = headless(&args)?;
-        let mode = match args.text("detail") { Some("anim") => Detail::Anim, Some("quick") => Detail::Quick, _ => Detail::Full };
+        let mode = Detail::parse(args.text("detail"));
         if mode != Detail::Full { e.bake(mode)?; }
         let ms = e.bench_combine(n, mode)?;
         println!("{{\"runs\":{n},\"combineOnlyMs\":{ms:.3}{}}}", e.layers_json());
@@ -579,7 +636,7 @@ fn run() -> Result<(), String> {
         e.renderer.profile = true;
         e.state.p.smooth = 0.0;
         e.resize(args.num("w").unwrap_or(1280.0) as u32, args.num("h").unwrap_or(720.0) as u32);
-        if let Some(mode) = e.state.want.take() { e.bake(mode)?; }
+        if let Some(r) = e.state.take_request() { e.bake(r.detail)?; }
         e.render(1);
         let ((_, _), (tw, th)) = e.renderer.size();
         let hdr = e.renderer.read_hdr(0, 0, tw, th)?;
@@ -656,7 +713,7 @@ fn run() -> Result<(), String> {
                 e.state.set_playing(false);
             }
             e.state.tick(1.0 / 60.0);
-            if let Some(d) = e.state.want { detail = d; }
+            if let Some(d) = e.state.wanted() { detail = d; }
             let t0 = Instant::now();
             e.frame(w, h, 0.0);
             e.gpu.wait();
@@ -677,8 +734,11 @@ fn run() -> Result<(), String> {
             e.state.theta = theta;
             e.state.update_r();
             e.state.apply_time();
-            e.state.want = None;
+            e.state.drop_request();
             e.bake(d)?;
+            // Live refinement can draw a different number of samples between captures.
+            // Give the reference at each pose the same ray sequence independently of that history.
+            e.renderer.reseed(0);
             e.render(n_ref);
             save(&e, &format!("ref_{i:03}"))?;
         }
@@ -688,6 +748,7 @@ fn run() -> Result<(), String> {
         // Scripted interaction, frame by frame as the window runs it (events=a;b;c, each one of):
         //   idle:N            N frames with nothing done
         //   turn:N            N frames of the view turned by hand
+        //   play:N            N frames of animation with a fixed 90 Hz clock, then stop
         //   drag:N:name=a..b  a setting dragged from a to b over N frames (a shape's: built quick while
         //                     dragged, in full on release, as a slider does)
         //   set:name=value    a setting changed once (then the frames go on)
@@ -712,28 +773,49 @@ fn run() -> Result<(), String> {
             s[((q * (s.len() - 1) as f64).round() as usize).min(s.len() - 1)]
         };
         let mut frame_no = 0usize;
+        let shot_at = args.text("shotAt").into_iter().flat_map(|v| v.split(','))
+            .map(|n| n.trim().parse::<usize>().map_err(|_| format!("invalid shotAt frame {n}")))
+            .collect::<Result<Vec<_>, _>>()?;
+        let shot_range = args.num("shotFrom").zip(args.num("shotTo")).map(|(a,b)| a as usize..=b as usize);
         for (k, ev) in args.text("events").unwrap_or("idle:60").split(';').filter(|s| !s.is_empty()).enumerate() {
             let (kind, rest) = ev.split_once(':').unwrap_or((ev, ""));
             let (n, what) = match kind { "set" => (1usize, rest), _ => { let (n, w) = rest.split_once(':').unwrap_or((rest, "")); (n.parse().unwrap_or(1), w) } };
             let (name, value) = what.split_once('=').unwrap_or(("", ""));
             let (a, b) = value.split_once("..").map(|(a, b)| (a.parse::<f64>().unwrap_or(0.0), b.parse::<f64>().unwrap_or(0.0))).unwrap_or((0.0, 0.0));
             let (mut calls, mut walls) = (Vec::new(), Vec::new());
+            // (the engine's own split of each call: building the shape, the lights, drawing)
+            let (mut builds, mut draws) = (Vec::new(), Vec::new());
             let mut shape = false;
-            let frames = if kind == "drag" { n + 1 } else if kind == "set" { 1 } else { n };
+            if kind == "play" { e.state.set_playing(true); }
+            let frames = if matches!(kind, "drag" | "hdrag" | "part") { n + 1 } else if kind == "set" { 1 } else { n };
             for i in 0..frames {
                 match kind {
                     "drag" if i < n => {
                         let v = a + (b - a) * (i + 1) as f64 / n as f64;
-                        let before = e.state.want;
-                        e.state.want = None;
+                        let before = e.state.take_request();
                         if name == "cells.depth" {
                             // a studio edit: the depth of a layer of cells carved into the shape
                             let json = format!("{{\"layers\":[{{\"kind\":\"cells\",\"scale\":0.14,\"depth\":{v},\"a\":0.75,\"b\":0.9,\"mode\":\"carve\"}}],\"round\":0.012,\"crumbs\":0.06}}");
-                            if let Some(sc) = gf_core::sculpt::Sculpt::from_arg(&json) { e.state.shape_mut().sculpt = sc; e.state.want = Some(Detail::Full); }
+                            if let Some(sc) = gf_core::sculpt::Sculpt::from_arg(&json) { *e.state.sculpt_mut() = sc; e.state.request(gf_core::build::BuildRequest::edit()); }
                         } else if !e.state.apply_arg(name, &format!("{v}")) { eprintln!("no such setting: {name}"); }
-                        if e.state.want.is_some() { shape = true; e.state.want = Some(Detail::Quick); } else { e.state.want = before; }
+                        if e.state.build_wanted() { shape = true; e.state.request(gf_core::build::BuildRequest::slider(true)); } else { e.state.restore_request(before); }
                     }
-                    "drag" => if shape { e.state.want = Some(Detail::Full); },
+                    "drag" => if shape { e.state.request(gf_core::build::BuildRequest::slider(false)); },
+                    // hdrag:N:name=a..b  the same setting moved as a handle on the view moves it (drafted as
+                    //                    a played frame is, final on release)
+                    "hdrag" => {
+                        if i < n && !e.state.apply_arg(name, &format!("{}", a + (b - a) * (i + 1) as f64 / n as f64)) { eprintln!("no such setting: {name}"); }
+                        e.state.request(gf_core::build::BuildRequest::handle(i < n));
+                    }
+                    // part:N:k=a..b      part k of the selected object's tree moved along x from a to b by its
+                    //                    handle over N frames, then let go
+                    "part" => {
+                        let k = name.parse::<usize>().unwrap_or(0);
+                        if i < n {
+                            if let Some(p) = e.state.csg.parts.get_mut(k) { p.place.pos[0] = a + (b - a) * (i + 1) as f64 / n as f64; }
+                        }
+                        e.state.request(gf_core::build::BuildRequest::handle(i < n));
+                    }
                     "set" => { if !e.state.apply_arg(name, value) { eprintln!("no such setting: {name}"); } }
                     "turn" => e.state.turn(&turn),
                     _ => {}
@@ -748,14 +830,34 @@ fn run() -> Result<(), String> {
                 let wall = t0.elapsed().as_secs_f64() * 1e3;
                 calls.push(call);
                 walls.push(wall);
+                builds.push(e.spans[1]);
+                draws.push(e.spans[3]);
                 if wall > 20.0 {
                     let s = e.spans;
                     slow += &format!("{}{{\"frame\":{frame_no},\"event\":{k},\"i\":{i},\"callMs\":{call:.1},\"wallMs\":{wall:.1},\"sizes\":{:.1},\"build\":{:.1},\"lights\":{:.1},\"draw\":{:.1},\"bakeParts\":[{:.1},{:.1},{:.1}],\"tracerMs\":{tracer_ms:.1}}}", if slow.is_empty() { "" } else { "," }, s[0], s[1], s[2], s[3], e.last_bake_parts[0], e.last_bake_parts[1], e.last_bake_parts[2]);
                 }
+                // shots=<folder> shotFrom=a shotTo=b: the picture after each of frames a to b, as
+                // <folder>/f<frame>_s<scale it was traced at>.png (for looking at moving frames)
+                if let Some(dir) = args.text("shots") {
+                    if shot_at.contains(&frame_no) || shot_range.as_ref().is_some_and(|r| r.contains(&frame_no)) {
+                        let (sw, sh, rgba) = e.screenshot()?;
+                        write_png(&format!("{dir}/f{frame_no:04}_s{:.2}.png", e.renderer.dyn_used), sw, sh, &rgba)?;
+                    }
+                }
                 frame_no += 1;
             }
-            out += &format!("{}{{\"event\":\"{}\",\"frames\":{},\"callMax\":{:.1},\"callP99\":{:.1},\"wallMax\":{:.1},\"wallP99\":{:.1},\"wallP50\":{:.1}}}",
-                if k > 0 { "," } else { "" }, ev.replace('"', "'").chars().take(60).collect::<String>(), calls.len(), pct(&calls, 1.0), pct(&calls, 0.99), pct(&walls, 1.0), pct(&walls, 0.99), pct(&walls, 0.5));
+            if kind == "play" { e.state.set_playing(false); }
+            out += &format!("{}{{\"event\":\"{}\",\"frames\":{},\"callMax\":{:.1},\"callP99\":{:.1},\"wallMax\":{:.1},\"wallP99\":{:.1},\"wallP50\":{:.1},\"wallP80\":{:.2},\"callP50\":{:.2},\"buildP50\":{:.2},\"drawP50\":{:.2},\"wallLast\":{:.2}}}",
+                if k > 0 { "," } else { "" }, ev.replace('"', "'").chars().take(60).collect::<String>(), calls.len(), pct(&calls, 1.0), pct(&calls, 0.99), pct(&walls, 1.0), pct(&walls, 0.99), pct(&walls, 0.5), pct(&walls, 0.8), pct(&calls, 0.5), pct(&builds, 0.5), pct(&draws, 0.5), walls.last().copied().unwrap_or(0.0));
+        }
+        // volHash=1: a fingerprint of every bit of the scene's volume and the bodies' as they stand after
+        // the last event (on stderr), to compare two ways of reaching the same settled scene
+        if args.text("volHash").is_some() {
+            let hash = |bits: &[u16]| bits.iter().fold(0xcbf29ce484222325u64, |h, &b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+            let (res, scene) = e.read_volume()?;
+            let bodies = e.read_bodies().map(|(r, c, b)| format!("{r}x{c} {:016x}", hash(&b))).unwrap_or_else(|_| "none".into());
+            eprintln!("[volhash] scene {res} {:016x} bodies {bodies}", hash(&scene));
+            eprintln!("[volbytes] {:.2} GB in the scene's volumes in use", e.volumes_bytes() as f64 / 1e9);
         }
         // shot=<file>: the picture as it stands after the last event (settled, if the events end idle)
         if let Some(path) = args.text("shot") {
@@ -830,7 +932,7 @@ fn run() -> Result<(), String> {
         // by hand, `n` of the animation playing, then `n` after everything stops (the picture settling,
         // then idling once it has). Every frame is waited for, so each time is that frame's own.
         // Prints the 50th, 80th and 95th percentile and the slowest, for each part and for all.
-        let n = n.as_ref().and_then(|v| v.parse().ok()).unwrap_or(240usize);
+        let n = n.as_ref().and_then(|v| v.parse().ok()).unwrap_or(240usize).max(1);
         let mut e = headless(&args)?;
         e.auto = false;
         let ((w, h), _) = e.renderer.size();
@@ -839,18 +941,58 @@ fn run() -> Result<(), String> {
         // (the first picture, and whatever the scene builds once, before the clock starts)
         e.render(4);
         let mut parts: Vec<(&str, Vec<f64>)> = Vec::new();
+        // keepLog=<file>: with keepRate=, every frame: part, frame, ms, the scale it was traced at, and what
+        // the controller had lowered
+        let mut log = args.text("keepLog").and_then(|p| std::fs::File::create(p).ok());
+        let mut scales: Vec<(&str, Vec<f64>)> = Vec::new();
+        let sun_sweep: Option<f64> = std::env::var("GF_SUNSWEEP").ok().map(|v| v.parse().unwrap_or(0.05));
+        let mut frames_done = 0usize;
         for part in ["turn", "play", "settle"] {
             if part == "play" { e.state.set_playing(true); }
             if part == "settle" { e.state.set_playing(false); }
             let mut ms = Vec::with_capacity(n);
-            for _ in 0..n {
+            let mut sc = Vec::with_capacity(n);
+            for i in 0..n {
+                let previous_passes = e.renderer.trace_passes;
                 let t0 = std::time::Instant::now();
                 if part == "turn" { e.state.turn(&turn); }
+                // GF_SUNSWEEP=<degrees a frame>: the sun climbs every frame, so the sky changes every frame
+                if let Some(k) = &sun_sweep { e.state.p.sun_pitch = 20.0 + (frames_done as f64) * k; }
+                frames_done += 1;
                 e.frame(w, h, dt);
                 e.gpu.wait();
-                ms.push(t0.elapsed().as_secs_f64() * 1e3);
+                let took = t0.elapsed().as_secs_f64() * 1e3;
+                ms.push(took);
+                sc.push(e.renderer.dyn_used);
+                if let Some(f) = &mut log {
+                    use std::io::Write;
+                    let (requested_scale, detail, settle_budget, moving_ms) = e.keep.as_ref().map_or((1.0, None, 1.0, 0.0), |k| {
+                        let lv = k.ctl.levers(&k.avail);
+                        (lv.scale, lv.detail, k.ctl.settle_k, k.ctl.moving_ms)
+                    });
+                    let [bounces, wavelengths] = e.renderer.traced_caps;
+                    let (_, (tw, th)) = e.renderer.size();
+                    let (rw, rh) = glassforms::render::dyn_region(tw, th, e.renderer.dyn_used);
+                    let [update, build, lights, draw] = e.spans;
+                    let volume_res = e.scene_volume().map_or(0, |v| v.res);
+                    let passes = e.renderer.trace_passes - previous_passes;
+                    let _ = writeln!(f, "{part}\t{i}\t{took:.3}\t{:.2}\t{requested_scale:.2}\t{bounces}\t{wavelengths}\t{detail:?}\t{settle_budget:.2}\t{moving_ms:.2}\t{}\t{rw}\t{rh}\t{update:.3}\t{build:.3}\t{lights:.3}\t{draw:.3}\t{}\t{volume_res}\t{passes}", e.renderer.dyn_used, e.renderer.accum_n, e.renderer.traced_half as u8);
+                }
             }
             parts.push((part, ms));
+            scales.push((part, sc));
+        }
+        if std::env::var_os("GF_SKYHASH").is_some() {
+            // the sky holds still now: let whatever waits for that finish, then print what the tracer
+            // reads of the sky, to compare with a run that never moved it
+            for _ in 0..900 {
+                e.frame(w, h, dt);
+                e.gpu.wait();
+                if e.sky_settled() { break; }
+            }
+            e.frame(w, h, dt);
+            e.gpu.wait();
+            eprintln!("SKYHASH {}", e.sky_fingerprint());
         }
         let pct = |v: &[f64], q: f64| -> f64 {
             let mut s = v.to_vec();
@@ -861,6 +1003,15 @@ fn run() -> Result<(), String> {
         let mut out = format!("{{\"scene\":\"{}\",\"preset\":\"{}\",\"w\":{w},\"h\":{h}", e.state.family().id, e.state.preset().id);
         for (name, v) in parts.iter().map(|(a, b)| (*a, b.as_slice())).chain(std::iter::once(("all", all.as_slice()))) {
             out += &format!(",\"{name}\":{{\"p50\":{:.2},\"p80\":{:.2},\"p95\":{:.2},\"max\":{:.2}}}", pct(v, 0.5), pct(v, 0.8), pct(v, 0.95), pct(v, 1.0));
+        }
+        // (keeping the frame rate: the scale each part's frames were traced at, mean and least)
+        if e.keep.is_some() {
+            out += ",\"keep\":{";
+            for (k, (name, v)) in scales.iter().enumerate() {
+                let mean = v.iter().sum::<f64>() / v.len().max(1) as f64;
+                out += &format!("{}\"{name}\":{{\"scaleMean\":{mean:.3},\"scaleMin\":{:.2}}}", if k > 0 { "," } else { "" }, v.iter().copied().fold(1.0, f64::min));
+            }
+            out += "}";
         }
         println!("{out}}}");
         if e.renderer.up.scale.is_some() { eprintln!("dlss: {} of {} frames drawn through DLSS", e.renderer.up.drawn, 3 * n); }
@@ -885,10 +1036,11 @@ fn crash_log() {
         let path = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("crash.log")));
         if let Some(path) = path {
             let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-            let text = format!("---- panic at unix time {secs} (version {})
+            let text = format!("---- panic at unix time {secs} (version {}, {})
 {info}
 {}
-", env!("CARGO_PKG_VERSION"), std::backtrace::Backtrace::force_capture());
+{}
+", env!("CARGO_PKG_VERSION"), glassforms::build_info::this(), glassforms::breadcrumbs::dump(), std::backtrace::Backtrace::force_capture());
             if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
                 use std::io::Write;
                 let _ = f.write_all(text.as_bytes());
@@ -899,6 +1051,11 @@ fn crash_log() {
 }
 
 fn main() {
+    // (here, not in `run`: a debug build's `run` takes more stack than the main thread has)
+    if std::env::args().skip(1).any(|a| a == "--version") {
+        println!("{}", glassforms::build_info::this());
+        return;
+    }
     crash_log();
     if let Err(e) = run() {
         eprintln!("glassforms: {e}");

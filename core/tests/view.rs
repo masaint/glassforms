@@ -88,4 +88,54 @@ fn a_setup_keeps_where_the_camera_stands() {
     // and the view is put back with them
     t.reset_view();
     assert_eq!((t.p.eye_x, t.p.eye_y, t.pivot()), (0.0, 0.0, [0.0; 3]));
+    assert_eq!((t.p.azim, t.p.elev), (0.0, 0.0));
+}
+
+#[test]
+fn orbiting_without_floor_keeps_lights_fixed_in_world_space() {
+    let mut s = State::with_args(&[], true);
+    assert_eq!(s.p.floor, 0.0);
+    assert_eq!(s.p.lights, 0.0);
+    let r_before = s.r;
+    let light_dir = State::light_dir(37.0, 24.0);
+    let obj_from_light = |st: &State| apply(&transpose(&st.view_r()), apply(&st.light_m(), light_dir));
+    let before = obj_from_light(&s);
+    s.drag_turn(80.0, -35.0);
+    assert_ne!(s.room_m(), gf_core::math::I3);
+    assert_eq!(s.r, r_before);
+    assert!(near(&obj_from_light(&s), &before, 1e-9), "light drifted relative to shape");
+    s.reset_view();
+    assert_eq!((s.p.azim, s.p.elev), (0.0, 0.0));
+}
+
+#[test]
+fn panning_moves_camera_and_pivot_without_shearing_shift() {
+    let mut s = State::with_args(&[], true);
+    let before_view = s.view_r();
+    s.drag_pan(120.0, -45.0, 1000.0);
+    assert_eq!(s.p.shift, [0.0, 0.0]);
+    let depth = s.p.dist;
+    let half = depth * (s.p.fov * gf_core::math::DEG / 2.0).tan();
+    let k = (2.0 * half) / 1000.0;
+    assert!(near(&s.eye()[..2], &[-120.0 * k, -45.0 * k], 1e-9), "{:?}", s.eye());
+    let uv = s.camera().project(apply(&before_view, s.pivot())).expect("in front");
+    assert!(near(&uv, &[0.0, 0.0], 1e-9), "{uv:?}");
+    let before = s.view_r();
+    s.drag_turn(40.0, -25.0);
+    s.keep_pivot(&before);
+    let uv = s.camera().project(apply(&s.view_r(), s.pivot())).expect("in front");
+    assert!(near(&uv, &[0.0, 0.0], 1e-9), "{uv:?}");
+}
+
+#[test]
+fn drag_roll_wraps_into_signed_half_turn_for_any_drag() {
+    let mut s = State::with_args(&[], true);
+    for dx in [-5000.0, -2500.0, -601.0, -1.0, 0.0, 45.0, 2500.0, 9999.0] {
+        s.p.roll = -170.0;
+        s.drag_roll(dx);
+        assert!((-180.0..180.0).contains(&s.p.roll), "dx={dx} gave roll={}", s.p.roll);
+    }
+    s.p.roll = -170.0;
+    s.drag_roll(-2000.0); // -170 - 600 = -770 === -50 (mod 360)
+    assert!((s.p.roll + 50.0).abs() < 1e-9, "got {}", s.p.roll);
 }

@@ -141,7 +141,9 @@ fn cs_land(@builtin(global_invocation_id) id: vec3u) {
   let white = 0.7;
 
   let sig = f00.sig;
-  let whole = sig != 0u && f10.sig == sig && f01.sig == sig && f11.sig == sig
+  // Four vertices independently scattered by rough metal no longer bound a coherent beam.
+  let whole = min(min(f00.travel,f10.travel),min(f01.travel,f11.travel))>=0.0
+           && min(min(l00.travel,l10.travel),min(l01.travel,l11.travel))>=0.0 && sig != 0u && f10.sig == sig && f01.sig == sig && f11.sig == sig
            && l00.sig == sig && l10.sig == sig && l01.sig == sig && l11.sig == sig;
   if (whole) {
     // All of the cell's light, at both ends of the spectrum, went the same way: its corners say where
@@ -213,11 +215,11 @@ fn cs_land(@builtin(global_invocation_id) id: vec3u) {
   if (f00.sig != 0u) {
     let floors = (f00.sig & 15u) == 15u;
     let h = select(hv, 2.0 * lu.fl1.w / lu.fl2.w, floors);
-    put(max(log2(max(f00.travel * one.dir.w, h) / h), lu.soft.x + log2(hv / h)), at(f00), light * unpack(f00.col) * blue, seed, floors);
+    put(max(log2(max(abs(f00.travel) * one.dir.w, h) / h), lu.soft.x + log2(hv / h)), at(f00), light * unpack(f00.col) * blue, seed, floors);
   }
   if (l00.sig != 0u) {
     let floors = (l00.sig & 15u) == 15u;
     let h = select(hv, 2.0 * lu.fl1.w / lu.fl2.w, floors);
-    put(max(log2(max(l00.travel * one.dir.w, h) / h), lu.soft.x + log2(hv / h)), at(l00), light * unpack(l00.col) * red, seed + 1u, floors);
+    put(max(log2(max(abs(l00.travel) * one.dir.w, h) / h), lu.soft.x + log2(hv / h)), at(l00), light * unpack(l00.col) * red, seed + 1u, floors);
   }
 }

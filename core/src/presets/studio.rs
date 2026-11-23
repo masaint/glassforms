@@ -397,6 +397,23 @@ fn body(p: vec3f) -> f32 {
 }
 "#;
 
+// (the readings `ell3` and `ell2` are gf_core::stretch::ELL_WGSL: exact, both signs)
+const ELLIPSOID: &str = r#"
+fn reach() -> f32 { return max(pr.rx, max(pr.ry, pr.rz)); }
+fn body(p: vec3f) -> f32 { return ell3(p, vec3f(pr.rx, pr.ry, pr.rz)); }
+"#;
+
+const OVAL: &str = r#"
+fn reach() -> f32 { return length(vec2f(max(pr.rx, pr.rz), 0.5 * pr.height)); }
+fn body(p: vec3f) -> f32 {
+  let half = vec3f(pr.rx, 0.5 * pr.height, pr.rz);
+  let t = trims(min(min(half.x, half.z), half.y));
+  // the outline seen from above drawn in by r (the ellipse's own distance and r: true where it bends no
+  // tighter than r), the two level faces drawn in by r; then r put back all over
+  return edge2(ell2(p.xz, half.xz) + t.x, abs(p.y) - (half.y - t.x), t.y) - t.x;
+}
+"#;
+
 const SPIRAL: &str = r#"
 // Turns do not run into each other: where the pitch is less than the band is thick, they are held a
 // hair apart instead.
@@ -562,6 +579,22 @@ pub fn family() -> Family {
                 rot: Some(lying),
                 animate: Some(vec!["lean"]),
                 ..Preset::new("wedge", "Wedge", shape(true, WEDGE))
+            },
+            Preset {
+                eq: vec!["x²/a² + y²/b² + z²/c² ≤ 1"],
+                note: "A ball drawn out or pressed in along its own axes, measured truly inside and out. A whole sphere stretched unevenly is this.",
+                params: vec![size("rx", "radius x", 0.95, 0.1, 1.25), size("ry", "radius y", 0.6, 0.1, 1.25), size("rz", "radius z", 0.75, 0.1, 1.25)],
+                rot: Some([20.0, -25.0, 0.0]),
+                animate: Some(vec!["ry"]),
+                ..Preset::new("ellipsoid", "Ellipsoid", shape(false, &format!("{}{ELLIPSOID}", crate::stretch::ELL_WGSL)))
+            },
+            Preset {
+                eq: vec!["x²/a² + z²/c² ≤ 1,   |y| ≤ h/2", EDGE_EQ],
+                note: "A cylinder whose section is an ellipse. A disc or cylinder stretched unevenly across its axis is this.",
+                params: with(vec![size("rx", "radius x", 0.95, 0.1, 1.2), size("rz", "radius z", 0.55, 0.1, 1.2), size("height", "height", 0.5, 0.03, 2.4)], 0.0, 0.03),
+                rot: Some([18.0, -25.0, 0.0]),
+                animate: Some(vec!["rz"]),
+                ..Preset::new("oval", "Oval", shape(true, &format!("{}{OVAL}", crate::stretch::ELL_WGSL)))
             },
         ],
         // The distances are true ones, but voxels that lie on a plane halfway between two faces are stored

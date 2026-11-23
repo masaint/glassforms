@@ -152,13 +152,13 @@ fn ret(clamp: u8) -> &'static str {
 // adds: where all members see alike light heroE is positive and nothing is added; where one member alone
 // sees light (a stone's fire) heroE is about today's sample, and what holding it adds is about what
 // today's hold adds.
-const EXIT: &str = "        let od = refract(dir, -m, ior);
+const EXIT: &str = "        let od = exit.transmitted;
 ";
-const EXIT_ALL: &str = "        let od = refract(dir, -m, ior);
+const EXIT_ALL: &str = "        let od = exit.transmitted;
         for (var c = 0; c < MAX_NW; c++) {
           if (c >= W) { break; }
           let lc = 400.0 + 300.0 * (f32(c) + xi) / f32(W);
-          let oc = refract(dir, -m, iorAt(lc));
+          let oc = pbr_dielectric_split(traceDielectricHit(-m, resolvedSceneMedium(iorAt(lc)), airMedium()), -dir).transmitted;
           if (dot(oc, oc) > 0.5) { heroT += specW(lc) * (thr * (1.0 - F)) * att * env(oc); }
         }
 ";
@@ -184,9 +184,10 @@ fn pick(seq: u8) -> &'static str {
 
 /// The tracer's text with the members inside as `h` says; None when it is not the plain glass tracer.
 pub fn weave(src: &str, h: &Hero) -> Option<String> {
-    for s in [LOOP_HEAD, LOOP_TAIL, RETURN, SAMPLE, SHADE, CLAMP, EXIT] {
-        if src.matches(s).count() != 1 { return None; }
-    }
+    let anchors = [("hero.loop_head", LOOP_HEAD), ("hero.loop_tail", LOOP_TAIL), ("hero.return", RETURN), ("hero.sample", SAMPLE),
+        ("hero.shade", SHADE), ("hero.clamp", CLAMP), ("hero.exit", EXIT)];
+    // (a tracer other than plain glass's lacks some: not drift)
+    if anchors.map(|(name, s)| crate::weave::found(src, name, s)) != [1; 7] { return None; }
     let k = h.k.max(1);
     let e = h.every.max(2);
     Some(
@@ -246,7 +247,7 @@ pub fn chroma_taa(src: &str) -> Option<String> {
     out = vec4f(rgb * vec3f(y, cc), cur.a);
   }
 ";
-    (src.matches(OLD).count() == 1).then(|| format!("const CHROMA_SPREAD: f32 = 3.0;
+    (crate::weave::found(src, "hero.chroma_taa", OLD) == 1).then(|| format!("const CHROMA_SPREAD: f32 = 3.0;
 const CHROMA_KEEP: f32 = 0.4;
 {}", src.replace(OLD, NEW)))
 }
@@ -273,9 +274,10 @@ pub fn split(src: &str) -> Option<String> {
     const GLOBAL: &str = "var<private> heroJ0: i32;";
     const HEAD: &str = "fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {";
     const OUT: &str = "return vec4f(col / f32(S), depth);";
-    for s in [TAIL, DECL, RET, GLOBAL, HEAD, OUT] {
-        if src.matches(s).count() != 1 { return None; }
-    }
+    let anchors = [("hero.split_tail", TAIL), ("hero.split_decl", DECL), ("hero.split_ret", RET), ("hero.split_global", GLOBAL),
+        ("hero.split_head", HEAD), ("hero.split_out", OUT)];
+    // (a tracer other than plain glass's lacks some: not drift)
+    if anchors.map(|(name, s)| crate::weave::found(src, name, s)) != [1; 6] { return None; }
     Some(src.replace(TAIL, &format!("{TAIL}    heroLs += L;
 "))
         .replace(DECL, &format!("{DECL}  var heroLs = vec3f(0.0);

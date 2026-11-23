@@ -9,7 +9,7 @@ use gf_core::state::{Knob, State};
 
 use super::theme::*;
 use super::widgets::*;
-use super::{camera, knob, material, right, room, studio, Bench, Panels, Request};
+use super::{camera, knob, material, room, studio, Bench, Panels, Request};
 use crate::video::Codec;
 
 /// The sizes a video can be made at: what is stored, and what the menu says.
@@ -39,7 +39,7 @@ pub fn show(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     ui.scope(|ui| {
         if locked { ui.disable(); }
 
-        material::group(ui, st, px, &knobs);
+        material::group(ui, st, px);
 
         // the light: all of it is in the light room (it needs the room its picture of the lighting takes);
         // here only its name, what it is set to, and the way in
@@ -49,16 +49,19 @@ pub fn show(ui: &mut Ui, st: &mut State, px: &mut Panels) {
         camera::section(ui, st, px);
 
         // how finely the renderer draws and builds (the renderer's, not the camera's)
-        let says = format!("{} · {}³", ["no denoise", "denoised", "denoised · glass"][(js_round(st.p.get("denoise").unwrap_or(1.0)).max(0.0) as usize).min(2)], st.shape().res);
+        let gi_on = st.p.get("gi").unwrap_or(1.0) > 0.5 && st.p.get("giStrength").unwrap_or(1.0) > 0.0;
+        let dn_says = ["no denoise", "denoised", "denoised · glass"][(js_round(st.p.get("denoise").unwrap_or(1.0)).max(0.0) as usize).min(2)];
+        let says = if gi_on { format!("{dn_says} · gi") } else { dn_says.to_string() };
         if px.group(ui, "quality", "quality", &says) {
-            for name in ["smooth", "scale", "ns", "nw", "nb"] { knob::knob_row(ui, st, k(name), px); }
+            for name in ["smooth", "scale", "ns", "nw"] { knob::knob_row(ui, st, k(name), px); }
+            knob::knob_row_with(ui, st, k("nb"), px, knob::Extra { tip: "internal reflections and refractions followed inside glass and between metals (separate from diffuse color bounces below)", ..Default::default() });
+            global_illumination(ui, st, px, k("giBounces"), k("giStrength"), k("giSamples"));
+            keep_rate(ui, px);
             denoise(ui, st, px);
             spectral(ui, st, px);
             let samples: Vec<(u32, String)> = vec![(8, "8 (draft)".into()), (16, "16".into()), (32, "32".into()), (64, "64".into()), (128, "128 (slow)".into())];
             if let Some(v) = pick_value(ui, "video samples", "video samples", &samples, &st.render.samples) { st.render.samples = v; }
             benchmark(ui, px);
-            gap(ui, 3.0);
-            right::detail_rows(ui, st, px);
         }
     });
 
@@ -80,7 +83,7 @@ pub fn show(ui: &mut Ui, st: &mut State, px: &mut Panels) {
 /// what lights the shape and whether anything casts, and the button that opens the room.
 fn light(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     // (what lights it: a picture, a studio, a backdrop, or the lights alone; then how many lights)
-    let around = if st.hdri.is_some() { Some("picture".to_owned()) } else { studio::studio_name(st).map(|n| n.to_lowercase()).or_else(|| (st.p.get("backdrop") == Some(1.0)).then(|| "backdrop".into())) };
+    let around = if st.hdri.is_some() { Some("picture".to_owned()) } else if st.p.sky > 0.5 { Some(studio::sky_name(st).unwrap_or_else(|| "sky".to_owned())) } else { studio::studio_name(st).map(|n| n.to_lowercase()).or_else(|| (st.p.get("backdrop") == Some(1.0)).then(|| "backdrop".into())) };
     let n = st.rig().lights.len();
     let lights = if room::lights_lit(st) { Some(format!("{n} light{}", if n == 1 { "" } else { "s" })) } else { None };
     let cast = ["", " · shadows", " · all cast"][(js_round(st.p.cast).max(0.0) as usize).min(2)];
@@ -110,6 +113,24 @@ fn benchmark(ui: &mut Ui, px: &mut Panels) {
     px.note("benchmark", at);
 }
 
+/// Global illumination (diffuse colour & indirect light bounces across objects, cavities and floor).
+fn global_illumination(ui: &mut Ui, st: &mut State, px: &mut Panels, bounces: &Knob, strength: &Knob, samples: &Knob) {
+    let on = st.p.get("gi").unwrap_or(1.0) > 0.5;
+    let run = named_run(ui, Id::unique("quality gi"), "color bounce", &[
+        Item::new("off", !on).tip("no diffuse colour bleed or indirect light bounces between surfaces and floor"),
+        Item::new("on", on).tip("bounce diffuse light and surface colour between objects, cavities and the floor"),
+    ]);
+    for (place, w) in run.places.iter().zip(["off", "on"]) { px.note(format!("gi:{w}"), *place); }
+    let tip = "Global illumination: bounces diffuse light and pigment colour between neighbouring objects, inside folds and cavities, and onto/from the floor (distinct from glass internal bounces above).";
+    ui.interact(egui::Rect::from_min_size(run.rect.min, egui::vec2(label_width(ui), run.rect.height())), Id::unique("quality gi name"), egui::Sense::hover()).on_hover_text(tip);
+    if let Some(i) = run.clicked { st.p.set("gi", i as f64); }
+    if on {
+        knob::knob_row_with(ui, st, strength, px, knob::Extra { tip: "strength of diffuse bounced light and colour bleed: 1.0 is physically based, 0 turns bounce off, above 1 boosts artistic colour bleed", ..Default::default() });
+        knob::knob_row_with(ui, st, bounces, px, knob::Extra { stepped: true, tip: "how many times diffuse indirect light hops between surfaces and the floor (1 = single bounce, 2–4 = multi-bounce fill)", ..Default::default() });
+        knob::knob_row_with(ui, st, samples, px, knob::Extra { stepped: true, tip: "diffuse bounce rays traced per shading sample each frame: 1 is fast and converges smoothly over frames, 2–4 settle faster", ..Default::default() });
+    }
+}
+
 /// The denoiser, for the whole picture: off, what is traced by chance (true scattering, roughness by
 /// sampling), or clear glass too.
 fn denoise(ui: &mut Ui, st: &mut State, px: &mut Panels) {
@@ -121,6 +142,26 @@ fn denoise(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     px.note("denoise", r);
     let tip = "Cleans the grain of light followed by chance (true scattering, roughness by sampling) while the view moves and in the first frames of a still one, and switches itself off as the picture settles. \"Clear glass too\": also clear glass and gems in motion, which keeps their brightness.";
     ui.interact(egui::Rect::from_min_size(r.min, egui::vec2(label_width(ui), r.height())), Id::unique("denoise name"), egui::Sense::hover()).on_hover_text(tip);
+}
+
+/// Keeping the frame rate while moving (autoscale.rs): off, or the rate aimed at; under it, faintly, what
+/// it is doing now. A setting of this machine (kept with the window's, not in a setup).
+fn keep_rate(ui: &mut Ui, px: &mut Panels) {
+    use crate::autoscale::{KeepRate, TARGETS};
+    let k = px.store.keep_rate;
+    let names: Vec<String> = std::iter::once("off".to_owned()).chain(TARGETS.iter().map(|t| if *t == 0 { "display refresh".to_owned() } else { format!("{t} fps") })).collect();
+    let now = if k.on { 1 + TARGETS.iter().position(|t| *t == k.target).unwrap_or(2) } else { 0 };
+    let at = ui.cursor().min;
+    if let Some(i) = pick(ui, Id::unique("keepRate"), "keep rate", &names, now) {
+        px.store.keep_rate = if i == 0 { KeepRate { on: false, ..k } } else { KeepRate { on: true, target: TARGETS[i - 1] } };
+    }
+    let r = egui::Rect::from_min_max(at, egui::pos2(at.x + ui.available_width(), ui.cursor().top()));
+    px.note("keepRate", r);
+    let tip = "While the view or the shape moves, draw a little less sharply and finely when needed to keep this many frames a second: first a smaller picture filled in by the antialiasing, then a coarser shape while it animates, then fewer bounces. A still picture always settles to the full quality. Off: moving pictures are always drawn in full.";
+    ui.interact(egui::Rect::from_min_size(r.min, egui::vec2(label_width(ui), r.height())), Id::unique("keepRate name"), egui::Sense::hover()).on_hover_text(tip);
+    if px.store.keep_rate.on && !px.keep_says.is_empty() {
+        paragraph(ui, &px.keep_says, mono(SMALL), pal().faint, LINE, label_width(ui));
+    }
 }
 
 /// The spectral speed-up while settling (hero.rs): one wavelength inside clear dispersive glass a frame.
@@ -139,7 +180,7 @@ fn spectral(ui: &mut Ui, st: &mut State, px: &mut Panels) {
 /// brought back.
 fn file(ui: &mut Ui, px: &mut Panels) {
     let setup = [
-        Item::new("save…", false).tip("keep the shape, its sliders, the view, the lights, what is animated and the video choices in a file"),
+        Item::new("save…", false).tip("keep the shape, its sliders, the view, the lights, what is animated and the video choices in a file · ctrl+S saves again, ctrl+shift+S asks where"),
         Item::new("load…", false).tip("bring back a setup saved earlier (a setup file can also be dropped on the window)"),
     ];
     let folder = px.store.stills_folder().display().to_string();
@@ -156,6 +197,24 @@ fn file(ui: &mut Ui, px: &mut Panels) {
     if let Some(i) = choice(ui, Id::unique("still bits"), "still as", &["8-bit", "16-bit"], px.store.still_16 as usize) {
         px.store.still_16 = i == 1;
     }
+    // what a still shows where the shape is not, whatever lights it (cutout.rs): the file only, not the screen
+    const BGS: [&str; 3] = ["seen", "plate", "clear"];
+    let now = BGS.iter().position(|b| *b == px.store.still_bg).unwrap_or(0);
+    let at = ui.cursor().min;
+    if let Some(i) = choice(ui, Id::unique("still background"), "background", &["as seen", "plate", "clear"], now) {
+        px.store.still_bg = BGS[i].into();
+    }
+    let r = egui::Rect::from_min_max(at, egui::pos2(at.x + ui.available_width(), ui.cursor().top()));
+    px.note("still background", r);
+    ui.interact(egui::Rect::from_min_size(r.min, egui::vec2(label_width(ui), r.height())), Id::unique("still background name"), egui::Sense::hover())
+        .on_hover_text("what a still shows where the shape is not, apart from what lights it: as on screen; one flat colour; or transparent, for a cut-out (the floor and what falls on it go too; through glass the world stays as seen)");
+    if px.store.still_bg == "plate" {
+        let r = row(ui, 20.0);
+        text_in(ui, egui::Rect::from_min_size(r.min, egui::vec2(label_width(ui), r.height())), egui::Align2::LEFT_CENTER, "plate", mono(SIZE), pal().dim);
+        let mut c = px.store.plate;
+        let mut sub = ui.new_child(egui::UiBuilder::new().max_rect(egui::Rect::from_min_max(egui::pos2(r.left() + label_width(ui) + COL_GAP, r.top()), r.max)));
+        if sub.color_edit_button_srgb(&mut c).changed() { px.store.plate = c; }
+    }
     match named_run(ui, Id::unique("file setup"), "setup", &setup).clicked {
         Some(0) => px.requests.push(Request::SaveSetup),
         Some(_) => px.requests.push(Request::LoadSetup),
@@ -166,10 +225,7 @@ fn file(ui: &mut Ui, px: &mut Panels) {
     if named_run(ui, Id::unique("file mesh"), "mesh", &mesh).clicked.is_some() {
         px.requests.push(Request::ExportMesh);
     }
-    if !px.file_text.is_empty() {
-        gap(ui, 2.0);
-        paragraph(ui, &px.file_text.clone(), mono(SMALL), pal().button, LINE, 0.0);
-    }
+    // (what was saved or loaded, or what went wrong, is told in the note over the foot line: overlay::message)
 }
 
 /// The video group: how one loop of the animation is rendered to a file, and the button that renders it.

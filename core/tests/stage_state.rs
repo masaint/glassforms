@@ -14,6 +14,58 @@ fn near(a: &[f64], b: &[f64], tol: f64) -> bool {
 }
 
 #[test]
+fn named_material_and_studio_follow_the_same_choices_as_the_window() {
+    let lavender = stage::studio_index("lavender").unwrap();
+    for name in ["mirror", "truejade", "glass"] {
+        let material = gf_core::material::named_index(name).unwrap();
+        for studio_first in [false, true] {
+            let mut window = State::with_args(&[], true);
+            let picks = if studio_first {
+                window.apply_studio(lavender);
+                window.set_material(material);
+                [("studio", "lavender"), ("material", name)]
+            } else {
+                window.set_material(material);
+                window.apply_studio(lavender);
+                [("material", name), ("studio", "lavender")]
+            };
+            let command = State::with_args(&args(&picks), true);
+            assert_eq!(command.rig().lights, window.rig().lights, "{picks:?}");
+            assert_eq!(command.rig().ambient, window.rig().ambient);
+            for key in stage::NAMES {
+                assert_eq!(command.p.get(key), window.p.get(key), "{picks:?} {key}");
+            }
+            assert_eq!(command.p.metal, window.p.metal);
+        }
+    }
+}
+
+#[test]
+fn changing_body_material_preserves_the_authored_studio() {
+    let mut scene = State::with_args(&args(&[
+        ("studio", "lavender"), ("light1.el", "17"), ("floorGloss", "0.37"),
+        ("exposure", "1.37"), ("layer", "solids:ring"), ("J12.op", "apart"),
+    ]), true);
+    let lights = scene.rig().clone();
+    let stages = |s: &State| stage::NAMES.iter().map(|k| s.p.get(k)).collect::<Vec<_>>();
+    let expected = stages(&scene);
+    for layer in [0, 1] {
+        for (i, material) in gf_core::material::NAMED.iter().enumerate() {
+            assert!(scene.set_body_material(layer, i));
+            assert_eq!(scene.body_settings(layer).mat, i as f64);
+            assert_eq!(scene.rig(), &lights, "layer {layer}, {}", material.id);
+            assert_eq!(stages(&scene), expected, "layer {layer}, {}", material.id);
+            assert_eq!(scene.p.exposure, 1.37, "layer {layer}, {}", material.id);
+        }
+    }
+    let mut reopened = State::new();
+    reopened.apply_setup(&scene.setup()).unwrap();
+    assert_eq!(reopened.rig(), &lights);
+    assert_eq!(stages(&reopened), expected);
+    assert_eq!(reopened.p.exposure, 1.37);
+}
+
+#[test]
 fn no_studio_unless_asked() {
     let s = State::with_args(&[], true);
     assert!(Stage::of(&s.p).off() && Grade::of(&s.p).plain());
@@ -125,4 +177,13 @@ fn a_setup_keeps_the_studio() {
     let plain = State::with_args(&[], true).setup_json().replace("\"backdrop\"", "\"notASetting\"");
     old.apply_setup_json(&plain).unwrap();
     assert!(Stage::of(&old.p).off());
+}
+
+#[test]
+fn clear_studio_preserves_orbited_camera_azimuth_and_elevation() {
+    let mut s = State::with_args(&args(&[("studio", "lavender"), ("elev", "24"), ("azim", "-67.5")]), true);
+    assert!(!Stage::of(&s.p).off());
+    s.clear_studio();
+    assert!(Stage::of(&s.p).off());
+    assert_eq!((s.p.elev, s.p.azim), (24.0, -67.5));
 }

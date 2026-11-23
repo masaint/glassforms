@@ -60,15 +60,50 @@ pub const SHOW_H: u32 = 256;
 
 // ---- where pictures are ------------------------------------------------------------------------------
 
-/// The program's folder: where the program file is, or the workspace when it is run straight from a
-/// build (`target\release`). Pictures given without a full path are looked for here, and the `hdri`
-/// folder of this folder is where a file chooser should open.
+/// The program's folder: the one that holds its shared files (`thumbs`, `models`, `hdri`). Pictures and
+/// models given without a full path are looked for here, and its `hdri` folder is where a file chooser
+/// opens. Found once (see `find_home`) and kept.
 pub fn home() -> PathBuf {
-    let exe = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)).unwrap_or_else(|| PathBuf::from("."));
-    match exe.parent().and_then(Path::parent) {
-        Some(root) if root.join("Cargo.toml").exists() => root.to_path_buf(),
-        _ => exe,
+    static HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    HOME.get_or_init(|| {
+        let exe = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)).unwrap_or_else(|| PathBuf::from("."));
+        let given = std::env::var_os("GF_HOME").map(PathBuf::from);
+        // the workspace this program was built from (a build run from any target folder still finds it)
+        let built = Path::new(env!("CARGO_MANIFEST_DIR")).parent().map(Path::to_path_buf);
+        match find_home(&exe, given.as_deref(), built.as_deref()) {
+            Ok(home) => home,
+            Err(why) => {
+                eprintln!("glassforms: {why}; shape pictures and bundled models will be missing (set GF_HOME to the folder holding `thumbs`)");
+                exe
+            }
+        }
+    })
+    .clone()
+}
+
+/// Whether a folder holds the program's shared files: a `thumbs` folder, and, unless it is the program's
+/// own folder (a copy made to be handed out), a `Cargo.toml` beside it (so that some unrelated `thumbs`
+/// higher up the disk is not taken).
+fn holds_files(dir: &Path, own: bool) -> bool {
+    dir.join("thumbs").is_dir() && (own || dir.join("Cargo.toml").is_file())
+}
+
+/// Where the shared files are, in this order: the folder `GF_HOME` names (an error if it does not hold
+/// them, so a wrong setting is not hidden); the program's folder or the nearest folder above it that
+/// holds them, itself or in its `native` folder (a program copied anywhere inside the workspace, such as
+/// `native\out\...`, finds them without links); the workspace it was built from; else an error saying why.
+pub fn find_home(exe_dir: &Path, given: Option<&Path>, built: Option<&Path>) -> Result<PathBuf, String> {
+    if let Some(g) = given.filter(|g| !g.as_os_str().is_empty()) {
+        if g.join("thumbs").is_dir() || g.join("models").is_dir() { return Ok(g.to_path_buf()); }
+        return Err(format!("GF_HOME={} holds no `thumbs` or `models` folder", g.display()));
     }
+    for (i, dir) in exe_dir.ancestors().enumerate() {
+        if holds_files(dir, i == 0) { return Ok(dir.to_path_buf()); }
+        let native = dir.join("native");
+        if holds_files(&native, false) { return Ok(native); }
+    }
+    if let Some(b) = built.filter(|b| holds_files(b, false)) { return Ok(b.to_path_buf()); }
+    Err(format!("no `thumbs` folder found above {}", exe_dir.display()))
 }
 
 /// The file a given path means: as it is if it is a full path, otherwise in the program's folder
@@ -965,6 +1000,35 @@ mod tests {
         }
         assert!((blur_sigma(0.5).to_degrees() - 5.1).abs() < 0.2, "{}", blur_sigma(0.5).to_degrees());
         assert!((blur_sigma(1.0).to_degrees() - 60.0).abs() < 1e-6 && blur_sigma(3.0) == blur_sigma(1.0));
+    }
+
+    #[test]
+    fn the_shared_files_are_found_from_anywhere_in_the_workspace() {
+        let root = std::env::temp_dir().join(format!("gf_home_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let native = root.join("repo").join("native");
+        for d in ["thumbs/knots", "models", "out/unified/executables", "target/release"] { std::fs::create_dir_all(native.join(d)).unwrap(); }
+        std::fs::write(native.join("Cargo.toml"), "").unwrap();
+        let elsewhere = root.join("target_elsewhere").join("release");
+        let handed_out = root.join("handed_out");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::create_dir_all(handed_out.join("thumbs")).unwrap();
+        // a program run from its build folder, copied deep into out\, or copied beside the workspace
+        assert_eq!(find_home(&native.join("target/release"), None, None), Ok(native.clone()));
+        assert_eq!(find_home(&native.join("out/unified/executables"), None, None), Ok(native.clone()));
+        assert_eq!(find_home(&root.join("repo").join("out"), None, None), Ok(native.clone()));
+        // a build in a target folder outside the workspace finds the workspace it was built from
+        assert_eq!(find_home(&elsewhere, None, Some(&native)), Ok(native.clone()));
+        assert!(find_home(&elsewhere, None, None).is_err());
+        // a copy handed out with its own thumbs needs no Cargo.toml; an unrelated thumbs above does
+        assert_eq!(find_home(&handed_out, None, Some(&native)), Ok(handed_out.clone()));
+        std::fs::create_dir_all(root.join("thumbs")).unwrap();
+        assert!(find_home(&elsewhere, None, None).is_err(), "a stray thumbs folder without Cargo.toml was taken");
+        // GF_HOME wins, and a wrong one is an error, not a silent fallback
+        assert_eq!(find_home(&native.join("target/release"), Some(&handed_out), None), Ok(handed_out.clone()));
+        assert!(find_home(&native.join("target/release"), Some(&root.join("nothing")), Some(&native)).is_err());
+        assert_eq!(find_home(&elsewhere, Some(Path::new("")), Some(&native)), Ok(native.clone()));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -106,6 +106,19 @@ fn lampsFloor(rd: vec3f) -> vec3f {
   return lamps.floor.rgb * lampsPool(x, up) * (0.31830989 * melt);
 }
 
+// The area a lamp shows towards direction -l (where l points from the lit surface to the lamp):
+// a ball's disc, a tube's outline, or a panel's front face (zero behind the panel).
+fn lampArea(L: LampU, l: vec3f) -> f32 {
+  var area = 3.14159265 * L.u.w * L.u.w;
+  if (L.p.w > 0.5 && L.p.w < 1.5) {
+    let along = dot(l, L.u.xyz);
+    area += 4.0 * L.u.w * L.v.w * sqrt(max(1.0 - along * along, 0.0));
+  } else if (L.p.w > 1.5) {
+    area = 4.0 * L.u.w * L.v.w * max(-dot(l, cross(L.u.xyz, L.v.xyz)), 0.0);
+  }
+  return area;
+}
+
 // The light a matte surface at p facing n gathers from the lamps, unshadowed (lampsDiffuse, without the
 // march towards each lamp).
 fn lampsPool(p: vec3f, n: vec3f) -> vec3f {
@@ -119,7 +132,8 @@ fn lampsPool(p: vec3f, n: vec3f) -> vec3f {
     let l = d * inverseSqrt(max(d2, 1e-8));
     let cosn = dot(n, l);
     if (cosn <= 0.0) { continue; }
-    let area = 3.14159265 * L.u.w * max(L.u.w, select(0.0, L.v.w, L.p.w > 0.5));
+    let area = lampArea(L, l);
+    if (area <= 0.0) { continue; }
     e += L.rgb.rgb * (area * cosn / max(d2, area + 1e-4));
   }
   return e;
@@ -145,13 +159,8 @@ fn lampsDiffuse(p: vec3f, n: vec3f) -> vec3f {
     let l = d * inverseSqrt(max(d2, 1e-8));
     let cosn = dot(n, l);
     if (cosn <= 0.0) { continue; }
-    var area = 3.14159265 * L.u.w * L.u.w;
-    if (L.p.w > 0.5 && L.p.w < 1.5) {
-      let along = dot(l, L.u.xyz);
-      area += 4.0 * L.u.w * L.v.w * sqrt(max(1.0 - along * along, 0.0));
-    } else if (L.p.w > 1.5) {
-      area = 4.0 * L.u.w * L.v.w * max(-dot(l, cross(L.u.xyz, L.v.xyz)), 0.0);
-    }
+    let area = lampArea(L, l);
+    if (area <= 0.0) { continue; }
     // (no nearer than the lamp's own size: a surface touching it is not lit without end)
     e += L.rgb.rgb * (area * cosn / max(d2, area + 1e-4)) * lampShadow(p, n, L.p.xyz, max(L.u.w, select(0.0, L.v.w, L.p.w > 0.5)));
   }

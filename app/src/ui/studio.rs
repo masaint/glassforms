@@ -85,6 +85,10 @@ pub fn casting(ui: &mut Ui, st: &mut State, px: &mut Panels) {
         label(ui, run.rect, "caustic detail");
         for (place, w) in run.places.iter().zip(["coarse", "medium", "fine", "finest"]) { px.note(format!("room/castDetail:{w}"), *place); }
         if let Some(i) = run.clicked { st.p.set("castDetail", i as f64); }
+        switch(ui, st, px, "gi", "color bounce", ["off", "on"], ["no diffuse colour bleed or indirect bounce light", "bounce diffuse light and colour between objects, cavities and the floor"]);
+        if st.p.get("gi").unwrap_or(1.0) > 0.5 {
+            knob::knob_row_with(ui, st, &State::engine_knob("giStrength"), px, knob::Extra { tip: "strength of diffuse bounced light and colour bleed: 1.0 is physically based, above 1 boosts colour bleed", ..Default::default() });
+        }
     });
     // what is being done: the lights followed, and the volume of light the caustics are gathered in
     if px.casting.on {
@@ -156,7 +160,7 @@ fn studio_is(st: &State, i: usize) -> bool {
 /// Is there no studio at all: the family's own lights, no backdrop, no floor?
 #[cfg(test)]
 fn no_studio(st: &State) -> bool {
-    st.rig_is_default() && st.p.get("backdrop") == Some(0.0) && st.p.get("floor") == Some(0.0)
+    st.rig_is_default() && st.p.get("backdrop") == Some(0.0) && st.p.get("floor") == Some(0.0) && st.p.get("sky") == Some(0.0)
 }
 
 /// A setting that is a switch, as two buttons beside a name.
@@ -198,46 +202,76 @@ pub fn studio_name(st: &State) -> Option<String> {
     (0..every().len()).find(|&i| studio_is(st, i)).map(|i| every()[i].name.to_lowercase())
 }
 
+fn sky_is(st: &State, i: usize) -> bool {
+    let s = &gf_core::sky::SKIES[i];
+    if st.p.sky <= 0.5 || st.hdri.is_some() { return false; }
+    s.settings.iter().all(|(n, v)| st.p.get(n) == Some(*v))
+}
+
+pub fn sky_name(st: &State) -> Option<String> {
+    if st.p.sky <= 0.5 || st.hdri.is_some() { return None; }
+    (0..gf_core::sky::SKIES.len()).find(|&i| sky_is(st, i)).map(|i| gf_core::sky::SKIES[i].name.to_lowercase())
+}
+
 /// What is all round the shape, lighting it and perhaps seen behind it: nothing (black), a studio
-/// backdrop, or an environment picture.
+/// backdrop, a physical sky, or an environment picture.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Around {
     Nothing,
     Studio,
+    Sky,
     Picture,
 }
 fn around(st: &State) -> Around {
-    if st.hdri.is_some() { Around::Picture } else if st.p.get("backdrop") == Some(1.0) { Around::Studio } else { Around::Nothing }
+    if st.hdri.is_some() {
+        Around::Picture
+    } else if st.p.sky > 0.5 {
+        Around::Sky
+    } else if st.p.get("backdrop") == Some(1.0) {
+        Around::Studio
+    } else {
+        Around::Nothing
+    }
 }
 
 /// The light room's surroundings: none, a studio backdrop (the studios, its colours, blend, reach,
-/// height, glow) or an environment picture (load, clear, brightness, softness), and one switch for
-/// whether it is also seen behind the shape.
+/// height, glow), a physical sky (presets, sun position/size/power/tint, atmosphere media, ground),
+/// or an environment picture (load, clear, brightness, softness), and one switch for whether it is
+/// also seen behind the shape.
 pub fn surroundings(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     let now = around(st);
     let says = match now {
         Around::Nothing => "black".to_owned(),
         Around::Studio => (0..every().len()).find(|&i| studio_is(st, i)).map_or("studio backdrop".to_owned(), |i| every()[i].name.to_owned()),
+        Around::Sky => sky_name(st).unwrap_or_else(|| "physical sky".to_owned()),
         Around::Picture => px.lighting.picture.as_ref().map_or("picture".to_owned(), |p| p.0.clone()),
     };
     if !px.window_group(ui, "room-surround", "surroundings", &says) { return; }
     let items = [
         Item::new("none", now == Around::Nothing).tip("black all round, as ever: only the lights light the shape"),
         Item::new("studio", now == Around::Studio).tip("a studio backdrop: a sweep of colour behind and round the shape, which also lights it"),
+        Item::new("sky", now == Around::Sky).tip("a physical atmosphere with Rayleigh, Mie, ozone and sun lighting and backing the shape"),
         Item::new("picture", now == Around::Picture).tip("an environment picture (.exr or .hdr panorama) lights the shape"),
     ];
     let run = named_run(ui, Id::unique("around"), "around", &items);
-    for (place, w) in run.places.iter().zip(["none", "studio", "picture"]) { px.note(format!("room/around:{w}"), *place); }
+    for (place, w) in run.places.iter().zip(["none", "studio", "sky", "picture"]) { px.note(format!("room/around:{w}"), *place); }
     match run.clicked {
         Some(0) => {
             st.p.set("backdrop", 0.0);
+            st.p.set("sky", 0.0);
             st.set_hdri(None);
         }
         Some(1) if now != Around::Studio => {
             st.set_hdri(None);
+            st.p.set("sky", 0.0);
             st.p.set("backdrop", 1.0);
         }
-        Some(2) if now != Around::Picture => {
+        Some(2) if now != Around::Sky => {
+            st.set_hdri(None);
+            st.p.set("backdrop", 0.0);
+            st.p.set("sky", 1.0);
+        }
+        Some(3) if now != Around::Picture => {
             // (the backdrop goes once a picture is in use; until one is chosen nothing changes)
             px.requests.push(super::Request::LoadPicture);
         }
@@ -275,6 +309,65 @@ pub fn surroundings(ui: &mut Ui, st: &mut State, px: &mut Panels) {
                 for name in ["backGlowAz", "backGlowEl", "backGlowSize"] { knob::knob_row(ui, st, &State::engine_knob(name), px); }
             }
         }
+        Around::Sky => {
+            let skies = gf_core::sky::SKIES;
+            let lit = (0..skies.len()).find(|&i| sky_is(st, i));
+            let names: Vec<String> = skies.iter().map(|s| s.name.to_lowercase()).collect();
+            let items: Vec<Item> = skies.iter().zip(&names).enumerate().map(|(i, (s, name))| Item::new(name, lit == Some(i)).tip(s.about)).collect();
+            let run = filled_run(ui, Id::unique("skies"), &items, egui::vec2(6.0, 2.0), &mono(SIZE));
+            for (s, place) in skies.iter().zip(&run.places) { px.note(format!("room/sky:{}", s.id), *place); }
+            if let Some(i) = run.clicked { st.apply_sky(i); }
+            gap(ui, 2.0);
+            behind(ui, st, px);
+            for name in ["skyGain", "sunPitch", "sunYaw", "sunSize", "sunPower"] {
+                knob::knob_row(ui, st, &State::engine_knob(name), px);
+            }
+            switch(ui, st, px, "sunDisc", "sun disc", ["hide", "show"], ["the visible solar disc is hidden; sun illumination remains", "draw the solar disc in the sky"]);
+            colour(ui, st, px, "sun tint", ["sunR", "sunG", "sunB"], 2.0);
+            px.sub(ui, "room-sky-air", "sky air", "", |ui, px| {
+                for name in ["skyRayleigh", "skyMie", "skyMieG", "skyOzone"] {
+                    knob::knob_row(ui, st, &State::engine_knob(name), px);
+                }
+                colour(ui, st, px, "ground", ["skyGroundR", "skyGroundG", "skyGroundB"], 1.0);
+            });
+            let cover = st.p.cloud_cover.clamp(0.0, 1.0);
+            let cloud_says = if cover <= 1e-4 { "off".to_owned() } else { format!("{:.0}%", cover * 100.0) };
+            px.sub(ui, "room-clouds", "clouds", &cloud_says, |ui, px| {
+                for (name, tip) in [
+                    ("cloudCover", "sky fraction covered by 3D volumetric clouds (0 = clear sky, cached when unchanged)"),
+                    ("cloudDensity", "optical extinction density of the volumetric cloud layer"),
+                    ("cloudScale", "spatial size of cloud formations across the curved planetary shell"),
+                    ("cloudBase", "cloud deck base altitude above the ground in kilometres"),
+                    ("cloudThick", "vertical thickness of convective cloud towers in kilometres"),
+                    ("cloudDetail", "high-frequency 3D turbulent billow erosion along cloud edges"),
+                    ("cloudSoft", "cloud morphology from crisp cumulus towers (0) to soft stratiform veils (1)"),
+                    ("cloudSilver", "forward-scattered silver lining and internal multiple-scattering glow"),
+                    ("cloudWindX", "east-west cloud drift offset in kilometres (animatable)"),
+                    ("cloudWindZ", "north-south cloud drift offset in kilometres (animatable)"),
+                    ("cloudShadow", "dappled cloud shadow strength on the floor and direct sun attenuation"),
+                ] {
+                    knob::knob_row_with(ui, st, &State::engine_knob(name), px, knob::Extra { tip, ..Default::default() });
+                }
+            });
+            let (haze, aerial, rays) = (st.p.atmo_haze, st.p.atmo_aerial, st.p.sun_rays);
+            let atmo_says = match (haze > 1e-4 || aerial > 1e-4, rays > 1e-4) {
+                (false, false) => "off",
+                (true, true) => "mist · rays",
+                (true, false) => "mist",
+                (false, true) => "sunrays",
+            };
+            px.sub(ui, "room-atmo", "atmosphere", atmo_says, |ui, px| {
+                for (name, tip) in [
+                    ("atmoHaze", "exponential boundary-layer mist & height fog density"),
+                    ("atmoFogH", "vertical scale height of ground mist and fog falloff"),
+                    ("atmoAerial", "distance aerial perspective & atmospheric turbidity"),
+                    ("sunRays", "volumetric crepuscular sunrays (god-rays) through cloud breaks and scene occlusion"),
+                    ("sunRayG", "forward-scattering anisotropy (focus) of volumetric sunray shafts"),
+                ] {
+                    knob::knob_row_with(ui, st, &State::engine_knob(name), px, knob::Extra { tip, ..Default::default() });
+                }
+            });
+        }
         Around::Picture => {
             let items = [Item::new("load…", false).tip("another .exr or .hdr panorama"), Item::new("clear", false).tip("back to the lights alone")];
             let run = named_run(ui, Id::unique("picture file"), "file", &items);
@@ -308,10 +401,11 @@ pub fn surroundings(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     gap(ui, 2.0);
 }
 
-/// Whether what is round the shape is also seen behind it: one switch for the backdrop and the picture.
+/// Whether what is round the shape is also seen behind it: one switch for the backdrop, sky and picture.
 fn behind(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     let shown = match around(st) {
         Around::Picture => st.p.hdri_show > 0.5,
+        Around::Sky => st.p.sky_show > 0.5,
         _ => st.p.get("backShow").unwrap_or(1.0) > 0.5,
     };
     let run = named_run(ui, Id::unique("behind shape"), "behind shape", &[
@@ -320,8 +414,9 @@ fn behind(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     ]);
     for (place, name) in run.places.iter().zip(["room/show:off", "room/show:on"]) { px.note(name, *place); }
     if let Some(i) = run.clicked {
-        // (both are kept alike, so that changing from one to the other keeps the choice)
+        // (kept alike across backdrop, sky, and picture so switching keeps the choice)
         st.p.hdri_show = i as f64;
+        st.p.sky_show = i as f64;
         st.p.set("backShow", i as f64);
     }
 }
@@ -376,9 +471,15 @@ mod tests {
         for name in ["cast", "castDetail", "backdrop", "backShow", "floor", "floorAuto", "floorMirror", "tone", "castShadow", "castCaustic4"] {
             assert!(p.get(name).is_some(), "{name} is not a setting");
         }
+        for name in gf_core::sky::NAMES {
+            assert!(p.get(name).is_some(), "{name} is not a sky setting");
+        }
         for name in ["castSoft", "castShadows", "castCaustics", "backGain", "backSpread", "backWrap", "backHigh", "backGlow", "backGlowAz", "backGlowEl", "backGlowSize",
                      "floorY", "floorMatch", "floorGain", "floorFade", "floorGloss"] {
             assert!(State::engine_knobs().iter().any(|k| k.id == name), "{name} is not a knob");
+        }
+        for (name, ..) in gf_core::sky::KNOBS {
+            assert!(State::engine_knobs().iter().any(|k| k.id == *name), "{name} is not a sky knob");
         }
     }
 
@@ -390,5 +491,9 @@ mod tests {
         assert!(!no_studio(&st) && studio_is(&st, 1) && !studio_is(&st, 0));
         st.clear_studio();
         assert!(no_studio(&st));
+        assert!(st.apply_sky(0));
+        assert!(sky_name(&st).is_some());
+        assert!(st.sky_arg("none"));
+        assert!(no_studio(&st) && sky_name(&st).is_none());
     }
 }

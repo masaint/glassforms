@@ -1,7 +1,7 @@
 //! The look: colours, fonts and sizes, and egui's own style brought into line with them.
 //! Everything is taken from the web version's style sheet, so the two read as the same program.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use eframe::egui::{self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Pos2, Rect, Shape, Stroke};
@@ -14,13 +14,34 @@ pub enum Mode {
     Light,
 }
 
-/// How much of the picture the panels and windows let through. They are frosted glass: a blurred,
-/// toned copy of the picture under them. Off: the plain boxes of before, for a GPU that is short of time.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Frost {
-    Off,
-    Subtle,
-    Full,
+/// The two settings of the panels' glass, each 0 to 1. Blur: how soft the picture under them is (0: none,
+/// the plain boxes of before, and nothing is made for them). Opacity: how much of the picture they let
+/// through, from most (0) to nearly none (1). The defaults are the look the panels had before either could
+/// be set: fully frosted, the tone band as it was.
+pub const BLUR_DEFAULT: f32 = 0.75;
+pub const OPACITY_DEFAULT: f32 = 0.5;
+
+/// The blur and opacity the old named frosts stand for ("off", "subtle", "full"), for settings files and
+/// scripts written before there were sliders.
+pub fn frost_named(name: &str) -> (f32, f32) {
+    match name {
+        "off" => (0.0, OPACITY_DEFAULT),
+        "subtle" => (0.5, 0.7),
+        _ => (BLUR_DEFAULT, OPACITY_DEFAULT),
+    }
+}
+
+/// The opacity as a lean either way from the default: -1 lets the most through, 1 the least.
+fn lean() -> f32 {
+    ((opacity() - OPACITY_DEFAULT) * 2.0).clamp(-1.0, 1.0)
+}
+
+/// An alpha leaned by the opacity: `base` at the default, `low` of it at the least, `top` at the most.
+fn leaned_alpha(base: u8, low: f32, top: u8) -> u8 {
+    let k = lean();
+    let b = base as f32;
+    let a = if k < 0.0 { b * (1.0 + (1.0 - low) * k) } else { b + (top as f32 - b).max(0.0) * k };
+    a.round().clamp(0.0, 255.0) as u8
 }
 
 /// The colours of one look.
@@ -153,7 +174,9 @@ pub const LIGHT: Palette = Palette {
 };
 
 static LIGHT_ON: AtomicBool = AtomicBool::new(false);
-static FROST: AtomicU8 = AtomicU8::new(2);
+/// the blur and the opacity in use (f32 bits)
+static BLUR: AtomicU32 = AtomicU32::new(0x3f40_0000); // 0.75
+static OPACITY: AtomicU32 = AtomicU32::new(0x3f00_0000); // 0.5
 /// The frosted copy of the picture, as egui knows it, and the place in the window the picture fills.
 static BACKDROP: Mutex<Option<(egui::TextureId, Rect)>> = Mutex::new(None);
 
@@ -164,11 +187,19 @@ pub fn pal() -> &'static Palette {
 pub fn mode() -> Mode {
     if LIGHT_ON.load(Ordering::Relaxed) { Mode::Light } else { Mode::Dark }
 }
-pub fn frost() -> Frost {
-    match FROST.load(Ordering::Relaxed) { 0 => Frost::Off, 1 => Frost::Subtle, _ => Frost::Full }
+pub fn blur() -> f32 {
+    f32::from_bits(BLUR.load(Ordering::Relaxed))
 }
-pub fn set_frost(f: Frost) {
-    FROST.store(match f { Frost::Off => 0, Frost::Subtle => 1, Frost::Full => 2 }, Ordering::Relaxed);
+pub fn opacity() -> f32 {
+    f32::from_bits(OPACITY.load(Ordering::Relaxed))
+}
+/// The panels are frosted glass (the blur is above nothing).
+pub fn frosted() -> bool {
+    blur() > 0.0
+}
+pub fn set_glass(blur: f32, opacity: f32) {
+    BLUR.store(blur.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    OPACITY.store(opacity.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
 }
 /// The frosted copy of the picture the surfaces are drawn on, and where the picture is (none: plain boxes).
 pub fn set_backdrop(b: Option<(egui::TextureId, Rect)>) {
@@ -186,35 +217,46 @@ pub fn mode_named(name: &str, system: Option<egui::Theme>) -> Mode {
         _ => Mode::Dark,
     }
 }
-pub fn frost_named(name: &str) -> Frost {
-    match name {
-        "off" => Frost::Off,
-        "subtle" => Frost::Subtle,
-        _ => Frost::Full,
+/// How far the picture is blurred for a blur setting, as levels of halving and the spread of the taps
+/// within a level: the reach doubles every quarter of the slider, from a quarter of the picture's size
+/// (2 levels) up; one level more for a picture of more pixels, so that it is as soft at every size. The
+/// default is exactly the frost of before (5 levels at 4K, 4 below, spread 1).
+pub fn blur_reach(blur: f32, height_px: u32) -> (u32, f32) {
+    let big = height_px >= 1800;
+    let s = (if big { 2.0 } else { 1.0 } + 4.0 * blur.clamp(0.0, 1.0)).max(2.0);
+    let levels = (s - 1e-4).ceil().clamp(2.0, 6.0);
+    (levels as u32, 2f32.powf((s - levels).min(0.0)))
+}
+
+/// The band of tone the frost presses the picture into, for a look, a picture bright from edge to edge or
+/// not, and an opacity lean (-1 to 1, see `lean`). The band is set by the brightest picture there is: over
+/// a white room the frost's brightest is still dark enough, or in the light look light enough, that the
+/// faintest words over it read; letting more through widens it only so far, letting less through closes
+/// it toward the panel's own colour.
+fn band(dark: bool, bright: bool, k: f32) -> ([f32; 3], [f32; 3], f32) {
+    let towards = |a: [f32; 3], b: [f32; 3], t: f32| [0, 1, 2].map(|i| a[i] + (b[i] - a[i]) * t);
+    let shut = 0.8 * k.max(0.0);
+    let sat = |s: f32| s + (1.0 - s) * k.max(0.0);
+    if dark {
+        let lo = [0.035, 0.04, 0.055];
+        let wide = 1.0 + 0.15 * (-k).max(0.0);
+        let hi = [0.255, 0.27, 0.305].map(|v| v * if bright { 0.8 } else { 1.0 } * wide);
+        (lo, towards(hi, lo, shut), sat(1.25))
+    } else {
+        let hi = [0.975, 0.978, 0.985];
+        let lift = if bright { 0.04 } else { 0.0 };
+        let lo = [0.77, 0.79, 0.83].map(|v| v + lift - 0.08 * (-k).max(0.0));
+        (towards(lo, hi, shut), hi, sat(1.3))
     }
 }
 
-/// How the frost is made for the look in use: how far the picture is blurred (in levels of halving, more
-/// for a picture of more pixels, so that it is as soft at every size), and the band of tone it is pressed
-/// into. The band is set by the brightest picture there is: over a white room (or a bright panorama,
-/// `bright`) the frost's brightest is still dark enough, or in the light look light enough, that the
-/// faintest words over it read. None: no frost.
+/// How the frost is made for the look in use: its blur (`blur_reach`) and its band of tone (`band`).
+/// None: no frost (the blur is off).
 pub fn frost_look(bright: bool, height_px: u32) -> Option<crate::backdrop::Look> {
-    let f = frost();
-    if f == Frost::Off { return None; }
-    let big = height_px >= 1800;
-    let levels = match (f, big) { (Frost::Full, true) => 5, (Frost::Full, false) | (Frost::Subtle, true) => 4, _ => 3 };
-    let full = f == Frost::Full;
-    let (lo, hi, sat) = if pal().dark {
-        let hi: [f32; 3] = if full { [0.255, 0.27, 0.305] } else { [0.19, 0.2, 0.225] };
-        let k = if bright { 0.8 } else { 1.0 };
-        ([0.035, 0.04, 0.055], hi.map(|v| v * k), if full { 1.25 } else { 1.1 })
-    } else {
-        let lo: [f32; 3] = if full { [0.77, 0.79, 0.83] } else { [0.86, 0.87, 0.89] };
-        let lift = if bright { 0.04 } else { 0.0 };
-        (lo.map(|v| v + lift), [0.975, 0.978, 0.985], if full { 1.3 } else { 1.1 })
-    };
-    Some(crate::backdrop::Look { levels, spread: 1.0, lo, hi, sat })
+    if !frosted() { return None; }
+    let (levels, spread) = blur_reach(blur(), height_px);
+    let (lo, hi, sat) = band(pal().dark, bright, lean());
+    Some(crate::backdrop::Look { levels, spread, lo, hi, sat })
 }
 
 /// What a surface is: a bar over the picture, a panel, or a window floating over both (each nearer the
@@ -235,11 +277,11 @@ pub fn glass(rect: Rect, radius: u8, lift: Lift, bright: bool) -> Shape {
     let shadow = egui::Shadow { offset: [0, off], blur, spread: 0, color: Color32::from_black_alpha(p.shadow[k]) };
     v.push(shadow.as_shape(rect, radius).into());
     let a = |c: [u8; 4]| Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
-    match backdrop().filter(|_| frost() != Frost::Off) {
+    match backdrop().filter(|_| frosted()) {
         Some((id, full)) => {
             let uv = |q: Pos2| Pos2::new((q.x - full.left()) / full.width().max(1.0), (q.y - full.top()) / full.height().max(1.0));
             v.push(egui::epaint::RectShape::filled(rect, radius, Color32::WHITE).with_texture(id, Rect::from_min_max(uv(rect.min), uv(rect.max))).into());
-            if lift == Lift::Float { v.push(Shape::rect_filled(rect, radius, a(p.veil))); }
+            if lift == Lift::Float { v.push(Shape::rect_filled(rect, radius, a([p.veil[0], p.veil[1], p.veil[2], leaned_alpha(p.veil[3], 0.5, 170)]))); }
         }
         None => v.push(Shape::rect_filled(rect, radius, if lift == Lift::Float { float_fill() } else { panel_fill(bright) })),
     }
@@ -261,39 +303,6 @@ pub fn glass_frame<R>(ui: &mut egui::Ui, margin: egui::Margin, radius: u8, lift:
     shown
 }
 
-// The colours of the dark look as they were, under their old names. Use `pal()` instead: these do not
-// follow the look chosen.
-#[deprecated(note = "use theme::pal().text")]
-pub const TEXT: Color32 = DARK.text;
-#[deprecated(note = "use theme::pal().dim")]
-pub const DIM: Color32 = DARK.dim;
-#[deprecated(note = "use theme::pal().bright")]
-pub const BRIGHT: Color32 = DARK.bright;
-#[deprecated(note = "use theme::pal().faint")]
-pub const FAINT: Color32 = DARK.faint;
-#[deprecated(note = "use theme::pal().hint")]
-pub const HINT: Color32 = DARK.hint;
-#[deprecated(note = "use theme::pal().button")]
-pub const BUTTON: Color32 = DARK.button;
-#[deprecated(note = "use theme::pal().ink")]
-pub const INK: Color32 = DARK.ink;
-#[deprecated(note = "use theme::pal().accent")]
-pub const ACCENT: Color32 = DARK.accent;
-#[deprecated(note = "use theme::pal().accent_mini")]
-pub const ACCENT_MINI: Color32 = DARK.accent_mini;
-#[deprecated(note = "use theme::pal().handle_to")]
-pub const HANDLE_TO: Color32 = DARK.handle_to;
-#[deprecated(note = "use theme::pal().error_text")]
-pub const ERROR_TEXT: Color32 = DARK.error_text;
-#[deprecated(note = "use theme::pal().error_fill")]
-pub const ERROR_FILL: Color32 = DARK.error_fill;
-#[deprecated(note = "use theme::pal().menu_fill")]
-pub const MENU_FILL: Color32 = DARK.menu_fill;
-#[deprecated(note = "use theme::pal().past")]
-pub const PAST: Color32 = DARK.past;
-#[deprecated(note = "use theme::pal().costly")]
-pub const COSTLY: Color32 = DARK.costly;
-
 /// The faint stuff of a surface at this opacity (0 to 1): white over the dark look, a dark slate over
 /// the light one. (Named for the dark look, where it began.)
 pub fn white(a: f32) -> Color32 {
@@ -309,10 +318,8 @@ pub fn fade(c: Color32, a: f32) -> Color32 {
 /// and the box lets much less of it through, so that the dimmer words stay easy to read.
 pub fn panel_fill(bright: bool) -> Color32 {
     let p = pal();
-    Color32::from_rgba_unmultiplied(p.solid[0], p.solid[1], p.solid[2], p.solid_alpha[bright as usize])
-}
-pub fn panel_stroke() -> Stroke {
-    Stroke::new(1.0, white(0.09))
+    // (letting the most through still keeps seven tenths of the box, so the dimmer words read)
+    Color32::from_rgba_unmultiplied(p.solid[0], p.solid[1], p.solid[2], leaned_alpha(p.solid_alpha[bright as usize], 0.7, 252))
 }
 /// The line of figures at the foot of the window: there to be read when looked for, not to be noticed.
 pub fn quiet() -> Color32 {
@@ -327,7 +334,7 @@ pub fn bed(bright: bool) -> Color32 {
 /// off: more solid than a panel, so that what is under it does not show through its words.
 pub fn float_fill() -> Color32 {
     let f = pal().float;
-    Color32::from_rgba_unmultiplied(f[0], f[1], f[2], f[3])
+    Color32::from_rgba_unmultiplied(f[0], f[1], f[2], leaned_alpha(f[3], 0.8, 252))
 }
 
 /// Put this look in use: the colours, and egui's own style (menus, hover notes, scroll bars, text fields).
@@ -523,6 +530,46 @@ mod tests {
         }
         assert_eq!(line_metrics(&[0, 1, 0, 0]), None);
         assert_eq!(line_metrics(&[]), None);
+    }
+
+    /// The defaults are the frost of before, exactly: 5 levels at 4K and 4 below, spread 1, the old band.
+    #[test]
+    fn the_default_glass_is_the_look_of_before() {
+        assert_eq!(blur_reach(BLUR_DEFAULT, 2160), (5, 1.0));
+        assert_eq!(blur_reach(BLUR_DEFAULT, 900), (4, 1.0));
+        assert_eq!(band(true, false, 0.0), ([0.035, 0.04, 0.055], [0.255, 0.27, 0.305], 1.25));
+        assert_eq!(band(false, false, 0.0), ([0.77, 0.79, 0.83], [0.975, 0.978, 0.985], 1.3));
+        assert_eq!(frost_named("full"), (BLUR_DEFAULT, OPACITY_DEFAULT));
+        assert_eq!(frost_named("off").0, 0.0);
+        // the reach grows with the slider and stays within the levels the backdrop makes
+        let mut last = 0.0;
+        for i in 0..=40 {
+            let (l, s) = blur_reach(i as f32 / 40.0, 2160);
+            assert!((2..=6).contains(&l) && s > 0.49 && s <= 1.0);
+            let reach = 2f32.powi(l as i32) * s;
+            assert!(reach >= last, "{i}: {reach} < {last}");
+            last = reach;
+        }
+    }
+
+    /// The faintest words (group titles, notes) keep a contrast of at least 2.5 to 1 against the frost's
+    /// worst tone at every opacity, in both looks (WCAG ratio of relative luminances).
+    #[test]
+    fn the_faintest_words_read_at_every_opacity() {
+        let lin = |v: f32| if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+        let lum = |c: [f32; 3]| 0.2126 * lin(c[0]) + 0.7152 * lin(c[1]) + 0.0722 * lin(c[2]);
+        let of = |c: Color32| [c.r() as f32 / 255.0, c.g() as f32 / 255.0, c.b() as f32 / 255.0];
+        for i in 0..=20 {
+            let k = -1.0 + i as f32 / 10.0;
+            for bright in [false, true] {
+                let (_, hi, _) = band(true, bright, k);
+                let r = (lum(of(DARK.faint)) + 0.05) / (lum(hi) + 0.05);
+                assert!(r >= 2.5, "dark, lean {k}: {r}");
+                let (lo, _, _) = band(false, bright, k);
+                let r = (lum(lo) + 0.05) / (lum(of(LIGHT.faint)) + 0.05);
+                assert!(r >= 2.5, "light, lean {k}: {r}");
+            }
+        }
     }
 
     #[test]

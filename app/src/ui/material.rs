@@ -1,15 +1,9 @@
 //! What the shape is made of. A material is one thing whose parts combine: a body (glass, a metal, a
 //! milky body, a thin wall), its surface, what lies on it (a thin film, a clear coat), what is in it
 //! (bubbles, a glow) and special ways light travels through it. The named materials are recipes: each
-//! sets those same parts. The window says so in three places:
-//!
-//!   the recipe    one line of words for what is on at present ("gold · satin 0.45 · clear coat"), each
-//!                 part with a small cross that takes it off;
-//!   the group     at the head of the left panel: which material by name, the recipe, and the handful of
-//!                 sliders reached for most;
-//!   the lab       a window floating over the picture: every control, as a stack of layers from the body
-//!                 outwards. A part that is off is the one row of its switch; switched on, the rest of
-//!                 its controls stand under it.
+//! sets those same parts. The left inspector opens the Materials Lab for the selection.
+//! The Lab owns preset selection, the material recipe, the viewport preview and all
+//! editable controls. A construction-layer override is edited separately from its body.
 //!
 //! None of them knows what the controls are. The materials come as a table (`gf_core::material::NAMED`)
 //! and so do their controls (`CONTROLS`): each line of that names a setting and says what kind of control
@@ -20,6 +14,7 @@
 //! A control that means nothing as things stand (a metal has no index) is greyed, not hidden, and
 //! hovering over its name says what it is waiting for.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use eframe::egui::{self, Align2, Color32, CursorIcon, Id, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui};
@@ -30,6 +25,8 @@ use gf_core::state::{Knob, State};
 use super::theme::*;
 use super::widgets::*;
 use super::{knob, studio, Panels};
+
+mod canonical;
 
 /// The most lines of materials the list shows before it scrolls.
 const LIST_LINES: f32 = 5.0;
@@ -59,12 +56,8 @@ fn value(st: &State, name: &str) -> f64 {
 }
 /// Set one of them. (Whether the shape is drawn as clay is said once, for the whole picture.)
 fn set(st: &mut State, name: &str, v: f64) {
-    let layer = body(st);
-    if layer == 0 || name == "clay" {
-        st.p.set(name, v);
-    } else {
-        st.body_set(layer, name, v);
-    }
+    if name == "clay" { st.p.set(name, v); }
+    else { st.body_set(body(st), name, v); }
 }
 /// Its sliders: the scene's among the engine's; for a body with a material of its own, that material's
 /// in their place (the bounces followed inside are the same for every body, and stay the engine's).
@@ -112,22 +105,17 @@ pub fn body_material(st: &State, layer: usize) -> &'static str {
     NAMED[(st.body_settings(layer).mat.round().max(0.0) as usize).min(NAMED.len() - 1)].name
 }
 
-/// Have its settings been changed since the named material was chosen? Told by laying the named material
-/// over a copy of the settings and seeing whether anything a material is made of comes out different.
-/// (A material that leaves the index or the tint to the family's own glass does not say what those were,
-/// so a change to them alone, on such a material, does not show.)
+/// Compare the material with the values that choosing its named recipe would restore.
 fn changed(st: &State) -> bool {
     let p = settings(st);
-    let mut q = p.clone();
-    NAMED[chosen(st)].apply(&mut q);
+    let q = st.named_material_settings(chosen(st)).expect("the selected named material exists");
     q.absorb != p.absorb || ["ior", "disp", "nb"].into_iter().chain(CONTROLS.iter().map(|c| c.name)).any(|name| q.get(name) != p.get(name))
 }
 
 /// The colours that stand for the named materials, as the screen shows them, in the table's order. Each
 /// takes laying the material over plain glass and, for some, adding up a spectrum, so they are worked out
 /// once and kept until the tint they are laid over changes.
-fn swatches(ui: &Ui, st: &State) -> Arc<Vec<Color32>> {
-    let over = settings(st).absorb;
+fn swatches(ui: &Ui, over: [f64; 3]) -> Arc<Vec<Color32>> {
     let key = over.map(f64::to_bits);
     let id = Id::unique("the named materials' colours");
     if let Some((_, kept)) = ui.data(|d| d.get_temp::<([u64; 3], Arc<Vec<Color32>>)>(id)).filter(|(k, _)| *k == key) { return kept; }
@@ -138,13 +126,20 @@ fn swatches(ui: &Ui, st: &State) -> Arc<Vec<Color32>> {
 
 // ---- what the tables say ----------------------------------------------------------------------------
 
-/// The groups the named materials come in, in the order the table first mentions each.
+/// Put common opaque finishes beside glass so their names are visible on first opening.
 fn named_groups() -> Vec<&'static str> {
-    let mut groups = Vec::new();
+    let mut groups = vec!["glass", "opaque"];
     for n in NAMED {
         if !groups.contains(&n.group) { groups.push(n.group); }
     }
     groups
+}
+
+fn family_label(id: &str) -> &str {
+    match id {
+        "opaque" => "clay, plastic & paint",
+        _ => id,
+    }
 }
 
 // ---- the stack --------------------------------------------------------------------------------------
@@ -169,11 +164,11 @@ const STACK: [Layer; 5] = [
         rows: &[
             ("metal", ""), ("hollow", ""), ("ior", ""), ("disp", ""), ("tintR", ""), ("density", ""), ("spectrum", ""), ("grad", ""), ("gradMode", "grad"),
             ("gradR", "grad"), ("gradAz", "grad"), ("gradEl", "grad"), ("gradOffset", "grad"), ("gradSoft", "grad"), ("gradBands", "grad"), ("gradWave", "grad"), ("fit", ""),
-            ("sss", ""), ("sssDepth", "sss"), ("sssDetail", "sss"), ("sssSpread", "sss"),
-            ("sssForward", "sss"), ("sssThrough", "sss"), ("sssHue", "sss"), ("ceramic", "sss"), ("ceramicThrough", "ceramic"), ("meter", "sss"), ("bodyR", ""),
+            ("sss", ""), ("sssOpaque", "sss"), ("ceramic", "sss"), ("ceramicThrough", "ceramic"), ("sssDepth", "sss"), ("sssDetail", "sss"), ("sssSpread", "sss"),
+            ("sssForward", "sss"), ("sssThrough", "sss"), ("sssHue", "sss"), ("meter", "sss"), ("bodyR", ""),
         ],
     },
-    Layer { title: "surface", bare: "polished", rows: &[("rough", "")] },
+    Layer { title: "surface", bare: "polished", rows: &[("rough", ""), ("roughRef", "rough")] },
     Layer {
         title: "on it",
         bare: "nothing",
@@ -227,16 +222,17 @@ fn is_on(name: &str, p: &Settings) -> bool {
     p.get(name).is_some_and(|v| v != 0.0)
 }
 
-/// What a layer of the lab is remembered by when it is folded away, and what the chooser of named
-/// materials in the left panel is.
+/// The persistent fold key for a material layer in the Lab.
 pub fn lab_fold(layer: &str) -> String {
     format!("lab-{layer}")
 }
-pub const CHOOSER: &str = "material-chooser";
+pub const CHOOSER: &str = "lab-material-presets";
+pub const ADVANCED: &str = "lab-advanced";
+pub const CANONICAL: &str = "lab-canonical";
 
 /// Everything of the material's that folds, by what it is remembered as.
 pub fn folds() -> Vec<String> {
-    std::iter::once(CHOOSER.to_owned()).chain(STACK.iter().map(|l| lab_fold(l.title))).chain(std::iter::once("lab-casts".to_owned())).collect()
+    [CHOOSER.to_owned(), ADVANCED.to_owned(), CANONICAL.to_owned()].into_iter().chain(STACK.iter().map(|l| lab_fold(l.title))).chain(std::iter::once("lab-casts".to_owned())).collect()
 }
 
 // ---- the recipe -------------------------------------------------------------------------------------
@@ -264,6 +260,15 @@ fn recipe(p: &Settings) -> Vec<Part> {
         out.push(part(named_in("metal", p.metal), 0, &[("metal", 0.0)]));
     } else if v.hollow {
         out.push(part("thin wall".into(), 0, &[("hollow", 0.0)]));
+    } else if v.ceramic {
+        let preset = NAMED.get(p.mat.round().max(0.0) as usize);
+        let name = match preset {
+            Some(n) if n.group == "ceramic" || (n.group == "opaque" && p.ceramic_through < 0.3) => n.name,
+            _ if p.ceramic_through < 0.3 => "opaque pigmented body",
+            _ => "translucent ceramic",
+        };
+        out.push(part(name.into(), 0, &[("ceramic", 0.0)]));
+        out.extend(coloured);
     } else if v.sss && p.sss >= 1.0 {
         out.push(part("milky".into(), 0, &[("sss", 0.0)]));
         out.extend(coloured);
@@ -400,16 +405,13 @@ fn part_of_colour(at: usize) -> bool {
     (1..=2).any(|back| at >= back && CONTROLS[at - back].kind == Kind::Colour)
 }
 
-/// What a body is drawn without while the scene's bodies have materials of their own: the tracer that
-/// follows a ray from one body into the next leaves these out.
-const NOT_AMONG: [&str; 2] = ["sssWalk", "roughRef"];
-
 /// Does this setting do anything as things stand? Not if the material's other choices leave it without
 /// meaning; not if it is one of the parts left out while bodies have materials of their own; and not if
 /// the shape is drawn as clay, which shows only what lies on the clay: a clear coat, and a thin film
 /// (with how rough that film is, on bare clay). What is inside does not show: clay is opaque.
 pub fn acts_as(name: &str, p: &Settings, how: How) -> bool {
-    if !material::applies(name, p) || (how.several && NOT_AMONG.contains(&name)) { return false; }
+    if !material::applies(name, p) { return false; }
+    if how.several && name == "roughRef" && !material::Variant::of(p).supports_scene_sampling() { return false; }
     if !how.clay { return true; }
     let left = material::Variant::of(p).for_clay();
     match name {
@@ -432,6 +434,9 @@ pub fn acts(name: &str, p: &Settings) -> bool {
 /// change does it.
 pub fn wants_as(name: &str, p: &Settings, how: How) -> Option<String> {
     if how.clay && acts_as(name, p, How { clay: false, ..how }) { return Some("not while drawn as clay".into()); }
+    if how.several && name == "roughRef" && !material::Variant::of(p).supports_scene_sampling() {
+        return Some("needs a conductor or a sampled glass interface".into());
+    }
     if how.several && acts_as(name, p, How { several: false, ..how }) { return Some("not while bodies have materials of their own".into()); }
     let mut needs: Vec<&str> = Vec::new();
     for other in CONTROLS.iter().filter(|o| o.name != name) {
@@ -496,45 +501,15 @@ fn own_row(ui: &mut Ui, st: &mut State, px: &mut Panels) {
 
 // ---- the named materials ------------------------------------------------------------------------------
 
-/// One line saying which material it is: its dot of colour, its name, and "changed" once its settings are
-/// no longer the named material's. `spare`: room kept free at the right of the line. `folds`: the line is
-/// pressed to fold something away under it (true: it is open now); folded, the line names the material's
-/// group too. Returns where the line is, and whether it was pressed.
-fn name_line(ui: &mut Ui, st: &State, px: &mut Panels, spare: f32, folds: Option<bool>) -> (Rect, bool) {
-    let now = chosen(st);
-    let r = row(ui, 17.0);
-    px.note(format!("{}mat-name", px.whose()), r);
-    let mut pressed = false;
-    let mut ink = pal().bright;
-    if let Some(open) = folds {
-        let resp = ui.interact(r, Id::unique(("material named", px.place)), Sense::click());
-        let hot = ui.is_enabled() && resp.hovered();
-        if hot {
-            ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
-            ink = pal().hot;
-        }
-        // the little arrow of something that opens, at the end of the line
-        let c = Pos2::new(r.right() - 8.0, r.center().y + 0.5);
-        let arrow = if open {
-            vec![c + egui::vec2(-3.5, 2.0), c + egui::vec2(0.0, -2.5), c + egui::vec2(3.5, 2.0)]
-        } else {
-            vec![c + egui::vec2(-3.5, -2.0), c + egui::vec2(3.5, -2.0), c + egui::vec2(0.0, 2.5)]
-        };
-        ui.painter().add(Shape::convex_polygon(arrow, if hot { pal().bright } else { pal().dim }, Stroke::NONE));
-        pressed = resp.on_hover_text(if open { "fold the list of materials away" } else { "choose another material" }).clicked();
-    }
-    dot(ui, Pos2::new(r.left() + 5.5, r.center().y), swatches(ui, st)[now], false);
-    let room = Rect::from_min_max(Pos2::new(r.left() + 16.0, r.top()), Pos2::new(r.right() - spare, r.bottom()));
-    let mut text = NAMED[now].name.to_owned();
-    // ("changed" only where the name keeps all of its room: the lit reset at the recipe's right says it too)
-    if changed(st) && text_width(ui, &format!("{text} · changed"), &mono(SIZE)) <= room.width() { text += " · changed"; }
-    // (folded, the line says which group the material is of, if there is room for that)
-    if folds == Some(false) {
-        let longer = format!("{} · {text}", NAMED[now].group);
-        if text_width(ui, &longer, &mono(SIZE)) <= room.width() { text = longer; }
-    }
-    text_in(ui, room, Align2::LEFT_CENTER, &text, mono(SIZE), ink);
-    (r, pressed)
+fn material_name(ui: &mut Ui, px: &mut Panels, index: usize, p: &Settings, modified: bool) {
+    let r = row(ui, 18.0);
+    dot(ui, Pos2::new(r.left() + 5.5, r.center().y), swatches(ui, p.absorb)[index], false);
+    let suffix = if modified { " · edited" } else { "" };
+    let label = format!("{}{}", NAMED[index].name, suffix);
+    text_in(ui, Rect::from_min_max(r.min + egui::vec2(16.0, 0.0), r.max),
+        Align2::LEFT_CENTER, &label, mono(SIZE), pal().bright);
+    px.note("mat-name", r);
+    px.note("lab/mat-name", r);
 }
 
 /// A line saying what the mark of a costly thing means.
@@ -546,22 +521,22 @@ fn legend(ui: &mut Ui) {
 
 /// The chooser of named materials: their groups as a block of buttons, and the materials of the group
 /// that is up as buttons, each with a dot of its colour, in a list that scrolls.
-fn named(ui: &mut Ui, st: &mut State, px: &mut Panels) {
+fn named(ui: &mut Ui, px: &mut Panels, now: usize, p: &Settings, is_changed: bool, clay: bool) -> Option<usize> {
     let groups = named_groups();
-    let now = chosen(st);
     // a material chosen from elsewhere (a setup, a script) brings its own group up and itself into view
     let moved = px.lit_mat.replace(now) != Some(now);
-    if moved { px.mat_group = None; }
-    let group = px.mat_group.filter(|g| groups.contains(g)).unwrap_or(NAMED[now].group);
+    let group = NAMED[now].group;
     let font = mono(SIZE);
 
-    let items: Vec<Item> = groups.iter().map(|g| Item::new(g, *g == group)).collect();
+    let items: Vec<Item> = groups.iter().map(|g| Item::new(family_label(g), *g == group)).collect();
     let run = filled_run(ui, Id::unique(("material groups", px.place)), &items, egui::vec2(6.0, 2.0), &font);
     for (g, place) in groups.iter().zip(&run.places) { px.note(format!("{}mat-group:{g}", px.whose()), *place); }
-    if let Some(i) = run.clicked { px.mat_group = Some(groups[i]); }
+    // A family applies its first finish. Reopening the active family keeps hand edits.
+    let family_pick = run.clicked.map(|i| groups[i]).filter(|g| *g != group)
+        .and_then(|g| NAMED.iter().position(|n| n.group == g));
     gap(ui, 6.0);
 
-    let (is_changed, colours) = (changed(st), swatches(ui, st));
+    let colours = swatches(ui, p.absorb);
     let members: Vec<usize> = (0..NAMED.len()).filter(|&i| NAMED[i].group == group).collect();
     let (width, pad) = (ui.available_width(), egui::vec2(7.0, 2.0));
     let line = button_size(ui, "x", &font, pad).y + RUN_SPACE;
@@ -572,6 +547,7 @@ fn named(ui: &mut Ui, st: &mut State, px: &mut Panels) {
             .map(|&i| {
                 let n = &NAMED[i];
                 let mut tip = n.note.to_owned();
+                if clay { tip.push_str("\nAssign this material and show it in the viewport."); }
                 if n.costly { tip.push_str("\nCostly: every frame takes noticeably longer."); }
                 if i == now && is_changed { tip.push_str("\nPress to put every setting back to what it sets."); }
                 Item::new(n.name, i == now).colour(colours[i]).mark(n.costly).tip(tip).reveal(moved && i == now)
@@ -585,14 +561,13 @@ fn named(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     for (&i, place) in members.iter().zip(&list.inner.places) {
         if shown.contains_rect(*place) { px.note(format!("{}mat:{}", px.whose(), NAMED[i].id), *place); }
     }
-    if let Some(n) = list.inner.clicked {
-        choose(st, members[n]);
-        px.lit_mat = Some(members[n]);
-    }
     if members.iter().any(|&i| NAMED[i].costly) {
         gap(ui, 3.0);
         legend(ui);
     }
+    let picked = list.inner.clicked.map(|n| members[n]).or(family_pick);
+    if let Some(i) = picked { px.lit_mat = Some(i); }
+    picked
 }
 
 // ---- one control, by its kind -----------------------------------------------------------------------
@@ -695,6 +670,7 @@ fn slider(ui: &mut Ui, st: &mut State, px: &mut Panels, k: &Knob) {
 fn sensible(c: &Control) -> f64 {
     match c.name {
         "sss" | "coat" | "grad" => 1.0,
+        "ceramicThrough" => 0.35,
         "film" => 360.0,
         "bubbles" => 0.3,
         "glow" => 2.0,
@@ -719,13 +695,15 @@ fn sensible(c: &Control) -> f64 {
 /// part that bodies of several materials are drawn without).
 pub fn enabler(name: &str, p: &Settings, how: How) -> Option<Vec<(&'static str, f64)>> {
     if acts_as(name, p, how) { return Some(Vec::new()); }
-    let (mut on, mut off): (Vec<(&'static str, f64)>, Vec<(&'static str, f64)>) = (Vec::new(), Vec::new());
+    let (mut on, mut costly_on, mut off): (Vec<(&'static str, f64)>, Vec<(&'static str, f64)>, Vec<(&'static str, f64)>) = (Vec::new(), Vec::new(), Vec::new());
     if how.clay { off.push(("clay", 0.0)); }
     for o in CONTROLS.iter().filter(|o| o.name != name) {
         let Some(now) = p.get(o.name) else { continue };
         let nothing = if o.lo <= 0.0 && o.hi >= 0.0 { 0.0 } else { o.lo };
         let some = sensible(o);
-        if now == nothing && some != now { on.push((o.name, some)); }
+        if now == nothing && some != now {
+            if o.costly { costly_on.push((o.name, some)); } else { on.push((o.name, some)); }
+        }
         if now != nothing { off.push((o.name, nothing)); }
     }
     let works = |changes: &[(&'static str, f64)]| {
@@ -736,7 +714,7 @@ pub fn enabler(name: &str, p: &Settings, how: How) -> Option<Vec<(&'static str, 
         }
         acts_as(name, &q, h)
     };
-    let all: Vec<(&'static str, f64)> = on.iter().chain(&off).copied().collect();
+    let all: Vec<(&'static str, f64)> = on.iter().chain(&costly_on).chain(&off).copied().collect();
     if let Some(one) = all.iter().find(|c| works(&[**c])) { return Some(vec![*one]); }
     for (i, a) in all.iter().enumerate() {
         for b in &all[i + 1..] {
@@ -806,72 +784,223 @@ fn control(ui: &mut Ui, st: &mut State, px: &mut Panels, at: usize, knobs: &[Kno
     if !live { wake(ui, st, px, c.name, Some(c.kind), top); }
 }
 
-// ---- the group on the left ----------------------------------------------------------------------------
+/// A group or empty World selection must never edit the previous object's material.
+fn target_body(st: &State) -> Option<usize> {
+    if let Some(layer) = st.edit_scope.object() { return Some(st.body_of(layer)); }
+    let items = st.world_selection();
+    let mut target = None;
+    for item in items {
+        let gf_core::groups::Item::Object(layer) = item else { return None };
+        let at = st.body_of(layer);
+        if target.is_some_and(|was| was != at) { return None; }
+        target = Some(at);
+    }
+    target
+}
 
-/// The material section of the left panel: only what says which material it is. Whose material it is
-/// (the body of the layer selected in the layers list), which named material (the chooser folds under its
-/// name), whether it is its own, the recipe (with the way back to the material as named at its right),
-/// whether it is drawn as itself or as clay, and the way into the materials lab, where every one of its
-/// controls is (the owner's ruling of 2026-11-17: the sliders live wholly in the lab, nothing twice).
-pub fn group(ui: &mut Ui, st: &mut State, px: &mut Panels, _knobs: &[Knob]) {
-    let clay = how(st).clay;
-    let name = NAMED[chosen(st)].name;
-    // with several bodies the title says whose material this is, and beside it the body's layers by name;
-    // folded, it says the material (without its remark in brackets, for which there is no room)
-    let bodies = st.bodies();
-    let at = st.body_of(st.stack.sel);
-    let title = if bodies.len() > 1 { format!("material of body {}", at + 1) } else { "material".to_owned() };
-    let brief = name.split(" (").next().unwrap_or(name);
-    let says = if px.store.is_closed("material") {
-        if clay { format!("{brief} · clay") } else { brief.to_owned() }
-    } else if bodies.len() > 1 {
-        body_name(st, &bodies[at])
+fn select_body(st: &mut State, layer: usize) {
+    let item = gf_core::groups::Item::Object(layer);
+    if st.edit_scope.object().is_some() {
+        st.enter_world_item(item);
     } else {
-        String::new()
-    };
-    let top = ui.cursor().top();
-    if !px.group_saying(ui, "material", &title, &says) { return; }
-    let names = label_width(ui);
-    set_label_width(ui, COL_LABEL_WIDE);
-
-    // which material it is; under that line the chooser of named materials, which a press on the line
-    // folds away or brings back. (The way back to the material as named is at the right of the recipe,
-    // where it takes nothing from the name.)
-    let open = !px.store.is_closed(CHOOSER);
-    let (_, pressed) = name_line(ui, st, px, 18.0, Some(open));
-    if pressed { px.store.fold(CHOOSER); }
-    if !px.store.is_closed(CHOOSER) {
-        gap(ui, 3.0);
-        named(ui, st, px);
+        let parent = st.outline().ancestors(item).and_then(|path| path.last().copied());
+        if parent != st.edit_scope.world { st.world_level(parent); }
+        st.select_world_item(item, false);
     }
-    own_row(ui, st, px);
-    // (a body made of the first body's material shows that material, out of reach until it has its own)
-    let mine = own(st);
-    gap(ui, 5.0);
-    ui.scope(|ui| {
-        if !mine { ui.disable(); }
-        recipe_line(ui, st, px, true);
-    });
-    gap(ui, 3.0);
+}
 
-    // drawn as what it is made of, or as clay (quick to draw, for trying out a shape)
-    let run = named_run(ui, Id::unique("drawn as"), "drawn as", &[
-        Item::new("material", !clay).tip("traced as what it is made of: refraction, dispersion, reflections inside, and whatever else the material has"),
-        Item::new("clay", clay).tip("a plain matte surface, several times quicker to draw: for trying out a shape · key C"),
+fn body_target(ui: &mut Ui, st: &mut State, px: &mut Panels) {
+    let bodies = st.bodies();
+    let at = target_body(st);
+    let label = |i: usize| format!("body {} · {}", i + 1, body_name(st, &bodies[i]));
+    if bodies.len() == 1 && at == Some(0) {
+        ui.label(label(0));
+        return;
+    }
+    let text = at.map(&label).unwrap_or_else(|| "choose a body".to_owned());
+    let mut clicked = None;
+    let response = egui::ComboBox::from_id_salt("material lab body")
+        .width(ui.available_width() - 6.0).selected_text(text).show_ui(ui, |ui| {
+            for (i, layers) in bodies.iter().enumerate() {
+                let b = ui.selectable_label(at == Some(i), label(i));
+                px.note(format!("lab:body:{}", i + 1), b.rect);
+                if b.clicked() { clicked = Some(layers[0]); }
+            }
+        });
+    px.note("lab:body", response.response.rect);
+    if let Some(layer) = clicked { select_body(st, layer); }
+}
+
+/// The node override belongs to a construction operation, independently of its body.
+pub(super) fn open_construction(st: &State, px: &mut Panels) {
+    px.lab_node = Some((st.stack.sel, st.edit_scope.construction().to_vec()));
+    px.store.lab_open = true;
+}
+
+fn construction_target(ui: &mut Ui, st: &mut State, px: &mut Panels) -> bool {
+    let path = st.edit_scope.construction().to_vec();
+    if st.edit_scope.object() != Some(st.stack.sel) || path.is_empty() {
+        px.lab_node = None;
+        return false;
+    }
+    let tree = st.csg.construction_tree();
+    let Some(node) = tree.node(&path) else { px.lab_node = None; return false };
+    let key = (st.stack.sel, path);
+    if px.lab_node.as_ref().is_some_and(|was| was != &key) { px.lab_node = None; }
+    let run = named_run(ui, Id::unique("lab owner"), "edit", &[
+        Item::new("Whole body", px.lab_node.is_none()),
+        Item::new("Construction layer", px.lab_node.is_some()),
     ]);
-    for (place, name) in run.places.iter().zip(["drawn:material", "drawn:clay"]) { px.note(name, *place); }
-    if let Some(i) = run.clicked { st.p.clay = i as f64; }
-
-    // the way into the lab, where every control of the material is
-    gap(ui, 2.0);
-    let (resp, at) = wide_button(ui, Id::unique("materials lab"), "materials lab…", px.store.lab_open);
-    px.note("lab button", at);
-    if resp.on_hover_text("every control of the material, layer by layer from the body outwards: what it is made of, its surface, what lies on it, what is in it, special optics, what it casts · key M").clicked() {
-        px.store.lab_open = !px.store.lab_open;
+    for (r, name) in run.places.iter().zip(["lab:whole-body", "lab:construction-layer"]) { px.note(name, *r); }
+    if let Some(i) = run.clicked { px.lab_node = (i == 1).then_some(key.clone()); }
+    if px.lab_node.is_none() { return false; }
+    ui.label(format!("Layer · {}", node.name));
+    if node.op == gf_core::csg::Op::Subtract {
+        use gf_core::construction::CutMaterial;
+        let options = [CutMaterial::Subtractor, CutMaterial::Recipient];
+        let policy = named_run(ui, Id::unique("cut surface material"), "cut surface", &[
+            Item::new("Cutter", node.cut_material == CutMaterial::Subtractor),
+            Item::new("Cut object", node.cut_material == CutMaterial::Recipient),
+        ]);
+        for (rect, name) in policy.places.iter().zip(["lab:cut:subtractor", "lab:cut:recipient"]) {
+            px.note(name, *rect);
+        }
+        let cut_material = policy.clicked.map_or(node.cut_material, |i| options[i]);
+        if cut_material != node.cut_material {
+            if let Some(layer) = st.csg.edit_construction().node_mut(&key.1) {
+                layer.cut_material = cut_material;
+                st.refresh_scope();
+            }
+        }
+        if cut_material == CutMaterial::Recipient {
+            ui.label("The exposed face uses the material of the object being cut.");
+            return true;
+        }
     }
-    set_label_width(ui, names);
-    // (where the material's section is, for tests)
-    px.note("material", Rect::from_min_max(Pos2::new(ui.cursor().left(), top), Pos2::new(ui.cursor().left() + ui.available_width(), ui.cursor().top())));
+    let mut authored = node.material.clone();
+    let mut replace_authored = false;
+    let mut current = settings(st).clone();
+    if let Some(values) = &authored {
+        for (name, v) in values { current.set(name, *v); }
+    }
+    let index = (current.mat.round().max(0.0) as usize).min(NAMED.len() - 1);
+    let ownership = named_run(ui, Id::unique("node material source"), "material", &[
+        Item::new("Inherit", authored.is_none()), Item::new("Layer override", authored.is_some()),
+    ]);
+    for (r, name) in ownership.places.iter().zip(["lab:inherit-layer", "lab:own-layer"]) { px.note(name, *r); }
+    if ownership.clicked.is_some() { replace_authored = true; }
+    if ownership.clicked == Some(0) { authored = None; }
+    if ownership.clicked == Some(1) && authored.is_none() { authored = Some(Default::default()); }
+    let presets = px.window_group(ui, CHOOSER, "material presets", NAMED[index].name);
+    material_name(ui, px, index, &current, false);
+    if presets {
+        if let Some(i) = named(ui, px, index, &current, false, how(st).clay) {
+            replace_authored = true;
+            let inherited = settings(st).clone();
+            current = inherited.clone();
+            NAMED[i].apply(&mut current);
+            current.mat = i as f64;
+            // Preset identity chooses the values; it is not itself a sparse canonical override.
+            authored = Some(construction_preset_values(&inherited, &current, i));
+            st.p.clay = 0.0;
+        }
+    }
+    if let Some(map) = authored.as_mut() {
+        for (label, keys) in [("Body colour", ["bodyR","bodyG","bodyB"]), ("Glass tint", ["tintR","tintG","tintB"])] {
+            let mut rgb = keys.map(|key| current.get(key).unwrap_or(1.0) as f32);
+            ui.horizontal(|ui| {
+                ui.label(label);
+                let edit = ui.color_edit_button_rgb(&mut rgb);
+                px.note(format!("lab:layer:{}", keys[0]), edit.rect);
+                if edit.changed() { for (k, v) in keys.into_iter().zip(rgb) { map.insert(k.into(), f64::from(v)); } }
+            });
+        }
+        let (name, label) = if current.ceramic > 0.5 { ("glazeHaze", "Coat roughness (alpha)") } else { ("rough", "Roughness") };
+        let mut value = current.get(name).unwrap_or(0.0);
+        let edit = ui.add(egui::Slider::new(&mut value, 0.0..=1.0).text(label));
+        px.note("lab:layer:finish", edit.rect);
+        if edit.changed() { map.insert(name.into(), value); }
+    }
+    let mut edit_error = None;
+    if authored != node.material {
+        let sparse = (!replace_authored).then(|| match (&authored, &node.material, &node.material_v2) {
+            (Some(after), Some(before), Some(_)) => changed_construction_controls(after, before),
+            _ => None,
+        }).flatten();
+        let result = if let Some(values) = sparse {
+            st.update_construction_material(key.0, &key.1, values)
+        } else {
+            st.set_construction_material(key.0, &key.1, authored)
+        };
+        match result {
+            Ok(()) => st.refresh_scope(),
+            Err(error) => edit_error = Some(error),
+        }
+    }
+    if let Some(error) = edit_error {
+        ui.colored_label(pal().hot, format!("Material edit was not applied: {error}"));
+    }
+    true
+}
+
+/// Preserve the selected recipe identity until construction conversion has migrated its exact values.
+/// The canonical patch contains only differences and never owns the positional `mat` setting.
+fn construction_preset_values(inherited: &Settings, current: &Settings, index: usize) -> BTreeMap<String, f64> {
+    std::iter::once(("mat".to_owned(), index as f64)).chain(
+        material::body_names().filter(|key| *key != "mat" && !Settings::DERIVED.contains(key)).filter_map(|key| {
+            let value = current.get(key)?;
+            (inherited.get(key) != Some(value)).then(|| (key.to_owned(), value))
+        })
+    ).collect()
+}
+
+/// Return only edited construction controls. New controls are sparse edits too; removing a key still
+/// requires whole-override replacement because a value delta cannot express that removal.
+fn changed_construction_controls(
+    after: &BTreeMap<String, f64>,
+    before: &BTreeMap<String, f64>,
+) -> Option<BTreeMap<String, f64>> {
+    before.keys().all(|name| after.contains_key(name)).then(|| {
+        after.iter().filter_map(|(name, value)| {
+            (before.get(name) != Some(value)).then(|| (name.clone(), *value))
+        }).collect()
+    })
+}
+
+/// Keep the two controls specific to the active finish within reach of the chooser.
+fn quick_controls(p: &Settings) -> [&'static str; 2] {
+    [if material::applies("bodyR", p) { "bodyR" } else { "tintR" },
+        if p.ceramic > 0.5 { "glazeHaze" } else { "rough" }]
+}
+
+fn preview(ui: &mut Ui, st: &mut State, px: &mut Panels) {
+    let clay = st.p.clay > 0.5;
+    let run = named_run(ui, Id::unique("drawn as"), "viewport", &[
+        Item::new("material", !clay).tip("show the assigned materials throughout the scene"),
+        Item::new("Clay preview", clay).tip("Preview all shapes in clay while keeping their assigned finishes · C"),
+    ]);
+    for (r, name) in run.places.iter().zip(["drawn:material", "drawn:clay"]) { px.note(name, *r); }
+    if let Some(i) = run.clicked { st.p.clay = i as f64; }
+}
+
+/// The normal editor only summarizes the selection and opens its material editor.
+pub fn group(ui: &mut Ui, st: &State, px: &mut Panels) {
+    // (a section as the light's is: its spaced title, what it is set to at the right, then its button)
+    let label = target_body(st).map_or_else(|| "choose a body in the lab".to_owned(), |i| {
+        let name = NAMED[chosen(st)].name;
+        if how(st).clay { format!("body {} · {name} · clay", i + 1) }
+        else { format!("body {} · {name}", i + 1) }
+    });
+    let at = section(ui, "material", &label);
+    px.note("group:material", at);
+    let top = at.min;
+    let (resp, r) = wide_button(ui, Id::unique("materials lab"), "materials lab…", px.store.lab_open);
+    px.note("lab button", r);
+    if resp.on_hover_text("choose and edit the material of a body · M").clicked() {
+        px.lab_node = None;
+        px.store.lab_open = true;
+    }
+    px.note("material", Rect::from_min_max(top, r.max));
 }
 
 /// Show the materials lab if it is open: a window of its own floating over the picture, with every control
@@ -881,34 +1010,57 @@ pub fn group(ui: &mut Ui, st: &mut State, px: &mut Panels, _knobs: &[Knob]) {
 /// the camera's tools over the picture.
 pub fn lab(ctx: &egui::Context, st: &mut State, px: &mut Panels, full: Rect, below: f32) {
     if !px.store.lab_open { return; }
-    // it first appears beside the left panel, under the camera's tools, where it covers neither panel
-    // (beside the light room, if that is open where it would be)
-    let x = px.left_at.map_or(full.left() + EDGE, |r| r.right() + 10.0);
+    // On compact windows the space between inspectors is the only clear view
+    // of the object. Open over the left inspector and leave the centre visible.
+    let beside = px.left_at.map_or(full.left() + EDGE, |r| r.right() + 10.0);
+    let right = px.right_at.map_or(full.right() - EDGE, |r| r.left());
+    let x = if right - beside >= 2.0 * LAB_W { beside } else { full.left() + EDGE };
     let x = if px.store.room_open && px.store.room_at.is_some_and(|p| (p[0] - x).abs() < 8.0) { x + FLOAT_W + 34.0 } else { x };
     let first = px.store.lab_at.map_or(Pos2::new(x, below), |p| Pos2::new(p[0], p[1]));
-    let max_h = (full.bottom() - first.y.max(EDGE) - EDGE - 44.0).max(80.0);
-    let bodies = st.bodies();
-    let title = if bodies.len() > 1 { format!("materials lab · body {}", st.body_of(st.stack.sel) + 1) } else { "materials lab".to_owned() };
-    let out = floating(ctx, "materials lab", &title, LAB_W, first, max_h, |ui| {
+    let width = LAB_W.min((full.width() - 2.0 * EDGE - 24.0).max(170.0));
+    let first = Pos2::new(first.x.clamp(full.left(), (full.right() - width - 24.0).max(full.left())),
+        first.y.clamp(full.top(), (full.bottom() - 240.0).max(full.top())));
+    let max_h = (full.bottom() - first.y - EDGE - 44.0).max(80.0);
+    let out = floating(ctx, "materials lab", "materials lab", width, first, max_h, |ui| {
         if px.rendering { ui.disable(); }
         px.place = "lab";
         px.costly_shown = false;
-        set_label_width(ui, LAB_LABEL);
-        // which material it is (words only: it is chosen in the panel)
-        let r = row(ui, 17.0);
-        dot(ui, Pos2::new(r.left() + 5.5, r.center().y), swatches(ui, st)[chosen(st)], false);
-        text_in(ui, Rect::from_min_max(Pos2::new(r.left() + 16.0, r.top()), r.max), Align2::LEFT_CENTER, NAMED[chosen(st)].name, mono(SIZE), pal().dim);
-        px.note("lab/mat-name", r);
+        set_label_width(ui, LAB_LABEL.min(width * 0.4));
+        body_target(ui, st, px);
+        preview(ui, st, px);
+        if target_body(st).is_none() { px.lab_node = None; return; }
+        if construction_target(ui, st, px) { return; }
+        own_row(ui, st, px);
+        let presets_open = px.window_group(ui, CHOOSER, "material presets", NAMED[chosen(st)].name);
+        let now = chosen(st);
+        let edited = changed(st);
+        material_name(ui, px, now, settings(st), edited);
+        if presets_open {
+            if let Some(i) = named(ui, px, now, settings(st), edited, how(st).clay) {
+                choose(st, i);
+                st.p.clay = 0.0;
+            }
+        }
         let mine = own(st);
-        if !mine { note(ui, "Made of the first body's material: give it a material of its own (own material, in the panel) to change it here."); }
-        // the stack: a group for each layer, each title saying what is on in it
         let knobs = sliders(st);
+        let [pigment, finish] = quick_controls(settings(st));
+        ui.scope(|ui| {
+            if !mine { ui.disable(); }
+            stack_rows(ui, st, px, &[(pigment, ""), (finish, "")], &knobs);
+            recipe_line(ui, st, px, true);
+        });
+        let canonical_open = px.window_group(ui, CANONICAL, "Canonical material (developer)", "");
+        canonical::section(ui, st, px, body(st), canonical_open);
+        if !px.window_group(ui, ADVANCED, "Advanced material controls", "") { return; }
+        let parts = recipe(settings(st));
         for (layer, l) in STACK.iter().enumerate() {
-            let says = layer_says(layer, &recipe(settings(st)));
+            let says = layer_says(layer, &parts);
             if px.window_group(ui, &lab_fold(l.title), l.title, &says) {
                 ui.scope(|ui| {
                     if !mine { ui.disable(); }
-                    stack_rows(ui, st, px, &layer_rows(layer), &knobs);
+                    let mut rows = layer_rows(layer);
+                    rows.retain(|(name, _)| *name != pigment && *name != finish);
+                    stack_rows(ui, st, px, &rows, &knobs);
                 });
             }
         }
@@ -1028,7 +1180,9 @@ pub fn told(st: &State, px: &Panels) -> serde_json::Value {
     }).collect();
     let parts = recipe(p);
     let says: serde_json::Map<String, serde_json::Value> = STACK.iter().enumerate().map(|(i, l)| (l.title.to_string(), json!(layer_says(i, &parts)))).collect();
-    let stack: Vec<serde_json::Value> = (0..STACK.len()).map(|l| json!({ "layer": STACK[l].title, "rows": layer_rows(l).iter().map(|r| r.0).collect::<Vec<_>>() })).collect();
+    let quick = quick_controls(p);
+    let stack: Vec<serde_json::Value> = (0..STACK.len()).map(|l| json!({ "layer": STACK[l].title,
+        "rows": layer_rows(l).iter().map(|r| r.0).filter(|n| !quick.contains(n)).collect::<Vec<_>>() })).collect();
     let bodies: Vec<serde_json::Value> = st
         .bodies()
         .iter()
@@ -1041,9 +1195,11 @@ pub fn told(st: &State, px: &Panels) -> serde_json::Value {
         })
         .collect();
     json!({
-        "body": st.body_of(st.stack.sel) + 1, "own": own(st), "several": how.several, "bodies": bodies,
+        "targetBody": target_body(st).map(|i| i + 1), "constructionTarget": px.lab_node.as_ref().map(|(_, path)| path),
+        "quick": quick, "advanced": !px.store.is_closed(ADVANCED), "body": st.body_of(st.stack.sel) + 1, "own": own(st), "several": how.several, "bodies": bodies,
+        "canonical": canonical::told(st, px, body(st)),
         "index": now, "id": NAMED[now].id, "name": NAMED[now].name, "group": NAMED[now].group, "changed": changed(st),
-        "showing": px.mat_group.unwrap_or(NAMED[now].group), "groups": named_groups(), "chooser": !px.store.is_closed(CHOOSER),
+        "showing": NAMED[now].group, "groups": named_groups(), "groupLabels": named_groups().into_iter().map(family_label).collect::<Vec<_>>(), "chooser": !px.store.is_closed(CHOOSER),
         "recipe": parts.iter().map(|part| json!({ "words": part.words, "layer": STACK[part.layer].title, "off": part.off.iter().map(|o| o.0).collect::<Vec<_>>() })).collect::<Vec<_>>(),
         "layers": STACK.iter().map(|l| l.title).collect::<Vec<_>>(),
         "stack": stack,
@@ -1056,6 +1212,32 @@ pub fn told(st: &State, px: &Panels) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_construction_presets_retain_identity_for_exact_absorption_migration() {
+        let inherited = Settings::default();
+        let index = NAMED.iter().position(|named| named.id == "obsidian").unwrap();
+        let mut current = inherited.clone();
+        NAMED[index].apply(&mut current);
+        let values = construction_preset_values(&inherited, &current, index);
+        assert_eq!(values.get("mat"), Some(&(index as f64)));
+        assert!(Settings::DERIVED.iter().all(|name| !values.contains_key(*name)));
+        let mut state = State::new();
+        state.enable_canonical_materials().unwrap();
+        let path = state.layer_csg_mut(0).unwrap().add_construction_part(&[], gf_core::csg::Part::default()).unwrap();
+        state.set_construction_material(0, &path, Some(values)).unwrap();
+        let node = state.layer_csg(0).construction.as_ref().unwrap().node(&path).unwrap();
+        let resolved = node.material_v2.as_ref().unwrap().apply(&state.canonical.as_ref().unwrap().scene).unwrap();
+        assert_eq!(resolved.transvolume.values.absorption_coefficients.as_constant(), Some(&gf_core::pbr::Color([14.0, 15.0, 16.0])));
+    }
+
+    #[test]
+    fn construction_deltas_include_new_controls_but_not_removed_keys() {
+        let before = BTreeMap::from([("coat".to_string(), 0.0)]);
+        let after = BTreeMap::from([("coat".to_string(), 0.0), ("rough".to_string(), 0.42)]);
+        assert_eq!(changed_construction_controls(&after, &before), Some(BTreeMap::from([("rough".to_string(), 0.42)])));
+        assert_eq!(changed_construction_controls(&before, &after), None);
+    }
 
     /// A setting of the material by name, on the settings a program starts with.
     fn with(sets: &[(&str, f64)]) -> Settings {
@@ -1096,7 +1278,8 @@ mod tests {
                 assert!(under.is_empty() || rows[..at].iter().any(|r| r.0 == *under), "{name} stands under {under}, which is not above it in {}", STACK[l].title);
             }
         }
-        assert_eq!(folds().len(), STACK.len() + 2);
+        assert_eq!(folds().len(), STACK.len() + 4);
+        assert!(folds().contains(&CANONICAL.to_owned()));
         // the named materials: ids are unique, and each group's materials come in one run
         for (i, n) in NAMED.iter().enumerate() {
             assert_eq!(NAMED.iter().position(|m| m.id == n.id), Some(i), "two materials are called {}", n.id);
@@ -1112,7 +1295,7 @@ mod tests {
         assert_eq!(wants("filmIor", &glass).as_deref(), Some("needs thin film nm"));
         assert!(acts("filmIor", &with(&[("film", 300.0)])));
         // the colour of the body needs a body that shows it
-        assert_eq!(wants("bodyR", &glass).as_deref(), Some("needs milkiness or metal"));
+        assert_eq!(wants("bodyR", &glass).as_deref(), Some("needs subsurface or metal"));
         // a metal has no index: not with a metal
         let gold = with(&[("metal", 4.0)]);
         assert!(!acts("ior", &gold) && acts("bodyR", &gold));
@@ -1133,6 +1316,17 @@ mod tests {
         assert_eq!(words(&with(&[("film", 360.0), ("bubbles", 0.2)])), "glass · film 360 nm · bubbles");
         assert_eq!(words(&with(&[("sss", 1.0), ("rough", 0.6)])), "milky · frosted 0.60");
         assert_eq!(words(&with(&[("sss", 0.3), ("glow", 2.0)])), "glass · milky 0.30 · glow");
+        for id in ["modelclay", "moulded", "satinpaint", "stoneware", "bisque"] {
+            let i = material::named_index(id).unwrap();
+            let mut edited = Settings::default();
+            NAMED[i].apply(&mut edited);
+            edited.mat = i as f64;
+            edited.set("bodyG", 0.18);
+            edited.set("glazeHaze", 0.4);
+            assert_eq!(recipe(&edited)[0].words, NAMED[i].name);
+            edited.ceramic = 0.0;
+            assert_eq!(recipe(&edited)[0].words, "milky");
+        }
         // glass coloured wavelength by wavelength goes by the colour's name; taken off, it is glass again
         let ruby = material::choices("spectrum").iter().position(|m| *m == "ruby").expect("ruby is a spectrum") as f64;
         assert_eq!(words(&with(&[("spectrum", ruby), ("rough", 0.3)])), "ruby · satin 0.30");
@@ -1153,15 +1347,37 @@ mod tests {
     }
 
     #[test]
-    fn bodies_of_several_materials_are_drawn_without_some_parts() {
+    fn scattering_controls_follow_the_available_single_and_multi_body_paths() {
         let p = with(&[("bubbles", 0.3), ("film", 300.0), ("sss", 1.0), ("sssWalk", 1.0), ("rough", 0.3), ("roughRef", 1.0)]);
         let (alone, among) = (How { clay: false, several: false }, How { clay: false, several: true });
-        assert!(acts_as("sssWalk", &p, alone));
-        for name in NOT_AMONG {
-            assert!(Settings::default().get(name).is_some(), "{name} is not a setting");
-            assert!(!acts_as(name, &p, among), "{name} acts among bodies of several materials");
+        for how in [alone, among] {
+            for name in ["sssWalk", "sssSpread", "sssForward"] {
+                assert!(acts_as(name, &p, how), "{name} controls the scattering walk");
+            }
+            for name in ["sssHue", "sssThrough", "sssDetail"] {
+                assert!(!acts_as(name, &p, how), "{name} belongs to the light volume");
+            }
         }
-        assert_eq!(wants_as("sssWalk", &p, among).as_deref(), Some("not while bodies have materials of their own"));
+        let satin_metal = with(&[("metal", 2.0), ("rough", 0.65)]);
+        assert!(acts_as("roughRef", &satin_metal, among));
+        assert!(acts_as("roughRef", &p, alone));
+        assert!(!acts_as("roughRef", &p, among));
+        assert_eq!(wants_as("roughRef", &p, among).as_deref(), Some("needs a conductor or a sampled glass interface"));
+        for coat in [0.0, 1.0] {
+            let rough = with(&[("rough", 0.3), ("coat", coat)]);
+            assert!(acts_as("roughRef", &rough, among));
+        }
+        let args = [("scene","knots"), ("preset","trefoil"), ("layer","algebraic:heart"),
+            ("J12.op","apart"), ("B2.material","wax")].map(|(k,v)| (k.to_owned(),v.to_owned()));
+        let mut scene = State::with_args(&args,true);
+        scene.select_layer(1);
+        assert!(how(&scene).several && acts_as("sssWalk",settings(&scene),how(&scene)));
+        set(&mut scene,"sssWalk",1.0);
+        set(&mut scene,"sssForward",0.6);
+        let materials = scene.body_materials().unwrap();
+        assert!(!material::Variant::of(materials[0]).walk);
+        assert!(material::Variant::of(materials[1]).walk);
+        assert_eq!(materials[1].sss_forward,0.6);
         // everything else is as it is alone
         for name in ["film", "filmIor", "rough", "coat", "ior", "sss", "glow", "bubbles", "bubbleSize", "biref", "grin"] { assert_eq!(acts_as(name, &p, among), acts_as(name, &p, alone), "{name}"); }
     }
@@ -1180,9 +1396,35 @@ mod tests {
         assert_eq!(enabler("ior", &with(&[("metal", 4.0)]), alone), Some(vec![("metal", 0.0)]));
         // under clay, the clay is switched off
         assert_eq!(enabler("ior", &with(&[("clay", 1.0)]), How { clay: true, several: false }), Some(vec![("clay", 0.0)]));
-        // what bodies of several materials are drawn without cannot be woken
-        assert_eq!(enabler("sssWalk", &glass, How { clay: false, several: true }), None);
-        assert_eq!(enabler_words(&[("sss", 1.0)]), "turns on milkiness too");
+        // Selecting true scattering on a clear part can enable milkiness on that part.
+        let among = How { clay: false, several: true };
+        assert_eq!(enabler("sssWalk", &glass, among), Some(vec![("sss", 1.0)]));
+        let rough = enabler("roughRef", &glass, among).expect("a polished dielectric can enable roughness");
+        assert_eq!(rough.len(), 1);
+        assert_eq!(rough[0].0, "rough");
+        assert!(rough[0].1 > 0.0);
+        assert_eq!(enabler_words(&[("sss", 1.0)]), "turns on subsurface too");
+    }
+
+    #[test]
+    fn conventional_pbr_controls_are_named_and_grouped_in_the_materials_lab() {
+        let expected = [
+            ("bodyR", "base colour"),
+            ("rough", "roughness"),
+            ("coat", "coat weight"),
+            ("coatIor", "coat IOR"),
+            ("glazeHaze", "coat roughness (alpha)"),
+            ("sss", "subsurface"),
+            ("sssDepth", "SSS mean free path"),
+            ("sssWalk", "true SSS random walk"),
+        ];
+        for (name, label) in expected {
+            assert_eq!(CONTROLS.iter().find(|c| c.name == name).map(|c| c.label), Some(label));
+        }
+        let coat_rows = layer_rows(2);
+        assert!(coat_rows.contains(&("coat", "")));
+        assert!(coat_rows.contains(&("coatIor", "coat")));
+        assert!(coat_rows.iter().any(|row| row.0 == "glazeHaze"));
     }
 
     #[test]
@@ -1198,5 +1440,14 @@ mod tests {
         assert!(acts("rough", &with(&[("clay", 1.0), ("film", 300.0)])) && acts("filmIor", &with(&[("clay", 1.0), ("film", 300.0)])));
         assert!(!acts("rough", &with(&[("clay", 1.0), ("film", 300.0), ("coat", 1.0)])));
         assert!(acts("coatIor", &with(&[("clay", 1.0), ("coat", 1.0)])) && !acts("bubbleSize", &with(&[("clay", 1.0), ("bubbles", 0.3)])));
+    }
+
+    #[test]
+    fn modelclay_sss_depth_waits_for_ceramic_through_wake() {
+        let mut modelclay = Settings::default();
+        NAMED[material::named_index("modelclay").unwrap()].apply(&mut modelclay);
+        let alone = How { clay: false, several: false };
+        assert!(!material::applies("sssDepth", &modelclay));
+        assert_eq!(enabler("sssDepth", &modelclay, alone), Some(vec![("ceramicThrough", 0.35)]));
     }
 }

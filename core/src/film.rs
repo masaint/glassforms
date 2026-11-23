@@ -32,10 +32,7 @@ pub struct Drain {
     pub up: f64,
 }
 
-fn smooth(a: f64, b: f64, x: f64) -> f64 {
-    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
+use crate::math::smoothstep as smooth;
 
 /// A film that was `film_nm` thick when fresh, drained by `drain` (0 to 1; below 0: the same, upside
 /// down).

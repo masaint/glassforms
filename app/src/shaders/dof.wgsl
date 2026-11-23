@@ -81,6 +81,7 @@ struct Lv {
 @group(0) @binding(18) var underTex: texture_2d<f32>;   // what is taken to lie under the glass in front of the band
 @group(0) @binding(19) var allTex: texture_2d<f32>;     // the glass at half size: rgb, a = the blur radius of the nearest of it
 @group(0) @binding(20) var farFill: texture_2d<f32>;    // the glass behind the band by itself, at falling sizes: rgb (times its share), a = its share
+@group(0) @binding(21) var splitTex: texture_2d<f32>;   // per pixel: rgb = behind share of picTex, a = front share (0..1)
 
 const NONE: f32 = 30000.0;      // "blur radius" stored where there is no glass
 const SHARP: f32 = 0.5;         // a blur smaller than this is no blur
@@ -139,82 +140,198 @@ fn area(q: f32) -> f32 { return textureLoad(normTex, vec2i(i32(min(q, 639.0)), 0
 struct CocOut {
   @location(0) zero: vec4f,
   @location(1) coc: vec4f,
+  @location(2) split: vec4f,
 }
 
 @fragment
 fn fs_coc(@builtin(position) pos: vec4f) -> CocOut {
   let c = vec2i(pos.xy);
   let top = vec2i(d.res) - 1;
-  let s = textureLoad(picTex, c, 0);
-  // The colour of a pixel on an outline is part one piece of glass and part whatever is behind it, but
-  // the distance stored is of one of the two. Whichever way such a pixel is taken, what must not happen
-  // is that something is left sharp that should have been blurred: that shows as a bright crumb.
-  //  - A pixel with no glass under its own ray that touches glass holds that glass's soft edge and
-  //    nothing else: it is blurred, or kept sharp, with it.
-  //  - A pixel that touches nearer glass that is MORE blurred than its own holds some of that glass's
-  //    bright rim, and goes with it: left behind, the rim would stay as a sharp line. (Such glass claims
-  //    two pixels, not one: the stored distance is one frame's and the colour many frames', and the rim
-  //    of glass is drawn up to a pixel outside its outline.)
-  //  - A pixel that touches nearer glass that is LESS blurred than its own stays as it is: it holds a
-  //    little of that glass's edge, but mostly its own glass, which must not stay sharp.
-  var near1 = 1e9;
-  var near2 = 1e9;
-  var lo = vec3f(1e9);            // the range of colours of the pixels two away with no glass under them:
-  var hi = vec3f(-1e9);           // what lies behind the glass here
-  var out = vec2f(0.0);           // and which way they lie
-  for (var y = -2; y <= 2; y++) {
-    for (var x = -2; x <= 2; x++) {
-      let n = textureLoad(picTex, clamp(c + vec2i(x, y), vec2i(0), top), 0);
-      let ring = max(abs(x), abs(y)) == 2;
-      if (n.a <= 0.0) {
-        if (ring) { lo = min(lo, n.rgb); hi = max(hi, n.rgb); out += vec2f(f32(x), f32(y)); }
-        continue;
-      }
-      if (ring) { near2 = min(near2, n.a); } else { near1 = min(near1, n.a); }
-    }
-  }
   let fc = vec2f(pos.x, d.res.y - pos.y);
-  var t = s.a;
-  if (t <= 0.0) {
-    if (near1 < 1e8) { t = near1; } else if (near2 < 1e8 && blur_of(near2, fc) < -2.0) { t = near2; }
-  } else {
-    let own = abs(blur_of(t, fc));
-    if (near1 < t - 0.02 && abs(blur_of(near1, fc)) > own + 1.0) {
-      t = near1;
-    } else if (near2 < t - 0.02 && abs(blur_of(near2, fc)) > own + 2.0) {
-      t = near2;
+  let s = textureLoad(picTex, c, 0);
+  // Find the nearest surface in the 3x3 neighbourhood. Subpixel antialiasing and 1-pixel grazing
+  // reflections reach at most one pixel outside a silhouette; unmixing front vs behind on that
+  // 1-pixel boundary prevents bright sky/backdrop from leaking into dark foreground bokeh and avoids
+  // jagged 2-pixel cutouts where blurred foreground crosses sharp tubes.
+  var near1 = 1e9;
+  var near1_rgb = s.rgb;
+  for (var y = -1; y <= 1; y++) {
+    for (var x = -1; x <= 1; x++) {
+      let n = textureLoad(picTex, clamp(c + vec2i(x, y), vec2i(0), top), 0);
+      if (n.a > 0.0 && n.a < near1) {
+        near1 = n.a;
+        near1_rgb = n.rgb;
+      }
     }
   }
   var o: CocOut;
   o.zero = vec4f(0.0);
-  if (t <= 0.0) {
-    o.coc = vec4f(NONE, 0.0, 0.0, 0.0);
+  if (near1 >= 1e8) {
+    o.coc = vec4f(NONE, NONE, 0.0, 0.0);
+    o.split = vec4f(0.0, 0.0, 0.0, 1.0);
     return o;
   }
-  let r = blur_of(t, fc);
-  o.coc = vec4f(r, 0.0, 0.0, 0.0);
+  var t_front = near1;
+  if (s.a > 0.0) {
+    let own_a = abs(blur_of(s.a, fc));
+    if (near1 < s.a - 0.02 && abs(blur_of(near1, fc)) > own_a + 1.0) {
+      t_front = near1;
+    } else {
+      t_front = s.a;
+    }
+  }
+  let r_self = select(NONE, blur_of(s.a, fc), s.a > 0.0);
+  let r_front = blur_of(t_front, fc);
+  let sky_jump = select(abs(r_front) > SHARP, abs(d.bg - r_front) > 2.5, d.bg > 0.0);
+
+  var behind_3x3 = false;
+  var s_behind = false;
+  var front_count_3x3 = 0;
+  var sky_w_3x3 = 0.0;
+  var geo_w_3x3 = 0.0;
+  var near_behind_t = 1e9;
+  var lo_sky_ring = vec3f(1e9);
+  var hi_sky_ring = vec3f(-1e9);
+  var lo_sky_near = vec3f(1e9);
+  var hi_sky_near = vec3f(-1e9);
+  var lo_geo_ring = vec3f(1e9);
+  var hi_geo_ring = vec3f(-1e9);
+  var lo_geo_near = vec3f(1e9);
+  var hi_geo_near = vec3f(-1e9);
+  var out = vec2f(0.0);
+  for (var y = -2; y <= 2; y++) {
+    for (var x = -2; x <= 2; x++) {
+      let q = clamp(c + vec2i(x, y), vec2i(0), top);
+      let n = textureLoad(picTex, q, 0);
+      let fc_q = vec2f(f32(q.x) + 0.5, d.res.y - (f32(q.y) + 0.5));
+      let is_behind = select(
+        n.a > t_front + max(0.12, 0.05 * t_front) && abs(blur_of(n.a, fc_q) - r_front) > 4.0,
+        sky_jump,
+        n.a <= 0.0
+      );
+      let ring = max(abs(x), abs(y)) == 2;
+      if (!is_behind) {
+        if (!ring) { front_count_3x3 += 1; }
+        continue;
+      }
+      if (n.a <= 0.0) {
+        if (ring) {
+          lo_sky_ring = min(lo_sky_ring, n.rgb);
+          hi_sky_ring = max(hi_sky_ring, n.rgb);
+        } else {
+          lo_sky_near = min(lo_sky_near, n.rgb);
+          hi_sky_near = max(hi_sky_near, n.rgb);
+          sky_w_3x3 += select(1.0, 2.0, abs(x) + abs(y) <= 1);
+        }
+      } else {
+        if (ring) {
+          lo_geo_ring = min(lo_geo_ring, n.rgb);
+          hi_geo_ring = max(hi_geo_ring, n.rgb);
+        } else {
+          lo_geo_near = min(lo_geo_near, n.rgb);
+          hi_geo_near = max(hi_geo_near, n.rgb);
+          geo_w_3x3 += select(1.0, 2.0, abs(x) + abs(y) <= 1);
+          near_behind_t = min(near_behind_t, n.a);
+        }
+      }
+      if (!ring) {
+        behind_3x3 = true;
+        if (x == 0 && y == 0) { s_behind = true; }
+      }
+      out += vec2f(f32(x), f32(y));
+    }
+  }
+
+  var r = r_self;
+  var rb = r_self;
+  var behind_rgb = vec3f(0.0);
+  var glass = 1.0;
+
+  let use_sky = select(sky_w_3x3 >= geo_w_3x3 || near_behind_t >= 1e8, s.a <= 0.0, s_behind);
+  if (behind_3x3 && (r_front < -SHARP || use_sky)) {
+    if (r_front < -SHARP && s_behind && s.a > 0.0 && front_count_3x3 >= 6) {
+      r = r_front;
+      rb = r_front;
+    } else {
+      var lo = vec3f(1e9);
+      var hi = vec3f(-1e9);
+      if (use_sky) {
+        rb = NONE;
+        let has_ring = hi_sky_ring.x >= lo_sky_ring.x;
+        lo = select(lo_sky_near, lo_sky_ring, has_ring);
+        hi = select(hi_sky_near, hi_sky_ring, has_ring);
+      } else {
+        let t_back = select(near_behind_t, s.a, s_behind);
+        rb = blur_of(t_back, fc);
+        let has_ring = hi_geo_ring.x >= lo_geo_ring.x;
+        lo = select(lo_geo_near, lo_geo_ring, has_ring);
+        hi = select(hi_geo_near, hi_geo_ring, has_ring);
+      }
+      if (hi.x >= lo.x) {
+        let in_dir = normalize(out + vec2f(1e-4));
+        let p2 = clamp(c - vec2i(round(in_dir * 2.0)), vec2i(0), top);
+        let in2 = textureLoad(picTex, p2, 0);
+        let fc2 = vec2f(f32(p2.x) + 0.5, d.res.y - (f32(p2.y) + 0.5));
+        var inner_rgb = near1_rgb;
+        if (in2.a > 0.0 && abs(blur_of(in2.a, fc2) - r_front) <= 4.0) {
+          inner_rgb = in2.rgb;
+        } else {
+          let p1 = clamp(c - vec2i(round(in_dir)), vec2i(0), top);
+          let in1 = textureLoad(picTex, p1, 0);
+          let fc1 = vec2f(f32(p1.x) + 0.5, d.res.y - (f32(p1.y) + 0.5));
+          if (in1.a > 0.0 && abs(blur_of(in1.a, fc1) - r_front) <= 4.0) {
+            inner_rgb = in1.rgb;
+          }
+        }
+        let back = clamp(s.rgb, lo, hi);
+        let v = inner_rgb - back;
+        let vv = dot(v, v);
+        r = r_front;
+        if (s_behind) {
+          let glass_col = clamp(dot(s.rgb - back, v) / max(vv, 1e-6), 0.0, 1.0);
+          glass = mix(0.0, glass_col, smoothstep(1e-4, 0.01, vv));
+        } else {
+          let bg_frac = clamp(dot(s.rgb - inner_rgb, back - inner_rgb) / max(vv, 1e-6), 0.0, 1.0);
+          glass = mix(1.0, 1.0 - bg_frac, smoothstep(1e-4, 0.02, vv));
+        }
+        behind_rgb = min(back * (1.0 - glass), s.rgb);
+        let front_excess = any(s.rgb > max(hi, back) + vec3f(0.05));
+        if (s_behind && front_excess) {
+          glass = max(glass, 0.5);
+          behind_rgb = min(back * (1.0 - glass), s.rgb);
+        } else if (s_behind && glass <= 0.02) {
+          r = rb;
+          glass = 1.0;
+          behind_rgb = vec3f(0.0);
+        }
+      }
+    }
+  }
+
+  o.coc = vec4f(r, rb, 0.0, 0.0);
+  o.split = vec4f(behind_rgb, glass);
+  if (r >= NONE * 0.5) {
+    return o;
+  }
   let a = abs(r);
+  let front_col = max(s.rgb - behind_rgb, vec3f(0.0));
   if (a <= SHARP) {
     // sharp: it does not spread, but it is in the way of what is behind it (see fs_out)
-    o.zero = vec4f(0.0, 0.0, 0.0, IN_THE_WAY);
+    if (glass > 0.5) { o.zero = vec4f(0.0, 0.0, 0.0, IN_THE_WAY); }
   } else if (a < d.hi) {
     // spread at full size: the light divided by the texels it will cover; positive = behind the band
     let q = floor(a * 32.0 + 0.5);
     let m = (1.0 - smoothstep(d.lo, d.hi, a)) / area(q);
-    var col = s.rgb;
-    var glass = 1.0;
-    if (d.bg > SHARP && hi.x >= lo.x) {
-      // on the outline, with a picture behind the glass: only the glass's share is spread here (what
-      // is behind is blurred by itself, far more)
-      let inner = textureLoad(picTex, clamp(c - vec2i(round(normalize(out + vec2f(1e-4)) * 2.0)), vec2i(0), top), 0);
-      let part = outline(col, lo, hi, inner);
-      col = max(col - part.rgb, vec3f(0.0));
-      glass = part.a;
-    }
-    o.zero = vec4f(col * m, sign(r) * pack(q, m * glass));
-  } else if (r < 0.0) {
+    o.zero = vec4f(front_col * m, sign(r) * pack(q, m * glass));
+  } else if (r < 0.0 && glass > 0.5) {
     // in front of the band and spread on the smaller copies: here it is only in the way
     o.zero = vec4f(0.0, 0.0, 0.0, -1.0);
+  }
+  let ab = abs(rb);
+  if (o.zero.a == 0.0 && glass <= 0.5 && ab > SHARP && ab < d.hi && ab < NONE * 0.5) {
+    let qb = floor(ab * 32.0 + 0.5);
+    let mb = (1.0 - smoothstep(d.lo, d.hi, ab)) / area(qb);
+    o.zero = vec4f(behind_rgb * mb, sign(rb) * pack(qb, mb * (1.0 - glass)));
   }
   return o;
 }
@@ -242,18 +359,37 @@ fn fs_pre(@builtin(position) pos: vec4f) -> PreOut {
     for (var i = 0; i < 2; i++) {
       let q = c + vec2i(i, j);
       if (q.x > top.x || q.y > top.y) { continue; }       // the picture is an odd number of pixels across
-      let r = textureLoad(cocTex, q, 0).r;
-      let a = abs(r);
-      if (a <= d.lo || a >= NONE * 0.5) { continue; }
+      let cc = textureLoad(cocTex, q, 0);
+      let sp = textureLoad(splitTex, q, 0);
       let col = textureLoad(picTex, q, 0).rgb;
-      // the share of this pixel that is not drawn at full size; its radius counts by how bright it is,
-      // so that a highlight keeps its own size among duller neighbours
-      let w = smoothstep(d.lo, d.hi, a);
-      let e = w * (lum(col) + 1e-5);
-      if (r > 0.0) {
-        far += col * w; farm += w; farc += a * e; farw += e;
-      } else {
-        near += col * w; nearm += w; nearc += a * e; nearw += e;
+      let front_col = max(col - sp.rgb, vec3f(0.0));
+      let glass = sp.a;
+      let r = cc.x;
+      let a = abs(r);
+      if (a > d.lo && a < NONE * 0.5) {
+        let w = smoothstep(d.lo, d.hi, a);
+        let e = w * (lum(front_col) + 1e-5 * glass);
+        if (e > 0.0) {
+          if (r > 0.0) {
+            far += front_col * w; farm += glass * w; farc += a * e; farw += e;
+          } else {
+            near += front_col * w; nearm += glass * w; nearc += a * e; nearw += e;
+          }
+        }
+      }
+      let bg_sh = 1.0 - glass;
+      let rb = cc.y;
+      let ab = abs(rb);
+      if (bg_sh > 1e-4 && ab > d.lo && ab < NONE * 0.5) {
+        let wb = smoothstep(d.lo, d.hi, ab);
+        let eb = wb * (lum(sp.rgb) + 1e-5 * bg_sh);
+        if (eb > 0.0) {
+          if (rb > 0.0) {
+            far += sp.rgb * wb; farm += bg_sh * wb; farc += ab * eb; farw += eb;
+          } else {
+            near += sp.rgb * wb; nearm += bg_sh * wb; nearc += ab * eb; nearw += eb;
+          }
+        }
       }
     }
   }
@@ -261,8 +397,8 @@ fn fs_pre(@builtin(position) pos: vec4f) -> PreOut {
   o.far = vec4f(0.0);
   o.near = vec4f(0.0);
   // the radius in eighths of a pixel, the share in the fraction
-  if (farm > 0.0) { o.far = vec4f(far * 0.25, pack(floor(farc / farw * 8.0 + 0.5), farm * 0.25)); }
-  if (nearm > 0.0) { o.near = vec4f(near * 0.25, pack(floor(nearc / nearw * 8.0 + 0.5), nearm * 0.25)); }
+  if (farw > 0.0) { o.far = vec4f(far * 0.25, pack(floor(farc / farw * 8.0 + 0.5), farm * 0.25)); }
+  if (nearw > 0.0) { o.near = vec4f(near * 0.25, pack(floor(nearc / nearw * 8.0 + 0.5), nearm * 0.25)); }
   return o;
 }
 
@@ -282,30 +418,67 @@ fn fs_pre2(@builtin(position) pos: vec4f) -> PullOut {
   var fill = vec4f(0.0);
   var ext = vec3f(0.0);
   var back = vec4f(0.0);
-  var all = vec4f(0.0, 0.0, 0.0, NONE);
+  var near_rgb = vec3f(0.0);
+  var near_sh = 0.0;
+  var near_min = NONE;
   for (var j = 0; j < 2; j++) {
     for (var i = 0; i < 2; i++) {
       let q = c + vec2i(i, j);
       if (q.x > top.x || q.y > top.y) { continue; }
-      let r = textureLoad(cocTex, q, 0).r;
+      let cc = textureLoad(cocTex, q, 0);
+      let sp = textureLoad(splitTex, q, 0);
       let col = textureLoad(picTex, q, 0).rgb;
+      let r = cc.x;
+      let rb = cc.y;
+      let glass = sp.a;
       if (r >= NONE * 0.5) {
         fill.a += 1.0;
         back += vec4f(col, 1.0);
         continue;
       }
-      all = vec4f(all.rgb + col, min(all.a, r));
-      if (r >= -SHARP) { fill += vec4f(col, 1.0); }
-      // (glass blurred so little that it is drawn at full size stands in front of the far glass the smaller
-      // copies draw, as sharp glass does: what it hides of that is made up in fs_band)
-      if (r > d.lo) { ext += vec3f(r, 1.0, 0.0); } else { ext.z += 1.0; }
+      let front_col = max(col - sp.rgb, vec3f(0.0));
+      if (glass > 0.0) {
+        let fw = smoothstep(-8.0, -SHARP, r);
+        fill += vec4f(front_col, glass) * fw;
+        let nw = 1.0 - fw;
+        if (nw > 0.0) {
+          near_rgb += front_col * nw;
+          near_sh += glass * nw;
+          if (glass * nw >= 0.25) { near_min = min(near_min, r); }
+        }
+        if (r > d.lo) { ext += vec3f(r * glass, glass, 0.0); } else { ext.z += glass; }
+      }
+      let bg_sh = 1.0 - glass;
+      if (bg_sh > 1e-4) {
+        if (rb >= NONE * 0.5) {
+          fill.a += bg_sh;
+          back += vec4f(sp.rgb, bg_sh);
+        } else {
+          let fwb = smoothstep(-8.0, -SHARP, rb);
+          fill += vec4f(sp.rgb, bg_sh) * fwb;
+          let nwb = 1.0 - fwb;
+          if (nwb > 0.0) {
+            near_rgb += sp.rgb * nwb;
+            near_sh += bg_sh * nwb;
+            if (bg_sh * nwb >= 0.25) { near_min = min(near_min, rb); }
+          }
+          if (rb > d.lo) { ext += vec3f(rb * bg_sh, bg_sh, 0.0); } else { ext.z += bg_sh; }
+        }
+      }
     }
   }
   var o: PullOut;
   o.fill = fill * 0.25;
   o.ext = vec4f(ext * 0.25, 0.0);
   o.back = back * 0.25;
-  o.all = vec4f(all.rgb * 0.25, all.a);
+  // When at least half of this 2x2 block is behind near glass, keep it unoccluded so fs_under can anchor cleanly on it.
+  if (fill.a >= 2.0) {
+    o.all = vec4f(fill.rgb / fill.a, 0.0);
+  } else if (near_sh > 0.0) {
+    o.all = vec4f(near_rgb / near_sh, select(-SHARP - 0.1, near_min, near_min < NONE * 0.5));
+  } else {
+    o.all = vec4f(0.0, 0.0, 0.0, NONE);
+  }
   return o;
 }
 
@@ -320,8 +493,17 @@ fn fs_farc(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     for (var i = 0; i < 2; i++) {
       let q = c + vec2i(i, j);
       if (q.x > top.x || q.y > top.y) { continue; }
-      let r = textureLoad(cocTex, q, 0).r;
-      if (r > d.lo && r < NONE * 0.5) { farc += vec4f(textureLoad(picTex, q, 0).rgb, 1.0); }
+      let cc = textureLoad(cocTex, q, 0);
+      let sp = textureLoad(splitTex, q, 0);
+      let col = textureLoad(picTex, q, 0).rgb;
+      let front_col = max(col - sp.rgb, vec3f(0.0));
+      if (cc.x > d.lo && cc.x < NONE * 0.5 && sp.a > 0.0) {
+        farc += vec4f(front_col, sp.a);
+      }
+      let bg_sh = 1.0 - sp.a;
+      if (bg_sh > 1e-4 && cc.y > d.lo && cc.y < NONE * 0.5) {
+        farc += vec4f(sp.rgb, bg_sh);
+      }
     }
   }
   return farc * 0.25;
@@ -336,15 +518,49 @@ struct HalveOut {
   @location(3) farc: vec4f,
 }
 
+fn sample4(tex: texture_2d<f32>, uv: vec2f, o: vec2f) -> vec4f {
+  return 0.25 * (
+    textureSampleLevel(tex, lin, uv + vec2f(-o.x, -o.y), 0.0)
+    + textureSampleLevel(tex, lin, uv + vec2f( o.x, -o.y), 0.0)
+    + textureSampleLevel(tex, lin, uv + vec2f(-o.x,  o.y), 0.0)
+    + textureSampleLevel(tex, lin, uv + vec2f( o.x,  o.y), 0.0)
+  );
+}
+
 @fragment
 fn fs_pull(@builtin(position) pos: vec4f) -> HalveOut {
   let uv = pos.xy / lv.size;
-  var o: HalveOut;
-  o.fill = textureSampleLevel(fillTex, lin, uv, 0.0);
-  o.ext = textureSampleLevel(extTex, lin, uv, 0.0);
-  o.back = textureSampleLevel(backTex, lin, uv, 0.0);
-  o.farc = textureSampleLevel(farFill, lin, uv, 0.0);
-  return o;
+  let o = 0.5 / lv.size;
+  var r: HalveOut;
+  r.fill = sample4(fillTex, uv, o);
+  r.ext = sample4(extTex, uv, o);
+  r.back = sample4(backTex, uv, o);
+  r.farc = sample4(farFill, uv, o);
+  return r;
+}
+
+// C2-continuous 2D cubic B-spline lookup (4 bilinear taps, strictly non-negative weights, zero mip grid creases).
+fn smoothMip(tex: texture_2d<f32>, uv: vec2f, l: i32) -> vec4f {
+  let dims = vec2f(max(textureDimensions(tex, l), vec2u(1u)));
+  let x = uv * dims - 0.5;
+  let i = floor(x);
+  let f = x - i;
+  let f2 = f * f;
+  let f3 = f2 * f;
+  let of_ = 1.0 - f;
+  let g0 = of_ * of_ * of_ / 6.0;
+  let g1 = (3.0 * f3 - 6.0 * f2 + 4.0) / 6.0;
+  let g2 = (-3.0 * f3 + 3.0 * f2 + 3.0 * f + 1.0) / 6.0;
+  let g3 = f3 / 6.0;
+  let h0 = g0 + g1;
+  let h1 = g2 + g3;
+  let o0 = (i - 0.5 + g1 / max(h0, vec2f(1e-6))) / dims;
+  let o1 = (i + 1.5 + g3 / max(h1, vec2f(1e-6))) / dims;
+  let lf = f32(l);
+  return textureSampleLevel(tex, lin, vec2f(o0.x, o0.y), lf) * (h0.x * h0.y)
+       + textureSampleLevel(tex, lin, vec2f(o1.x, o0.y), lf) * (h1.x * h0.y)
+       + textureSampleLevel(tex, lin, vec2f(o0.x, o1.y), lf) * (h0.x * h1.y)
+       + textureSampleLevel(tex, lin, vec2f(o1.x, o1.y), lf) * (h1.x * h1.y);
 }
 
 // ---- 4. which blurs can reach which part of the picture -------------------------------------------------
@@ -360,9 +576,13 @@ fn fs_tile(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     for (var i = 0; i < TILE; i++) {
       let q = c + vec2i(i, j);
       if (q.x > top.x || q.y > top.y) { continue; }
-      let r = textureLoad(cocTex, q, 0).r;
+      let cc = textureLoad(cocTex, q, 0);
+      let r = cc.x;
       if (r > SHARP && r < NONE * 0.5) { o.x = min(o.x, r); o.y = max(o.y, r); }
       if (r < -SHARP) { o.z = min(o.z, -r); o.w = max(o.w, -r); }
+      let rb = cc.y;
+      if (rb > SHARP && rb < NONE * 0.5) { o.x = min(o.x, rb); o.y = max(o.y, rb); }
+      if (rb < -SHARP) { o.z = min(o.z, -rb); o.w = max(o.w, -rb); }
     }
   }
   return o;
@@ -379,8 +599,8 @@ fn fs_reach(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   for (var j = max(-n, -c.y); j <= min(n, top.y - c.y); j++) {
     for (var i = max(-n, -c.x); i <= min(n, top.x - c.x); i++) {
       let t = textureLoad(tileTex, c + vec2i(i, j), 0);
-      // the least distance between a pixel there and a pixel here
-      let gap = f32(TILE) * length(max(abs(vec2f(f32(i), f32(j))) - 1.0, vec2f(0.0))) - d.pad - 1.0;
+      // the least distance between a pixel there and a pixel here (with one tile's slack for inpainted far edges)
+      let gap = max(f32(TILE) * (length(max(abs(vec2f(f32(i), f32(j))) - 1.0, vec2f(0.0))) - 1.0) - d.pad - 1.0, 0.0);
       if (t.y >= gap) { o.x = min(o.x, max(t.x, gap)); o.y = max(o.y, t.y); }
       if (t.w >= gap) { o.z = min(o.z, max(t.z, gap)); o.w = max(o.w, t.w); }
     }
@@ -492,13 +712,19 @@ fn fs_band(@builtin(position) pos: vec4f) -> BandOut {
       // copy draws its share of a blur, and the shares only add up to the whole if every copy takes the
       // hidden part's blur to be the same); otherwise the nearest's.
       let uv = (vec2f(p) + 0.5) / lv.size;
-      var ex = vec2f(0.0);
-      var wl = 1.0;
-      for (var l = 0; l < 4; l++) {
-        ex += wl * textureSampleLevel(extTex, lin, uv, FILL_LEVEL + f32(l)).rg;
-        wl *= 0.05;
+      let max_l = min(6, i32(textureNumLevels(extTex)) - 1);
+      var ex = 0.0;
+      var has_ex = 0.0;
+      for (var l = max_l; l >= i32(FILL_LEVEL); l--) {
+        let s = smoothMip(extTex, uv, l).rg;
+        if (s.y > 1e-4) {
+          let val = s.x / s.y;
+          let w = select(smoothstep(0.0, 0.35, s.y), 1.0, has_ex < 0.5);
+          ex = mix(ex, val, w);
+          has_ex = 1.0;
+        }
       }
-      let c = select(rad / col.a, ex.x / ex.y, ex.y > 1e-6);
+      let c = select(rad / col.a, ex, has_ex > 0.5);
       let w = share(c);
       if (c > d.lo && w > 0.0) {
         let h = front * col.a / (col.a + open);
@@ -555,7 +781,7 @@ fn fs_gather(@builtin(position) pos: vec4f) -> GatherOut {
   // A texel narrower than a tile asks its tile (and the tiles round it) what can reach it; a wider one
   // does not ask: there are few of those.
   var t = vec4f(0.0, d.cmax, 0.0, d.cmax);
-  if (lv.scale < f32(TILE)) { t = textureLoad(wideTex, tile_of(vec2i((vec2f(p) + 0.5) * lv.scale)), 0); }
+  if (lv.scale < 8.0) { t = textureLoad(wideTex, tile_of(vec2i((vec2f(p) + 0.5) * lv.scale)), 0); }
   var o: GatherOut;
   o.far = vec4f(0.0);
   o.near = vec4f(0.0);
@@ -605,18 +831,41 @@ fn fs_gather(@builtin(position) pos: vec4f) -> GatherOut {
 @fragment
 fn fs_back(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let p = vec2i(pos.xy);
+  let ml = i32(d.back);
   let top = vec2i(lv.size) - 1;
-  let q = floor(d.bg / lv.scale * 32.0 + 0.5);
+  let uv = pos.xy / lv.size;
+  let max_l = i32(textureNumLevels(backTex)) - 1;
+  var fallback = vec3f(0.0);
+  var has_fb = 0.0;
+  for (var l = max_l; l >= ml; l--) {
+    let b = smoothMip(backTex, uv, l);
+    if (b.a > 1e-4) {
+      let val = b.rgb / b.a;
+      let w = select(smoothstep(0.0, 0.25, b.a), 1.0, has_fb < 0.5);
+      fallback = mix(fallback, val, w);
+      has_fb = 1.0;
+    }
+  }
+  let q = max(floor(d.bg / lv.scale * 32.0 + 0.5), 1.0);
   let R = i32(ceil(d.bg / lv.scale + d.pad));
   var g = vec4f(0.0);
   for (var j = max(-R, -p.y); j <= min(R, top.y - p.y); j++) {
     let w = i32(sqrt(f32(R * R - j * j)));
     for (var i = max(-w, -p.x); i <= min(w, top.x - p.x); i++) {
-      g += cover_far(q, vec2i(i, j)) * textureLoad(backTex, p + vec2i(i, j), 0);
+      g += cover_far(q, vec2i(i, j)) * textureLoad(backTex, p + vec2i(i, j), ml);
     }
   }
-  if (g.a < 1e-4) { return vec4f(0.0); }
-  return vec4f(g.rgb / g.a, 1.0);
+  if (g.a > 1e-4) {
+    let disc_col = g.rgb / g.a;
+    if (has_fb > 0.5) {
+      let full_a = max(area(q), 1.0);
+      let w_disc = smoothstep(0.0, 0.08, g.a / full_a);
+      return vec4f(mix(fallback, disc_col, w_disc), 1.0);
+    }
+    return vec4f(disc_col, 1.0);
+  }
+  if (has_fb > 0.5) { return vec4f(fallback, 1.0); }
+  return vec4f(0.0);
 }
 
 // ---- 7. what lies under the glass in front of the band ---------------------------------------------------
@@ -627,31 +876,43 @@ fn fs_back(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 // tube passing behind: lines that go in on one side of the strip and come out on the other. So the strip
 // is bridged along straight lines, in the direction in which its two edges agree best: then the lines
 // carry on under the blur instead of stopping at it. Where no two edges are found (the hidden part is too
-// wide, or runs off the picture) the texel takes after what shows around it, from the finest of the
-// smaller pictures that has anything there.
+// wide, or runs off the picture) incoming tubes and edges continue smoothly inward before relaxing into
+// the surrounding pyramid.
 // rgb = the glass that is taken to be there, a = how much of the texel is taken to be open to what lies
 // behind all the glass.
 const BRIDGE: i32 = 14;         // the widest strip bridged, in texels from the texel to either edge
 
-// What counts as behind a texel whose nearest glass has blur radius r (negative: in front of the band):
-// anything less than half as far in front. So a strongly blurred tube is bridged from a slightly blurred
-// one behind it as well as from sharp glass.
-fn behind_of(r: f32) -> f32 { return 0.5 * r - 0.25; }
+// Only genuine exterior regions (not 1-texel pinholes between spiral coil turns) qualify as bridge anchors.
+fn is_behind_texel(q: vec2i) -> bool {
+  let f = textureLoad(fillTex, q, 0);
+  if (f.a < 0.75) { return false; }
+  return smoothMip(fillTex, (vec2f(q) + 0.5) / d.half, 1).a >= 0.50;
+}
+
+// Under-layer payload (rgb = non-sky glass/floor, a = open sky share) at a behind texel.
+fn under_at_texel(q: vec2i) -> vec4f {
+  let f = textureLoad(fillTex, q, 0);
+  let o = textureLoad(backTex, q, 0).a;
+  return vec4f(f.rgb, o) / max(f.a, 1e-4);
+}
+
+// Visual colour (including sky) at a behind texel, for comparing edge agreement; a < 0 if not behind.
+fn vis_at(at: vec2f, top: vec2i) -> vec4f {
+  let q = clamp(vec2i(floor(at)), vec2i(0), top);
+  if (!is_behind_texel(q)) { return vec4f(0.0, 0.0, 0.0, -1.0); }
+  let f = textureLoad(fillTex, q, 0);
+  let b = textureLoad(backTex, q, 0);
+  return vec4f((f.rgb + b.rgb) / max(f.a, 1e-4), 1.0);
+}
 
 // how far from `p` along `dir` the first texel wholly behind is (-1 = none near)
-fn edge_at(p: vec2i, dir: vec2f, top: vec2i, thr: f32) -> f32 {
+fn edge_at(p: vec2i, dir: vec2f, top: vec2i) -> f32 {
   for (var i = 1; i <= BRIDGE; i++) {
     let q = vec2i(floor(vec2f(p) + 0.5 + dir * f32(i)));
     if (q.x < 0 || q.y < 0 || q.x > top.x || q.y > top.y) { return -1.0; }
-    if (textureLoad(allTex, q, 0).a >= thr) { return f32(i); }
+    if (is_behind_texel(q)) { return f32(i); }
   }
   return -1.0;
-}
-
-// the glass in the texel a point falls in: rgb, and a negative fourth number if it is not behind
-fn glass_at(at: vec2f, top: vec2i, thr: f32) -> vec4f {
-  let g = textureLoad(allTex, clamp(vec2i(floor(at)), vec2i(0), top), 0);
-  return vec4f(g.rgb, select(-1.0, 1.0, g.a >= thr));
 }
 
 @fragment
@@ -659,25 +920,24 @@ fn fs_under(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let p = vec2i(pos.xy);
   let top = vec2i(d.half) - 1;
   let uv = pos.xy / d.half;
-  let own = textureLoad(allTex, p, 0);
-  if (own.a >= -SHARP) {
-    // nothing in front of the band here: the texel as it is (its neighbours' bridges lead up to it)
-    return vec4f(own.rgb, textureLoad(backTex, p, 0).a);
+  let f_own = textureLoad(fillTex, p, 0);
+  let o_own = textureLoad(backTex, p, 0).a;
+  if (f_own.a >= 0.999) {
+    return vec4f(f_own.rgb, o_own) / f_own.a;
   }
-  var sum = vec4f(0.0);
-  var open = 0.0;
-  var wl = 1.0;
-  for (var l = 0; l < 7; l++) {
-    sum += wl * textureSampleLevel(fillTex, lin, uv, f32(l));
-    open += wl * textureSampleLevel(backTex, lin, uv, f32(l)).a;
-    wl *= 0.05;
+  let max_l = min(6, i32(textureNumLevels(fillTex)) - 1);
+  var around = vec4f(0.0, 0.0, 0.0, 1.0);
+  var has = 0.0;
+  for (var l = max_l; l >= 0; l--) {
+    let f = smoothMip(fillTex, uv, l);
+    let o = smoothMip(backTex, uv, l).a;
+    if (f.a > 1e-4) {
+      let val = vec4f(f.rgb, o) / f.a;
+      let w = select(smoothstep(0.0, 0.35, f.a), 1.0, has < 0.5);
+      around = mix(around, val, w);
+      has = 1.0;
+    }
   }
-  let around = vec4f(sum.rgb, open) / max(sum.a, 1e-9);
-  // Deep inside a wide piece of near glass there is no edge within reach, and no need of one: the blur
-  // above is solid there. (The fourth of the smaller pictures has nothing here: nothing but near glass
-  // for 16 pixels and more around.)
-  if (textureSampleLevel(fillTex, lin, uv, 3.0).a <= 0.0) { return around; }
-  let thr = behind_of(own.a);
 
   // the shortest way across: of eight directions, the one whose two edges are closest together
   var span = 1e9;
@@ -686,51 +946,56 @@ fn fs_under(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   for (var k = 0; k < 8; k++) {
     let a = f32(k) * 0.39269908;
     let dir = vec2f(cos(a), sin(a));
-    let d1 = edge_at(p, dir, top, thr);
+    let d1 = edge_at(p, dir, top);
     if (d1 < 0.0 || d1 >= span) { continue; }
-    let d2 = edge_at(p, -dir, top, thr);
+    let d2 = edge_at(p, -dir, top);
     if (d2 > 0.0 && d1 + d2 < span) { span = d1 + d2; nu = dir; ends = vec2f(d1, d2); }
   }
-  if (span > 1e8) { return around; }
-
-  // Bridges through this texel at thirteen slants. For each, the two edges are compared over a short
-  // stretch either side of where the bridge lands: where what goes in is what comes out, the slant is
-  // that of the hidden lines. The bridges are then mixed by how well their ends agree (a straight
-  // crossing preferred when nothing tells them apart).
-  let tau = vec2f(-nu.y, nu.x);
-  let c1 = pos.xy + nu * (ends.x + 1.0);
-  let c2 = pos.xy - nu * (ends.y + 1.0);
-  let t = (ends.x + 1.0) / (span + 2.0);
-  var acc = vec4f(0.0);
-  var wsum = 0.0;
-  for (var i = -6; i <= 6; i++) {
-    let slant = f32(i) * 0.3 * span;
-    let a1 = c1 + tau * (slant * ends.x / span);
-    let a2 = c2 - tau * (slant * ends.y / span);
-    let e1 = glass_at(a1, top, thr);
-    let e2 = glass_at(a2, top, thr);
-    if (e1.a < 0.0 || e2.a < 0.0) { continue; }
-    var diff = dot(abs(e1.rgb - e2.rgb), vec3f(1.0));
-    var mag = dot(e1.rgb + e2.rgb, vec3f(1.0));
-    var n = 1.0;
-    for (var u = -2; u <= 2; u++) {
-      if (u == 0) { continue; }
-      let f1 = glass_at(a1 + tau * (1.5 * f32(u)), top, thr);
-      let f2 = glass_at(a2 + tau * (1.5 * f32(u)), top, thr);
-      if (f1.a < 0.0 || f2.a < 0.0) { continue; }
-      diff += dot(abs(f1.rgb - f2.rgb), vec3f(1.0));
-      mag += dot(f1.rgb + f2.rgb, vec3f(1.0));
-      n += 1.0;
+  var under_res = around;
+  if (span <= 1e8) {
+    // Bridges through this texel at thirteen slants.
+    let tau = vec2f(-nu.y, nu.x);
+    let c1 = pos.xy + nu * (ends.x + 1.0);
+    let c2 = pos.xy - nu * (ends.y + 1.0);
+    let t = (ends.x + 1.0) / (span + 2.0);
+    var acc = vec4f(0.0);
+    var wsum = 0.0;
+    for (var i = -6; i <= 6; i++) {
+      let slant = f32(i) * 0.3 * span;
+      let a1 = c1 + tau * (slant * ends.x / span);
+      let a2 = c2 - tau * (slant * ends.y / span);
+      let e1 = vis_at(a1, top);
+      let e2 = vis_at(a2, top);
+      if (e1.a < 0.0 || e2.a < 0.0) { continue; }
+      var diff = dot(abs(e1.rgb - e2.rgb), vec3f(1.0));
+      var mag = dot(e1.rgb + e2.rgb, vec3f(1.0));
+      var n = 1.0;
+      for (var u = -2; u <= 2; u++) {
+        if (u == 0) { continue; }
+        let f1 = vis_at(a1 + tau * (1.5 * f32(u)), top);
+        let f2 = vis_at(a2 + tau * (1.5 * f32(u)), top);
+        if (f1.a < 0.0 || f2.a < 0.0) { continue; }
+        diff += dot(abs(f1.rgb - f2.rgb), vec3f(1.0));
+        mag += dot(f1.rgb + f2.rgb, vec3f(1.0));
+        n += 1.0;
+      }
+      if (n < 3.0) { continue; }
+      let w = exp(-16.0 * (diff / (mag + 1e-3 * n) + 0.03 * abs(f32(i))));
+      let u1 = under_at_texel(clamp(vec2i(floor(a1)), vec2i(0), top));
+      let u2 = under_at_texel(clamp(vec2i(floor(a2)), vec2i(0), top));
+      acc += w * mix(u1, u2, t);
+      wsum += w;
     }
-    if (n < 3.0) { continue; }
-    let w = exp(-16.0 * (diff / (mag + 1e-3 * n) + 0.03 * abs(f32(i))));
-    let o1 = textureLoad(backTex, clamp(vec2i(floor(a1)), vec2i(0), top), 0).a;
-    let o2 = textureLoad(backTex, clamp(vec2i(floor(a2)), vec2i(0), top), 0).a;
-    acc += w * mix(vec4f(e1.rgb, o1), vec4f(e2.rgb, o2), t);
-    wsum += w;
+    if (wsum >= 1e-6) {
+      let bridgeW = smoothstep(f32(2 * BRIDGE), f32(BRIDGE), span) * smoothstep(0.0, 0.1, wsum);
+      under_res = mix(around, acc / wsum, bridgeW);
+    }
   }
-  if (wsum < 1e-6) { return around; }
-  return acc / wsum;
+  if (f_own.a > 1e-4) {
+    let own_val = vec4f(f_own.rgb, o_own) / f_own.a;
+    under_res = mix(under_res, own_val, smoothstep(0.0, 0.95, f_own.a));
+  }
+  return under_res;
 }
 
 // ---- 8. the picture put together ------------------------------------------------------------------------
@@ -783,46 +1048,41 @@ fn fs_out(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let s = textureLoad(picTex, c, 0);
   let t = textureLoad(tileTex, tile_of(c), 0);
   let wide = textureLoad(wideTex, tile_of(c), 0);
-  let r = textureLoad(cocTex, c, 0).r;
+  let cc = textureLoad(cocTex, c, 0);
+  let sp = textureLoad(splitTex, c, 0);
+  let r = cc.x;
+  let rb = cc.y;
+  let glass = sp.a;
   let at = (vec2f(c) + 0.5) / (2.0 * d.half);
   // What lies behind all the glass, as this pixel is to show it: as it is when it is black (or all but
   // sharp), blurred otherwise.
   var backdrop = s.rgb;
   var blurred = vec4f(0.0);
-  if (d.bg > SHARP) {
+  if (d.bg > 0.0) {
     blurred = up(backOut, at, i32(d.back));
-    backdrop = mix(s.rgb, blurred.rgb, blurred.a * smoothstep(SHARP, 3.0, d.bg));
+    if (d.bg > SHARP) {
+      backdrop = mix(s.rgb, blurred.rgb, blurred.a * smoothstep(SHARP, 3.0, d.bg));
+    }
   }
-  // Sharp (or all but sharp) glass on its outline, with a picture behind it. The pixel is part glass and
-  // part that picture, and the picture's part must be the blurred picture, or the outline is left with a
-  // rim of sharp background.
-  var sharp = s.rgb;
-  if (d.bg > SHARP && r > -2.5 && r <= SHARP) {
-    var lo = vec3f(1e9);
-    var hi = vec3f(-1e9);
-    var out = vec2f(0.0);
-    for (var y = -2; y <= 2; y++) {
-      for (var x = -2; x <= 2; x++) {
-        let q = clamp(c + vec2i(x, y), vec2i(0), top);
-        if (textureLoad(cocTex, q, 0).r < NONE * 0.5) { continue; }
-        let g = textureLoad(picTex, q, 0).rgb;
-        lo = min(lo, g);
-        hi = max(hi, g);
-        out += vec2f(f32(x), f32(y));
-      }
+  let back_blur = blurred.rgb * blurred.a;
+  if (d.show > 2.5) {
+    if (d.show < 3.5) {
+      return vec4f(max(-r, 0.0) / d.cmax, select(0.0, 0.2, abs(r) <= SHARP), select(r, 0.0, r >= NONE * 0.5 || r < 0.0) / d.cmax, s.a);
     }
-    if (hi.x >= lo.x) {
-      let inner = textureLoad(picTex, clamp(c - vec2i(round(normalize(out + vec2f(1e-4)) * 2.0)), vec2i(0), top), 0);
-      let part = outline(s.rgb, lo, hi, inner);
-      // the background's share of the pixel, blurred: by how far the blurred background is from that share
-      let k = blurred.a * smoothstep(SHARP, 3.0, d.bg);
-      sharp = max(s.rgb + k * ((1.0 - part.a) * blurred.rgb - part.rgb), vec3f(0.0));
-    }
+    let un = textureSampleLevel(underTex, lin, at, 0.0);
+    return vec4f(un.rgb + un.a * back_blur, s.a);
+  }
+  // Sharp glass on its outline against blurred sky: replace the unblurred background share with blurred backdrop.
+  var sharp_sky = s.rgb;
+  if (d.bg > SHARP && r > -2.5 && r <= SHARP && glass < 1.0 && rb >= NONE * 0.5) {
+    let k = blurred.a * smoothstep(SHARP, 3.0, d.bg);
+    sharp_sky = max(s.rgb + k * ((1.0 - glass) * blurred.rgb - sp.rgb), vec3f(0.0));
   }
   // nothing blurred comes anywhere near: the pixel is as it was
   if (wide.y <= SHARP && wide.w <= SHARP) {
+    if (d.show > 0.5) { return vec4f(0.0, 0.0, 0.0, s.a); }
     if (r >= NONE * 0.5) { return vec4f(backdrop, s.a); }
-    return vec4f(sharp, s.a);
+    return vec4f(sharp_sky, s.a);
   }
 
   // The slightly blurred glass around this pixel, gathered at full size. If the pixel is itself slightly
@@ -869,34 +1129,62 @@ fn fs_out(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   for (var l = 0; l < n; l++) {
     // the smallest blur this copy draws (see RADIUS), unless its texels are too wide for the tiles to say
     let lo = select(d.lo, 0.75 * RADIUS * exp2(f32(l)), l > 0);
-    if (l >= 3 || wide.y >= lo) { far = behind(far, up(farOut, at, l)); }
+    if (l >= 2 || wide.y >= lo) { far = behind(far, up(farOut, at, l)); }
   }
   for (var l = n - 1; l >= 0; l--) {
     let lo = select(d.lo, 0.75 * RADIUS * exp2(f32(l)), l > 0);
-    if (l >= 3 || wide.w >= lo) { near = behind(near, up(nearOut, at, l)); }
+    if (l >= 2 || wide.w >= lo) { near = behind(near, up(nearOut, at, l)); }
   }
   near = behind(near, near0);
 
-  // What this pixel shows under the layer of near glass.
-  var below = sharp;
-  if (r >= NONE * 0.5) {
-    // no glass: the blur of far glass beside it, and behind that whatever lies behind everything
-    below = far.rgb + (1.0 - min(far.a, 1.0)) * backdrop;
-  } else if (r > SHARP) {
-    // blurred glass behind the band: at its outline it does not fill the lens, and what lies behind
-    // everything shows past it
-    below = far.rgb + (1.0 - min(far.a, 1.0)) * blurred.rgb * blurred.a;
-  } else if (r < -SHARP) {
-    // Near glass: the tracer never saw what is behind it (see fs_under). Glass hardly in front of the
-    // band is the sharp glass carrying on: there, what is under it is itself.
-    let un = textureSampleLevel(underTex, lin, at, 0.0);
-    below = mix(sharp, un.rgb + un.a * blurred.rgb, smoothstep(SHARP, 2.5, -r));
-  }
   if (d.show > 0.5) {
     if (d.show < 1.5) { return vec4f(vec3f(near.a), s.a); }
-    if (d.show < 2.5) { return vec4f(vec3f(far.a), s.a); }
-    if (d.show < 3.5) { return vec4f(max(-r, 0.0) / d.cmax, select(0.0, 0.2, abs(r) <= SHARP), select(r, 0.0, r >= NONE * 0.5 || r < 0.0) / d.cmax, s.a); }
-    return vec4f(textureSampleLevel(underTex, lin, at, 0.0).rgb, s.a);
+    return vec4f(vec3f(far.a), s.a);
+  }
+
+  let far_sky = far.rgb + (1.0 - min(far.a, 1.0)) * backdrop;
+  let far_comp = far.rgb + (1.0 - min(far.a, 1.0)) * back_blur;
+
+  // What this pixel shows under the layer of near glass.
+  var below = sharp_sky;
+  if (r >= NONE * 0.5) {
+    below = far_sky;
+  } else if (r > SHARP) {
+    below = far_comp;
+    if (glass < 1.0 && rb >= NONE * 0.5) {
+      let sky_unblur = sp.rgb / max(1.0 - glass, 1e-4);
+      let sky_here = mix(sky_unblur, blurred.rgb, blurred.a * smoothstep(SHARP, 3.0, d.bg));
+      below = far.rgb + (1.0 - min(far.a, 1.0)) * mix(sky_here, back_blur, glass);
+    }
+  } else if (r >= -SHARP) {
+    // Sharp glass: on an outline over blurred sky or blurred far geometry, blend its unmixed front share
+    // over the blurred background behind it without leaking open sky where geometry is behind.
+    if (glass < 1.0) {
+      let front_sharp = max(s.rgb - sp.rgb, vec3f(0.0));
+      let bg_unblur = sp.rgb / max(1.0 - glass, 1e-3);
+      let far_geo = far.rgb + (1.0 - min(far.a, 1.0)) * bg_unblur;
+      let bg_behind = select(far_geo, far_sky, rb >= NONE * 0.5);
+      below = front_sharp + (1.0 - glass) * bg_behind;
+    }
+  } else {
+    // Near glass: inside its silhouette use underTex; on its 1-pixel AA edge over non-near surfaces blend
+    // smoothly with the directly visible sharp/far/sky surface behind the subpixel miss share.
+    let un = textureSampleLevel(underTex, lin, at, 0.0);
+    let under_below = mix(s.rgb, un.rgb + un.a * back_blur, smoothstep(SHARP, 4.0, -r));
+    if (glass < 0.999 && rb >= -SHARP) {
+      var known_behind: vec3f;
+      if (rb >= NONE * 0.5) {
+        let sky_unblur = sp.rgb / max(1.0 - glass, 1e-3);
+        let sky_here = mix(sky_unblur, blurred.rgb, blurred.a * smoothstep(SHARP, 3.0, d.bg));
+        known_behind = far.rgb + (1.0 - min(far.a, 1.0)) * sky_here;
+      } else {
+        let bg_unblur = sp.rgb / max(1.0 - glass, 1e-3);
+        known_behind = far.rgb + (1.0 - min(far.a, 1.0)) * bg_unblur;
+      }
+      below = mix(known_behind, under_below, glass);
+    } else {
+      below = under_below;
+    }
   }
   return vec4f(near.rgb + (1.0 - min(near.a, 1.0)) * below, s.a);
 }

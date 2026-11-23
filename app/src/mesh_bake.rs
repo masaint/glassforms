@@ -414,6 +414,10 @@ impl MeshBaker {
 
 /// A model file read and examined.
 pub struct Loaded {
+    appearance_notice: Option<String>,
+    /// Canonical owners retained beside their renderer projection and packed decoded pixels.
+    pub canonical: Option<Arc<gf_core::pbr::CanonicalImport>>,
+    pub surface: Option<Arc<Vec<u32>>>,
     pub ex: Examined,
     /// the file's name, its size, and how long reading and examining took
     pub file: String,
@@ -499,12 +503,22 @@ fn as_shell(mode: u8, report: &Report) -> bool {
 fn load(path: &Path) -> R<Loaded> {
     let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let t = Instant::now();
-    let read = mesh::read::read_file(path)?;
+    let asset = mesh::read::read_asset(path)?;
+    let read = asset.mesh;
     let read_ms = t.elapsed().as_secs_f64() * 1e3;
     let t = Instant::now();
     let ex = mesh::examine(&read).map_err(|e| format!("{file}: {e}"))?;
     let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-    Ok(Loaded { ex, file, bytes, read_ms, examine_ms: t.elapsed().as_secs_f64() * 1e3 })
+    let mut canonical = None;
+    let surface = asset.appearance.map(|a| {
+        let fit = mesh::solid::Fit::of(&ex.surface, false);
+        let source_id = path.to_string_lossy();
+        let (import, words) = a.canonical_shader_words(&source_id, &read, &fit)
+            .map_err(|error| format!("{file}: {error}"))?;
+        canonical = Some(Arc::new(import));
+        Ok::<_, String>(Arc::new(words))
+    }).transpose()?;
+    Ok(Loaded { ex, canonical, surface, appearance_notice: asset.appearance_notice, file, bytes, read_ms, examine_ms: t.elapsed().as_secs_f64() * 1e3 })
 }
 
 /// Everything that needs no GPU: read and examine the file (unless that has been done), and prepare
@@ -650,10 +664,10 @@ impl Models {
         let plain = job.size == 1.0 && smooth <= 0.0 && res == full;
         // While a slider moves or a video is made the base volume is wanted again at once and is kept;
         // a full build is the last for a while, and gives the base's memory back.
-        let keep = mode != Detail::Full;
+        let keep = mode.keeps_model_base();
         // (GLASSFORMS_MODEL_BASE=1 goes by way of the base volume always, to check the two ways against each other)
         let direct = plain && offset.abs() <= DIRECT_REACH && (e.base.is_none() || !keep) && std::env::var_os("GLASSFORMS_MODEL_BASE").is_none();
-        let (out, _) = volumes.target(res);
+        let (out, _) = volumes.target(res)?;
         let t = Instant::now();
         if direct {
             baker.base(gpu, &p, &out, offset)?;
@@ -673,7 +687,7 @@ impl Models {
         // what the window is told
         let l = &self.loaded[&path];
         let info = ModelInfo {
-            file: l.file.clone(), line: l.ex.report.line.clone(), shell: key.shell, treatment: l.ex.report.treatment, report: l.ex.report.clone(), triangles: p.tris.len(),
+            file: l.file.clone(), line: l.appearance_notice.as_ref().map_or_else(|| l.ex.report.line.clone(), |why| format!("{}. Source materials could not be loaded. {why}", l.ex.report.line)), shell: key.shell, treatment: l.ex.report.treatment, report: l.ex.report.clone(), triangles: p.tris.len(),
             hidden: p.hidden, unclosed: p.unclosed, band: p.band / voxel, smooth,
             read_ms: l.read_ms, examine_ms: l.examine_ms, prepare_ms: e.prep_ms, gpu_ms, direct,
         };
@@ -708,7 +722,7 @@ impl Engine {
                 self.models.asked = Some((given, new_layer));
             }
         }
-        if arrived && self.state.want.is_none() { self.state.want = Some(Detail::Full); }
+        if arrived { self.state.request_if_idle(gf_core::build::BuildRequest::model_ready()); }
         for layer in 0..self.state.layer_count() {
             let Some(file) = self.state.model_file(layer).filter(|f| !f.trim().is_empty()) else { continue };
             // A file the user chose is kept relative to the program's folder when it is in it. (Looked
@@ -769,6 +783,36 @@ impl Engine {
         self.models.asked = Some((path.to_string(), new_layer));
     }
 
+    /// File-authored surface data and placements for the visible model instances.
+    pub(crate) fn imported_surfaces(&self) -> Vec<crate::model_surface::Instance> {
+        if self.models.loaded.values().all(|model| model.surface.is_none()) { return Vec::new(); }
+        let mut surfaces = Vec::new();
+        let edited = self.state.edit_scope.object();
+        let world = edited.is_none().then(|| self.state.stack.world_plan());
+        for (layer, source) in self.state.stack.layers.iter().enumerate() {
+            // Object Mode presents the source at its authored placement, even if hidden in World Mode.
+            // Keep the triangle lookup in the same scope as the displayed distance field.
+            let placements: &[_] = match &world {
+                Some(plan) if source.show => &plan.placements[layer],
+                None if edited == Some(layer) => std::slice::from_ref(&source.place),
+                _ => continue,
+            };
+            let Some(file) = self.state.model_file(layer).filter(|p| !p.is_empty()) else { continue };
+            let Some(data) = self.models.loaded.get(&hdri::resolve(&file)).and_then(|m| m.surface.as_ref()) else { continue };
+            let Some(shape) = self.state.layer_shape(layer) else { continue };
+            let preset = self.state.layer_preset(layer);
+            if preset.param_index("fileSurface").and_then(|i|shape.vals.get(i)).copied().unwrap_or(1.0) < 0.5 { continue; }
+            let job = gf_core::presets::models::job(preset, shape, &file);
+            for &place in placements {
+                let reach = 0.012 + job.smooth.max(0.0) + job.inflate.abs() + if job.mode == 2 { job.wall } else { 0.0 };
+                surfaces.push(crate::model_surface::Instance {
+                    data: data.clone(), place, up_z: job.up_z, size: job.size, reach,
+                });
+            }
+        }
+        surfaces
+    }
+
     /// Why the last file given to `load_model` could not be used (None once one loads).
     pub fn model_error(&self) -> Option<&str> {
         self.models.error.as_deref()
@@ -796,5 +840,167 @@ impl Engine {
             })
             .collect();
         if rows.is_empty() { String::new() } else { format!(",\"models\":[{}]", rows.join(",")) }
+    }
+}
+
+#[cfg(test)]
+mod surface_tests {
+    use super::*;
+    use gf_core::groups::Item;
+    use gf_core::mods::{Axes, Kind, Modifier};
+    use gf_core::state::State;
+    use serde_json::json;
+
+    fn write_loader_gltf(dir: &Path, material: serde_json::Value, textured: bool) -> PathBuf {
+        let mut buffer = Vec::new();
+        for value in [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] {
+            buffer.extend(value.to_le_bytes());
+        }
+        for value in [0.0f32, 0.0, 1.0, 0.0, 0.0, 1.0] {
+            buffer.extend(value.to_le_bytes());
+        }
+        std::fs::write(dir.join("loader.bin"), &buffer).unwrap();
+        let mut doc = json!({
+            "asset": {"version": "2.0"},
+            "scene": 0,
+            "scenes": [{"nodes": [0]}],
+            "nodes": [{"mesh": 0}],
+            "meshes": [{"primitives": [{"attributes": {
+                "POSITION": 0, "TEXCOORD_0": 1
+            }, "material": 0}]}],
+            "materials": [material],
+            "buffers": [{"uri": "loader.bin", "byteLength": buffer.len()}],
+            "bufferViews": [
+                {"buffer": 0, "byteLength": 36},
+                {"buffer": 0, "byteOffset": 36, "byteLength": 24}
+            ],
+            "accessors": [
+                {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3"},
+                {"bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC2"}
+            ]
+        });
+        if textured {
+            let file = std::fs::File::create(dir.join("loader.png")).unwrap();
+            let mut image = png::Encoder::new(file, 1, 1);
+            image.set_color(png::ColorType::Rgba);
+            image.write_header().unwrap().write_image_data(&[40, 80, 120, 255]).unwrap();
+            doc["images"] = json!([{"uri": "loader.png"}]);
+            doc["textures"] = json!([{"source": 0}]);
+        }
+        let path = dir.join("loader.gltf");
+        std::fs::write(&path, doc.to_string()).unwrap();
+        path
+    }
+
+    #[test]
+    fn imported_surfaces_follow_world_visibility_and_object_isolation() {
+        let Ok(gpu) = Gpu::headless("vulkan") else { return };
+        let params = vec![("res".into(), "64".into())];
+        let mut e = Engine::new(gpu, State::with_args(&params, true), true);
+        let dir = std::env::temp_dir().join(format!("glassforms-surface-scope-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tetra.obj");
+        std::fs::write(&path, "mtllib paint.mtl\nv 0 1 0\nv -1 -1 1\nv 1 -1 1\nv 0 -1 -1\nvt 0 0\nusemtl paint\nf 1/1 2/1 3/1\nf 1/1 3/1 4/1\nf 1/1 4/1 2/1\nf 2/1 4/1 3/1\n").unwrap();
+        std::fs::write(dir.join("paint.mtl"), "newmtl paint\nmap_Kd paint.png\n").unwrap();
+        let file = std::fs::File::create(dir.join("paint.png")).unwrap();
+        let mut image = png::Encoder::new(file, 1, 1);
+        image.set_color(png::ColorType::Rgb);
+        image.write_header().unwrap().write_image_data(&[210, 30, 10]).unwrap();
+
+        e.models.wait = true;
+        e.load_model_as(&path.to_string_lossy(), true);
+        assert_eq!(e.model_error(), None);
+        let shape = Item::Object(1);
+        let mut repeat = Modifier::of(Kind::Repeat);
+        repeat.a = Axes::new([3., 1., 1.], false);
+        e.state.stack.world_modifiers_mut(shape).unwrap().list.push(repeat);
+        assert_eq!(e.imported_surfaces().len(), 3);
+        e.state.set_layer_show(1, false);
+        assert!(e.imported_surfaces().is_empty());
+        assert!(e.state.enter_world_item(shape));
+        let selected = e.imported_surfaces();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].place, e.state.stack.layers[1].place);
+        e.state.leave_object();
+        e.state.set_layer_show(1, true);
+        assert!(e.state.enter_world_item(Item::Object(0)));
+        assert!(e.imported_surfaces().is_empty());
+        e.state.leave_object();
+        assert_eq!(e.imported_surfaces().len(), 3);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn factor_only_load_retains_canonical_owner_and_renderable_surface_payload() {
+        let dir = std::env::temp_dir().join(format!("glassforms-factor-surface-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("factor.obj");
+        std::fs::write(&path, "mtllib factor.mtl\nv 0 1 0\nv -1 -1 1\nv 1 -1 1\nv 0 -1 -1\nusemtl paint\nf 1 2 3\nf 1 3 4\nf 1 4 2\nf 2 4 3\n").unwrap();
+        std::fs::write(dir.join("factor.mtl"), "newmtl paint\nKd 0.1 0.3 0.7\nPr 0.42\nPm 0.23\n").unwrap();
+        let loaded = load(&path).unwrap();
+        let canonical = loaded.canonical.expect("canonical import owner was dropped");
+        assert_eq!(canonical.source_id, path.to_string_lossy());
+        assert_eq!(canonical.materials.len(), 1);
+        assert!(canonical.materials[0].spec.textures.is_empty());
+        let words = loaded.surface.expect("factor-only material has no renderer payload");
+        let material = words[2] as usize;
+        let values: Vec<f32> = words[material..material + 6]
+            .iter().map(|word| f32::from_bits(*word)).collect();
+        assert_eq!(&values[..4], &[0.1, 0.3, 0.7, 1.0]);
+        assert_eq!(&values[4..], &[0.42, 0.23]);
+        assert_eq!(words[3] as usize, words.len());
+        let repeated = load(&path).unwrap();
+        assert_eq!(repeated.canonical.as_deref(), Some(canonical.as_ref()));
+        assert_eq!(repeated.surface.as_deref(), Some(words.as_ref()));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn zero_scale_gltf_uv_transform_retains_canonical_owner_and_projection() {
+        let dir = std::env::temp_dir().join(format!("glassforms-zero-scale-uv-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = write_loader_gltf(&dir, json!({
+            "pbrMetallicRoughness": {"baseColorTexture": {
+                "index": 0,
+                "extensions": {"KHR_texture_transform": {
+                    "scale": [0.0, 1.0], "offset": [0.25, 0.0]
+                }}
+            }}
+        }), true);
+        let loaded = load(&path).unwrap();
+        assert!(loaded.appearance_notice.is_none());
+        let canonical = loaded.canonical.expect("zero-scale UV transform lost its canonical owner");
+        assert_eq!(canonical.materials.len(), 1);
+        let words = loaded.surface.unwrap();
+        let uv = words[1] as usize + 9;
+        let actual: Vec<f32> = words[uv..uv + 6].iter().map(|word| f32::from_bits(*word)).collect();
+        assert_eq!(actual, [0.25, 0.0, 0.25, 0.0, 0.25, 1.0]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn factor_only_gltf_alpha_cutoff_above_one_retains_canonical_owner_and_payload() {
+        let dir = std::env::temp_dir().join(format!("glassforms-alpha-cutoff-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = write_loader_gltf(&dir, json!({
+            "alphaMode": "MASK",
+            "alphaCutoff": 2.0,
+            "pbrMetallicRoughness": {
+                "baseColorFactor": [0.16, 0.42, 0.78, 1.0],
+                "roughnessFactor": 0.29,
+                "metallicFactor": 0.37
+            }
+        }), false);
+        let loaded = load(&path).unwrap();
+        assert!(loaded.appearance_notice.is_none());
+        let canonical = loaded.canonical.expect("valid alpha cutoff lost its canonical owner");
+        assert_eq!(canonical.materials[0].spec.coverage.values.alpha_cutoff.as_constant(), Some(&2.0));
+        let words = loaded.surface.unwrap();
+        let material = words[2] as usize;
+        let actual: Vec<f32> = words[material..material + 6]
+            .iter().map(|word| f32::from_bits(*word)).collect();
+        assert_eq!(actual, [0.16, 0.42, 0.78, 1.0, 0.29, 0.37]);
+        assert_eq!(words[3] as usize, words.len());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

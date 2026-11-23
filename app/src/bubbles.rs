@@ -12,7 +12,7 @@ use crate::bake::{Volume, VOL_FORMAT};
 use crate::gpu::*;
 use crate::combine::bodies_format;
 
-const BUBBLES_WGSL: &str = include_str!("shaders/bubbles.wgsl");
+const BUBBLES_WGSL: &str = concat!(include_str!("shaders/pbr/hash.wgsl"), include_str!("shaders/bubbles.wgsl"));
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]

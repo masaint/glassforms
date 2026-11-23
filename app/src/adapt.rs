@@ -64,16 +64,44 @@ pub fn tracer_pipeline(gpu: &Gpu, label: &str, module: &wgpu::ShaderModule, layo
 /// testing the stencil as the mask pass left it (`masked`) or with every pixel traced.
 #[allow(clippy::too_many_arguments)]
 pub fn trace_pass(enc: &mut wgpu::CommandEncoder, views: &[&wgpu::TextureView], first: wgpu::Color, stencil: &wgpu::TextureView, masked: bool, pipe: &wgpu::RenderPipeline, group: &wgpu::BindGroup, second: Option<&wgpu::BindGroup>) {
+    trace_pass_in(enc, views, first, stencil, masked, pipe, group, second, None);
+}
+
+/// The same, traced only into the corner `region` (width, height) of the targets when one is given (a
+/// moving frame traced smaller to keep the frame rate: render.rs `dyn_scale`).
+#[allow(clippy::too_many_arguments)]
+pub fn trace_pass_in(enc: &mut wgpu::CommandEncoder, views: &[&wgpu::TextureView], first: wgpu::Color, stencil: &wgpu::TextureView, masked: bool, pipe: &wgpu::RenderPipeline, group: &wgpu::BindGroup, second: Option<&wgpu::BindGroup>, region: Option<(u32, u32)>) {
+    trace_region(enc, views, first, stencil, masked, pipe, group, second, region, None);
+}
+
+/// A scissored pass updates native pixels and keeps the previous sample in the untouched area.
+#[allow(clippy::too_many_arguments)]
+pub fn trace_region(enc: &mut wgpu::CommandEncoder, views: &[&wgpu::TextureView], first: wgpu::Color, stencil: &wgpu::TextureView, masked: bool, pipe: &wgpu::RenderPipeline, group: &wgpu::BindGroup, second: Option<&wgpu::BindGroup>, region: Option<(u32, u32)>, scissor: Option<(u32, u32, u32)>) {
+    trace_regions(enc, views, first, stencil, masked, pipe, group, second, region, scissor);
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn trace_regions(enc: &mut wgpu::CommandEncoder, views: &[&wgpu::TextureView], first: wgpu::Color, stencil: &wgpu::TextureView, masked: bool, pipe: &wgpu::RenderPipeline, group: &wgpu::BindGroup, second: Option<&wgpu::BindGroup>, region: Option<(u32, u32)>, scissors: impl IntoIterator<Item = (u32, u32, u32)>) {
+    let mut scissors = scissors.into_iter().peekable();
+    let partial = scissors.peek().is_some();
     let atts: Vec<Option<wgpu::RenderPassColorAttachment>> = views
         .iter()
         .enumerate()
-        .map(|(i, &view)| Some(wgpu::RenderPassColorAttachment { view, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(if i == 0 { first } else { wgpu::Color::TRANSPARENT }), store: wgpu::StoreOp::Store } }))
+        .map(|(i, &view)| Some(wgpu::RenderPassColorAttachment { view, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load: if partial { wgpu::LoadOp::Load } else { wgpu::LoadOp::Clear(if i == 0 { first } else { wgpu::Color::TRANSPARENT }) }, store: wgpu::StoreOp::Store } }))
         .collect();
     let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor { label: Some("trace"), color_attachments: &atts, depth_stencil_attachment: Some(attachment(stencil, masked)), timestamp_writes: None, occlusion_query_set: None, multiview_mask: None });
     rp.set_pipeline(pipe);
+    if let Some((w, h)) = region { rp.set_viewport(0.0, 0.0, w as f32, h as f32, 0.0, 1.0); }
     rp.set_bind_group(0, group, &[]);
     if let Some(g) = second { rp.set_bind_group(1, g, &[]); }
-    rp.draw(0..3, 0..1);
+    if partial {
+        for (x, w, h) in scissors {
+            rp.set_scissor_rect(x, 0, w, h);
+            rp.draw(0..3, 0..1);
+        }
+    } else {
+        rp.draw(0..3, 0..1);
+    }
 }
 
 /// The stencil attachment for a tracer's pass: kept as the mask pass wrote it (`masked`), or cleared, so

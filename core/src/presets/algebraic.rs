@@ -91,14 +91,7 @@ pub fn family() -> Family {
             ("dist", Setting::Num(6.6)), ("fov", Setting::Num(26.0)), ("rot", Setting::Vec3([24.0, 34.0, 0.0])),
             ("spin", Setting::Num(0.25)), ("bloom", Setting::Num(0.35)), ("exposure", Setting::Num(1.0)),
         ],
-        lights: vec![
-            Light { az:   38.0, el:  18.0, w: 14.0, h: 32.0, rgb: [5.0, 4.9, 4.7],   soft: 0.7 },
-            Light { az:  -55.0, el:  -8.0, w: 10.0, h: 42.0, rgb: [0.5, 1.4, 4.0],   soft: 0.7 },
-            Light { az: -140.0, el:   5.0, w:  8.0, h: 42.0, rgb: [5.0, 1.6, 0.25],  soft: 0.7 },
-            Light { az:  150.0, el:  28.0, w: 24.0, h: 16.0, rgb: [3.2, 3.1, 3.0],   soft: 0.8 },
-            Light { az:    0.0, el:  85.0, w: 34.0, h: 34.0, rgb: [0.8, 0.9, 1.1],   soft: 0.9 },
-            Light { az:    0.0, el: -80.0, w: 30.0, h: 30.0, rgb: [0.5, 0.22, 0.05], soft: 0.9 },
-        ],
+        lights: surface_lights(),
         ..Family::new("algebraic", "Algebraic surfaces", Kind::Field)
     }
 }

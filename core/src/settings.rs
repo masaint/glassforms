@@ -53,6 +53,14 @@ settings! {
     disp, "disp", 0.08;
     /// bounces followed inside the glass
     nb, "nb", 4.0;
+    /// 1 = diffuse indirect light and colour bounces (global illumination) across objects, folds and floor; 0 = off
+    gi, "gi", 1.0;
+    /// diffuse indirect light bounces followed (1 to 4; separate from `nb`, which is glass/metal internal bounces)
+    gi_bounces, "giBounces", 2.0;
+    /// strength of diffuse bounced light and colour bleed: 1 = physically based, 0 = off, > 1 = boosted colour bleed
+    gi_strength, "giStrength", 1.0;
+    /// diffuse bounce rays traced per shading sample each frame (1 to 4)
+    gi_samples, "giSamples", 1.0;
     /// rays per pixel, and wavelengths carried by each
     ns, "ns", 1.0;
     nw, "nw", 3.0;
@@ -237,11 +245,17 @@ settings! {
     dust, "dust", 0.0;
     /// fine parallel polishing lines round the shape's vertical (brushed metal): 0 = none
     brush, "brush", 0.0;
+    /// Orientation of the polishing axis in the object’s local XY plane, in degrees.
+    brush_angle, "brushAngle", 0.0;
     /// uneven colour: clouds and veins in a milky body, a faint unevenness of a metal's colour (0 = even)
     mottle, "mottle", 0.0;
     /// a thin film on the surface: thickness in nanometres (0 = none), its index, how much the thickness
     /// varies across the surface, how large that pattern is, where the pattern is in its flow (one turn =
     /// 1), and how much thinner the film is towards the top
+    grating, "grating", 0.0;
+    grating_pitch, "gratingPitch", 1600.0;
+    grating_angle, "gratingAngle", 0.0;
+    grating_radial, "gratingRadial", 0.0;
     film, "film", 0.0;
     film_ior, "filmIor", 1.33;
     film_var, "filmVar", 0.0;
@@ -265,6 +279,7 @@ settings! {
     /// and 1 = follow the light as it wanders (true, costly) instead of estimating it
     sss, "sss", 0.0;
     sss_depth, "sssDepth", 0.2;
+    sss_opaque, "sssOpaque", 0.0;
     sss_walk, "sssWalk", 0.0;
     /// how differently the colours scatter: 0 = all alike; towards 1 blue is scattered more often and red
     /// less (as in milk glass and wax: a bluish edge, a warm glow deeper in and in the shade)
@@ -427,7 +442,7 @@ settings! {
     /// brightens and darkens with them); between, a mix. Without a backdrop it is always the light.
     floor_match, "floorMatch", 1.0;
     /// how far from the middle of the room the floor has melted wholly into the backdrop
-    floor_fade, "floorFade", 16.0;
+    floor_fade, "floorFade", 120.0;
     /// 0 = a matte floor, up to 1 = a glossy one; and 1 = the shape itself is mirrored in a glossy floor
     floor_gloss, "floorGloss", 0.0;
     floor_mirror, "floorMirror", 0.0;
@@ -443,6 +458,43 @@ settings! {
     /// 1 = as it is; contrast about middle grey, and how strong the colours are
     contrast, "contrast", 1.0;
     saturation, "saturation", 1.0;
+    // ---- physical sky & sun (see sky.rs) ---------------------------------------------------------------
+    sky, "sky", 0.0;
+    sky_show, "skyShow", 1.0;
+    sky_lights, "skyLights", 0.0;
+    sky_gain, "skyGain", 1.0;
+    sun_pitch, "sunPitch", 38.0;
+    sun_yaw, "sunYaw", 35.0;
+    sun_size, "sunSize", 1.0;
+    sun_power, "sunPower", 1.1;
+    sun_disc, "sunDisc", 1.0;
+    sun_r, "sunR", 1.0;
+    sun_g, "sunG", 0.98;
+    sun_b, "sunB", 0.95;
+    sky_rayleigh, "skyRayleigh", 1.0;
+    sky_mie, "skyMie", 0.6;
+    sky_mie_g, "skyMieG", 0.78;
+    sky_ozone, "skyOzone", 1.0;
+    sky_ground_r, "skyGroundR", 0.20;
+    sky_ground_g, "skyGroundG", 0.18;
+    sky_ground_b, "skyGroundB", 0.15;
+    // ---- volumetric sky-space clouds & atmosphere (see sky.rs) -----------------------------------------
+    cloud_cover, "cloudCover", 0.0;
+    cloud_density, "cloudDensity", 1.0;
+    cloud_scale, "cloudScale", 1.0;
+    cloud_base, "cloudBase", 1.6;
+    cloud_thick, "cloudThick", 1.8;
+    cloud_detail, "cloudDetail", 0.55;
+    cloud_soft, "cloudSoft", 0.35;
+    cloud_silver, "cloudSilver", 1.0;
+    cloud_wind_x, "cloudWindX", 0.0;
+    cloud_wind_z, "cloudWindZ", 0.0;
+    cloud_shadow, "cloudShadow", 0.75;
+    atmo_haze, "atmoHaze", 0.0;
+    atmo_fog_h, "atmoFogH", 1.2;
+    atmo_aerial, "atmoAerial", 0.0;
+    sun_rays, "sunRays", 0.0;
+    sun_ray_g, "sunRayG", 0.76;
 }
 
 impl Settings {
@@ -464,9 +516,9 @@ impl Settings {
         let nums: Vec<f64> = text.split(',').filter_map(|s| s.trim().parse::<f64>().ok().filter(|v| v.is_finite())).collect();
         let whole = nums.len() == text.split(',').count();
         match name {
-            "absorb" if whole && nums.len() == 3 => { self.absorb = [nums[0], nums[1], nums[2]]; true }
-            "shift" if whole && nums.len() == 2 => { self.shift = [nums[0], nums[1]]; true }
-            "rot" if whole && nums.len() == 3 => { self.rot = [nums[0], nums[1], nums[2]]; true }
+            "absorb" if whole && nums.len() == 3 => { self.absorb = [nums[0], nums[1], nums[2]].map(|a| crate::limits::hold(a, (0.0, 1000.0))); true }
+            "shift" if whole && nums.len() == 2 => { self.shift = [nums[0], nums[1]].map(|s| crate::limits::hold(s, (-100.0, 100.0))); true }
+            "rot" if whole && nums.len() == 3 => { self.rot = [nums[0], nums[1], nums[2]].map(|r| crate::limits::hold(r, (-36000.0, 36000.0))); true }
             _ if whole && nums.len() == 1 => self.set(name, nums[0]),
             _ => false,
         }

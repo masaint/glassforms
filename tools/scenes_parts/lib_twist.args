@@ -1,0 +1,9 @@
+scene=studio
+preset=block
+material=glass
+p.width=0.75
+p.height=1.9
+p.depth=0.75
+mods=[{"kind":"twist","a":{"v":[0,180,0],"link":false}}]
+dist=5.0
+rot=10,20,0

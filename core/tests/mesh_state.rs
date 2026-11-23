@@ -23,7 +23,7 @@ fn the_family_of_models_follows_the_seven() {
         let Shape::Mesh { file } = &p.shape else { panic!("{}: not a model", p.id) };
         assert_eq!(file.is_empty(), p.id == "file", "{}", p.id);
         let sliders: Vec<&str> = p.params.iter().map(|d| d.id).collect();
-        assert_eq!(sliders, ["size", "smooth", "wall", "mode", "up"], "{}", p.id);
+        assert_eq!(sliders, ["size", "smooth", "wall", "mode", "up", "fileSurface"], "{}", p.id);
         assert!(!p.eq.is_empty() && !p.note.is_empty() && p.rot.is_some(), "{}", p.id);
         // smoothing starts unset: it is the mesh's to say
         assert_eq!(p.params[1].value, SMOOTH_UNSET, "{}", p.id);
@@ -43,13 +43,13 @@ fn a_model_is_a_job_that_names_its_file_and_its_sliders() {
     // the sliders: the model's own, and inflate; two of them are choices with names
     let knobs = s.shape_knobs();
     let ids: Vec<&str> = knobs.iter().map(|k| k.id.as_str()).collect();
-    assert_eq!(ids, ["size", "smooth", "wall", "mode", "up", "@puff"]);
+    assert_eq!(ids, ["size", "smooth", "wall", "mode", "up", "fileSurface", "@puff"]);
     let choices = |id: &str| s.knob_choices(knobs.iter().find(|k| k.id == id).unwrap());
     assert_eq!(choices("mode").unwrap(), ["as found", "solid", "shell"]);
     assert_eq!(choices("up").unwrap(), ["y up", "z up"]);
     assert!(choices("size").is_none() && choices("@puff").is_none());
     // choices are never animated; amounts are
-    assert!(knobs.iter().all(|k| k.wave == !matches!(k.id.as_str(), "mode" | "up")));
+    assert!(knobs.iter().all(|k| k.wave == !matches!(k.id.as_str(), "mode" | "up" | "fileSurface")));
     // a slider of another family with the same name is not a choice
     let t = State::with_args(&args(&[("scene", "knots")]), true);
     assert!(t.shape_knobs().iter().all(|k| t.knob_choices(k).is_none()));
@@ -73,7 +73,7 @@ fn a_file_given_by_name_is_the_shape() {
     assert!(k.apply_arg("model", r"C:\models\Bust of a Man.glb"));
     assert_eq!((k.family().id, k.preset().id), ("models", "file"));
     assert_eq!(k.layer_title(0), "Bust of a Man");
-    assert_eq!(k.want, Some(Detail::Full));
+    assert_eq!(k.wanted(), Some(Detail::Full));
     // smoothing set for one file does not carry over to the next
     let i = s.preset().param_index("smooth").unwrap();
     assert!(s.set_model("a.obj"));

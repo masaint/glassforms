@@ -53,7 +53,7 @@ fn part(g: f64, start: f64) -> f64 {
 }
 
 /// Build a shape at full size for its frame, then as far as it has grown.
-fn grown(v: &[f64], grow_at: usize, build: impl Fn(&[f64], f64) -> RawCurve) -> RawCurve {
+fn grown(v: &[f64], grow_at: usize, mut build: impl FnMut(&[f64], f64) -> RawCurve) -> RawCurve {
     let mut whole = build(v, 1.0);
     // (a shape may give its own frame: the boxes round slanting points are loose)
     if whole.frame.is_empty() { whole.frame_pieces(); }
@@ -233,7 +233,23 @@ mod ge {
     pub const GROW: usize = 5;
 }
 
-fn geode(v: &[f64], _o: &CurveOpts) -> RawCurve {
+/// The geode. `whole`: its shell as one piece (for the formula, which passes pieces by by their boxes, and
+/// has no voxels of a hollow to fill), rather than as patches each with a box round it alone (for the grid).
+#[cfg(test)]
+fn geode_build(v: &[f64], whole: bool) -> RawCurve {
+    geode_points(v, whole, |_| {})
+}
+
+struct GeodePoint {
+    base: V,
+    axis: V,
+    side: V,
+    length: f64,
+    radius: f64,
+    start: f64,
+}
+
+fn geode_points(v: &[f64], whole: bool, mut record: impl FnMut(GeodePoint)) -> RawCurve {
     grown(v, ge::GROW, |v, g| {
         let mut raw = RawCurve::default();
         let mut r = Rng::new(v[ge::SEED] * 31.0 + 5.0);
@@ -243,11 +259,17 @@ fn geode(v: &[f64], _o: &CurveOpts) -> RawCurve {
         let cut = Term::Plane { n: [0.0, 0.0, 1.0], d: open };
         // the stone's rough outside: faces knocked off a ball
         let rough: Vec<(V, f64)> = (0..22).map(|_| (r.dir(), ro * r.range(0.88, 0.97))).collect();
+        if whole {
+            let mut terms = vec![Term::Ball { c: [0.0; 3], r: ro }, Term::Hollow { c: [0.0; 3], r: ri }];
+            for &(n, d) in &rough { terms.push(Term::Plane { n, d }); }
+            terms.push(cut.clone());
+            raw.pieces.push(Piece { lo: [-ro; 3], hi: [ro, ro, (open + 0.01).min(ro)], terms });
+        }
         // The shell, cut into patches of a cube's faces (4 x 4 on each), each with a box round it alone:
         // one piece round the whole would be drawn into every voxel of the hollow. The patches overlap.
         let m = 4;
         let lap = 0.06;
-        for face in 0..6 {
+        for face in (0..6).filter(|_| !whole) {
             let ax = face / 2;
             let sgn = if face % 2 == 0 { 1.0 } else { -1.0 };
             let (a1, a2) = ((ax + 1) % 3, (ax + 2) % 3);
@@ -319,14 +341,69 @@ fn geode(v: &[f64], _o: &CurveOpts) -> RawCurve {
             let len = size * r.range(0.45, 1.15);
             let rad = len / r.range(2.2, 3.2);
             let foot = mul(d, ri + 0.6 * rad + 0.02);
-            let f = part(g, 0.7 * r.next());
+            let start = 0.7 * r.next();
+            let f = part(g, start);
             let u = across_turned(axis, TAU * r.next());
+            record(GeodePoint { base: foot, axis, side: u, length: len, radius: rad, start });
             placed += 1;
             if f <= 0.0 { continue; }
             if let Some(p) = quartz_point(foot, axis, u, len * f + 0.6 * rad + 0.02, rad * (0.4 + 0.6 * f), 52.0) { raw.pieces.push(p); }
         }
         raw
     })
+}
+
+/// All sizes of a growing point are contained in the final prism. Its cell lists
+/// and plane directions therefore stay fixed throughout playback. The shader changes
+/// the prism's radius and tip height from the same start time as the generator.
+fn geode_table(v: &[f64]) -> Vec<[f32; 4]> {
+    let mut full = v.to_vec();
+    full[ge::GROW] = 1.0;
+    let mut points = Vec::new();
+    let raw = geode_points(&full, true, |p| points.push(p));
+    let (origin, scale) = exact::place_of(&raw.frame, crate::FIT);
+    let shell = RawCurve { pieces: vec![raw.pieces[0].clone()], frame: raw.frame.clone(), ..Default::default() };
+    let mut pieces = exact::placed_pieces(&shell, origin, scale);
+    for (point, piece) in points.iter().zip(&raw.pieces[1..]) {
+        let base = mul(sub(point.base, origin), scale);
+        let record = |p: V, w: f64| [p[0] as f32, p[1] as f32, p[2] as f32, w as f32];
+        pieces.push(exact::Written {
+            lo: mul(sub(piece.lo, origin), scale),
+            hi: mul(sub(piece.hi, origin), scale),
+            e: vec![
+                [109.0, point.start as f32, (point.length * scale) as f32, (point.radius * scale) as f32],
+                record(base, 0.02 * scale),
+                record(point.axis, 0.0), record(point.side, 0.0),
+            ],
+            meta: 0.0,
+        });
+    }
+    exact::write(pieces, None, 0.0)
+}
+
+fn geode_formula() -> (Shape, Option<TableFn>) {
+    let source = exact::WGSL.replace("fn pc_growth() -> f32 { return 1.0; }", "fn pc_growth() -> f32 { return pr.grow; }");
+    let shape = Shape::Field { wgsl: source, clip: crate::field::CLIP_DEFAULT.to_owned(), shell: crate::field::SHELL_DEFAULT.to_owned() };
+    let cached = std::sync::Mutex::new(None::<(Vec<f64>, Vec<[f32; 4]>)>);
+    let table: TableFn = Box::new(move |v, _| {
+        let key = &v[..ge::GROW];
+        let mut cache = cached.lock().unwrap_or_else(|poison| poison.into_inner());
+        if let Some((saved, entries)) = &*cache {
+            if saved == key { return entries.clone(); }
+        }
+        let entries = geode_table(v);
+        *cache = Some((key.to_vec(), entries.clone()));
+        entries
+    });
+    (shape, Some(table))
+}
+
+/// What the builders are told when they build for the formula (nothing moves: no quick version).
+const WHOLE: CurveOpts = CurveOpts { len: 1.0, quick: false, text: "" };
+/// A preset traced (and baked) from its pieces as an exact formula (`exact.rs`), built by `build`.
+fn formula(build: fn(&[f64]) -> RawCurve) -> (Shape, Option<TableFn>) {
+    let shape = Shape::Field { wgsl: exact::WGSL.to_string(), clip: crate::field::CLIP_DEFAULT.to_string(), shell: crate::field::SHELL_DEFAULT.to_string() };
+    (shape, Some(Box::new(move |v: &[f64], _: &str| exact::table(&build(v), crate::FIT))))
 }
 
 // ---- the family -------------------------------------------------------------------------------------
@@ -345,11 +422,10 @@ pub fn family() -> Family {
             ParamDef::labelled("seed", "seed", 2.0, 1.0, 999.0, 1.0),
             ParamDef::labelled("grow", "grown", 1.0, 0.0, 1.0, 0.002),
         ],
-        fixed_length: true,
         rot: Some([38.0, 20.0, 0.0]),
         animate: Some(vec!["grow"]),
-        info: Some(Box::new(|raw, _v| format!("{} bars", raw.pieces.len()))),
-        ..Preset::new("bismuth", "Bismuth hopper", Shape::Curve(Box::new(bismuth)))
+        table: formula(|v| bismuth(v, &WHOLE)).1,
+        ..Preset::new("bismuth", "Bismuth hopper", formula(|v| bismuth(v, &WHOLE)).0)
     };
     let quartz = Preset {
         eq: vec!["six sides n·p ≤ r, six tip faces at θ to the axis", "a cluster from a rough base"],
@@ -364,12 +440,12 @@ pub fn family() -> Family {
             ParamDef::labelled("base", "base", 0.55, 0.0, 1.2, 0.01),
             ParamDef::labelled("grow", "grown", 1.0, 0.0, 1.0, 0.002),
         ],
-        fixed_length: true,
         rot: Some([10.0, 0.0, 0.0]),
         animate: Some(vec!["grow"]),
-        info: Some(Box::new(|raw, _v| format!("{} pieces", raw.pieces.len()))),
-        ..Preset::new("quartz", "Quartz cluster", Shape::Curve(Box::new(quartz)))
+        table: formula(|v| quartz(v, &WHOLE)).1,
+        ..Preset::new("quartz", "Quartz cluster", formula(|v| quartz(v, &WHOLE)).0)
     };
+    let (geode_shape, geode_table) = geode_formula();
     let geode = Preset {
         eq: vec!["a shell: |p| ≤ 1, |p| ≥ 1 − t, broken at z = open", "lined with quartz points, pointing in"],
         note: "A hollow stone broken open: inside, quartz grew inward from the wall, point by point.",
@@ -381,11 +457,10 @@ pub fn family() -> Family {
             ParamDef::labelled("open", "opening", 0.25, -0.6, 0.95, 0.01),
             ParamDef::labelled("grow", "grown", 1.0, 0.0, 1.0, 0.002),
         ],
-        fixed_length: true,
         rot: Some([12.0, -20.0, 0.0]),
         animate: Some(vec!["grow"]),
-        info: Some(Box::new(|raw, _v| format!("{} pieces", raw.pieces.len()))),
-        ..Preset::new("geode", "Geode", Shape::Curve(Box::new(geode)))
+        table: geode_table,
+        ..Preset::new("geode", "Geode", geode_shape)
     };
     Family {
         presets: vec![bismuth, quartz, geode],
@@ -396,7 +471,7 @@ pub fn family() -> Family {
             ("dist", Setting::Num(6.6)), ("fov", Setting::Num(26.0)), ("rot", Setting::Vec3([20.0, 20.0, 0.0])),
         ],
         lights: solid_lights(),
-        ..Family::new(FAMILY, "Crystals", Kind::Curve)
+        ..Family::new(FAMILY, "Crystals", Kind::Field)
     }
 }
 
@@ -409,8 +484,7 @@ mod tests {
         let p = f.preset(id).unwrap();
         let mut v = p.defaults();
         for &(i, x) in set { v[i] = x; }
-        let Shape::Curve(c) = &p.shape else { panic!() };
-        c(&v, &CurveOpts { len: 1.0, quick: false, text: "" })
+        match id { "bismuth" => bismuth(&v, &WHOLE), "quartz" => quartz(&v, &WHOLE), _ => geode_build(&v, true) }
     }
 
     #[test]
@@ -448,11 +522,113 @@ mod tests {
     }
 
     #[test]
+    fn the_geode_grows_inside_one_static_formula_table() {
+        let family = family();
+        let preset = family.preset("geode").unwrap();
+        let mut values = preset.defaults();
+        let table = preset.table.as_ref().unwrap();
+        let complete = table(&values, "");
+        values[ge::GROW] = 0.25;
+        assert_eq!(complete, table(&values, ""));
+        let shape = geode_build(&values, true);
+        // Each prism's side and tip planes intersect at the same surface as
+        // its analytic hexagonal cross-section at this point in playback.
+        let mut seeds = Vec::new();
+        let mut full = values.clone();
+        full[ge::GROW] = 1.0;
+        geode_points(&full, true, |s| seeds.push(s));
+        let live: Vec<_> = seeds.into_iter().filter(|s| s.start < values[ge::GROW]).collect();
+        assert_eq!(shape.pieces.len(), live.len() + 1);
+        let mut rng = Rng::new(31.0);
+        for (point, piece) in live.iter().zip(&shape.pieces[1..]) {
+            let g = part(values[ge::GROW], point.start);
+            for _ in 0..20 {
+                let p = add(point.base, mul(rng.dir(), rng.next() * point.length));
+                let truth = piece.terms.iter().filter_map(|term| match term {
+                    Term::Plane { n, d } => Some(dot(*n, p) - d),
+                    _ => None,
+                }).fold(f64::NEG_INFINITY, f64::max);
+                let q = sub(p, point.base);
+                let (x, y, z) = (dot(q, point.side).abs(), dot(q, cross(point.axis, point.side)).abs(), dot(q, point.axis));
+                let radial = x.max(0.5 * x + 0.5 * 3f64.sqrt() * y);
+                let length = point.length * g + 0.6 * point.radius + 0.02;
+                let radius = point.radius * (0.4 + 0.6 * g);
+                let tip = 52.0 * DEG;
+                let distance = (-z).max(radial - radius).max(tip.cos() * (z - length) + tip.sin() * radial);
+                assert!((truth - distance).abs() < 1e-7);
+            }
+        }
+    }
+
+    #[test]
     fn building_is_quick() {
         for id in ["bismuth", "quartz", "geode"] {
             let t = std::time::Instant::now();
             let _ = build(id, &[]);
             assert!(t.elapsed().as_secs_f64() < 0.05, "{id} took {:?}", t.elapsed());
+        }
+    }
+}
+
+#[cfg(test)]
+mod sizes {
+    use super::*;
+    /// Every crystal's pieces fit in the formula's table, the geode with as many points as it may have.
+    #[test]
+    fn every_crystal_fits_its_table() {
+        for p in family().presets {
+            let mut v = p.defaults();
+            for (i, d) in p.params.iter().enumerate() { if d.id == "points" || d.id == "count" { v[i] = d.hi; } }
+            let t = crate::field::table(&p, &v, "");
+            let n = t.len() / 4;
+            assert!(n <= crate::field::TABLE_MAX && t[0] as usize == n, "{}: {n} entries", p.id);
+            eprintln!("{}: {n} entries", p.id);
+        }
+    }
+}
+
+#[cfg(test)]
+mod lists {
+    use super::*;
+    /// Read through the cell lists, the crystals' formula is what measuring every piece gives (near them).
+    #[test]
+    fn the_lists_agree_with_every_piece() {
+        for id in ["bismuth", "geode"] {
+            let f = family();
+            let p = f.preset(id).unwrap();
+            let v = p.defaults();
+            let t = (p.table.as_ref().unwrap())(&v, "");
+            let mut r = Rng::new(2.0);
+            let mut bad = 0;
+            for _ in 0..3000 {
+                let q = [1.4 * r.sym(), 1.4 * r.sym(), 1.4 * r.sym()];
+                let d = exact::tests::dist(&t, q);
+                let truth = exact::tests::dist_by(&t, q, true);
+                // (far off, both are bounds; a box's distance may be the closer one)
+                if truth < 0.02 && (d - truth).abs() > 1e-4 { bad += 1; if bad < 5 { eprintln!("{id} {q:?}: {d} vs {truth}"); } }
+            }
+            assert_eq!(bad, 0, "{id}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod build_time {
+    use super::*;
+    #[test]
+    fn table_build_times() {
+        for p in family().presets.iter().chain(crate::presets::foam::family().presets.iter()) {
+            let v = p.defaults();
+            let t = std::time::Instant::now();
+            let tb = crate::field::table(p, &v, "");
+            eprintln!("{}: {:.1} ms, {} entries", p.id, t.elapsed().as_secs_f64() * 1e3, tb.len() / 4);
+            if p.id == "geode" {
+                let t = std::time::Instant::now();
+                let raw = geode_build(&v, true);
+                let t1 = t.elapsed().as_secs_f64() * 1e3;
+                let _ = exact::table(&raw, crate::FIT);
+                eprintln!("geode: build {t1:.1} ms, table {:.1} ms", t.elapsed().as_secs_f64() * 1e3 - t1);
+            }
         }
     }
 }

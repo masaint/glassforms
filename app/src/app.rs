@@ -14,6 +14,7 @@
 //!                         with a "=" of its own is not taken for a setting
 //!   --ui-shot <png>       then save a picture of the whole window, and leave
 //!   --ui-frames <n>       ... once the picture has had this many frames (30)
+//!   --ui-reference        redraw a stopped screenshot with a fixed ray sequence and sample count
 //!   --ui-dump <json>      write the state as it ends up, and leave
 //!   --ui-scale <s>        pixels per point (default: the display's own scaling)
 //!   --ui-out <folder>     where the script's videos go
@@ -43,7 +44,7 @@ use crate::ui::{animate, gizmo, knob, left, material, overlay, right, room, widg
 use crate::video::{Codec, VideoJob, VideoOpts, VideoResult};
 
 /// Things given as name=value that are about the window or the video rather than settings of the picture.
-const NOT_SETTINGS: [&str; 16] = ["upscale", "upscaleScale", "w", "h", "frames", "anim", "backend", "vsync", "fps", "samples", "lensRays", "shutter", "codec", "crf", "detail", "play"];
+const NOT_SETTINGS: [&str; 20] = ["refine", "tier", "tierAuto", "tierMotion", "keepRate", "upscale", "upscaleScale", "w", "h", "frames", "anim", "backend", "vsync", "fps", "samples", "lensRays", "shutter", "codec", "crf", "detail"];
 
 /// What the command line asked of the window.
 struct Opts {
@@ -54,6 +55,7 @@ struct Opts {
     script: Vec<Act>,
     shot: Option<PathBuf>,
     frames: u32,
+    reference: bool,
     dump: Option<PathBuf>,
     out: Option<PathBuf>,
     store: Option<PathBuf>,
@@ -95,6 +97,7 @@ impl Opts {
             scripted: text.is_some() || shot.is_some() || dump.is_some(),
             show: flag("ui-show").is_some(),
             frames: number("ui-frames")?.map_or(30, |n| n.max(1.0) as u32),
+            reference: flag("ui-reference").is_some(),
             timeout: number("ui-timeout")?.unwrap_or(180.0),
             out: path("ui-out"),
             store: path("ui-store"),
@@ -113,10 +116,21 @@ pub fn run(pairs: Vec<(String, String)>, flags: Vec<(String, Option<String>)>) -
     let opts = Opts::read(pairs, &flags)?;
     // a scripted run remembers nothing unless it is given a file to remember in
     let store_path = if opts.scripted { opts.store.clone() } else { Some(opts.store.clone().unwrap_or_else(Store::default_path)) };
-    let store = store_path.as_deref().map(Store::load).unwrap_or_default();
+    let mut store = store_path.as_deref().map(Store::load).unwrap_or_default();
+    if let Some(rate) = opts.pair("keepRate") {
+        if rate == "0" || rate == "off" {
+            store.keep_rate.on = false;
+        } else {
+            let target = if rate == "display" { Some(0) } else { rate.parse::<u32>().ok().filter(|fps| *fps > 0) };
+            let target = target.filter(|fps| crate::autoscale::TARGETS.contains(fps))
+                .ok_or_else(|| format!("Unknown keepRate={rate}. Choose 30, 60, 90, 120, 144, display or off."))?;
+            store.keep_rate = crate::autoscale::KeepRate { on: true, target };
+        }
+    }
+    if let Some(c) = crate::tier::from_args(store.tiers, |k| opts.pair(k))? { store.tiers = c; }
     let no_terminal = !opts.scripted && leave_own_console();
 
-    let mut viewport = egui::ViewportBuilder::default().with_title("Glass Forms").with_min_inner_size([480.0, 320.0]).with_icon(theme::icon());
+    let mut viewport = egui::ViewportBuilder::default().with_title(crate::build_info::this()).with_min_inner_size([480.0, 320.0]).with_icon(theme::icon());
     viewport = match opts.size_px {
         // the scaling of the display is not known yet: a first guess, put right once the window is up
         Some((w, h)) => viewport.with_inner_size([w as f32, h as f32]),
@@ -318,12 +332,16 @@ enum Gesture {
     Handle,
     /// a part of the path drawn over the picture (ui/paths.rs)
     Path,
+    /// a box drawn over the picture with the select tool, from where the press began (ui/select.rs)
+    Box,
 }
 struct Drag {
     kind: Gesture,
     /// how far the pointer has travelled, in points: a press that hardly moves is a click
     moved: f32,
     at: Pos2,
+    /// where the press began
+    from: Pos2,
 }
 
 /// One step of a scripted run.
@@ -405,6 +423,8 @@ struct App {
     /// frames a second, as last worked out; and the frames drawn since then, and when that was
     fps: f64,
     drawn: (u32, Instant),
+    /// the display's refresh rate, as the frames' pace shows it (for keeping the frame rate at it)
+    refresh: crate::autoscale::Refresh,
     stat_at: Instant,
     drag: Option<Drag>,
     video: Option<VideoJob>,
@@ -443,9 +463,36 @@ struct App {
     backdrop: crate::backdrop::Backdrop,
     backdrop_from: Option<wgpu::Texture>,
     backdrop_id: Option<(egui::TextureId, u64)>,
+    /// what was last put in the note over the foot line from each place that has results to tell: the
+    /// file group, the video group, the environment picture
+    told: (String, String, Option<String>),
+    /// the setup file last saved or loaded (what Ctrl+S saves over)
+    setup_path: Option<PathBuf>,
+    /// the setup written now and then to the recovery folder (none for scripted runs), and the last
+    /// session's, while it is offered back
+    recovery: Option<crate::recovery::Recovery>,
+    restore_from: Option<PathBuf>,
 }
 
 impl App {
+    /// Put new results and errors in the one note over the foot line (overlay::message): a file saved or
+    /// loaded, a mesh written, a video finished or failed, an environment picture that could not be read.
+    fn tell(&mut self) {
+        let is_error = |t: &str| t.starts_with("could not") || t.contains(" was not ") || t.starts_with("a mesh is being written");
+        if self.px.file_text != self.told.0 {
+            self.told.0 = self.px.file_text.clone();
+            self.px.say(self.told.0.clone(), is_error(&self.told.0));
+        }
+        if self.video.is_none() && self.px.video_text != self.told.1 {
+            self.told.1 = self.px.video_text.clone();
+            let t = &self.told.1;
+            if !t.starts_with("frame ") { self.px.say(if t.starts_with("could not") || t.starts_with("cancelled") { t.clone() } else { format!("video saved: {t}") }, t.starts_with("could not")); }
+        }
+        if self.engine.hdri_error != self.told.2 {
+            self.told.2 = self.engine.hdri_error.clone();
+            if let Some(e) = &self.told.2 { self.px.say(format!("the environment picture could not be used: {e}"), true); }
+        }
+    }
     fn new(cc: &eframe::CreationContext<'_>, opts: Opts, store: Store, store_path: Option<PathBuf>, failure: Arc<Mutex<Option<String>>>) -> Result<App, String> {
         let rs = cc.wgpu_render_state.clone().ok_or("the window has no graphics device")?;
         let gpu = Gpu::from_parts(rs.device.clone(), rs.queue.clone(), &rs.adapter.get_info())?;
@@ -503,13 +550,22 @@ impl App {
             }
         });
         let mut px = Panels::new(store.clone());
+        // (tierAll=1: a check aid, the row shows every tier whether this machine and build could draw it or not)
+        px.tier_all = opts.pair("tierAll") == Some("1");
         px.ffmpeg = crate::video::ffmpeg().is_some();
         px.record = opts.scripted;
+        // work kept through a crash (recovery.rs): not for scripted runs, which must leave nothing behind
+        let mut recovery = (!opts.scripted && std::env::var_os("GF_NO_RECOVERY").is_none()).then(|| crate::recovery::Recovery::start(crate::recovery::folder()));
+        let restore_from = recovery.as_mut().and_then(|r| r.offer()).map(|(path, at)| {
+            let s = at.elapsed().map_or(0, |d| d.as_secs());
+            px.restore = Some(match s { 0..=89 => "a minute ago".to_owned(), 90..=5399 => format!("{} minutes ago", (s + 30) / 60), 5400..=172_799 => format!("{} hours ago", (s + 1800) / 3600), _ => format!("{} days ago", s / 86400) });
+            path
+        });
         Ok(App {
-            engine, rs, shown: None, preview: None, px, seeking: opts.size_px, canvas: (0, 0), full: Rect::ZERO, last: None, rested: false, fly_at: None, history: Default::default(), input_at: Instant::now(), unsettled: true, quiet_frames: 0, called_off: false, let_go_at: None, put_back: false, fps: 0.0, drawn: (0, Instant::now()), stat_at: Instant::now(),
+            engine, rs, shown: None, preview: None, px, seeking: opts.size_px, canvas: (0, 0), full: Rect::ZERO, last: None, rested: false, fly_at: None, history: Default::default(), input_at: Instant::now(), unsettled: true, quiet_frames: 0, called_off: false, let_go_at: None, put_back: false, fps: 0.0, drawn: (0, Instant::now()), refresh: Default::default(), stat_at: Instant::now(),
             drag: None, video: None, last_video: None, exporting: None, bench_in: 0, frozen: false, test, inject: Vec::new(), dropped: Vec::new(), model_asked: None, model_said: String::new(), adding: None, model_refused: None, failure, store_path,
             saved: store, changed_at: None, frames: Arc::new(AtomicU64::new(0)), passes: 0, ffmpeg_checked: Instant::now(), opts,
-            backdrop, backdrop_from: None, backdrop_id: None,
+            backdrop, backdrop_from: None, backdrop_id: None, told: Default::default(), setup_path: None, recovery, restore_from,
         })
     }
 
@@ -593,7 +649,10 @@ impl App {
             self.history.settle(&mut self.engine.state);
             let _ = std::fs::write(gf_core::history::history_path(path), self.history.to_json());
         }
-        if saved.is_ok() { self.px.store.setup_folder = store::remembered(path, "setups"); }
+        if saved.is_ok() {
+            self.px.store.setup_folder = store::remembered(path, "setups");
+            self.setup_path = Some(path.to_path_buf());
+        }
         self.px.file_text = match saved {
             Ok(()) => format!("saved {name}"),
             Err(e) => format!("could not save {name}: {e}"),
@@ -613,7 +672,10 @@ impl App {
                 let _ = self.history.adopt_json(&text, &mut self.engine.state);
             }
         }
-        if loaded.is_ok() { self.px.store.setup_folder = store::remembered(path, "setups"); }
+        if loaded.is_ok() {
+            self.px.store.setup_folder = store::remembered(path, "setups");
+            self.setup_path = Some(path.to_path_buf());
+        }
         self.px.file_text = match loaded {
             Ok(()) => format!("loaded {name}"),
             Err(e) => format!("could not load {name}: {e}"),
@@ -636,15 +698,23 @@ impl App {
     fn save_still(&mut self, path: &Path, keep: bool) -> bool {
         let (name, deep) = (file_name(path), self.px.store.still_16);
         let e = &self.engine;
+        // the background, apart from the lighting (cutout.rs): as seen, a plate of one colour, or clear
+        let bg = crate::cutout::Background::of(&self.px.store.still_bg, self.px.store.plate);
         let saved = make_folder(path).and_then(|()| {
+            let (_, (tw, th)) = e.renderer.size();
+            let hdr = if deep || bg != crate::cutout::Background::Seen { Some(e.renderer.read_hdr(0, 0, tw, th)?) } else { None };
+            let cov = hdr.as_ref().filter(|_| bg != crate::cutout::Background::Seen).map(|h| crate::cutout::coverage(h, tw as usize, th as usize)).unwrap_or_default();
+            let (cw, ch) = (tw as usize, th as usize);
             if deep {
-                let (_, (w, h)) = e.renderer.size();
-                let rgb = crate::render::tone_map16(&e.renderer.read_hdr(0, 0, w, h)?, &e.renderer.read_bloom()?, w, h, &e.state.p);
+                let (w, h) = (tw, th);
+                let rgb = crate::render::tone_map16(hdr.as_ref().expect("read above"), &e.renderer.read_bloom()?, w, h, &e.state.p);
+                let (px, alpha) = crate::cutout::apply16(&rgb, w as usize, h as usize, &cov, cw, ch, bg);
                 // PNG keeps the high byte first
-                let bytes: Vec<u8> = rgb.iter().flat_map(|v| v.to_be_bytes()).collect();
-                write_png(path, w, h, png::ColorType::Rgb, png::BitDepth::Sixteen, &bytes).map(|()| (w, h))
+                let bytes: Vec<u8> = px.iter().flat_map(|v| v.to_be_bytes()).collect();
+                write_png(path, w, h, if alpha { png::ColorType::Rgba } else { png::ColorType::Rgb }, png::BitDepth::Sixteen, &bytes).map(|()| (w, h))
             } else {
-                let (w, h, rgba) = e.screenshot()?;
+                let (w, h, mut rgba) = e.screenshot()?;
+                crate::cutout::apply8(&mut rgba, w as usize, h as usize, &cov, cw, ch, bg);
                 write_png(path, w, h, png::ColorType::Rgba, png::BitDepth::Eight, &rgba).map(|()| (w, h))
             }
         });
@@ -663,7 +733,7 @@ impl App {
     fn load_model(&mut self, path: &Path, new_layer: bool) {
         let st = &self.engine.state;
         self.model_said = if new_layer && st.layer_count() >= gf_core::layers::MAX_LAYERS {
-            format!("four layers already: it took the place of {}", st.layer_title(st.stack.sel))
+            format!("{} layers already: it took the place of {}", gf_core::layers::MAX_LAYERS, st.layer_title(st.stack.sel))
         } else {
             String::new()
         };
@@ -752,7 +822,13 @@ impl App {
                 Request::SaveSetup | Request::LoadSetup | Request::SaveStillAs | Request::ExportMesh if self.test.is_some() => {
                     self.px.file_text = "a scripted run opens no dialogs".into();
                 }
-                Request::LoadPicture | Request::LoadModel if self.test.is_some() => {}
+                Request::LoadPicture | Request::LoadModel | Request::LoadMatcap if self.test.is_some() => {}
+                Request::LoadMatcap => {
+                    let dialog = rfd::FileDialog::new().set_title("A matcap picture").add_filter("Pictures of a lit ball (.png, .jpg, .hdr, .exr)", &["png", "jpg", "jpeg", "hdr", "exr"]).set_parent(frame);
+                    if let Some(path) = dialog.pick_file() {
+                        self.engine.state.view.matcap.source = gf_core::view_mode::MatcapSource::Image(path.display().to_string());
+                    }
+                }
                 Request::LoadModel => {
                     // it opens where the selected layer's file is, if that is a file of the user's; otherwise
                     // among the models that come with the program
@@ -807,6 +883,16 @@ impl App {
                     let dialog = rfd::FileDialog::new().set_title("Save this setup").set_file_name(name).add_filter("Glass Forms setup", &["json"]).set_parent(frame);
                     if let Some(path) = in_folder(dialog, &dir).save_file() { self.save_setup(&with_ending(path, "json")); }
                 }
+                Request::Restore(take) => {
+                    self.px.restore = None;
+                    if let Some(path) = self.restore_from.take().filter(|_| take) {
+                        let kept = (self.setup_path.clone(), self.px.store.setup_folder.clone());
+                        self.load_setup(&path);
+                        // (the recovery copy is not the user's file: Ctrl+S still asks where, dialogs open where they did)
+                        (self.setup_path, self.px.store.setup_folder) = kept;
+                        if self.px.file_text.starts_with("loaded") { self.px.file_text = "the last session's work is back".into(); }
+                    }
+                }
                 Request::LoadSetup => {
                     let dialog = rfd::FileDialog::new().set_title("Load a setup").add_filter("Glass Forms setup", &["json"]).set_parent(frame);
                     if let Some(path) = in_folder(dialog, &self.px.store.setups_folder()).pick_file() { self.load_setup(&path); }
@@ -832,9 +918,20 @@ impl App {
             self.drag = None;
             return;
         }
-        let st = &mut self.engine.state;
         let (down, delta, at, mods) = ctx.input(|i| (picture.is_pointer_button_down_on(), i.pointer.delta(), i.pointer.latest_pos(), i.modifiers));
-        if down && self.drag.is_none() {
+        // with the select tool at a world level, a left drag that begins on nothing draws a box (ui/select.rs)
+        let boxing = down && self.drag.is_none() && !mods.ctrl && !mods.alt
+            && self.px.handles.tool() == crate::ui::handles::Tool::Select && self.engine.state.edit_scope.object().is_none()
+            && !ctx.input(|i| i.pointer.button_down(PointerButton::Secondary) || i.pointer.button_down(PointerButton::Middle))
+            && at.is_some_and(|p| {
+                let (fx, fy) = (((p.x - self.full.left()) / self.full.width()) as f64, ((p.y - self.full.top()) / self.full.height()) as f64);
+                crate::ui::handles::pick_occurrence(&self.engine, fx, fy).is_none() && crate::ui::handles::pick_lamp(&self.engine.state, self.full, p).is_none()
+            });
+        let st = &mut self.engine.state;
+        if boxing {
+            let p = at.unwrap_or(self.full.center());
+            self.drag = Some(Drag { kind: Gesture::Box, moved: 0.0, at: p, from: p });
+        } else if down && self.drag.is_none() {
             let (right, middle) = ctx.input(|i| (i.pointer.button_down(PointerButton::Secondary), i.pointer.button_down(PointerButton::Middle)));
             // (a press on one of the handles takes hold of it, whatever keys are held: they mean steps or finely)
             // (the path's joints and handles first: they are small and lie on the shape, the layer's handles round it)
@@ -850,7 +947,8 @@ impl App {
                 // (flying, a drag with either button looks round)
                 Gesture::Look
             } else if right || mods.shift { Gesture::Pan } else if middle || mods.ctrl { Gesture::Roll } else { Gesture::Turn };
-            self.drag = Some(Drag { kind, moved: 0.0, at: at.unwrap_or(self.full.center()) });
+            let p = at.unwrap_or(self.full.center());
+            self.drag = Some(Drag { kind, moved: 0.0, at: p, from: p });
         } else if let Some(d) = &mut self.drag {
             if down {
                 d.moved += delta.x.abs() + delta.y.abs();
@@ -869,45 +967,76 @@ impl App {
                         Gesture::Roll => st.drag_roll(dx),
                         Gesture::Handle => self.px.handles.drag(st, self.full, d.at, mods.ctrl, mods.shift),
                         Gesture::Path => self.px.paths.drag(st, self.full, d.at, mods.ctrl, mods.shift),
+                        Gesture::Box => {}
                     }
                 }
             } else {
                 // let go: a press that hardly moved is a click. It selects what is under it (a lamp, a layer's
                 // shape) or lets go of what was chosen if nothing is; with the camera's tool and an aperture,
                 // or with Alt held, it focuses where it landed instead.
+                // (a press on the handles that never became a drag is a click too: the large ball inside the
+                // rings would otherwise swallow every click near the chosen thing. What it moved is put back.)
                 let (fx, fy) = ((d.at.x / self.full.width()) as f64, (d.at.y / self.full.height()) as f64);
-                let click = matches!(d.kind, Gesture::Turn | Gesture::Look) && d.moved < 4.0;
+                let still = d.moved < crate::ui::pick::CLICK_SLOP_PT;
+                let click = still && matches!(d.kind, Gesture::Turn | Gesture::Look | Gesture::Handle);
                 let focus = st.p.aperture > 0.0 && (mods.alt || self.px.handles.tool() == crate::ui::handles::Tool::Camera);
-                if d.kind == Gesture::Handle {
+                if d.kind == Gesture::Handle && still { self.px.handles.cancel(st); }
+                if d.kind == Gesture::Box && !still {
+                    // what the box meets is chosen (with shift, added)
+                    let r = crate::ui::select::drag_box(d.from, d.at);
+                    let boxes: Vec<_> = crate::ui::select::level(st).into_iter()
+                        .filter_map(|(item, _)| crate::ui::handles::world_screen_box(st, item, self.full).map(|b| (item, b))).collect();
+                    let next = crate::ui::select::in_box(&boxes, r, &st.world_selection(), mods.shift);
+                    crate::ui::select::set(st, &next);
+                    self.px.nav.say_for_objects(format!("{} chosen by the box", next.len()));
+                } else if d.kind == Gesture::Box {
+                    // a box that never opened is a click on nothing: it lets go, as ever
+                    let had = !st.world_selection().is_empty();
+                    self.px.handles.let_go();
+                    if !mods.shift { crate::ui::pick::deselect_all(st); }
+                    if had { self.px.nav.say_for_objects("let go · click a shape to choose it".into()); }
+                } else if d.kind == Gesture::Handle && !still {
                     self.px.handles.end(st);
                 } else if d.kind == Gesture::Path {
                     self.px.paths.end(st);
                 } else if click && focus {
                     self.engine.pick_focus(fx, fy);
                 } else if click && !mods.alt {
-                    // a lamp under the pointer first (it is known exactly), then a layer's shape
-                    if let Some(i) = crate::ui::handles::pick_lamp(&self.engine.state, self.full, d.at) {
-                        self.px.handles.pick(Some(i));
-                        self.px.lamp = i;
-                        // (the lamp's own controls are in the light room: it opens at this lamp)
-                        self.px.store.room_open = true;
-                        if self.px.store.is_closed("room-lamps") { self.px.store.fold("room-lamps"); }
-                    } else if let Some(i) = crate::ui::handles::pick_layer(&self.engine, fx, fy) {
-                        self.px.handles.pick(None);
-                        if i != self.engine.state.stack.sel { self.engine.state.select_layer(i); }
-                    } else {
-                        let had = self.px.handles.picked;
-                        self.px.handles.let_go();
-                        if had && (self.px.handles.on || self.px.handles.select) {
-                            self.px.nav.say_for_objects("let go · click a shape to choose it".into());
+                    // the pixel under the pointer decides: the nearer of a shown lamp and a shape along its ray
+                    use crate::ui::pick::{self, Clicked};
+                    let lamp = crate::ui::handles::pick_lamp(&self.engine.state, self.full, d.at);
+                    let object = crate::ui::handles::pick_occurrence(&self.engine, fx, fy).map(|hit| (hit.depth, hit.source));
+                    let what = pick::under(lamp, object);
+                    match pick::click(&mut self.engine.state, &mut self.px.handles, what, mods.shift || mods.command) {
+                        Clicked::Lamp(i) => {
+                            self.px.lamp = i;
+                            // (the lamp's own controls are in the light room: it opens at this lamp)
+                            self.px.store.room_open = true;
+                            if self.px.store.is_closed("room-lamps") { self.px.store.fold("room-lamps"); }
+                        }
+                        Clicked::Object => {}
+                        Clicked::Nothing { had } => {
+                            if had && (self.px.handles.on || self.px.handles.select) {
+                                self.px.nav.say_for_objects("let go · click a shape to choose it".into());
+                            }
                         }
                     }
                 }
                 self.drag = None;
             }
         }
+        if picture.double_clicked() {
+            if let Some(at) = picture.interact_pointer_pos() {
+                let fx = ((at.x - self.full.left()) / self.full.width()) as f64;
+                let fy = ((at.y - self.full.top()) / self.full.height()) as f64;
+                let what = match crate::ui::handles::pick_layer(&self.engine, fx, fy) {
+                    Some(i) => crate::ui::pick::Under::Object(i),
+                    None => crate::ui::pick::Under::Nothing,
+                };
+                crate::ui::pick::double_click(&mut self.engine.state, &mut self.px.handles, what);
+            }
+        }
         let st = &mut self.engine.state;
-        if picture.double_clicked() { st.reset_view(); }
         if let Some(d) = &self.drag {
             ctx.set_cursor_icon(if d.kind == Gesture::Pan { CursorIcon::Move } else { CursorIcon::Grabbing });
         } else if picture.hovered() && (self.px.handles.hover.is_some() || self.px.paths.hover.is_some()) {
@@ -932,6 +1061,8 @@ impl App {
                         nav.speed = (nav.speed * (-d * 0.0018).exp()).clamp(crate::ui::tools::SPEED.0, crate::ui::tools::SPEED.1);
                         let words = format!("fly speed {:.2} a second", nav.speed);
                         nav.say(words);
+                    } else if st.camera().proj == gf_core::camera::Projection::Orthographic {
+                        st.ortho_wheel(d);
                     } else {
                         st.wheel(d, modifiers.shift);
                     }
@@ -954,7 +1085,13 @@ impl App {
         self.fly_at = Some(now);
         let k = self.px.nav.speed * dt * if mods.shift { 4.0 } else if mods.ctrl { 0.25 } else { 1.0 };
         let way = |a: bool, b: bool| (a as i32 - b as i32) as f64;
-        self.engine.state.fly_move(way(keys[3], keys[2]) * k, way(keys[5], keys[4]) * k, way(keys[0], keys[1]) * k);
+        let (right, up, forward) = (way(keys[3], keys[2]) * k, way(keys[5], keys[4]) * k, way(keys[0], keys[1]) * k);
+        if self.engine.state.camera().proj == gf_core::camera::Projection::Orthographic {
+            self.engine.state.fly_move(right, up, 0.0);
+            if forward != 0.0 { self.engine.state.ortho_wheel(-forward * 250.0); }
+        } else {
+            self.engine.state.fly_move(right, up, forward);
+        }
         ctx.request_repaint();
     }
 
@@ -977,7 +1114,7 @@ impl App {
         // change how it goes)
         let held = ctx.input(|i| i.pointer.any_down()) && !pressed;
         if pressed || (keyed && !held) {
-            self.history.settle(&mut self.engine.state);
+            self.settle_noted();
         }
     }
 
@@ -996,25 +1133,47 @@ impl App {
         // (a scripted run's frames come quickly: three quiet frames are its quiet moment)
         let quiet = self.input_at.elapsed() >= Duration::from_millis(300) || (self.test.is_some() && self.quiet_frames >= 3);
         if quiet {
-            self.history.settle(st);
+            self.settle_noted();
             self.unsettled = false;
         } else {
             ctx.request_repaint_after(Duration::from_millis(320));
         }
     }
 
-    /// Ctrl+Z undoes, Ctrl+Shift+Z and Ctrl+Y redo; Ctrl+1..0 stores the view in a slot, Shift+1..0 goes
+    /// Ctrl+Z undoes, Ctrl+Shift+Z and Ctrl+Y redo; Ctrl+S saves the setup; Ctrl+1..0 stores the view in a slot, Shift+1..0 goes
     /// to it (1..9 alone are the families, as ever).
     fn history_keys(&mut self, ctx: &egui::Context) {
         if ctx.egui_wants_keyboard_input() || egui::Popup::is_any_open(ctx) { return; }
         use egui::Key::*;
         let digits = [Num1, Num2, Num3, Num4, Num5, Num6, Num7, Num8, Num9, Num0];
+        // (undo and redo wait while a button is held: the gesture in progress would go on writing over what
+        // they put back, and its settle would clear redo; state machine E9)
+        let held = ctx.input(|i| i.pointer.any_down());
         for ev in ctx.input(|i| i.events.clone()) {
             let egui::Event::Key { key, pressed: true, repeat: false, modifiers, .. } = ev else { continue };
             let ctrl = modifiers.ctrl || modifiers.command;
             match key {
+                Z | Y if ctrl && held => self.px.nav.say("let go first: undo waits for the button".into()),
                 Z if ctrl && !modifiers.shift => self.undo(),
                 Z | Y if ctrl => self.redo(),
+                // save the setup: Ctrl+S over the file it was last saved to or loaded from (asks where the
+                // first time), Ctrl+Shift+S always asks
+                S if ctrl && !modifiers.shift && self.test.is_none() && self.setup_path.is_some() => {
+                    if let Some(path) = self.setup_path.clone() { self.save_setup(&path); }
+                }
+                S if ctrl => self.px.requests.push(Request::SaveSetup),
+                // the selection turned over (ui/select.rs): Ctrl+I all the rest, Ctrl+Shift+I the rest of
+                // what is shown, Ctrl+Alt+I only what is shown
+                I if ctrl => {
+                    let which = if modifiers.alt { "visible" } else if modifiers.shift { "invert-visible" } else { "invert" };
+                    self.px.handles.let_go();
+                    if let Some(words) = crate::ui::select::command(&mut self.engine.state, which) { self.px.nav.say_for_objects(words); }
+                }
+                // select none
+                A if ctrl && modifiers.shift => {
+                    self.px.handles.let_go();
+                    crate::ui::pick::deselect_all(&mut self.engine.state);
+                }
                 _ => {
                     let Some(i) = digits.iter().position(|d| *d == key) else { continue };
                     if ctrl {
@@ -1027,20 +1186,31 @@ impl App {
         }
     }
 
+    /// Settle what changed into the history; a change is kept in the crash trail too (breadcrumbs.rs).
+    fn settle_noted(&mut self) {
+        if !self.history.settle(&mut self.engine.state) { return; }
+        let words = self.history.latest().map(|(was, now)| crate::ui::undo_words(was, now)).unwrap_or_default();
+        let st = &self.engine.state;
+        crate::breadcrumbs::note(format!("changed: {words} || {} || {}", crate::breadcrumbs::scene(st), crate::breadcrumbs::gpu_memory(&self.engine.gpu)));
+        crate::breadcrumbs::window(format!("{}x{} px, ui scale {:?}, upscale {:?}, {}", self.canvas.0, self.canvas.1, self.px.store.ui_scale, self.opts.pair("upscale"), crate::build_info::this()));
+    }
+
     fn undo(&mut self) {
         let before = self.engine.state.undo_snapshot();
         let done = self.history.undo(&mut self.engine.state);
-        self.px.handles.grab = None;
+        self.px.drop_gestures();
         let left = self.history.can_undo();
         let what = if done { crate::ui::undo_words(&before, &self.engine.state.undo_snapshot()) } else { String::new() };
+        if done { crate::breadcrumbs::note(format!("undo: {what} || {}", crate::breadcrumbs::scene(&self.engine.state))); }
         self.px.nav.say(if done { format!("undone: {what} · {left} more") } else { "nothing to undo".into() });
     }
     fn redo(&mut self) {
         let before = self.engine.state.undo_snapshot();
         let done = self.history.redo(&mut self.engine.state);
-        self.px.handles.grab = None;
+        self.px.drop_gestures();
         let left = self.history.can_redo();
         let what = if done { crate::ui::undo_words(&before, &self.engine.state.undo_snapshot()) } else { String::new() };
+        if done { crate::breadcrumbs::note(format!("redo: {what} || {}", crate::breadcrumbs::scene(&self.engine.state))); }
         self.px.nav.say(if done { format!("redone: {what} · {left} more") } else { "nothing to redo".into() });
     }
     /// (slot i: 0 to 9, shown as 1 to 9 and 0)
@@ -1057,9 +1227,10 @@ impl App {
     // space: spin.  P: animate.  H: hide the panels.  L: the light room.  M: the materials lab.  K: fold the
     // camera.  F11: fullscreen.  R: reset the view.
     // F: frame what is chosen.  V: orbit or fly (flying: W A S D Q E move).  G, T, Esc: the tools.
-    // C: clay or glass.  F1: the help.  1-9: family.  arrows: step through the shapes.
+    // C: clay or glass.  Z: render or matcap.  F1: the help.  1-9: family.  arrows: step through the shapes.
     fn keys(&mut self, ctx: &egui::Context) {
-        if self.video.is_some() || ctx.egui_wants_keyboard_input() || egui::Popup::is_any_open(ctx) { return; }
+        // (the shape picker, open, has the keys to itself)
+        if self.video.is_some() || ctx.egui_wants_keyboard_input() || egui::Popup::is_any_open(ctx) || self.px.picker.is_open() { return; }
         let st = &mut self.engine.state;
         for ev in ctx.input(|i| i.events.clone()) {
             let egui::Event::Key { key, pressed: true, repeat, modifiers, .. } = ev else { continue };
@@ -1076,11 +1247,17 @@ impl App {
                     let hide = !(self.px.hide_left && self.px.hide_right);
                     (self.px.hide_left, self.px.hide_right) = (hide, hide);
                 }
+                O => self.px.palette.open = !self.px.palette.open,
+                Escape if self.px.palette.drag.take().is_some() => {}
                 L => self.px.store.room_open = !self.px.store.room_open,
                 // the materials lab opened or closed; the camera's section opened or folded
                 M => self.px.store.lab_open = !self.px.store.lab_open,
                 K => self.px.store.fold("camera"),
                 C => st.p.clay = if st.p.clay > 0.5 { 0.0 } else { 1.0 },
+                // Z: the full render or the matcap (view_mode.rs)
+                // shift+Z: the next tier of the row (ui/tiers.rs)
+                Z if modifiers.shift => crate::ui::tiers::step(st, &mut self.px),
+                Z => st.view.mode = st.view.toggled(),
                 F1 => self.px.help_open = !self.px.help_open,
                 R => st.reset_view(),
                 F11 => {
@@ -1116,9 +1293,19 @@ impl App {
                     self.let_go_at = Some(ctx.input(|i| i.pointer.latest_pos()).unwrap_or_default());
                 }
                 Escape if self.px.help_open => self.px.help_open = false,
+                // (at a world level, what is selected is let go of first, then the level is left)
+                Escape if st.edit_scope.object().is_none() && crate::ui::pick::has_selection(st, &self.px.handles) => {
+                    self.px.handles.let_go();
+                    crate::ui::pick::deselect_all(st);
+                }
+                Escape if st.edit_scope.object().is_some() || st.edit_scope.world.is_some() => {
+                    st.scope_up();
+                    self.px.handles.let_go();
+                }
                 Escape if self.px.handles.on => self.px.handles.set_tool(crate::ui::handles::Tool::Select),
                 Escape if self.px.handles.picked || self.px.handles.select => {
                     self.px.handles.let_go();
+                    crate::ui::pick::deselect_all(st);
                     self.px.handles.set_tool(crate::ui::handles::Tool::Camera);
                 }
                 Escape => {
@@ -1138,7 +1325,8 @@ impl App {
     // ---- the panels ----------------------------------------------------------------------------
     fn panels(&mut self, ctx: &egui::Context) {
         let st = &self.engine.state;
-        self.px.bright = st.hdri.is_some() && st.p.hdri_show > 0.5 && self.engine.hdri_info().is_some();
+        self.px.bright = (st.hdri.is_some() && st.p.hdri_show > 0.5 && self.engine.hdri_info().is_some())
+            || (st.hdri.is_none() && st.p.sky > 0.5 && st.p.sky_show > 0.5 && st.p.sun_pitch > 0.0 && st.p.sky_gain > 0.35);
         // the panels are frosted glass over the picture (theme::glass)
         let margin = egui::Margin { left: 12, right: 2, top: 10, bottom: 9 };
         let bright = self.px.bright;
@@ -1158,6 +1346,12 @@ impl App {
                 }).content_size.y
             }).inner
         };
+        if self.engine.state.edit_scope.object().is_none() && !self.engine.state.playing
+            && (self.px.handles.picked || self.px.palette.open || !self.engine.state.world_selection().is_empty()) && self.px.handles.grab.is_none()
+            // (the corners round a selection need its box; not remeasured while a slider is held, only after)
+            && (self.px.handles.picked || !ctx.input(|i| i.pointer.any_down())) {
+            if let Err(error) = self.engine.measure_world_bounds() { self.px.palette.report(error); }
+        }
         self.px.rects.clear();
         widgets::forget_menu(ctx);
         // what the light room shows of the engine's doing (the picture of the lighting is only asked for, and
@@ -1169,6 +1363,7 @@ impl App {
             error: self.engine.hdri_error.clone(),
             loading: self.engine.hdri_loading(),
         };
+        self.px.matcap_error = self.engine.matcap_error.clone();
         self.px.sculpted = (self.engine.sculptor.last.res > 0).then(|| (self.engine.sculptor.last.res, self.engine.sculptor.last.ms));
         // a mesh being written: what it came to, once it has
         if let Some(r) = self.exporting.as_ref().and_then(|x| x.poll()) {
@@ -1178,7 +1373,10 @@ impl App {
                 Err(e) => format!("the mesh was not written: {e}"),
             };
         }
-        self.px.sculpt_size = self.engine.sculptor.sizes.get(self.engine.state.stack.sel).copied().unwrap_or(0.0);
+        let slot = if self.engine.state.has_tree(self.engine.state.stack.sel) { crate::sculpt::TREE_SLOT + self.engine.state.stack.sel } else { self.engine.state.stack.sel };
+        self.tell();
+        self.px.sculpt_size = self.engine.sculptor.sizes.get(slot).copied().unwrap_or(0.0);
+        self.px.mods_note = self.engine.mods_note.clone();
         self.px.sculpt_error = self.engine.sculptor.image_error.clone().or_else(|| (!self.engine.sculptor.available()).then(|| "the surface studio needs a graphics device that can write volumes by compute shader".to_owned()));
         self.px.joined = if self.engine.layers.combined { self.engine.scene_volume().map(|v| (v.res, self.engine.layers.combine_ms)) } else { None };
         self.px.model = self.model_told();
@@ -1217,7 +1415,10 @@ impl App {
             px.note("left", shown.response.rect);
         }
         if !px.hide_right {
-            let to = px.scroll_to[1].take();
+            // (the right panel lays itself out to the height there is: its head stays, the selected object's
+            // controls scroll, the animation keeps to the foot; a scroll asked for is theirs)
+            px.right_scroll = px.scroll_to[1].take();
+            let to = None;
             let shown = egui::Area::new(Id::unique("right panel")).order(egui::Order::Middle).anchor(Align2::RIGHT_TOP, egui::vec2(-EDGE, EDGE)).constrain(false).fade_in(false).show(ctx, |ui| {
                 px.place = "right";
                 frame(ui, &mut |ui| scroller(ui, RIGHT_W, to, "right", &mut |ui| right::show(ui, st, px))).inner
@@ -1232,6 +1433,8 @@ impl App {
             room::show(ctx, st, px, self.full);
             material::lab(ctx, st, px, self.full, below);
             crate::ui::sculpt::show(ctx, st, px, self.full);
+            crate::ui::outline::show(ctx, st, px, self.full);
+            crate::ui::picker::show(ctx, st, px, self.full);
             overlay::help(ctx, px, st.families.len(), self.full);
             crate::ui::settings::show(ctx, px, self.full, self.opts.scale.is_some());
         }
@@ -1242,7 +1445,7 @@ impl App {
             ctx.request_repaint_after(REFUSED_FOR.saturating_sub(at.elapsed()) + Duration::from_millis(30));
             why.clone()
         });
-        if let Some(err) = self.engine.error.as_ref().or(refused.as_ref()) {
+        if let Some(err) = self.engine.shader_error.as_ref().or(self.engine.error.as_ref()).or(refused.as_ref()) {
             let width = (self.full.width() - LEFT_W - RIGHT_W - 150.0).clamp(240.0, 640.0);
             egui::Area::new(Id::unique("error")).order(egui::Order::Foreground).anchor(Align2::CENTER_TOP, egui::vec2(0.0, EDGE)).interactable(false).fade_in(false).show(ctx, |ui| {
                 egui::Frame::new()
@@ -1263,8 +1466,9 @@ impl App {
     /// the panels where the frosted copy of the picture is, if there is one to draw them on.
     fn look(&mut self, ctx: &egui::Context) {
         theme::set_mode(ctx, theme::mode_named(&self.px.store.theme, ctx.system_theme()));
-        theme::set_frost(theme::frost_named(&self.px.store.frost));
-        let on = self.video.is_none() && theme::frost() != theme::Frost::Off;
+        let (blur, opacity) = self.px.store.glass();
+        theme::set_glass(blur, opacity);
+        let on = self.video.is_none() && theme::frosted();
         theme::set_backdrop(self.backdrop_id.filter(|_| on && self.backdrop.texture().is_some()).map(|(id, _)| (id, self.full)));
     }
 
@@ -1338,6 +1542,63 @@ impl App {
         Some(id)
     }
 
+    /// Keeping the frame rate (autoscale.rs) as the quality section sets it: on or off, and the rate aimed
+    /// at (the display's own, from the frames' pace, when that is asked for); and what it is doing, for
+    /// the section to say.
+    /// The quality tier for this frame (tier.rs): which geometry the choice wants (the parts engine or the existing path; a change
+    /// rebuilds once), the phase of the interaction, and what draws. Returns the view mode to put back after the frame when it is
+    /// drawn as matcap while moving (Auto, motion tier matcap).
+    fn tier_step(&mut self, ctx: &egui::Context) -> Option<gf_core::view_mode::ViewMode> {
+        use crate::tier::{self, Frame, Tier};
+        use gf_core::view_mode::ViewMode;
+        self.px.tier_frame = self.px.tier_frame.wrapping_add(1);
+        let frame = self.px.tier_frame;
+        let st = &self.engine.state;
+        let choice = self.px.store.tiers;
+        let avail = crate::ui::tiers::avail(st, &mut self.px, frame);
+        // the geometry: Live asks for the parts engine itself; under Auto the scene's weight does (plan 1.4: more than one object, or
+        // more than 16 parts), and only where it accepts the scene. A phase never changes it.
+        let heavy = st.csg.parts.len() > 16 || (st.stack.layers.len() > 1 && !st.csg.parts.is_empty());
+        let want = choice.rest == Tier::Live || (choice.auto && heavy && avail.live.is_ok());
+        self.engine.set_parts_wanted(want);
+        // the phase: something is being dragged (the picture, a handle, a slider) or playing
+        let st = &self.engine.state;
+        let moving = self.drag.is_some() || ctx.dragged_id().is_some() || st.playing || st.p.spin > 0.0;
+        let phase = self.px.tier_phase.next(moving);
+        let mut c = choice;
+        if st.view.mode == ViewMode::Matcap { c.rest = Tier::Matcap; }
+        // (the draft is not drawn by this build yet: the engine has no Ray Reconstruction pass)
+        let mut av = avail;
+        av.draft = Err("the draft is not drawn by this build yet".into());
+        let d = tier::decide(&c, &av, &Frame { phase, prev: self.px.tier_drawing, settled: false, draft_ready: false, pop: Default::default() });
+        self.px.tier_drawing = Some(d.tier);
+        self.px.tier_note = d.fallback.map(|f| f.0);
+        if d.tier == Tier::Matcap && self.engine.state.view.mode != ViewMode::Matcap {
+            let was = self.engine.state.view.mode;
+            self.engine.state.view.mode = ViewMode::Matcap;
+            return Some(was);
+        }
+        None
+    }
+
+    fn keep_sync(&mut self, dt: f64) {
+        // (with vsync, frames whose GPU work left time to spare come once a refresh)
+        let spare = self.engine.keep.as_ref().is_none_or(|k| k.ctl.moving_ms.max(k.ctl.settle_ms) < 600.0 * dt);
+        self.refresh.gap(dt, spare);
+        let want = self.px.store.keep_rate;
+        if !want.on {
+            self.engine.keep = None;
+            self.px.keep_says.clear();
+            return;
+        }
+        let fps = if want.target == 0 { self.refresh.hz.unwrap_or(60.0) } else { want.target as f64 };
+        match &mut self.engine.keep {
+            Some(k) => k.set_fps(fps),
+            None => self.engine.keep = Some(crate::autoscale::Keep::new(&self.engine.gpu, fps)),
+        }
+        self.px.keep_says = self.engine.keep.as_ref().map(|k| k.says()).unwrap_or_default();
+    }
+
     /// Bring the line at the foot of the window up to date: the size the picture is traced at; frames a
     /// second while it moves, or how far it has refined while it is still; how long the shape took to build.
     /// True if it now says something else.
@@ -1345,22 +1606,55 @@ impl App {
         let n = self.engine.renderer.accum_n;
         let (_, (tw, th)) = self.engine.renderer.size();
         let moving = n as f64 <= (1.0 / (1.0 - self.engine.state.p.smooth)).round() + 1.0;
+        // what the picture is doing, in words: work that holds the lighting back comes first, then moving
+        // (its pace), then settling (how far, also drawn as a hairline under the line) or settled
+        let most = self.engine.max_accum();
+        self.px.settle = None;
         let pace = if self.video.is_some() {
             // a video is being made: how far along it is
             format!("video {}", self.px.video_text.lines().next().unwrap_or_default())
+        } else if self.engine.building {
+            "building the tracer".to_owned()
+        } else if self.engine.hdri_loading() {
+            "reading the picture".to_owned()
         } else if moving && self.fps > 0.0 {
             format!("{:.0} fps", self.fps)
-        } else if n >= self.engine.max_accum() {
-            "refined".to_owned()
+        } else if n >= most {
+            "settled".to_owned()
         } else {
-            format!("refining {n}/{}", self.engine.max_accum())
+            self.px.settle = Some(n as f32 / most.max(1) as f32);
+            format!("settling {n}/{most}")
         };
+        let pace = if self.video.is_none() && !self.engine.clouds.settled() { format!("{pace} · relighting the sky") } else { pace };
         // how long the selected layer's shape took to build, and with several layers the joining of them
         let ms = self.engine.state.shape().meta.ms;
+        // (keeping the frame rate: a moving picture traced smaller says the size it is traced at, and a
+        // faint note that the rate is being kept)
+        let (tw, th) = if moving && self.engine.renderer.dyn_used < 0.999 { crate::render::dyn_region(tw, th, self.engine.renderer.dyn_used) } else { (tw, th) };
         let mut text = format!("{tw}×{th} · {pace} · shape {ms:.*} ms", if ms < 9.95 { 1 } else { 0 });
+        // the quality tier and its GPU time, once a tier other than the plain full render is in use or has times (ui/tiers.rs)
+        {
+            let lit = crate::ui::tiers::lit(&self.engine.state, &self.px);
+            let drawn = self.px.tier_drawing.unwrap_or(lit);
+            let plain = lit == crate::tier::Tier::Full && !self.px.store.tiers.auto;
+            let times = self.px.tier_times.foot(drawn, moving);
+            if !plain || times.is_some() { text += &format!(" · {}", times.unwrap_or_else(|| drawn.label().to_owned())); }
+            // why the parts engine is not drawing when it was asked for, and any other fallback, said once
+            if self.engine.parts_wanted { if let Some(n) = &self.engine.parts_note { text += &format!(" · {n}"); } }
+            if let Some(n) = &self.px.tier_note { text += &format!(" · {n}"); }
+        }
+        if let Some(k) = self.engine.keep.as_ref().filter(|_| self.engine.keep_on()) { text += &format!(" · keeping {:.0} fps", k.fps); }
         if let Some((_, join)) = self.px.joined { text += &format!(" · join {join:.*} ms", if join < 9.95 { 1 } else { 0 }); }
         // a model's file being read (it may take seconds, and the picture carries on as it was meanwhile)
         if let Some(name) = &self.px.model.reading { text += &format!(" · reading {name}…"); }
+        // what makes this scene slow, when anything stands out (a few quiet words, not a warning)
+        let st = &self.engine.state;
+        let video = st.render.size.split_once('x').and_then(|(w, h)| Some((w.trim().parse().ok()?, h.trim().parse().ok()?)));
+        let heavy = overlay::heavy_words(&overlay::Heavy {
+            parts: st.csg.parts.len(), detail: st.shape().res, moving_detail: st.shape().anim_res, animating: st.playing,
+            modifiers: st.selected_modifiers().list.len(), video,
+        });
+        if !heavy.is_empty() { text += &format!(" · heavy: {}", heavy.join(", ")); }
         let changed = text != self.px.perf;
         self.px.perf = text;
         changed
@@ -1439,6 +1733,9 @@ impl App {
                         return;
                     }
                 }
+                Step::Lit | Step::Settle(_) if self.engine.shader_error.is_some() => {
+                    return self.fail(ctx, self.engine.shader_error.clone().unwrap());
+                }
                 Step::Lit => {
                     if self.engine.lighting_pending() || self.engine.model_loading() {
                         t.steps.push_front(Step::Lit);
@@ -1456,11 +1753,18 @@ impl App {
                     let had = if moving { t.settled } else { self.engine.renderer.accum_n };
                     // (clay settles after fewer frames than glass; a picture or a model being read and a tracer
                     // being built are waited for, so that what is photographed is what was asked for)
-                    if had < n.min(self.engine.max_accum()) || self.video.is_some() || self.engine.lighting_pending() || self.engine.model_loading() {
+                    let busy = self.video.is_some() || self.engine.lighting_pending() || self.engine.model_loading();
+                    if !settle_done(self.frozen, had, n.min(self.engine.max_accum()), busy) {
                         t.steps.push_front(Step::Settle(n));
                         return;
                     }
-                    // hold the picture exactly as it is while it is photographed and described
+                    t.settled = 0;
+                    // hold the picture exactly as it is while it is photographed and described (a picture
+                    // the script holds already stays as it was held)
+                    if self.opts.reference && !moving && !self.frozen {
+                        self.engine.renderer.reseed(0);
+                        self.engine.render(n);
+                    }
                     self.frozen = true;
                     self.perf();
                 }
@@ -1588,19 +1892,41 @@ impl App {
                 let sliders: serde_json::Map<String, serde_json::Value> =
                     st.shape_knobs().into_iter().map(|k| (k.id.clone(), serde_json::json!([k.lo, k.hi, k.step, st.get(&k.r)]))).collect();
                 let note = serde_json::json!({
-                    "perf": self.px.perf, "family": st.family().id, "preset": st.preset().id, "error": self.engine.error,
+                    "perf": self.px.perf, "family": st.family().id, "preset": st.preset().id, "error": self.engine.shader_error.as_ref().or(self.engine.error.as_ref()),
                     "built": st.shape().meta.res, "sliders": sliders, "material": material::id(st), "needsFile": st.needs_file(st.stack.sel),
                 });
                 if let Some(t) = &mut self.test { t.noted.push(note); }
             }
             Act::Room(open) => self.px.store.room_open = open,
             Act::Sculpt(open) => self.px.store.sculpt_open = open,
+            Act::Picker(how) => match how {
+                // (hanging from the button that would have opened it)
+                Some(false) => {
+                    crate::ui::picker::anchor_from(&mut self.px, &["layer:add", "picker:add"]);
+                    crate::ui::picker::open_add(st, &mut self.px)
+                }
+                Some(true) => {
+                    crate::ui::picker::anchor_from(&mut self.px, &["shape card"]);
+                    crate::ui::picker::open_replace(st, &mut self.px)
+                }
+                None => crate::ui::picker::close(&mut self.px),
+            },
+            Act::PickerBrowse => crate::ui::picker::browse(&mut self.px),
+            Act::Pick(fam, preset) => {
+                let f = st.families.iter().position(|f| f.id == fam).ok_or_else(|| format!("pick: there is no family called \"{fam}\""))?;
+                let p = st.families[f].presets.iter().position(|p| p.id == preset).ok_or_else(|| format!("pick: {fam} has no shape called \"{preset}\""))?;
+                crate::ui::picker::pick(st, &mut self.px, f, p);
+            }
             // (the materials lab is a window of its own; opened by a script, every layer of it is open too, so that
             // every part of the material is in view)
             Act::Lab(open) => {
                 self.px.store.lab_open = open;
                 if open {
-                    for g in material::folds().iter().skip(1) {
+                    for g in material::folds()
+                        .iter()
+                        .skip(1)
+                        .filter(|g| g.as_str() != material::CANONICAL)
+                    {
                         if self.px.store.is_closed(g) { self.px.store.fold(g); }
                     }
                 }
@@ -1625,7 +1951,7 @@ impl App {
                 st.select_layer(i);
             }
             Act::AddLayer => {
-                if st.layer_count() >= gf_core::layers::MAX_LAYERS { return Err("add-layer: there are four layers already".into()); }
+                if st.layer_count() >= gf_core::layers::MAX_LAYERS { return Err(format!("add-layer: there are {} layers already", gf_core::layers::MAX_LAYERS)); }
                 crate::ui::layers::add(st, &mut self.px);
             }
             Act::Join(tag) => {
@@ -1807,7 +2133,11 @@ impl App {
             }
             Act::Ui(name, value) => match name.as_str() {
                 "theme" => self.px.store.theme = value,
-                "frost" => self.px.store.frost = value,
+                "frost" => (self.px.store.frost, self.px.store.ui_blur, self.px.store.ui_opacity) = (value, None, None),
+                "blur" | "opacity" => {
+                    let v = value.trim().parse::<f32>().map_err(|_| format!("ui:{name}: \"{value}\" is not a number from 0 to 1"))?.clamp(0.0, 1.0);
+                    if name == "blur" { self.px.store.ui_blur = Some(v) } else { self.px.store.ui_opacity = Some(v) }
+                }
                 "scale" => self.px.store.ui_scale = if value == "auto" { None } else { Some(value.trim().parse::<f32>().map_err(|_| format!("ui:scale: \"{value}\" is not a number"))?) },
                 _ => self.px.store.settings_open = value == "open",
             },
@@ -1823,7 +2153,8 @@ impl App {
             // (no further than the panel's contents go: a large number means "to the foot")
             Act::Scroll(which, y) => match which.as_str() {
                 "left" => self.px.scroll_to[0] = Some(y.clamp(0.0, (self.px.needs[0] - self.px.room_h).max(0.0))),
-                "right" => self.px.scroll_to[1] = Some(y.clamp(0.0, (self.px.needs[1] - self.px.room_h).max(0.0))),
+                // (the right panel's own controls scroll within it, as far as they need: the area holds them to that)
+                "right" => self.px.scroll_to[1] = Some(y.max(0.0)),
                 _ => return Err(format!("scroll: \"{which}\" is not left or right")),
             },
             Act::Wait(n) => steps = vec![Step::Frames(n)],
@@ -1834,6 +2165,7 @@ impl App {
             }
             Act::Error(words) => self.engine.error = Some(words),
             Act::Hold => self.frozen = true,
+            Act::Release => self.frozen = false,
             Act::SaveSetup(path) => {
                 self.save_setup(Path::new(&path));
                 if !self.px.file_text.starts_with("saved") { return Err(self.px.file_text.clone()); }
@@ -1850,6 +2182,14 @@ impl App {
                 if !saved { return Err(self.px.file_text.clone()); }
             }
             Act::StillBits(bits) => self.px.store.still_16 = bits == 16,
+            Act::Select(which) => {
+                self.px.handles.let_go();
+                crate::ui::select::command(&mut self.engine.state, &which).ok_or_else(|| "select: only at a world level".to_owned())?;
+            }
+            Act::StillBg(word, rgb) => {
+                self.px.store.still_bg = word;
+                if let Some(c) = rgb { self.px.store.plate = c; }
+            }
             Act::Scrub(seconds) => {
                 animate::scrub(st, seconds);
                 animate::scrub_done(st);
@@ -1955,12 +2295,25 @@ impl App {
             "framesShown": self.frames.load(Ordering::SeqCst),
             "undrawn": self.passes - self.frames.load(Ordering::SeqCst),
             "idle": self.test.as_ref().and_then(|t| t.idle_found).map(|(s, n)| json!({ "seconds": s, "frames": n })),
-            "error": self.engine.error,
+            "error": self.engine.shader_error.as_ref().or(self.engine.error.as_ref()),
             "adapter": self.engine.gpu.name,
             "windowFormat": format!("{:?}", self.rs.target_format),
             "rects": rects,
         });
+        // (the selected object's modifiers, in order, and whether each is on: for the checks)
+        told["mods"] = serde_json::Value::Array(st.shape().mods.list.iter().map(|m| json!({ "kind": m.kind.name(), "on": m.on })).collect());
         told["view"] = camera_told;
+        // (the quality-tier row: which tier is lit, what is chosen, and what each button of the row shows)
+        {
+            let a = self.px.tier_cache.as_ref().map(|(_, a)| a.clone());
+            let row: Vec<_> = a.iter().flat_map(|a| crate::tier::TIERS.iter().map(move |t| (t, a.shown(*t)))).map(|(t, s)| match s {
+                crate::tier::Shown::Normal => json!({ "id": t.id(), "shown": "normal" }),
+                crate::tier::Shown::Dimmed(why) => json!({ "id": t.id(), "shown": "dimmed", "reason": why }),
+                crate::tier::Shown::Hidden => json!({ "id": t.id(), "shown": "hidden" }),
+            }).collect();
+            told["tiers"] = json!({ "lit": crate::ui::tiers::lit(&self.engine.state, &self.px).id(), "rest": self.px.store.tiers.rest.id(), "auto": self.px.store.tiers.auto,
+                "motion": self.px.store.tiers.motion.id(), "menu": self.px.tier_menu, "row": row, "mode": format!("{:?}", self.engine.state.view.mode) });
+        }
         told["history"] = json!({ "undo": self.history.can_undo(), "redo": self.history.can_redo(),
             "slots": (0..gf_core::history::SLOTS).filter(|i| self.engine.state.view_stored(*i)).map(|i| (i + 1) % 10).collect::<Vec<_>>() });
         // (what follows is added afterwards: one list of everything is more than the macro that makes it will take)
@@ -2000,6 +2353,12 @@ impl egui::DroppedFile for Dropped {
 }
 
 /// The name of a file, for telling the user about it.
+/// A scripted Settle is done: the picture has had `need` frames and nothing it waits for is still under
+/// way. A picture the script holds is never drawn again, so it is as settled as it will get.
+fn settle_done(held: bool, had: u32, need: u32, busy: bool) -> bool {
+    held || (had >= need && !busy)
+}
+
 fn file_name(path: &Path) -> String {
     path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
@@ -2150,7 +2509,7 @@ impl eframe::App for App {
         let picture = ui.interact(self.full, Id::unique("picture"), Sense::click_and_drag());
         if self.video.is_none() {
             self.history_before(&ctx);
-            self.gestures(&ctx, &picture);
+            if !self.px.draw_cut.gesture(&ctx,&picture,&mut self.engine.state) { self.gestures(&ctx, &picture); }
             self.history_keys(&ctx);
             self.keys(&ctx);
             self.fly(&ctx);
@@ -2175,9 +2534,29 @@ impl eframe::App for App {
             // after a rest the clock starts afresh: nothing was moving, so no time has to be made up
             if self.rested { dt = dt.min(1.0 / 60.0); }
             self.last = Some(now);
+            self.keep_sync(dt);
             let t_frame = Instant::now();
+            let put_back = self.tier_step(&ctx);
             let did = self.engine.frame(self.canvas.0, self.canvas.1, dt);
+            if let Some(mode) = put_back { self.engine.state.view.mode = mode; }
+            if let Some(t) = self.px.tier_drawing {
+                for (phase, ms) in std::mem::take(&mut self.engine.gpu_ms) { self.px.tier_times.push(t, phase == crate::autoscale::Phase::Moving, ms); }
+            }
             drew = did.drew;
+            // (a build that ran out of video memory: the edit that asked for it is put back, as Esc does,
+            // and a control still held stops writing until it is let go; the message stays up)
+            if std::mem::take(&mut self.engine.starved) {
+                self.history.cancel(&mut self.engine.state);
+                if ctx.input(|i| i.pointer.any_down()) {
+                    self.called_off = true;
+                    self.let_go_at = ctx.input(|i| i.pointer.latest_pos());
+                }
+                crate::breadcrumbs::note("out of video memory: the last edit was put back".into());
+            }
+            if let Some(note) = self.engine.memory_note.take() {
+                if self.px.nav.said_text() != Some(note.as_str()) { crate::breadcrumbs::note(note.clone()); }
+                self.px.nav.say(note);
+            }
             perf_log(&self.engine, did.drew, t_frame.elapsed().as_secs_f64() * 1e3);
             // frames a second: those drawn over the last fifth of a second or more, counted
             if did.drew { self.drawn.0 += 1; }
@@ -2216,6 +2595,12 @@ impl eframe::App for App {
         if self.video.is_none() {
             let pointer = ctx.input(|i| i.pointer.hover_pos());
             self.px.handles.paint(ui.painter(), &self.engine.state, self.full, pointer);
+            // the box being drawn with the select tool
+            if let Some(d) = self.drag.as_ref().filter(|d| d.kind == Gesture::Box && d.moved >= crate::ui::pick::CLICK_SLOP_PT) {
+                let r = crate::ui::select::drag_box(d.from, d.at);
+                ui.painter().rect_filled(r, 2, Color32::from_white_alpha(10));
+                ui.painter().rect_stroke(r, 2, egui::Stroke::new(1.0, Color32::from_white_alpha(150)), egui::StrokeKind::Inside);
+            }
             self.px.paths.paint(ui.painter(), &self.engine.state, self.full, pointer);
             if self.px.record {
                 for (name, at) in self.px.paths.spots.clone() { self.px.note(name, Rect::from_center_size(at, egui::vec2(2.0, 2.0))); }
@@ -2238,6 +2623,18 @@ impl eframe::App for App {
         }
         // over it, at the foot: the quiet line of figures, hidden with the panels
         if !(self.px.hide_left && self.px.hide_right) { overlay::foot(ui, &mut self.px, self.full); }
+        // and above it the note of what was just saved, made or went wrong (shown even with the panels hidden),
+        // and the offer of the last session's work
+        overlay::message(ui, &mut self.px, self.full);
+        overlay::restore_offer(ui, &mut self.px, self.full);
+        // the work kept now and then for after a crash (not while the last session's is still on offer:
+        // it would be written over)
+        if self.restore_from.is_none() && self.video.is_none() {
+            if let Some(r) = &mut self.recovery {
+                let st = &self.engine.state;
+                if let Err(e) = r.tick(|| st.setup_json()) { self.px.say(e, true); }
+            }
+        }
 
         // draw again only while something is going on
         let busy = again || rendering || self.drag.is_some() || ctx.input(|i| i.pointer.any_down());
@@ -2253,10 +2650,24 @@ impl eframe::App for App {
     fn on_exit(&mut self) {
         // an unfinished video is thrown away, and what is remembered is written down
         if let Some(job) = self.video.take() { job.cancel(&mut self.engine); }
+        // a clean close: nothing to offer back next time
+        if let Some(r) = &mut self.recovery { r.close(); }
         if let Some(path) = &self.store_path {
             if self.px.store != self.saved {
                 if let Err(e) = self.px.store.save(path) { eprintln!("glassforms: {e}"); }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_settle_after_hold_does_not_wait_for_frames_that_are_never_drawn() {
+        // held after 3 frames, asked to settle at 16: the old count can never grow
+        assert!(super::settle_done(true, 3, 16, false));
+        assert!(!super::settle_done(false, 3, 16, false));
+        assert!(!super::settle_done(false, 16, 16, true));
+        assert!(super::settle_done(false, 16, 16, false));
     }
 }

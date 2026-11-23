@@ -102,13 +102,17 @@ pub struct Optics {
     pub tint: [f64; 3],
     /// roughness of the surface (0 = polished): a rough body's caustics are soft
     pub rough: f64,
+    /// Measured optical constants for the reflecting substrate. A perfect mirror has no table.
+    pub conductor: Option<&'static material::Metal>,
+    /// Effective clear coat index, including the authored coat strength.
+    pub coat_ior: f64,
 }
 impl Optics {
     pub fn clear(ior: f64, disp: f64, absorb: [f64; 3]) -> Optics {
-        Optics { kind: Kind::Clear, ior, disp, absorb, tint: [1.0; 3], rough: 0.0 }
+        Optics { kind: Kind::Clear, ior, disp, absorb, tint: [1.0; 3], rough: 0.0, conductor: None, coat_ior: 1.0 }
     }
     pub fn matte() -> Optics {
-        Optics { kind: Kind::Matte, ior: 1.5, disp: 0.0, absorb: [0.0; 3], tint: [1.0; 3], rough: 1.0 }
+        Optics { kind: Kind::Matte, ior: 1.5, disp: 0.0, absorb: [0.0; 3], tint: [1.0; 3], rough: 1.0, conductor: None, coat_ior: 1.0 }
     }
     /// Whether a body of this kind casts a shadow and caustics when nobody has said otherwise.
     pub fn defaults(&self) -> (bool, bool) {
@@ -137,21 +141,24 @@ pub fn optics_of(p: &Settings, scale: f64) -> Optics {
     let body = [p.body_r.clamp(0.0, 1.0), p.body_g.clamp(0.0, 1.0), p.body_b.clamp(0.0, 1.0)];
     let rough = p.rough.clamp(0.0, 1.0);
     if v.metal {
-        return Optics { kind: Kind::Metal, ior: 1.0, disp: 0.0, absorb: [0.0; 3], tint: body, rough };
+        return Optics {
+            kind: Kind::Metal, ior: 1.0, disp: 0.0, absorb: [0.0; 3], tint: body, rough,
+            conductor: material::metal_of(p), coat_ior: 1.0 + (p.coat_ior - 1.0) * p.coat.clamp(0.0, 1.0),
+        };
     }
     // A fired or painted body (a ceramic that lets little of its inner light through: stoneware,
     // porcelain, lacquer) stops light at its surface: its shadow is a solid one, not the pale coloured
     // shadow of a milky body. (A coloured shadow under an orange lacquered pot read at once as a sweet
     // made of coloured wax.) Milk glass, which lets a good share through, stays milky.
     if v.sss && v.ceramic && p.ceramic_through < 0.3 {
-        return Optics { kind: Kind::Matte, ior: p.ior, disp: 0.0, absorb: [0.0; 3], tint: body, rough: 1.0 };
+        return Optics { kind: Kind::Matte, ior: p.ior, disp: 0.0, absorb: [0.0; 3], tint: body, rough: 1.0, conductor: None, coat_ior: 1.0 };
     }
     if v.sss {
         let sc =material::scatter(body, p.sss_depth * crate::material::sss_fit(scale), p.sss);
-        return Optics { kind: Kind::Milky, ior: p.ior, disp: 0.0, absorb: sc.kappa, tint: body, rough };
+        return Optics { kind: Kind::Milky, ior: p.ior, disp: 0.0, absorb: sc.kappa, tint: body, rough, conductor: None, coat_ior: 1.0 };
     }
     if v.hollow {
-        return Optics { kind: Kind::Clear, ior: 1.0, disp: 0.0, absorb: [0.0; 3], tint: [1.0; 3], rough };
+        return Optics { kind: Kind::Clear, ior: 1.0, disp: 0.0, absorb: [0.0; 3], tint: [1.0; 3], rough, conductor: None, coat_ior: 1.0 };
     }
     // the tint deepens with `density`, and with the shape's thickness when the material is fitted to it;
     // colour by wavelength is taken as the three numbers that give a typical piece its colour
@@ -161,7 +168,7 @@ pub fn optics_of(p: &Settings, scale: f64) -> Optics {
     } else {
         [p.absorb[0] * p.density / scale, p.absorb[1] * p.density / scale, p.absorb[2] * p.density / scale]
     };
-    Optics { kind: Kind::Clear, ior: p.ior, disp: p.disp, absorb, tint: [1.0; 3], rough }
+    Optics { kind: Kind::Clear, ior: p.ior, disp: p.disp, absorb, tint: [1.0; 3], rough, conductor: None, coat_ior: 1.0 }
 }
 
 /// A body's two switches as the settings have them. Bodies keep their switches under their lowest
@@ -187,11 +194,12 @@ pub struct Caster {
     pub shadow: bool,
     pub caustic: bool,
     pub optics: Optics,
+    pub medium: crate::pbr::CompiledMedium,
 }
 impl Caster {
     /// A body that takes no part.
     pub fn none() -> Caster {
-        Caster { shadow: false, caustic: false, optics: Optics::matte() }
+        Caster { shadow: false, caustic: false, optics: Optics::matte(), medium: Default::default() }
     }
     pub fn of(mode: Mode, switches: (Switch, Switch), optics: Optics) -> Caster {
         let (ds, dc) = optics.defaults();
@@ -202,7 +210,11 @@ impl Caster {
             (Mode::PerBody, Switch::On) => true,
             (Mode::PerBody, Switch::Auto) => d,
         };
-        Caster { shadow: pick(switches.0, ds), caustic: pick(switches.1, dc) && optics.can_focus(), optics }
+        Caster { shadow: pick(switches.0, ds), caustic: pick(switches.1, dc) && optics.can_focus(), optics, medium: Default::default() }
+    }
+    pub fn with_medium(mut self, medium: crate::pbr::CompiledMedium) -> Self {
+        self.medium = medium;
+        self
     }
     /// How a shadow march treats the body: (what a unit length of it takes from the light, per colour;
     /// what its two surfaces let through). A body that does not cast takes nothing.
@@ -292,10 +304,7 @@ pub fn nine(t: &[f64; 9], n: [f64; 3]) -> f64 {
     t[0] + t[1] * y + t[2] * z + t[3] * x + t[4] * x * y + t[5] * y * z + t[6] * (3.0 * z * z - 1.0) + t[7] * x * z + t[8] * (x * x - y * y)
 }
 
-fn sstep(x: f64) -> f64 {
-    let x = x.clamp(0.0, 1.0);
-    x * x * (3.0 - 2.0 * x)
-}
+use crate::math::sstep;
 
 fn terms_of(sh: &Sh9) -> [f64; 9] {
     let t = env::sh_terms(sh, env::SH_MATTE);
@@ -464,9 +473,9 @@ mod tests {
         let glass = Optics::clear(1.5, 0.05, [0.1; 3]);
         let off = (Switch::Off, Switch::Off);
         let on = (Switch::On, Switch::On);
-        assert_eq!(Caster::of(Mode::Off, on, glass), Caster { shadow: false, caustic: false, optics: glass });
-        assert_eq!(Caster::of(Mode::All, off, glass), Caster { shadow: true, caustic: true, optics: glass });
-        assert_eq!(Caster::of(Mode::PerBody, off, glass), Caster { shadow: false, caustic: false, optics: glass });
+        assert_eq!(Caster::of(Mode::Off, on, glass), Caster { shadow: false, caustic: false, optics: glass, medium: Default::default() });
+        assert_eq!(Caster::of(Mode::All, off, glass), Caster { shadow: true, caustic: true, optics: glass, medium: Default::default() });
+        assert_eq!(Caster::of(Mode::PerBody, off, glass), Caster { shadow: false, caustic: false, optics: glass, medium: Default::default() });
         // by the material: glass casts both, a matte body only a shadow, and nothing makes it focus
         let auto = (Switch::Auto, Switch::Auto);
         assert!(Caster::of(Mode::PerBody, auto, glass).caustic);
@@ -478,10 +487,10 @@ mod tests {
     fn shadows_take_what_caustics_give_back() {
         let glass = Optics::clear(1.5, 0.05, [0.2, 0.1, 0.0]);
         // casting caustics: the shadow takes everything
-        let both = Caster { shadow: true, caustic: true, optics: glass };
+        let both = Caster { shadow: true, caustic: true, optics: glass, medium: Default::default() };
         assert!(both.shadow_terms().0[0] > 1e3 && both.shadow_terms().1 == 0.0);
         // not: the light goes straight on, less the two reflections (4% each for index 1.5)
-        let plain = Caster { shadow: true, caustic: false, optics: glass };
+        let plain = Caster { shadow: true, caustic: false, optics: glass, medium: Default::default() };
         assert_eq!(plain.shadow_terms().0, [0.2, 0.1, 0.0]);
         assert!((plain.shadow_terms().1 - 0.96 * 0.96).abs() < 1e-12);
         assert_eq!(Caster::none().shadow_terms(), ([0.0; 3], 1.0));

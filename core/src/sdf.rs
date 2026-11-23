@@ -14,9 +14,11 @@
 //! is held to `STEP_MAX`. A preset whose `raw` is a true distance (the studio's shapes) or never more than
 //! one (a cut stone's facets) is read as it is, one evaluation a step.
 //!
-//! Shapes made from curves (attractors, knots, trees) and models read from files have no formula to
-//! evaluate per step (a point would have to be measured against every piece of every strand or every
-//! triangle): they are traced from their volume only. See `docs/sdf_mode.md`.
+//! Paths are the exception among curves: their primitives are exact formulas (`path_formula`), read by a tree
+//! from a table (gf_core::csg); `tracer_decl` gives them no text of their own.
+//!
+//! Generated curves supply cubics with a radius along each span. Spatial cell lists
+//! limit evaluation to nearby spans and leaves. Imported meshes supply distance volumes.
 //!
 //! The grid is still baked in either mode: everything besides the tracer (shadows and caustics, the
 //! surface pass, the floor's height, the light inside a milky body, the measured thickness) reads it.
@@ -60,7 +62,8 @@ pub enum Support {
 /// Families whose `raw` is a true distance, or never more than one: the studio's shapes measure their
 /// distance exactly, inside and out; a cut stone's is the largest of its facets' distances, exact
 /// inside and short of the truth outside.
-const EXACT: &[&str] = &["studio", "gems"];
+// (snowflakes: a union of prisms, each the intersection of half-spaces: presets/snowflakes.rs)
+const EXACT: &[&str] = &["studio", "gems", "snowflakes"];
 /// Single presets whose `raw` is a true distance: the kaleidoscope's polyhedra and frames (the distance to
 /// the corner their faces make, exactly) and the stellations (the distance to a wedge of face planes).
 const EXACT_PRESETS: &[&str] = &[
@@ -70,6 +73,9 @@ const EXACT_PRESETS: &[&str] = &[
     // fractals: the Menger sponge (smooth unions and cuts of exact distances, never more than the distance) and
     // the Apollonian packing (every ball near the point found in the packing's tree and measured exactly)
     "fractals/menger", "fractals/apollonian",
+    // (the escape-time fractals' distance estimates, |z| ln|z| / |dz| less the skin: estimates, but read as they
+    // are, one evaluation a step instead of four, as their slope is near 1 everywhere it is read)
+    "fractals/mandelbulb", "fractals/mandelbox", "fractals/quatjulia",
     // topology: walls about surfaces whose `raw` is the distance to the nearest point of the surface found by a
     // search (Dini's and the Calabi-Yau slice to first order: read as distances, as their bake reads them)
     "topology/kleinbottle", "topology/enneper", "topology/dini", "topology/kuen", "topology/breather", "topology/calabiyau", "topology/costa",
@@ -84,8 +90,12 @@ const EXACT_PRESETS: &[&str] = &[
 
 /// Can this family's preset be traced from its formula?
 pub fn support(fam: &Family, p: &Preset) -> Support {
+    // (a path is exact primitives, read from a table: gf_core::path_formula)
+    if fam.id == crate::presets::paths::FAMILY { return Support::Formula { exact: true }; }
+    // A swept tube evaluates the exact sphere-envelope distance directly.
+    if p.exact_tubes { return Support::Formula { exact: true }; }
     match &p.shape {
-        Shape::Field { .. } => Support::Formula { exact: EXACT.contains(&fam.id) || EXACT_PRESETS.contains(&format!("{}/{}", fam.id, p.id).as_str()) },
+        Shape::Field { wgsl, .. } => Support::Formula { exact: (p.has_table() && wgsl.contains(crate::field::DISTANCE_MARK)) || EXACT.contains(&fam.id) || EXACT_PRESETS.contains(&format!("{}/{}", fam.id, p.id).as_str()) },
         Shape::Flow(_) | Shape::Curve(_) => Support::VolumeOnly("drawn from curves: no formula to trace"),
         Shape::Mesh { .. } => Support::VolumeOnly("a model file: no formula to trace"),
     }
@@ -93,6 +103,8 @@ pub fn support(fam: &Family, p: &Preset) -> Support {
 
 /// The binding of the formula's numbers in the tracer (read only by tracers built for a formula).
 pub const BINDING: u32 = 35;
+/// The binding of a formula's table in the tracer (`Preset::table`; read only by tracers built for one).
+pub const TABLE_BINDING: u32 = 36;
 /// The longest step the slope's estimate is trusted for, in the volume's units (the volume is 3 across).
 /// The bake's walk to the surface trusts its gradient no further than 0.12 a step; a ray marching
 /// through the glass and out of it takes this, scaled by the family's step scale.
@@ -111,6 +123,31 @@ pub const BAND: f32 = 0.0;
 pub const SLOPE_E: f32 = 0.0007;
 /// How far apart the readings that give a normal are: a tenth of a 768-voxel grid's spacing.
 pub const NORMAL_E: f32 = 0.0004;
+/// A line a preset's text may hold to say that its formula is too dear to read at every surface a path
+/// meets inside the glass (a search, many members, a deep iteration): traced from the formula, it settles
+/// the first surface the eye meets and gives its normal, and every surface after that, inside the glass
+/// and beyond, is the volume's, as when traced from the volume. What is seen first, the outline and the
+/// surface in front, is the formula's exactly; what is seen through it is refracted out of any sharpness
+/// the formula could add. It is read in the tracer's `primary` alone, so that none of its text is put into
+/// the loops inside the glass, where it would slow the whole shader (app/src/sdf.rs `first_only`).
+pub const FIRST_ONLY_MARK: &str = "// csg: the formula at the first surface only";
+/// Shapes read at the first surface only though their text does not say so (written by generators shared
+/// with cheaper shapes): over 11.1 ms p80 at 4K traced from the formula at every surface
+/// (_r17_gensfix/shots/sweep1.jsonl).
+const FIRST_ONLY_PRESETS: &[&str] = &[
+    "fractals/mandelbox", "fractals/quatjulia", "fractals/sierpinski",
+    "topology/enneper", "topology/dini", "topology/kuen", "topology/breather", "topology/calabiyau",
+    "polyhedra/tricupola", "polyhedra/fivecubes", "polyhedra/fivetetra", "polyhedra/fiveocta", "polyhedra/cubeocta",
+    "polyhedra/dodecaicosa", "polyhedra/triacontahedron", "polyhedra/truncoct", "polyhedra/enneacontahedron",
+    "polyhedra/truncicosidodeca", "polyhedra/polarzono", "polyhedra/geodesic", "polyhedra/geodesicframe",
+];
+/// Is this preset traced from its formula at the first surface only?
+pub fn first_only(fam: &Family, p: &Preset) -> bool {
+    let Shape::Field { wgsl, .. } = &p.shape else { return false };
+    wgsl.contains(FIRST_ONLY_MARK) || FIRST_ONLY_PRESETS.contains(&format!("{}/{}", fam.id, p.id).as_str())
+}
+/// What the tracer's text for such a preset says (app/src/sdf.rs looks for it).
+pub const FIRST_ONLY_DECL: &str = "const SDF_FIRST_ONLY: bool = true;";
 
 /// `text` with every `from` that starts a name (not preceded by a letter, digit, `_` or `.`) made `to`.
 pub(crate) fn rename(text: &str, from: &str, to: &str) -> String {
@@ -133,12 +170,14 @@ pub(crate) fn rename(text: &str, from: &str, to: &str) -> String {
 fn adapt(text: &str) -> String {
     let t = rename(text, "pr.", "sdfU.pr.");
     let t = rename(&t, "u.hb", "sdfU.hb");
+    let t = rename(&t, "tbl[", "sdfTbl[");
+    let t = rename(&t, "u.pad", "sdfU.pad");
     rename(&t, "u.res", "sdfU.res")
 }
 
 /// The names a text declares at its top level (`fn`, `const`, `struct`, `alias`, `var<...>` at the start
 /// of a line).
-pub(crate) fn top_names(text: &str) -> Vec<String> {
+pub fn top_names(text: &str) -> Vec<String> {
     let mut names = Vec::new();
     for line in text.lines() {
         let rest = ["fn ", "const ", "struct ", "alias ", "override "].iter().find_map(|k| line.strip_prefix(k))
@@ -153,7 +192,7 @@ pub(crate) fn top_names(text: &str) -> Vec<String> {
 /// `text` with every name in `names` (whole names only, and not after a `.`, where a name is a member)
 /// given `prefix`: the preset's own names must not meet the tracer's (a seashell has a `beyond`, and so
 /// has the tracer).
-pub(crate) fn prefix_names(text: &str, names: &[String], prefix: &str) -> String {
+pub fn prefix_names(text: &str, names: &[String], prefix: &str) -> String {
     let mut out = String::with_capacity(text.len() + 256);
     let mut word = String::new();
     let mut prev = ' ';
@@ -179,6 +218,76 @@ pub(crate) fn prefix_names(text: &str, names: &[String], prefix: &str) -> String
     out
 }
 
+/// The normal from four readings of the formula (see `tracer_decl`).
+const TAP_NORMAL: &str = "// The outward normal at p, in the object's frame: the slope of the formula, four readings (a wall about
+// the surface faces away from it on either side: the slope, turned to the side p is on; how its thickness
+// changes along the surface is too slow to tilt it). Where the clip comes within the 0.03 it is blended
+// over, its own slope is read at the same four points and the two are blended as the cut blends them
+// (the share each has in a smooth maximum). The distance itself is never read here: it would put the
+// whole formula into the shader once more.
+fn sdfNormal(p: vec3f) -> vec3f {
+  SDF_TAPS = 4u + u32(sdfU.pad);
+  let clipNear = sdfClip(p) >= -0.035;
+  var f = 0.0;
+  var g = vec3f(0.0);
+  var cf = 0.0;
+  var cg = vec3f(0.0);
+  for (var i = 0u; i < SDF_TAPS; i++) {
+    let o = sdfTap(i);
+    let v = raw(p + SDF_NE * o);
+    f += v;
+    g += o * v;
+    if (clipNear) {
+      let c = sdfClip(p + SDF_NE * o);
+      cf += c;
+      cg += o * c;
+    }
+  }
+  var n = normalize(g);
+  // the distance at p, as sdfDist would have it (the readings' mean over the slope)
+  var sd = f * SDF_NE * inverseSqrt(max(dot(g, g), 1e-30)) - sdfU.puff;
+  let w = sdfShell(p);
+  if (w > 0.0) {
+    n *= select(1.0, -1.0, sd < 0.0);
+    sd = abs(sd) - w;
+  }
+  if (clipNear) {
+    let share = clamp(0.5 + 0.5 * (sd - 0.25 * cf) / 0.03, 0.0, 1.0);
+    n = normalize(share * n + (1.0 - share) * normalize(cg));
+  }
+  return n;
+}
+";
+/// The normal from the preset's own slope (`rawGrad`), one reading; the clip's slope still from four
+/// readings of the clip alone where it comes near.
+const GRAD_NORMAL: &str = "// The outward normal at p, in the object's frame: the preset's own slope, from whichever of its pieces
+// decides the surface there (`rawGrad`); blended with the clip's where the clip comes near, as above.
+fn sdfNormal(p: vec3f) -> vec3f {
+  SDF_TAPS = 4u + u32(sdfU.pad);
+  let rg = rawGrad(p);
+  var n = normalize(rg.xyz);
+  var sd = rg.w - sdfU.puff;
+  let w = sdfShell(p);
+  if (w > 0.0) {
+    n *= select(1.0, -1.0, sd < 0.0);
+    sd = abs(sd) - w;
+  }
+  if (sdfClip(p) >= -0.035) {
+    var cf = 0.0;
+    var cg = vec3f(0.0);
+    for (var i = 0u; i < SDF_TAPS; i++) {
+      let o = sdfTap(i);
+      let c = sdfClip(p + SDF_NE * o);
+      cf += c;
+      cg += o * c;
+    }
+    let share = clamp(0.5 + 0.5 * (sd - 0.25 * cf) / 0.03, 0.0, 1.0);
+    n = normalize(share * n + (1.0 - share) * normalize(cg));
+  }
+  return n;
+}
+";
+
 /// What goes into the tracer to trace this preset from its formula: the formula's numbers (the same
 /// block of 48 bytes the bake reads, `field::uniforms`), the preset's own text and `sdfDist(p)`, the
 /// distance to the surface from a point of the object's frame, made as the bake makes the volume's
@@ -186,8 +295,9 @@ pub(crate) fn prefix_names(text: &str, names: &[String], prefix: &str) -> String
 /// that is not a formula.
 pub fn tracer_decl(fam: &Family, p: &Preset) -> Option<String> {
     let Support::Formula { exact } = support(fam, p) else { return None };
-    let Shape::Field { wgsl, clip, shell } = &p.shape else { return None };
-    let mut members: Vec<String> = p.params.iter().take(MAX_PARAMS).map(|d| member_name(d.id)).collect();
+    let (wgsl, clip, shell) = p.formula()?;
+    let params = if p.exact_tubes { &[][..] } else { &p.params[..] };
+    let mut members: Vec<String> = params.iter().take(MAX_PARAMS).map(|d| member_name(d.id)).collect();
     for i in members.len()..MAX_PARAMS { members.push(format!("_p{i}")); }
     let pr: Vec<String> = members.iter().map(|m| format!("{m}: f32")).collect();
     let estimate = if exact {
@@ -213,7 +323,7 @@ pub fn tracer_decl(fam: &Family, p: &Preset) -> Option<String> {
         "
 // ---- {name}, traced from its formula (gf_core::sdf) ----
 struct SdfPr {{ {pr} }}
-struct SdfU {{ hb: f32, res: f32, puff: f32, pad: f32, pr: SdfPr }}
+struct SdfU {{ hb: f32, res: f32, puff: f32, pad: f32, pr: SdfPr }}{tbl}
 @group(0) @binding({BINDING}) var<uniform> sdfU: SdfU;
 const SDF_STEP_MAX: f32 = {STEP_MAX};
 const SDF_NE: f32 = {NORMAL_E};
@@ -226,9 +336,14 @@ fn sdfTap(i: u32) -> vec3f {{
 }}
 ",
         name = p.name, pr = pr.join(", "),
+        tbl = if p.has_table() { format!("\n@group(0) @binding({TABLE_BINDING}) var<storage, read> sdfTbl: array<vec4f>;") } else { String::new() },
     );
     let own = format!("{helpers}\n{body}\n", helpers = HELPERS.trim_end(), body = adapt(wgsl).trim_end());
     let names = top_names(&own);
+    // A preset that gives its own slope (`rawGrad(p)`: the slope and the value, from whichever of its pieces
+    // decides the surface there) has its normal read once, not from four readings: an exact formula of
+    // many pieces costs as much as each reading, and every hit of every ray takes a normal.
+    let normal = if wgsl.contains("fn rawGrad(") { GRAD_NORMAL } else { TAP_NORMAL };
     let all = format!(
         "{own}fn sdfShell(p: vec3f) -> f32 {{ return {shell}; }}
 fn sdfClip(p: vec3f) -> f32 {{ return {clip}; }}
@@ -240,49 +355,13 @@ fn sdfDist(p: vec3f) -> f32 {{
   if (w > 0.0) {{ sd = abs(sd) - w; }}
   return clamp(smax(sd, sdfClip(p), 0.03), -1.0, 1.0);
 }}
-// The outward normal at p, in the object's frame: the slope of the formula, four readings (a wall about
-// the surface faces away from it on either side: the slope, turned to the side p is on; how its thickness
-// changes along the surface is too slow to tilt it). Where the clip comes within the 0.03 it is blended
-// over, its own slope is read at the same four points and the two are blended as the cut blends them
-// (the share each has in a smooth maximum). The distance itself is never read here: it would put the
-// whole formula into the shader once more.
-fn sdfNormal(p: vec3f) -> vec3f {{
-  SDF_TAPS = 4u + u32(sdfU.pad);
-  let clipNear = sdfClip(p) >= -0.035;
-  var f = 0.0;
-  var g = vec3f(0.0);
-  var cf = 0.0;
-  var cg = vec3f(0.0);
-  for (var i = 0u; i < SDF_TAPS; i++) {{
-    let o = sdfTap(i);
-    let v = raw(p + SDF_NE * o);
-    f += v;
-    g += o * v;
-    if (clipNear) {{
-      let c = sdfClip(p + SDF_NE * o);
-      cf += c;
-      cg += o * c;
-    }}
-  }}
-  var n = normalize(g);
-  // the distance at p, as sdfDist would have it (the readings' mean over the slope)
-  var sd = f * SDF_NE * inverseSqrt(max(dot(g, g), 1e-30)) - sdfU.puff;
-  let w = sdfShell(p);
-  if (w > 0.0) {{
-    n *= select(1.0, -1.0, sd < 0.0);
-    sd = abs(sd) - w;
-  }}
-  if (clipNear) {{
-    let share = clamp(0.5 + 0.5 * (sd - 0.25 * cf) / 0.03, 0.0, 1.0);
-    n = normalize(share * n + (1.0 - share) * normalize(cg));
-  }}
-  return n;
-}}
-",
+{normal}",
         shell = adapt(shell), clip = adapt(clip),
     );
     // (the preset's own names, and the helpers', made its own: `sdf_raw`, `sdf_smax`...)
-    Some(head + &prefix_names(&all, &names, "sdf_"))
+    let first = if first_only(fam, p) { format!("{FIRST_ONLY_DECL}
+") } else { String::new() };
+    Some(head + &first + &prefix_names(&all, &names, "sdf_"))
 }
 
 #[cfg(test)]
@@ -300,7 +379,9 @@ mod tests {
         for f in crate::presets::families() {
             for p in &f.presets {
                 let d = tracer_decl(&f, p);
-                assert_eq!(d.is_some(), matches!(p.shape, Shape::Field { .. }), "{}/{}", f.id, p.id);
+                assert_eq!(d.is_some(), p.formula().is_some(), "{}/{}", f.id, p.id);
+                // (a path is a formula all the same, read from a table by a tree)
+                if f.id == crate::presets::paths::FAMILY { assert_eq!(support(&f, p), Support::Formula { exact: true }); }
                 if let Some(d) = d {
                     assert!(d.contains("fn sdfDist(") && !d.contains(" pr.") && !d.contains("(pr."), "{}/{}", f.id, p.id);
                 }

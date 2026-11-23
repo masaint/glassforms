@@ -10,6 +10,51 @@ fn check(name: &str, src: &str) {
 }
 
 #[test]
+fn swept_tubes_use_hybrid_band_and_reset_exact_hits_per_sample() {
+    let m = March { step_scale: 0.9, steps_out: 220, steps_in: 56, layers: 2 };
+    let fams = gf_core::presets::families();
+    let f = fams.iter().find(|f| f.id == "knots").expect("knots family");
+    let p = f.presets.iter().find(|p| p.id == "trefoil").expect("trefoil preset");
+    let decl = gf_core::sdf::tracer_decl(f, p).expect("trefoil decl");
+    let sss_mat = Variant { mat: gf_core::material::Variant { sss: true, ..Default::default() }, ..Default::default() };
+    let hero_src = glassforms::hero::weave(&tracer_source(&m, Variant::default(), false), &glassforms::hero::Hero::settling(true)).expect("hero weave");
+    for (name, plain) in [
+        ("plain", tracer_source(&m, Variant::default(), false)),
+        ("lens", tracer_source_lens(&m, Variant::default(), false)),
+        ("hero", hero_src),
+        ("sss", tracer_source(&m, sss_mat, false)),
+    ] {
+        let src = glassforms::sdf::weave(&plain, &decl);
+        let sample_at = src.split("fn sampleAt(").nth(1).expect("sampleAt in woven shader");
+        let sample_body = sample_at.split("\nfn ").next().unwrap_or(sample_at);
+        assert!(sample_body.contains("SDF_HITS = 0u;"), "missing SDF_HITS reset in sampleAt ({name})");
+        assert!(src.contains("    SDF_HITS = 1u;\n"), "missing per-wavelength SDF_HITS reset ({name})");
+        assert!(
+            src.contains(&format!("const SDF_EXACT_HITS: u32 = {}u;", glassforms::sdf::TUBE_EXACT_HITS)),
+            "missing fixed SDF_EXACT_HITS ({name})"
+        );
+        let primary_fn = src.split("fn primary(").nth(1).expect("primary in woven shader");
+        let primary_body = primary_fn.split("\nfn ").next().unwrap_or(primary_fn);
+        assert!(primary_body.contains("sdfBestD < 0.75 * sdfVox"), "missing grazing silhouette rescue ({name})");
+        assert!(primary_body.contains("sdfLast < 0.0008"), "missing exact hit confirmation ({name})");
+        // (the first surface is settled by the formula, every later one by the volume: glassforms::sdf `tube_interior`)
+        assert!(primary_body.contains("mapNWX(") && !primary_body.contains("mapNW("), "primary must read the formula ({name})");
+        assert!(src.contains("fn mapN(p: vec3f) -> f32 { sdfLastP = vec3f(1e9); return mapNVolume(p); }"), "interior settles must read the volume ({name})");
+        assert!(!primary_body.contains("if (abs(d) <"), "unexpected per-step hybrid branch in primary ({name})");
+        let map_fn = src.split("fn map(").nth(1).expect("map in woven shader");
+        let map_body = map_fn.split("\nfn ").next().unwrap_or(map_fn);
+        assert!(!map_body.contains("sdfDist("), "map() must stay volume-only ({name})");
+        assert!(src.contains("fn sdf_tube_eval("), "missing tube evaluator ({name})");
+        // (settled by Newton's step along the ray, the normal taken from the settling reading when it is
+        // close enough: glassforms::sdf `tube_newton`)
+        assert!(src.contains("fn sdfAlong(") && src.contains("if (dot(dp, dp) > SDF_REUSE * SDF_REUSE)"), "missing Newton settling ({name})");
+        let newton = src.matches(") * sdfAlong(").count() + src.matches("sdfLast * sdfAlong(").count();
+        assert_eq!(newton, src.matches("for (var sdfS = 0u;").count(), "a settling loop without Newton's step ({name})");
+        check(&format!("knots/trefoil ({name})"), &src);
+    }
+}
+
+#[test]
 fn every_formula_weaves_into_the_tracer() {
     let m = March { step_scale: 0.9, steps_out: 220, steps_in: 56, layers: 2 };
     let plain = tracer_source(&m, Variant::default(), false);
@@ -23,7 +68,17 @@ fn every_formula_weaves_into_the_tracer() {
   {{PROFILE") && src.contains("for (var sdfS = 0u;"), "{}/{}", f.id, p.id);
             if f.id == "gems" { assert!(!src.contains("if (!sdf_gem_ready)") && src.contains("  sdf_gem_setup();
 "), "{}: the stone's setup is not hoisted", p.id); }
-            assert!(src.contains("fn mapN(p: vec3f) -> f32 { return sdfDist(p); }") && src.contains("sdfNormal(toObj(p))"), "{}/{}", f.id, p.id);
+            if decl.contains(gf_core::sdf::FIRST_ONLY_DECL) {
+                // a formula read at the first surface only: `primary` settles its hit onto the formula and
+                // keeps the formula's normal for the first `nrm`; every other reading is the volume's
+                assert!(src.contains("  if (sdfFirst) { sdfFirst = false; return sdfN; }") && src.contains("      sdfN = nrmF(ro + rd * t);"), "{}/{}", f.id, p.id);
+                assert_eq!(src.matches("\nfn primary(").count(), src.matches("      sdfFirst = true;\n").count(), "{}/{}", f.id, p.id);
+                // the formula is read in `primary` alone
+                assert!(!src.contains("fn mapN(p: vec3f) -> f32 { return sdfDist(p); }"), "{}/{}", f.id, p.id);
+            } else {
+            // (a formula with a table is read at the first hits only: `glassforms::sdf::EXACT_HITS`)
+            assert!((src.contains("fn mapN(p: vec3f) -> f32 { return sdfDist(p); }") || src.contains("SDF_EXACT_HITS")) && src.contains("sdfNormal(toObj(p))"), "{}/{}", f.id, p.id);
+            }
             check(&format!("{}/{}", f.id, p.id), &src);
             if f.id == "gems" {
                 let g = glassforms::sdf::weave(&gem_weave(&plain), &decl);
@@ -62,6 +117,33 @@ fn the_formula_weaves_into_other_tracers() {
     }
 }
 
+/// A formula read at the first surface only (gf_core::sdf::FIRST_ONLY_MARK) weaves into the same other
+/// tracers: in each, every `primary` settles its hit onto the formula and keeps its normal.
+#[test]
+fn a_first_surface_formula_weaves_into_other_tracers() {
+    let fams = gf_core::presets::families();
+    let fr = fams.iter().find(|f| f.id == "fractals").unwrap();
+    let ap = fr.presets.iter().find(|p| p.id == "apollonian").unwrap();
+    let decl = gf_core::sdf::tracer_decl(fr, ap).unwrap();
+    assert!(decl.contains(gf_core::sdf::FIRST_ONLY_DECL));
+    let m = March { step_scale: 0.9, steps_out: 220, steps_in: 56, layers: 2 };
+    let mut vs = vec![
+        Variant::default(),
+        Variant { light: LightFrom::Picture, backdrop: true, ..Default::default() },
+        Variant { clay: true, ..Default::default() },
+    ];
+    for mat in gf_core::material::Variant::samples().into_iter().filter(|v| v.bodies == 0 && !v.bubbles).take(12) {
+        vs.push(Variant { mat, ..Default::default() });
+    }
+    for v in vs {
+        for (name, src) in [("", tracer_source(&m, v, false)), (" (counting)", tracer_source(&m, v, true)), (" (lens)", tracer_source_lens(&m, v, false))] {
+            let woven = glassforms::sdf::weave(&src, &decl);
+            assert!(woven.contains("  if (sdfFirst) { sdfFirst = false; return sdfN; }") && woven.matches("\nfn primary(").count() == woven.matches("      sdfFirst = true;\n").count(), "{v:?}{name}: not woven");
+            check(&format!("{v:?}{name}"), &woven);
+        }
+    }
+}
+
 #[test]
 fn layers_and_bubbles_read_the_volume() {
     let bodies = Variant { mat: gf_core::material::Variant { bodies: 2, ..Default::default() }, ..Default::default() };
@@ -94,7 +176,7 @@ fn formulas(fams: &[gf_core::presets::Family]) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     for (fi, f) in fams.iter().enumerate() {
         for (pi, p) in f.presets.iter().enumerate() {
-            if matches!(gf_core::sdf::support(f, p), gf_core::sdf::Support::Formula { .. }) { out.push((fi, pi)); }
+            if gf_core::csg::formula_part(f, p) { out.push((fi, pi)); }
         }
     }
     out
@@ -108,12 +190,14 @@ fn every_formula_is_a_part() {
     let m = March { step_scale: 0.9, steps_out: 220, steps_in: 56, layers: 2 };
     let plain = tracer_source(&m, Variant::default(), false);
     let all = formulas(&fams);
-    // 77, and the mathematical families: 6 fractals, 12 topology, 16 hydrogen orbitals, 23 polyhedra
-    assert_eq!(all.len(), 134);
+    // Every generator has an analytic representation in a tree. Imported files supply a grid.
+    let generators: usize = fams.iter().filter(|family| family.kind != gf_core::presets::Kind::Mesh)
+        .map(|family| family.presets.len()).sum();
+    assert_eq!(all.len(), generators);
     for &k in &all {
         let name = format!("{}/{}", fams[k.0].id, fams[k.0].presets[k.1].id);
         let src = glassforms::sdf::weave(&plain, &gf_core::csg::wgsl(&fams, &[k], gf_core::sdf::BINDING, false));
-        assert!(src.contains("let c = csgDist(p);") && src.contains("csgNormal(po, near)") && src.contains("for (var sdfS = 0u;"), "{name}");
+        assert!((src.contains("let c = csgDist(p);") || src.contains("let cw = csgDistW(p, -1);")) && src.contains("csgNormal(po, near)") && src.contains("for (var sdfS = 0u;"), "{name}");
         check(&format!("{name} (tree)"), &src);
         check(&format!("{name} (merge)"), &glassforms::csg::merge_source(&gf_core::csg::wgsl(&fams, &[k], 0, true)));
         check(&format!("{name} (extents)"), &glassforms::csg::extent_source(&gf_core::csg::wgsl(&fams, &[k], 0, false)));
@@ -241,28 +325,28 @@ fn every_shape_is_a_part_of_the_tree() {
     let (tree, joined) = st.csg_tree();
     assert!(!joined);
     assert_eq!(tree.len(), 4);
-    assert_eq!(tree[0].grid.as_ref().map(|g| (g.slot, g.from)), Some((0, GridFrom::Up)));
+    assert!(tree[0].grid.is_none());
     assert!(tree[1].grid.is_none());
-    assert_eq!(tree[2].grid.as_ref().map(|g| (g.slot, g.res, g.from)), Some((1, 256, GridFrom::Part(1))));
-    assert_eq!(tree[3].grid.as_ref().map(|g| (g.slot, g.from)), Some((2, GridFrom::Part(2))));
+    assert!(tree[2].grid.is_none());
+    assert_eq!(tree[3].grid.as_ref().map(|g| (g.slot, g.from)), Some((0, GridFrom::Part(2))));
     assert!(!gf_core::csg::plain(&tree));
     // the memory the parts' own volumes take
     let (bytes, own) = st.csg_grid_bytes();
-    assert_eq!(own, 2);
-    assert_eq!(bytes, gf_core::csg::grid_bytes(256) + gf_core::csg::grid_bytes(gf_core::csg::GRID_RES));
+    assert_eq!(own, 1);
+    assert_eq!(bytes, gf_core::csg::grid_bytes(gf_core::csg::GRID_RES));
     // a formula reshaped by the surface studio is a grid part too (its studio-shaped volume)
     let studio = st.families.iter().position(|f| f.id == "studio").unwrap();
     st.set_scene(studio);
     assert!(st.apply_arg("trace", "csg"));
     assert!(st.csg_tree().0[0].grid.is_none());
     // past the cap: at most MAX_GRIDS grid parts, the rest left out
-    let many: Vec<String> = (0..10).map(|i| format!("knots/trefoil@{},0,0@0,0,0@0.2", -1.0 + 0.2 * i as f64)).collect();
+    let many: Vec<String> = (0..10).map(|i| format!("models/teapot@{},0,0@0,0,0@0.2", -1.0 + 0.2 * i as f64)).collect();
     assert!(st.apply_arg("csg", &many.join(";")));
     let (tree, _, left) = st.csg_tree_counted();
     assert_eq!(tree.iter().filter(|p| p.grid.is_some()).count(), gf_core::csg::MAX_GRIDS);
     assert_eq!(left, 10 - gf_core::csg::MAX_GRIDS);
     // and past the memory: eight of the finest are more than the budget allows
-    let fine: Vec<String> = (0..8).map(|i| format!("knots/trefoil@{},0,0@0,0,0@0.2@union@0@0@768", -1.0 + 0.2 * i as f64)).collect();
+    let fine: Vec<String> = (0..8).map(|i| format!("models/teapot@{},0,0@0,0,0@0.2@union@0@0@768", -1.0 + 0.2 * i as f64)).collect();
     assert!(st.apply_arg("csg", &fine.join(";")));
     let (tree, _, left) = st.csg_tree_counted();
     let used: u64 = tree.iter().filter_map(|p| p.grid.as_ref()).map(|g| gf_core::csg::grid_bytes(g.res)).sum();

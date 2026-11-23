@@ -1,7 +1,7 @@
 //! The surface studio: a window floating over the picture in which the selected layer's surface is
 //! reshaped by a stack of procedural layers (gf_core::sculpt says what they are; app/src/sculpt.rs does it).
 //!
-//! It is opened from the right panel, under the shape's own sliders. From the top: the studio on or
+//! It is the window of the modifier "surface lab" (ui/mods.rs), opened from that modifier's row. From the top: the studio on or
 //! off and what it last cost; the layers, one open at a time (each with its kind, how
 //! it changes the surface, how it blends with the layers before it, its mask, its opacity and sliders,
 //! and buttons to switch it off, move it, copy it or take it away); a menu that adds a layer; and the
@@ -17,18 +17,6 @@ use super::{knob, Panels, Request};
 
 const W: f32 = LAB_W;
 
-/// The button on the right panel that opens the studio, with a word on what is in it.
-pub fn button(ui: &mut Ui, st: &mut State, px: &mut Panels) {
-    let s = st.sculpt();
-    let n = s.live().count();
-    let text = if s.layers.is_empty() { "surface studio…".to_owned() } else if !s.on { "surface studio… (off)".to_owned() } else { format!("surface studio… ({n} layer{})", if n == 1 { "" } else { "s" }) };
-    let (resp, at) = wide_button(ui, Id::unique("surface studio"), &text, px.store.sculpt_open);
-    px.note("sculpt button", at);
-    if resp.on_hover_text("reshape the surface of this layer's solid: cells, foam, noise, veins, dimples, lattices, a picture of your own, layered over one another").clicked() {
-        px.store.sculpt_open = !px.store.sculpt_open;
-    }
-}
-
 /// Show the studio if it is open. `full`: the inside of the program's window.
 pub fn show(ctx: &egui::Context, st: &mut State, px: &mut Panels, full: Rect) {
     if !px.store.sculpt_open { return; }
@@ -36,7 +24,7 @@ pub fn show(ctx: &egui::Context, st: &mut State, px: &mut Panels, full: Rect) {
     let below = super::tools::below_right(full);
     let first = px.store.sculpt_at.map_or(Pos2::new(px.right_at.map_or(full.right() - EDGE, |r| r.left() - 10.0) - W - 24.0, below), |p| Pos2::new(p[0], p[1]));
     let max_h = (full.bottom() - first.y.max(EDGE) - EDGE - 44.0).max(80.0);
-    let title = if st.layer_count() > 1 { format!("surface studio · {}", st.layer_title(st.stack.sel)) } else { "surface studio".to_owned() };
+    let title = if st.layer_count() > 1 { format!("surface lab · {}", st.layer_title(st.stack.sel)) } else { "surface lab".to_owned() };
     let out = floating(ctx, "surface studio", &title, W, first, max_h, |ui| {
         if px.rendering { ui.disable(); }
         set_label_width(ui, COL_LABEL);

@@ -477,12 +477,17 @@ const CALABI: &str = "
 // raw: a distance (to first order, held to 0.3)
 fn cm(a: vec2f, b: vec2f) -> vec2f { return vec2f(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x); }
 fn cpw(z: vec2f, n: i32) -> vec2f {
-  var r = vec2f(1.0, 0.0);
-  for (var i = 0; i < 8; i++) { if (i >= n) { break; } r = cm(r, z); }
-  return r;
+  if (n == 1) { return z; }
+  let z2 = cm(z, z);
+  if (n == 2) { return z2; }
+  if (n == 3) { return cm(z2, z); }
+  let z4 = cm(z2, z2);
+  if (n == 4) { return z4; }
+  if (n == 5) { return cm(z4, z); }
+  if (n == 6) { return cm(z4, z2); }
+  if (n == 7) { return cm(cm(z4, z2), z); }
+  return cm(z4, z4);
 }
-// how far out on the curve a point is: |z1|^n + |z2|^n = cosh 2ξ in Hanson's coordinates
-fn cy_h(z1: vec2f, z2: vec2f, n: f32) -> f32 { return pow(max(dot(z1, z1), 1e-12), 0.5 * n) + pow(max(dot(z2, z2), 1e-12), 0.5 * n); }
 struct Cy { n: i32, cs: vec2f, K: f32, sc: f32 }
 fn cy() -> Cy {
   let n = i32(clamp(round(pr.degree), 2.0, 8.0));
@@ -494,16 +499,61 @@ fn cy() -> Cy {
 fn cy_cost(k: Cy, abc: vec3f, t: f32) -> f32 {
   let z1 = vec2f(abc.x, abc.z * k.cs.x - t * k.cs.y);
   let z2 = vec2f(abc.y, abc.z * k.cs.y + t * k.cs.x);
-  let f = cpw(z1, k.n) + cpw(z2, k.n) - vec2f(1.0, 0.0);
-  let out = max(cy_h(z1, z2, f32(k.n)) - k.K, 0.0);
+  // The quartic uses |z^4| = |z|^4. Its residual and patch penalty
+  // share the component squares and need no square roots.
+  if (k.n == 4) {
+    let x = vec2f(z1.x, z2.x);
+    let y = vec2f(z1.y, z2.y);
+    let x2 = x*x;
+    let y2 = y*y;
+    let re = x2 - y2;
+    let im = 2.0*x*y;
+    let f = vec2f(dot(re, re) - dot(im, im) - 1.0, 2.0 * dot(re, im));
+    let m = x2 + y2;
+    let out = max(dot(m, m) - k.K, 0.0);
+    return dot(f, f) + 4.0*out*out;
+  }
+  let a = cpw(z1, k.n);
+  let b = cpw(z2, k.n);
+  let f = a + b - vec2f(1.0, 0.0);
+  // |z^n| = |z|^n. The powers are already needed for the curve's residual.
+  let out = max(length(a) + length(b) - k.K, 0.0);
   return dot(f, f) + 4.0 * out * out;
 }
 // the rim of the patch, as a distance (to first order) beyond it: kept from the last reading of raw
 var<private> cy_at: vec3f = vec3f(1e9);
 var<private> cy_rim: f32 = 0.0;
+var<private> cy_last_distance: f32;
 // From a low point of the search along the line (at t, where the cost is c): settled there by halving
 // steps; then the distance to first order, |f| over its slope, and the rim's distance (into cy_rim2)
 var<private> cy_rim2: f32 = 0.0;
+// Shell and rim distances on one particular fibre sample.
+fn cy_distance(k: Cy, abc: vec3f, t: f32) -> vec2f {
+  let cs = k.cs;
+  let n = k.n;
+  let nn = f32(n);
+  let z1 = vec2f(abc.x, abc.z * cs.x - t * cs.y);
+  let z2 = vec2f(abc.y, abc.z * cs.y + t * cs.x);
+  let a = cpw(z1, n - 1);
+  let b = cpw(z2, n - 1);
+  let z1n = cm(a, z1);
+  let z2n = cm(b, z2);
+  let f = z1n + z2n - vec2f(1.0, 0.0);
+  let d1 = nn * a;
+  let d2 = nn * b;
+  let d3 = cm(vec2f(0.0, 1.0), cs.x * d1 + cs.y * d2);
+  let fl = length(f);
+  let fh = f / max(fl, 1e-20);
+  let g = vec3f(dot(fh, d1), dot(fh, d2), dot(fh, d3));
+  // the rim: |z1|^n + |z2|^n = K, over its slope
+  let abs1 = length(z1n);
+  let abs2 = length(z2n);
+  let a1 = nn * abs1 / max(dot(z1, z1), 1e-12);
+  let a2 = nn * abs2 / max(dot(z2, z2), 1e-12);
+  let gh = vec3f(a1 * z1.x, a2 * z2.x, a1 * z1.y * cs.x + a2 * z2.y * cs.y);
+  let rim = (abs1 + abs2 - k.K) / max(length(gh), 1e-6);
+  return vec2f(fl / max(length(g), 1e-6), rim);
+}
 fn cy_settle(k: Cy, abc: vec3f, t0: f32, c0: f32, step0: f32) -> f32 {
   var t = t0;
   var best = c0;
@@ -514,48 +564,45 @@ fn cy_settle(k: Cy, abc: vec3f, t0: f32, c0: f32, step0: f32) -> f32 {
     let m2 = cy_cost(k, abc, t + step);
     if (m1 < best && m1 <= m2) { best = m1; t -= step; } else if (m2 < best) { best = m2; t += step; }
   }
-  let cs = k.cs;
-  let n = k.n;
-  let nn = f32(n);
-  let z1 = vec2f(abc.x, abc.z * cs.x - t * cs.y);
-  let z2 = vec2f(abc.y, abc.z * cs.y + t * cs.x);
-  let f = cpw(z1, n) + cpw(z2, n) - vec2f(1.0, 0.0);
-  let d1 = nn * cpw(z1, n - 1);
-  let d2 = nn * cpw(z2, n - 1);
-  let d3 = cm(vec2f(0.0, 1.0), cs.x * d1 + cs.y * d2);
-  let fl = length(f);
-  let fh = f / max(fl, 1e-20);
-  let g = vec3f(dot(fh, d1), dot(fh, d2), dot(fh, d3));
-  // the rim: |z1|^n + |z2|^n = K, over its slope
-  let a1 = nn * pow(max(dot(z1, z1), 1e-12), 0.5 * nn - 1.0);
-  let a2 = nn * pow(max(dot(z2, z2), 1e-12), 0.5 * nn - 1.0);
-  let gh = vec3f(a1 * z1.x, a2 * z2.x, a1 * z1.y * cs.x + a2 * z2.y * cs.y);
-  cy_rim2 = (cy_h(z1, z2, nn) - k.K) / max(length(gh), 1e-6);
-  return fl / max(length(g), 1e-6);
+  let d = cy_distance(k, abc, t);
+  cy_rim2 = d.y;
+  return d.x;
 }
 const CY_N: i32 = 28;
 fn raw(p: vec3f) -> f32 {
+  if (all(p == cy_at)) { return cy_last_distance; }
   let k = cy();
   let abc = vec3f(p.x, p.z, p.y) / k.sc;
-  let T = 2.2 * pow(k.K, 1.0 / f32(k.n));
+  let T = 2.2 / k.sc;
   // The line may pass near several sheets, and the one whose |f| is least need not be the nearest: every
   // low point of the search (up to three) is settled, and the nearest kept.
-  var c: array<f32, 29>;
-  for (var i = 0; i <= CY_N; i++) { c[i] = cy_cost(k, abc, mix(-T, T, f32(i) / f32(CY_N))); }
+  // A local minimum needs only its two neighbours. Streaming these three values avoids
+  // a dynamically indexed private array in every fragment.
+  var left = 1e35;
+  var middle = cy_cost(k, abc, -T);
   var d = 0.3;                                   // and never more than this: far off, the estimate is no good
   var rim = 1.0;
   var found = 0;
   for (var i = 0; i <= CY_N; i++) {
-    let low = (i == 0 || c[i] <= c[i - 1]) && (i == CY_N || c[i] <= c[i + 1]);
-    if (!low || found >= 3) { continue; }
-    found++;
-    let di = cy_settle(k, abc, mix(-T, T, f32(i) / f32(CY_N)), c[i], T / f32(CY_N));
-    if (di < d || found == 1) { rim = cy_rim2; }
-    d = min(d, di);
+    var right = 1e35;
+    if (i < CY_N) { right = cy_cost(k, abc, mix(-T, T, f32(i + 1) / f32(CY_N))); }
+    if (middle <= left && middle <= right) {
+      found++;
+      let coarse = mix(-T, T, f32(i) / f32(CY_N));
+      let di = cy_settle(k, abc, coarse, middle, T / f32(CY_N));
+      if (di < d || found == 1) {
+        rim = cy_rim2;
+      }
+      d = min(d, di);
+      if (found == 3) { break; }
+    }
+    left = middle;
+    middle = right;
   }
   cy_at = p;
   cy_rim = rim * k.sc;
-  return d * k.sc;
+  cy_last_distance = d * k.sc;
+  return cy_last_distance;
 }
 fn cyRim(p: vec3f) -> f32 {
   if (any(p != cy_at)) { _ = raw(p); }
@@ -724,7 +771,8 @@ fn presets() -> Vec<Preset> {
             params: vec![ParamDef::labelled("reach", "reach", 1.25, 0.7, 1.32, 0.005), wall(0.03)],
             rot: [22.0, 25.0, 0.0],
             animate: "reach",
-            wgsl: COSTA.to_string(),
+            wgsl: format!("// csg: the formula at the first surface only
+{COSTA}"),
             clip: "length(p) - pr.reach".to_string(),
         }),
         topo(Topo {

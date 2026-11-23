@@ -12,7 +12,7 @@
 //!
 //! ```wgsl
 //! struct Pr { /* eight f32: the preset's parameters in order, then _p<i> for the places not used */ }
-//! struct U { hb: f32, res: f32, puff: f32, pad: f32, pr: Pr }       // 48 bytes, pr at byte 16
+//! struct U { hb: f32, res: f32, puff: f32, first_slice: f32, pr: Pr }       // 48 bytes, pr at byte 16
 //! @group(0) @binding(0) var<uniform> u: U;                          // read by both stages
 //! @vertex   fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) slice: u32) -> VOut
 //! @fragment fn fs(in: VOut) -> @location(0) vec4f                   // (distance, 0, 0, 1)
@@ -31,12 +31,18 @@
 //! @compute @workgroup_size(8, 8, 4) fn cs(@builtin(global_invocation_id) id: vec3u)   // dispatch res/8, res/8, res/4
 //! ```
 
-use crate::presets::{Preset, Shape};
+use crate::presets::Preset;
 
 /// Bytes of the uniform block: hb, res, puff, a spare, then eight parameters, all f32.
 pub const UNIFORM_SIZE: usize = 48;
 /// The most sliders a field preset can have.
 pub const MAX_PARAMS: usize = 8;
+/// The most entries (four f32 each) a formula's table (`Preset::table`) can have. A preset with a table reads
+/// it as `tbl[i]`, a storage block (binding `TABLE_BINDING` in the bake): pixels side by side read different
+/// entries, which a uniform block would serve one after another.
+pub const TABLE_MAX: usize = 1 << 20;
+/// Where the bake reads the table.
+pub const TABLE_BINDING: u32 = 2;
 /// What a preset that gives no `clip` is cut to: a ball.
 pub const CLIP_DEFAULT: &str = "length(p) - 1.38";
 /// The `shell` of a preset that fills one side of its surface.
@@ -156,7 +162,8 @@ const COMPUTE: &str = "
 @group(0) @binding(1) var outVol: texture_storage_3d<r16float, write>;
 
 @compute @workgroup_size(8, 8, 4)
-fn cs(@builtin(global_invocation_id) id: vec3u) {
+fn cs(@builtin(global_invocation_id) dispatch_id: vec3u) {
+  let id = dispatch_id + vec3u(0u, 0u, u32(u.first_slice));
   pr = u.pr;
   textureStore(outVol, id, walk(vec2f(id.xy) + 0.5, (f32(id.z) + 0.5) / u.res));
 }
@@ -212,9 +219,10 @@ pub fn bake_shader_compute(p: &Preset) -> String {
 
 /// The complete WGSL module that bakes this field preset into one slice of the distance volume.
 pub fn bake_shader(p: &Preset) -> String {
-    let Shape::Field { wgsl, clip, shell } = &p.shape else { panic!("{}: not an equation, so there is nothing to bake this way", p.id) };
-    assert!(p.params.len() <= MAX_PARAMS, "{}: a field preset can have at most {MAX_PARAMS} sliders", p.id);
-    let mut members: Vec<String> = p.params.iter().map(|d| member_name(d.id)).collect();
+    let (wgsl, clip, shell) = p.formula().expect("an equation to bake");
+    let params = if p.exact_tubes { &[][..] } else { &p.params[..] };
+    assert!(params.len() <= MAX_PARAMS, "{}: a field preset can have at most {MAX_PARAMS} sliders", p.id);
+    let mut members: Vec<String> = params.iter().map(|d| member_name(d.id)).collect();
     for (i, m) in members.iter().enumerate() {
         assert!(!members[..i].contains(m), "{}: two sliders would both be called pr.{m} in the shader", p.id);
     }
@@ -223,13 +231,26 @@ pub fn bake_shader(p: &Preset) -> String {
     format!(
         "// {name}: one slice of its distance volume.\n\
          struct Pr {{ {pr} }}\n\
-         struct U {{ hb: f32, res: f32, puff: f32, pad: f32, pr: Pr }}\n\
-         @group(0) @binding(0) var<uniform> u: U;\n\
+         struct U {{ hb: f32, res: f32, puff: f32, first_slice: f32, pr: Pr }}\n\
+         @group(0) @binding(0) var<uniform> u: U;\n{tbl}\
          var<private> pr: Pr;\n\n\
          {HELPERS}\n{wgsl}\n\n{VERTEX}{walk}{shell}{WALK_SHELL_TO_CLIP}{clip}{WALK_END}",
         name = p.name, pr = pr.join(", "),
-        walk = if wgsl.contains("fn gem_fold(") || wgsl.contains(BOUND_MARK) { gem_walk() } else if wgsl.contains(DISTANCE_MARK) { distance_walk() } else { WALK.to_string() },
+        tbl = if p.has_table() { format!("@group(0) @binding({TABLE_BINDING}) var<storage, read> tbl: array<vec4f>;\n") } else { String::new() },
+        walk = if p.exact_tubes {
+            distance_walk()
+        } else if wgsl.contains("fn gem_fold(") || wgsl.contains(BOUND_MARK) { gem_walk() } else if wgsl.contains(DISTANCE_MARK) { distance_walk() } else { WALK.to_string() },
     )
+}
+
+/// A preset's table for these values (`Preset::table`), as the f32s that follow the uniform block: empty for
+/// a preset with none, and never more than `TABLE_MAX` entries.
+pub fn table(p: &Preset, values: &[f64], text: &str) -> Vec<f32> {
+    let Some(f) = &p.table else { return Vec::new() };
+    let vals: Vec<f64> = p.params.iter().enumerate().map(|(i, d)| values.get(i).copied().unwrap_or(d.value)).collect();
+    let mut t = f(&vals, text);
+    t.truncate(TABLE_MAX);
+    t.iter().flatten().copied().collect()
 }
 
 /// The uniform block's contents for these values: hb, res, puff, a spare, then the parameters in order.

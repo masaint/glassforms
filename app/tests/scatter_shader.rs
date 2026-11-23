@@ -13,7 +13,16 @@ fn check(name: &str, src: &str) {
 
 #[test]
 fn the_light_volume_shader_is_valid() {
-    check("scatter.wgsl", include_str!("../src/shaders/scatter.wgsl"));
+    let src = include_str!("../src/shaders/scatter.wgsl");
+    check("scatter.wgsl", src);
+    check("sparse scatter", concat!(
+        include_str!("../src/shaders/scatter.wgsl"),
+        include_str!("../src/shaders/scatter_sparse.wgsl"),
+    ));
+    let level_body = src.split("fn cs_level(").nth(1).expect("cs_level").split("\n@compute").next().unwrap();
+    assert!(level_body.contains("if (any(id >= textureDimensions(phiTex))) { return; }"), "cs_level must bounds-check coarse non-multiple-of-4 grids");
+    let finish_body = src.split("fn cs_finish(").nth(1).expect("cs_finish");
+    assert!(finish_body.contains("let f = textureLoad(calibTex, me, 0).rgb;"), "cs_finish must apply per-channel furnace calibration");
 }
 
 fn tracer(settings: &[(&str, f64)]) -> String {

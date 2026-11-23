@@ -27,15 +27,20 @@
 //!   tools     the bars over the picture: the camera's (orbit or fly, frame, the camera slots) with the cube
 //!             of the room's axes beside the left panel; the object tools (select, all, move, turn, size)
 //!             beside the right
+//!   picker    the shape picker: a window of pictures of every shape, family by family, that makes an object
+//!             (from the "+") or changes the selected object's shape (from its card in the right panel)
 //!   overlay   the line of figures at the foot of the window, and the help with its "?"
 //!   store     what is remembered between runs
 //!   script    driving the window without a mouse, for tests
 
 pub mod animate;
 pub mod camera;
+pub mod tiers;
+pub mod viewport;
 pub mod csg;
 pub mod gizmo;
 pub mod handles;
+pub mod draw_cut;
 pub mod knob;
 pub mod lamps;
 pub mod layers;
@@ -43,18 +48,29 @@ pub mod left;
 pub mod material;
 pub mod overlay;
 pub mod paths;
+pub mod picker;
+pub mod pick;
+pub mod outline;
 pub mod right;
 pub mod room;
 pub mod script;
+pub mod select;
 pub mod settings;
+pub mod mods;
+mod modifier_pivot;
+mod world;
+mod construction;
+pub mod world_modifiers;
 pub mod sculpt;
 pub mod store;
 pub mod studio;
 pub mod theme;
 pub mod tools;
 pub mod widgets;
+#[cfg(test)]
+mod gesture_tests;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use eframe::egui::{self, Id, Rect, TextureId, Ui};
 
@@ -68,6 +84,8 @@ pub enum Request {
     ChooseFolder,
     SaveSetup,
     LoadSetup,
+    /// the last session's work, offered back after it ended without closing: taken (true) or let go
+    Restore(bool),
     SaveStill,
     SaveStillAs,
     /// choose an environment picture in a dialog
@@ -80,6 +98,8 @@ pub enum Request {
     LoadSculptPicture(usize),
     /// write the shape as a mesh (OBJ or STL), to a file chosen in a dialog
     ExportMesh,
+    /// choose a picture to use as the matcap (view_mode.rs)
+    LoadMatcap,
 }
 
 /// What the window knows of the lighting that the state does not say: the engine's doing.
@@ -149,6 +169,19 @@ pub enum Bench {
 /// What the panels share with the window that shows them.
 pub struct Panels {
     pub store: store::Store,
+    /// the quality-tier row (ui/tiers.rs): what the scene allows (looked at again every few frames), the chevron's window and where it stands,
+    /// the choices inside the tiers, the frame times by tier, the tier drawing now when it is not the lit one, and a check aid that shows every tier
+    pub tier_cache: Option<(u64, crate::tier::Avail)>,
+    pub tier_menu: bool,
+    pub tier_menu_at: Option<[f32; 2]>,
+    pub tier_cfg: tiers::Cfg,
+    pub tier_times: crate::tier::Times,
+    pub tier_drawing: Option<crate::tier::Tier>,
+    pub tier_all: bool,
+    /// the phase of the interaction as the window sees it, a count of frames, and why a frame was not drawn by what was asked for
+    pub tier_phase: crate::tier::PhaseTracker,
+    pub tier_frame: u64,
+    pub tier_note: Option<String>,
     pub hide_left: bool,
     pub hide_right: bool,
     /// the help (what the mouse and the keys do) is open
@@ -160,19 +193,24 @@ pub struct Panels {
     pub light: usize,
     /// the handles over the picture (shown with G)
     pub handles: handles::Handles,
+    pub draw_cut: draw_cut::Drawing,
     /// the path builder, and the path drawn over the picture (while the shape is a path)
     pub paths: paths::PathEdit,
     /// how the camera is moved: orbiting or flying
     pub nav: tools::Nav,
     /// which lamp the light room is showing the sliders of
     pub lamp: usize,
-    /// which group of the named materials the list is showing (none: the group of the one chosen), and
-    /// the material the list last showed lit (when another is chosen from elsewhere, the list goes to it)
-    pub mat_group: Option<&'static str>,
+    /// The last selected preset; a selection from a setup or another body scrolls into view.
     pub lit_mat: Option<usize>,
+    /// The specific Object Mode construction node being edited in the Materials Lab.
+    pub lab_node: Option<(usize, Vec<usize>)>,
+    /// Canonical attributes added for editing in this session, and the last rejected body edit.
+    /// These are UI affordances only; full canonical owners in `State` remain authoritative.
+    pub canonical_added: BTreeSet<(usize, String)>,
+    pub canonical_error: Option<(usize, String)>,
     /// which combination of layers has its row open in the joins (one at a time), as a mask of the layers;
     /// and whether the rows for three layers, and for all four, are shown under their headings
-    pub combo_open: Option<u8>,
+    pub combo_open: Option<gf_core::layers::Mask>,
     pub meets_open: [bool; 2],
     /// the layers were last combined into a volume this many voxels a side, in this many milliseconds
     /// (none: one layer, nothing to combine)
@@ -184,7 +222,24 @@ pub struct Panels {
     /// measured yet)
     pub sculpt_size: f64,
     pub sculpt_error: Option<String>,
+    /// why the matcap picture asked for could not be used
+    pub matcap_error: Option<String>,
+    /// the starter matcaps as small balls for the picker (made the first time it is shown)
+    pub matcap_thumbs: Vec<eframe::egui::TextureHandle>,
     pub sculpt_layer: Option<usize>,
+    /// the modifier whose controls are open, "+ add modifier" open, its frame's rows open; how the
+    /// selected object's stack was applied when that is worth a note (ui/mods.rs)
+    pub mods_sel: Option<usize>,
+    pub mods_adding: bool,
+    pub mods_frame: bool,
+    pub mods_note: Option<String>,
+    /// the modifier being carried to another place (its row, and where in it it was picked up), each row's
+    /// slide from its place (easing to where it is going), the height the open controls took
+    pub mods_drag: Option<(usize, f32)>,
+    pub mods_slide: Vec<f32>,
+    pub mods_ctrl_h: f32,
+    /// the csg object's own strokes are open in the panel
+    pub strokes_open: bool,
     pub lighting: Lighting,
     pub model: Model,
     pub casting: Casting,
@@ -194,6 +249,14 @@ pub struct Panels {
     pub last_fstop: f64,
     /// the line at the foot of the window: picture size, speed or how far the picture has refined, the shape's build
     pub perf: String,
+    /// how far the still picture has settled (0 to 1), drawn as a hairline under that line; none while it moves or has settled
+    pub settle: Option<f32>,
+    /// the short note above the foot line: what was just saved or loaded, or what went wrong (overlay::message)
+    pub message: Option<overlay::Message>,
+    /// the last session ended without closing and its work can be brought back: when it was last kept
+    pub restore: Option<String>,
+    /// what keeping the frame rate is doing now, for the quality section (empty while it is off)
+    pub keep_says: String,
     pub bench: Bench,
     /// a video is being rendered: everything but its cancel button is out of reach
     pub rendering: bool,
@@ -224,6 +287,16 @@ pub struct Panels {
     pub tab_seen: (usize, usize, bool),
     /// the family shown while making a new object (the selected object's family is left as it is)
     pub browse_fam: usize,
+    /// a new object of the selected object's own kind is being made (its tab pressed again, or the objects' +)
+    pub adding: bool,
+    /// how tall the animation at the foot of the right panel was drawn (the controls above are given the rest)
+    pub anim_h: f32,
+    /// where the selected object's controls are to scroll to (a script's scroll:right)
+    pub right_scroll: Option<f32>,
+    /// while controls are drawn in an area that scrolls: what of it is in sight (`note` leaves the rest out)
+    pub clip: Option<Rect>,
+    /// how far the selected object's controls can scroll (as last drawn)
+    pub controls_max: f32,
     /// scroll a panel to here on the next frame: [left, right]
     pub scroll_to: [Option<f32>; 2],
     /// the most height a panel's contents may take before it scrolls, and the height each one's take: [left, right]
@@ -236,19 +309,24 @@ pub struct Panels {
     pub full: Rect,
     /// a control marked costly is in view in the materials lab (its legend is shown only then)
     pub costly_shown: bool,
+    /// the shape picker: whether it is open and for what, its search, its pictures
+    pub picker: picker::Picker,
+    pub palette: outline::Palette,
 }
 
 impl Panels {
     pub fn new(store: store::Store) -> Self {
         Self {
-            store, hide_left: false, hide_right: false, help_open: false, bright: false, light: 0, handles: handles::Handles::starting(), paths: paths::PathEdit::default(), nav: tools::Nav::default(), lamp: 0, mat_group: None, lit_mat: None, combo_open: None, meets_open: [false; 2], joined: None, sculpted: None, sculpt_size: 0.0, sculpt_error: None, sculpt_layer: Some(0), lighting: Lighting::default(), model: Model::default(), casting: Casting::default(), aspect: 16.0 / 9.0, last_fstop: 4.0, perf: String::new(), bench: Bench::Idle, rendering: false, ffmpeg: false,
+            store, tier_cache: None, tier_menu: false, tier_menu_at: None, tier_cfg: Default::default(), tier_times: Default::default(), tier_drawing: None, tier_all: false, tier_phase: Default::default(), tier_frame: 0, tier_note: None, hide_left: false, hide_right: false, help_open: false, bright: false, light: 0, handles: handles::Handles::starting(), draw_cut: Default::default(), paths: paths::PathEdit::default(), nav: tools::Nav::default(), lamp: 0, lit_mat: None, lab_node: None, canonical_added: BTreeSet::new(), canonical_error: None, combo_open: None, meets_open: [false; 2], joined: None, sculpted: None, sculpt_size: 0.0, sculpt_error: None, matcap_error: None, matcap_thumbs: Vec::new(), sculpt_layer: Some(0), mods_sel: None, mods_adding: false, mods_frame: false, mods_note: None, mods_drag: None, mods_slide: Vec::new(), mods_ctrl_h: 0.0, strokes_open: false, lighting: Lighting::default(), model: Model::default(), casting: Casting::default(), aspect: 16.0 / 9.0, last_fstop: 4.0, perf: String::new(), settle: None, message: None, restore: None, keep_says: String::new(), bench: Bench::Idle, rendering: false, ffmpeg: false,
             video_text: String::new(), file_text: String::new(), loop_text: String::new(), requests: Vec::new(), place: "", record: false, rects: BTreeMap::new(),
-            left_at: None, right_at: None, lit_shape: None, tab: None, tab_seen: (0, 1, false), browse_fam: 0, scroll_to: [None, None], room_h: 600.0, needs: [0.0; 2], right_rest: 0.0, full: Rect::ZERO, costly_shown: false,
+            left_at: None, right_at: None, lit_shape: None, tab: None, tab_seen: (0, 1, false), browse_fam: 0, adding: false, anim_h: 120.0, right_scroll: None, clip: None, controls_max: 0.0, scroll_to: [None, None], room_h: 600.0, needs: [0.0; 2], right_rest: 0.0, full: Rect::ZERO, costly_shown: false, picker: picker::Picker::default(), palette: outline::Palette::default(),
         }
     }
 
     /// Note where something was drawn, if a test has asked for that.
     pub fn note(&mut self, name: impl Into<String>, rect: Rect) {
+        // (a control scrolled out of sight is not there to be pressed)
+        if self.clip.is_some_and(|c| !c.intersects(rect)) { return; }
         if self.record { self.rects.insert(name.into(), rect); }
     }
 
@@ -284,6 +362,15 @@ impl Panels {
 /// and never folds; a group in a floating window folds; a sub-group folds and stands in from the edge
 /// with a bar down its left.
 impl Panels {
+    /// Let go of every gesture in progress. They hold places in the scene (layer, modifier and item
+    /// indices) that an undo or redo can give to something else.
+    pub fn drop_gestures(&mut self) {
+        self.handles.grab = None;
+        self.paths.grab = None;
+        self.draw_cut = Default::default();
+        self.palette.drag = None;
+        self.mods_drag = None;
+    }
     /// A group's heading in a panel. (Noted as `group:<id>` for tests, as the folding ones are.)
     pub fn heading(&mut self, ui: &mut Ui, id: &str, title: &str) {
         let at = widgets::group_heading(ui, title);
@@ -329,6 +416,8 @@ pub fn digits_of(step: f64) -> usize {
 /// What an undo or a redo changed, in a few words: the setting it moved and from what to what ("index
 /// 1.80 → 1.50"), and how many more it moved with it; otherwise what part of the scene it changed.
 pub fn undo_words(was: &gf_core::setup::Setup, now: &gf_core::setup::Setup) -> String {
+    // (an entry that changed nothing a setup keeps changed what was selected)
+    if was == now { return "the selection".to_owned(); }
     let (a, b) = (serde_json::to_value(&was.settings).unwrap_or_default(), serde_json::to_value(&now.settings).unwrap_or_default());
     let mut moved: Vec<String> = Vec::new();
     if let (Some(a), Some(b)) = (a.as_object(), b.as_object()) {

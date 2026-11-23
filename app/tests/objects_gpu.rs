@@ -10,12 +10,12 @@ fn engine(gpu: &Gpu, pairs: &[(&str, &str)]) -> Engine {
     let mut e = Engine::new(gpu.clone(), State::with_args(&args, true), true);
     e.resize(64, 36);
     e.bake(Detail::Full).unwrap();
-    e.state.want = None;
+    e.state.drop_request();
     e
 }
 
 fn rebuild(e: &mut Engine) {
-    if let Some(m) = e.state.want.take() { e.bake(m).unwrap(); }
+    if let Some(r) = e.state.take_request() { e.bake(r.detail).unwrap(); }
     e.draw(false);
     e.gpu.wait();
 }
@@ -24,6 +24,54 @@ fn rebuild(e: &mut Engine) {
 fn inside(e: &Engine) -> usize {
     let (_, bits) = e.read_volume().unwrap();
     bits.iter().filter(|b| half::f16::from_bits(**b).to_f32() < 0.0).count()
+}
+
+#[test]
+fn a_group_shell_hollows_the_join_after_internal_faces_disappear() {
+    use gf_core::{groups::{DropAt, Item}, mods::{Kind, Modifier}};
+    let Ok(gpu) = Gpu::headless("vulkan") else { return };
+    let mut e = engine(&gpu, &[("scene", "studio"), ("preset", "sphere"), ("res", "128")]);
+    let (f, p) = find(&e.state, "studio", "sphere");
+    e.state.create_object(f, p, true).unwrap();
+    e.state.stack.layers[1].place.size = 0.4;
+    let group = e.state.new_group(None).unwrap();
+    // Moving the first sphere to the end puts the small one first in the underlying stack.
+    e.state.move_item(Item::Object(0), DropAt::Inside(group)).unwrap();
+    e.state.move_item(Item::Object(0), DropAt::Inside(group)).unwrap();
+    e.state.selected_group = Some(group);
+    e.state.selected_modifiers_mut().list.push(Modifier::of(Kind::Shell));
+    e.state.sculpt_changed(false);
+    rebuild(&mut e);
+    let (res, field) = e.read_volume().unwrap();
+    let n = res as usize;
+    let ray = &field[(n / 2 * n + n / 2) * n..(n / 2 * n + n / 2 + 1) * n];
+    let signs: Vec<_> = ray.iter().map(|b| half::f16::from_bits(*b).to_f32() < 0.0).collect();
+    assert!(!signs[n / 2], "the centre of the group must be hollow");
+    assert_eq!(signs.windows(2).filter(|s| s[0] != s[1]).count(), 4, "only the outside sphere has a wall");
+    e.state.selected_modifiers_mut().list.clear();
+    e.state.sculpt_changed(false);
+    rebuild(&mut e);
+    let (_, solid) = e.read_volume().unwrap();
+    assert!(half::f16::from_bits(solid[(n / 2 * n + n / 2) * n + n / 2]).to_f32() < 0.0, "removing the group modifier restores solid geometry");
+}
+
+#[test]
+fn group_subtraction_follows_the_order_of_the_parts() {
+    use gf_core::groups::{DropAt, GroupOp, Item};
+    let Ok(gpu) = Gpu::headless("vulkan") else { return };
+    let mut e = engine(&gpu, &[("scene", "studio"), ("preset", "sphere"), ("trace", "csg"), ("res", "128")]);
+    let (f, p) = find(&e.state, "studio", "sphere");
+    e.state.create_object(f, p, true).unwrap();
+    e.state.stack.layers[1].place.size = 0.4;
+    let id = e.state.new_group(None).unwrap();
+    for _ in 0..2 { e.state.move_item(Item::Object(0), DropAt::Inside(id)).unwrap(); }
+    e.state.stack.hierarchy.as_mut().unwrap().group_mut(id).unwrap().operation = GroupOp::Subtract;
+    rebuild(&mut e);
+    assert!(e.renderer.sdf_key().is_some_and(|key| key.contains("|group:")), "the cutter and its wall retain their formula normals");
+    assert!(inside(&e) > 1000);
+    e.state.move_item(Item::Object(1), DropAt::Before(Item::Object(0))).unwrap();
+    rebuild(&mut e);
+    assert_eq!(inside(&e), 0, "subtracting the enclosing sphere consumes the entire smaller sphere");
 }
 
 fn find(st: &State, fam: &str, preset: &str) -> (usize, usize) {
@@ -64,7 +112,7 @@ fn an_empty_scene_draws_nothing_in_the_window() {
     let before = window_middle(&mut e, 30);
     assert!(e.state.delete_object(0));
     let after = window_middle(&mut e, 90);
-    eprintln!("after: empty {}, want {:?}, scene volume {:?}, plain {}", e.state.empty, e.state.want.is_some(), e.scene_volume().map(|v| v.res), e.state.plain());
+    eprintln!("after: empty {}, want {:?}, scene volume {:?}, plain {}", e.state.empty, e.state.build_wanted(), e.scene_volume().map(|v| v.res), e.state.plain());
     eprintln!("the middle of the picture: {before:.2} with Thomas, {after:.2} with nothing");
     assert!(after < 0.25 * before, "the empty scene still shows something: {after:.2} against {before:.2}");
 }
@@ -134,4 +182,24 @@ fn a_tree_converted_and_beside_a_volume_object() {
     let both = inside(&e);
     eprintln!("beside a small Thomas: {both}");
     assert!(both > tree * 9 / 10 && both < inside(&plain), "{both}");
+}
+#[test]
+fn two_formula_tables_keep_their_own_geometry_in_a_union() {
+    let Ok(gpu) = Gpu::headless("vulkan") else { return };
+    let args = [("scene", "links"), ("preset", "hopflink"), ("res", "128"), ("trace", "csg")];
+    let first = engine(&gpu, &args);
+    let mut combined_args = args.to_vec();
+    combined_args.push(("csg", "text/word@0.68,0.32,0@0,0,0@0.62@union"));
+    let combined = engine(&gpu, &combined_args);
+    let (_, left) = first.read_volume().unwrap();
+    let (_, both) = combined.read_volume().unwrap();
+    let negative = |v: u16| half::f16::from_bits(v).to_f32() < 0.0;
+    let mut added = 0;
+    let mut lost = 0;
+    for (a, b) in left.into_iter().zip(both) {
+        if negative(a) && !negative(b) { lost += 1; }
+        if !negative(a) && negative(b) { added += 1; }
+    }
+    assert!(added > 100, "the second formula adds {added} interior voxels");
+    assert!(lost < 20, "the first formula lost {lost} interior voxels");
 }

@@ -5,7 +5,7 @@
 
 use eframe::egui::{self, Align2, Id, Pos2, Rect, Sense, Ui};
 use gf_core::anim::{EASES, EASE_AT};
-use gf_core::state::{Knob, KnobRef, State};
+use gf_core::state::{Knob, State};
 
 use super::theme::*;
 use super::widgets::*;
@@ -125,14 +125,6 @@ pub fn hue_row(ui: &mut Ui, px: &mut Panels, key: &str, label: &str, hue: f64, s
     let swatch = Rect::from_center_size(c.wave.center(), egui::vec2(12.0, 12.0));
     ui.painter().rect(swatch, 3, shown_colour(hue_rgb(shown, strength)), egui::Stroke::new(1.0, white(0.25)), egui::StrokeKind::Outside);
     out
-}
-
-/// The knob of a setting, by the setting's name: the engine's own if it has one (which can then be
-/// animated), otherwise a plain one with this label and range. None if there is no such setting.
-pub fn setting_knob(st: &State, name: &'static str, label: &str, lo: f64, hi: f64, step: f64) -> Option<Knob> {
-    st.p.get(name)?;
-    let own = State::engine_knobs().into_iter().find(|k| k.id == name);
-    Some(own.unwrap_or_else(|| Knob { key: format!("P.{name}"), id: name.into(), label: label.into(), lo, hi, step, shape: false, wave: false, r: KnobRef::P(name) }))
 }
 
 /// What a knob's row may have beyond the knob itself.

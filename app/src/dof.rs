@@ -193,6 +193,7 @@ struct Targets {
     hh: u32,
     zero_view: wgpu::TextureView,
     coc_view: wgpu::TextureView,
+    split_view: wgpu::TextureView,
     pre_views: [wgpu::TextureView; 2],
     tile_views: [wgpu::TextureView; 3],
     under_view: wgpu::TextureView,
@@ -265,9 +266,9 @@ impl Pipes {
     /// The stage's passes built from this text of its shader.
     fn of(gpu: &Gpu, layouts: &Layouts, src: &str) -> Pipes {
         let module = gpu.shader("focus", src, true);
-        let r16 = wgpu::TextureFormat::R16Float;
+        let rg16 = wgpu::TextureFormat::Rg16Float;
         Pipes {
-            coc: pipeline(gpu, "focus: radius", &module, "fs_coc", &layouts.coc, &[F32, r16]),
+            coc: pipeline(gpu, "focus: radius", &module, "fs_coc", &layouts.coc, &[F32, rg16, F16]),
             pre: pipeline(gpu, "focus: half size", &module, "fs_pre", &layouts.pre, &[F32, F32]),
             pre2: pipeline(gpu, "focus: half size, the rest", &module, "fs_pre2", &layouts.pre, &[F16, F16, F16, F16]),
             farc: pipeline(gpu, "focus: half size, the far glass alone", &module, "fs_farc", &layouts.pre, &[F16]),
@@ -330,15 +331,15 @@ impl Dof {
         // the numbers are those of the bindings in dof.wgsl
         let layouts = Layouts {
             coc: gpu.bind_layout("focus: radius", &[un(0), t(2), t(11)]),
-            pre: gpu.bind_layout("focus: half size", &[un(0), t(2), t(3)]),
+            pre: gpu.bind_layout("focus: half size", &[un(0), t(2), t(3), t(21)]),
             pull: gpu.bind_layout("focus: halve", &[un(1), t(7), t(8), sampler_entry(14), t(16), t(20)]),
             tile: gpu.bind_layout("focus: tiles", &[un(0), t(3)]),
             reach: gpu.bind_layout("focus: reach", &[un(0), t(9)]),
             band: gpu.bind_layout("focus: copy", &[un(0), un(1), t(5), t(6), t(8), t(11), sampler_entry(14), t(16), t(20)]),
             gather: gpu.bind_layout("focus: gather", &[un(0), un(1), t(5), t(6), t(9), t(10), t(15)]),
-            back: gpu.bind_layout("focus: backdrop", &[un(0), un(1), t(10), t(16)]),
+            back: gpu.bind_layout("focus: backdrop", &[un(0), un(1), t(10), t(11), sampler_entry(14), t(16)]),
             under: gpu.bind_layout("focus: under the near glass", &[un(0), t(7), sampler_entry(14), t(16), t(19)]),
-            out: gpu.bind_layout("focus: put together", &[un(0), t(2), t(3), t(4), t(9), t(10), t(11), t(12), t(13), sampler_entry(14), t(15), t(17), t(18)]),
+            out: gpu.bind_layout("focus: put together", &[un(0), t(2), t(3), t(4), t(9), t(10), t(11), t(12), t(13), sampler_entry(14), t(15), t(17), t(18), t(21)]),
         };
         let pipes = Pipes::of(gpu, &layouts, DOF_WGSL);
         let table = |label, w: u32, h: u32| {
@@ -403,7 +404,8 @@ impl Dof {
         // as many smaller copies as leave the smallest at least eight texels across
         let n = ((hw.min(hh) as f32 / 8.0).log2().floor() as usize + 1).clamp(1, MAX_LEVELS);
         let zero_view = view(&gpu.target("focus: full size", w, h, F32, &[]));
-        let coc_view = view(&gpu.target("focus: radius", w, h, wgpu::TextureFormat::R16Float, &[]));
+        let coc_view = view(&gpu.target("focus: radius", w, h, wgpu::TextureFormat::Rg16Float, &[]));
+        let split_view = view(&gpu.target("focus: split", w, h, F16, &[]));
         let pre_views = [view(&gpu.target("focus: half far", hw, hh, F32, &[])), view(&gpu.target("focus: half near", hw, hh, F32, &[]))];
         let (tw, th) = (w.div_ceil(TILE), h.div_ceil(TILE));
         let tile_views = [0, 1, 2].map(|_| view(&gpu.target("focus: tiles", tw, th, F16, &[])));
@@ -434,7 +436,7 @@ impl Dof {
                 pull_views: [fill[m].clone(), ext[m].clone(), back[m].clone(), far_fill[m].clone()],
                 g_pull: (m > 0).then(|| group("focus: halve", &l.pull, &[uni(&u, 1), tex(7, &fill[m - 1]), tex(8, &ext[m - 1]), smp.clone(), tex(16, &back[m - 1]), tex(20, &far_fill[m - 1])])),
                 back_view: back_out[m].clone(),
-                g_back: group("focus: backdrop", &l.back, &[uni(&self.u, 0), uni(&u, 1), tex(10, &self.kern_view), tex(16, &back[m])]),
+                g_back: group("focus: backdrop", &l.back, &[uni(&self.u, 0), uni(&u, 1), tex(10, &self.kern_view), tex(11, &self.norm_view), smp.clone(), tex(16, &back_all)]),
                 band_views: [band_far[b].clone(), band_near[b].clone()],
                 out_views: [out_far[b].clone(), out_near[b].clone()],
                 g_band: group("focus: copy", &l.band, &[uni(&self.u, 0), uni(&u, 1), tex(5, &pre_views[0]), tex(6, &pre_views[1]), tex(8, &ext_all), tex(11, &self.norm_view), smp.clone(), tex(16, &back_all), tex(20, &far_fill_all)]),
@@ -443,19 +445,19 @@ impl Dof {
             });
         }
         let g_coc = [0, 1].map(|i| group("focus: radius", &l.coc, &[uni(&self.u, 0), tex(2, &picture[i]), tex(11, &self.norm_view)]));
-        let g_pre = [0, 1].map(|i| group("focus: half size", &l.pre, &[uni(&self.u, 0), tex(2, &picture[i]), tex(3, &coc_view)]));
+        let g_pre = [0, 1].map(|i| group("focus: half size", &l.pre, &[uni(&self.u, 0), tex(2, &picture[i]), tex(3, &coc_view), tex(21, &split_view)]));
         let g_out = [0, 1].map(|i| {
             group("focus: put together", &l.out, &[
                 uni(&self.u, 0), tex(2, &picture[i]), tex(3, &coc_view), tex(4, &zero_view), tex(9, &tile_views[1]), tex(10, &self.kern_view),
                 tex(11, &self.norm_view), tex(12, &out_far_all), tex(13, &out_near_all), smp.clone(), tex(15, &tile_views[2]),
-                tex(17, &back_out_all), tex(18, &under_view),
+                tex(17, &back_out_all), tex(18, &under_view), tex(21, &split_view),
             ])
         });
         let g_under = group("focus: under the near glass", &l.under, &[uni(&self.u, 0), tex(7, &fill_all), smp.clone(), tex(16, &back_all), tex(19, &all_view)]);
         let g_tile = group("focus: tiles", &l.tile, &[uni(&self.u, 0), tex(3, &coc_view)]);
         let g_reach = group("focus: reach", &l.reach, &[uni(&self.u, 0), tex(9, &tile_views[0])]);
         let g_wide = group("focus: wide reach", &l.reach, &[uni(&self.u, 0), tex(9, &tile_views[1])]);
-        Some(Targets { hw, hh, zero_view, coc_view, pre_views, tile_views, under_view, all_view, g_under, levels, g_coc, g_pre, g_out, g_tile, g_reach, g_wide })
+        Some(Targets { hw, hh, zero_view, coc_view, split_view, pre_views, tile_views, under_view, all_view, g_under, levels, g_coc, g_pre, g_out, g_tile, g_reach, g_wide })
     }
 
     /// The focused picture: what the bloom and the tone map read when the stage has run. Same size and
@@ -511,17 +513,19 @@ impl Dof {
         if f.floor > 0.0 { (z0, z1) = (z0.min(f.floor.max(0.02)), f32::INFINITY); }
         let mut need = (k * (1.0 / z0 - 1.0 / zn)).max(k * (1.0 / zf - 1.0 / z1)).max(0.0);
         // through the camera's own arithmetic, the camera says what those come to
-        let through = f.lens.as_ref().map(|c| crate::camera::focus_numbers(c, w, h));
-        if let Some(n) = &through { (k, need) = (n.k, n.near.max(n.far)); }
+        let through = f.lens.as_ref().map(|c| crate::camera::focus_numbers_in(c, w, h, f.bound as f64, f.floor as f64));
+        if let Some(n) = &through {
+            k = n.k;
+            need = n.near.max(n.far);
+        }
         let have = t.levels.len() - 2;
         let n = Self::levels_for(need, have);
         let cmax = RADIUS * 2f32.powi(n as i32);
         let pad = 0.5 / opening.ka();
         let hi = full_size(h, settled);
-        // What lies behind the glass is infinitely far: its blur is the far plane's k / distance, drawn on
-        // the smaller picture where that is at most RADIUS / 2 texels (and never more than a tenth of the
-        // picture's height: beyond that nothing of it is left to see anyway).
-        let bg = if f.backdrop { through.as_ref().map_or(k / zf, |n| n.bg).min(0.1 * h as f32) } else { 0.0 };
+        // What lies behind the glass is infinitely far: its blur is the far plane's k / distance, matched to
+        // cmax so a floor reaching the horizon and the sky above it blur at the same radius with no step.
+        let bg = if f.backdrop { through.as_ref().map_or(k / zf, |n| n.bg).min(cmax) } else { 0.0 };
         let back = ((bg / RADIUS).max(1.0).log2().ceil() as usize).min(t.levels.len() - 1);
         let du = DU {
             res: [w as f32, h as f32],
@@ -532,7 +536,7 @@ impl Dof {
             k, cmax,
             ka: opening.ka(),
             pad,
-            reach: ((need.min(cmax) + pad + 1.0) / TILE as f32).ceil() + 1.0,
+            reach: ((need.min(cmax) + pad + 1.0) / TILE as f32).ceil() + 2.0,
             levels: n as f32,
             bg,
             lo: hi / 2.0,
@@ -554,7 +558,7 @@ impl Dof {
             self.gpu.queue.write_buffer(&lv.u, 0, bytemuck::bytes_of(&lu));
         }
         let p = if f.lens.is_some() { self.lens_pipes.get_or_init(|| Pipes::of(&self.gpu, &self.layouts, &crate::camera::focus(DOF_WGSL))) } else { &self.pipes };
-        draw(enc, &[&t.zero_view, &t.coc_view], &p.coc, &t.g_coc[src]);
+        draw(enc, &[&t.zero_view, &t.coc_view, &t.split_view], &p.coc, &t.g_coc[src]);
         draw(enc, &[&t.tile_views[0]], &p.tile, &t.g_tile);
         draw(enc, &[&t.tile_views[1]], &p.reach, &t.g_reach);
         draw(enc, &[&t.tile_views[2]], &p.wide, &t.g_wide);
@@ -565,11 +569,11 @@ impl Dof {
         for lv in &t.levels[1..] {
             draw(enc, &lv.pull_views.each_ref(), &p.pull, lv.g_pull.as_ref().unwrap());
         }
-        if bg > 0.5 {
+        if bg > 0.0 {
             draw(enc, &[&t.levels[back].back_view], &p.back, &t.levels[back].g_back);
         }
         // only glass in front of the band has anything under it to make up
-        if through.as_ref().map_or(z0 < zn, |n| n.near > 0.0) {
+        if through.as_ref().map_or(z0 < zn, |n| n.near > 0.0) || self.show > 3.5 {
             draw(enc, &[&t.under_view], &p.under, &t.g_under);
         }
         for lv in &t.levels[..n] {

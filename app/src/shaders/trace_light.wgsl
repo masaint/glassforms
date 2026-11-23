@@ -3,6 +3,7 @@
 // for clay. Glass lit by the family's lights alone is built without any of this: `tracer_source` in
 // render.rs puts this text into trace.wgsl, after its bindings, only for the other ways of drawing.
 
+struct PaintLight { a: vec4f, u: vec4f, v: vec4f, rgb: vec4f }
 struct LU {
   picture: vec4f,           // x: brightness of the environment picture where it is shown behind the shape
                             // z: the level of its softened copies shown there
@@ -12,6 +13,8 @@ struct LU {
   nine: array<vec4f, 18>,   // the lighting as nine smooth terms a colour (env.rs: `sh_terms`), in the lights'
                             // own frame. First nine: the light a matte surface facing a direction gathers.
                             // Last nine: the light arriving from around a direction (for the sheen).
+  paintRoom: array<vec4f, 9>,
+  paintLights: array<PaintLight, 12>,
 }
 @group(0) @binding(5) var<uniform> lu: LU;
 @group(0) @binding(6) var pictureTex: texture_cube<f32>;      // the environment picture on a cube, each level softer
@@ -31,10 +34,8 @@ fn backdrop(rd: vec3f) -> vec3f {
 
 // One of the two sets of nine terms, summed for direction d (in the lights' own frame).
 fn nine(o: i32, d: vec3f) -> vec3f {
-  let v = lu.nine[o].rgb
-        + lu.nine[o + 1].rgb * d.y + lu.nine[o + 2].rgb * d.z + lu.nine[o + 3].rgb * d.x
-        + lu.nine[o + 4].rgb * (d.x * d.y) + lu.nine[o + 5].rgb * (d.y * d.z) + lu.nine[o + 6].rgb * (3.0 * d.z * d.z - 1.0)
-        + lu.nine[o + 7].rgb * (d.x * d.z) + lu.nine[o + 8].rgb * (d.x * d.x - d.y * d.y);
+  let v = pbr_sh9_sum(lu.nine[o].rgb, lu.nine[o + 1].rgb, lu.nine[o + 2].rgb, lu.nine[o + 3].rgb, lu.nine[o + 4].rgb,
+                      lu.nine[o + 5].rgb, lu.nine[o + 6].rgb, lu.nine[o + 7].rgb, lu.nine[o + 8].rgb, d);
   return max(v, vec3f(0.0));
 }
 
@@ -48,14 +49,7 @@ fn nine(o: i32, d: vec3f) -> vec3f {
 //   sheen     a soft reflection of the lighting, stronger towards the outline
 fn clay(p: vec3f, rd: vec3f) -> vec3f {
   let n = nrm(p);
-  var shut = 0.0;
-  var weight = 1.0;
-  for (var i = 0; i < 5; i++) {
-    let h = 0.012 + 0.052 * f32(i);
-    shut += weight * max(h - mapW(p + n * h), 0.0) / h;
-    weight *= 0.8;
-  }
-  let open = clamp(1.0 - 0.42 * shut, 0.0, 1.0);
+  let open = lightOcclusion(p, n);   // light/occlusion.wgsl
   let c = lu.clay.rgb;
   let a = 2.0404 * c - 0.3324;
   let b = -4.7951 * c + 0.6417;

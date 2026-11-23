@@ -15,7 +15,7 @@ fn starts_on_thomas_with_travel_animated() {
     let tr = &s.tracks["attractors/thomas/@travel"];
     assert!(tr.on && tr.from == 0.0 && tr.to == 0.5 && tr.period == 14.0);
     assert_eq!(s.active().iter().map(|k| k.label.as_str()).collect::<Vec<_>>(), vec!["travel"]);
-    assert_eq!(s.want, Some(Detail::Full));
+    assert_eq!(s.wanted(), Some(Detail::Full));
 }
 
 #[test]
@@ -72,7 +72,7 @@ fn the_animation_moves_its_slider_and_loops() {
     assert_eq!(v0, 0.0);
     // a quarter of the 14 s trip, sine both ways: half way between the stops
     assert!((v1 - 0.25).abs() < 1e-9, "{v1}");
-    assert_eq!(s.want, Some(Detail::Anim));
+    assert_eq!(s.wanted(), Some(Detail::Anim));
     // after one whole loop everything is where it started
     s.p.lock = 1.0;
     s.p.spin = 0.3;
@@ -84,7 +84,7 @@ fn the_animation_moves_its_slider_and_loops() {
     s.apply_time();
     assert!((s.shape().travel - a).abs() < 1e-9);
     s.set_playing(false);
-    assert_eq!(s.want, Some(Detail::Full));
+    assert_eq!(s.wanted(), Some(Detail::Full));
 }
 
 #[test]
@@ -266,12 +266,66 @@ fn a_light_is_where_the_picture_of_the_lighting_shows_it() {
         let (a, e) = s.light_at_preview(u, v);
         assert!((a - az).abs() < 1e-6 && (e - el).abs() < 1e-6, "({az}, {el}) came back as ({a}, {e})");
     }
-    // and it is where the tracer sees it: the direction on the picture is the light's, turned as the lights are
+    // and it is where the preview draws it: the direction on the picture is the light's, turned into the level-horizon preview frame
     let d = gf_core::env::preview_dir(0.5, 0.5);
     assert!(d[0].abs() < 1e-12 && d[1].abs() < 1e-12 && (d[2] + 1.0).abs() < 1e-12, "the middle of the picture is straight ahead");
-    let seen = gf_core::math::apply(&s.light_m(), State::light_dir(38.0, 18.0));
+    let seen = gf_core::math::apply(&s.preview_m(), State::light_dir(38.0, 18.0));
     let (u, v) = gf_core::env::preview_uv(seen);
     assert_eq!((u, v), s.light_on_preview(38.0, 18.0));
+}
+
+#[test]
+fn light_room_preview_keeps_the_horizon_level_under_camera_elev_and_roll() {
+    use gf_core::math::{apply, transpose, DEG};
+    let mut s = State::new();
+    s.p.spin = 0.0;
+    for lights in [0.0, 1.0] {
+        s.p.lights = lights;
+        for (azim, elev, roll) in [(0.0, 25.0, 0.0), (42.0, 35.0, 15.0), (-135.0, -40.0, -75.0), (90.0, 89.5, 180.0)] {
+            s.p.azim = azim;
+            s.p.elev = elev;
+            s.p.roll = roll;
+            s.p.lyaw = 33.0;
+            s.p.lpitch = -18.0;
+            s.p.lroll = 210.0;
+            let room_at = |u: f64, v: f64| {
+                let d_lights = apply(&transpose(&s.preview_m()), gf_core::env::preview_dir(u, v));
+                apply(&s.lights_to_room(), d_lights)
+            };
+            for u in [0.0, 0.125, 0.25, 0.5, 0.75, 0.875, 1.0] {
+                let h = room_at(u, 0.5);
+                assert!(h[1].abs() < 1e-12, "horizon bent at u={u}, elev={elev}, roll={roll}, azim={azim}: {h:?}");
+                let top = room_at(u, 0.0);
+                assert!((top[1] - 1.0).abs() < 1e-12, "zenith tilted: {top:?}");
+                let bot = room_at(u, 1.0);
+                assert!((bot[1] + 1.0).abs() < 1e-12, "nadir tilted: {bot:?}");
+            }
+            let fwd = room_at(0.5, 0.5);
+            let want = [(azim * DEG).sin(), 0.0, -(azim * DEG).cos()];
+            assert!(
+                (fwd[0] - want[0]).abs() < 1e-12 && fwd[1].abs() < 1e-12 && (fwd[2] - want[2]).abs() < 1e-12,
+                "middle of preview drifted off camera azimuth: {fwd:?} vs {want:?}"
+            );
+            for (az, el) in [(0.0, 0.0), (-65.0, 22.0), (140.0, -35.0)] {
+                let (u, v) = s.light_on_preview(az, el);
+                let (a, e) = s.light_at_preview(u, v);
+                assert!((a - az).abs() < 1e-6 && (e - el).abs() < 1e-6, "({az}, {el}) -> ({a}, {e})");
+            }
+        }
+    }
+    // With unturned room-locked lights, scrubbing light azimuth moves purely horizontally even when pitched/rolled.
+    s.p.lights = 0.0;
+    s.p.lyaw = 0.0;
+    s.p.lpitch = 0.0;
+    s.p.lroll = 0.0;
+    s.p.azim = 30.0;
+    s.p.elev = 25.0;
+    s.p.roll = 18.0;
+    let (_, v0) = s.light_on_preview(-60.0, 20.0);
+    for az in [-150.0, -20.0, 30.0, 95.0, 170.0] {
+        let (_, v) = s.light_on_preview(az, 20.0);
+        assert!((v - v0).abs() < 1e-12, "azimuth drag curved vertically: v={v} vs v0={v0}");
+    }
 }
 
 #[test]
@@ -396,4 +450,76 @@ fn a_setup_s_own_tracks_load_as_saved() {
         for _ in 0..77 { t.tick(1.0 / 60.0); }
         t.set_playing(false);
     }
+}
+
+#[test]
+fn moving_bodies_preserves_material_tracks_into_and_out_of_layer_zero() {
+    let mut s = State::with_args(&args(&[
+        ("scene", "knots"), ("preset", "trefoil"),
+        ("layer", "solids:icosahedron"), ("J12.op", "apart"),
+        ("B2.material", "gold"),
+        ("track", "P.ior:1.4:1.9:6"),
+        ("track", "B2.rough:0.05:0.45:4"),
+    ]), true);
+    assert!(s.tracks.contains_key("P.ior") && s.tracks.contains_key("B2.rough"));
+    s.swap_layers(0, 1);
+    assert_eq!((s.tracks["P.rough"].from, s.tracks["P.rough"].to), (0.05, 0.45));
+    assert_eq!((s.tracks["B2.ior"].from, s.tracks["B2.ior"].to), (1.4, 1.9));
+    assert!(!s.tracks.contains_key("B2.rough") && !s.tracks.contains_key("P.ior"));
+    // Swapping back restores both tracks to their original owners.
+    s.swap_layers(0, 1);
+    assert_eq!((s.tracks["P.ior"].from, s.tracks["P.ior"].to), (1.4, 1.9));
+    assert_eq!((s.tracks["B2.rough"].from, s.tracks["B2.rough"].to), (0.05, 0.45));
+    // Removing layer 0 promotes body 2's material track to P.* and drops removed layer 0's material track.
+    assert!(s.remove_layer(0));
+    assert_eq!((s.tracks["P.rough"].from, s.tracks["P.rough"].to), (0.05, 0.45));
+    assert!(!s.tracks.contains_key("P.ior") && !s.tracks.contains_key("B2.rough"));
+
+    // When the promoted layer has no own material, shared scene P.* tracks stay on P.*.
+    let mut shared = State::with_args(&args(&[
+        ("scene", "knots"), ("preset", "trefoil"),
+        ("layer", "solids:icosahedron"), ("J12.op", "apart"),
+        ("track", "P.ior:1.3:1.7:5"),
+    ]), true);
+    assert!(!shared.body_own(1));
+    shared.swap_layers(0, 1);
+    assert_eq!((shared.tracks["P.ior"].from, shared.tracks["P.ior"].to), (1.3, 1.7));
+    assert!(!shared.tracks.contains_key("B2.ior"));
+}
+
+#[test]
+fn cli_args_and_set_text_enforce_hard_limits() {
+    use gf_core::state::{Detail, ShapeJob};
+    let mut s = State::with_args(&args(&[
+        ("scene", "knots"), ("preset", "trefoil"),
+        ("beads", "2.0"), ("beadPeriod", "0"), ("thick", "0"), ("len", "0"), ("melt", "-1"), ("puff", "9"), ("travel", "9"),
+        ("absorb", "-5,2000,0.2"), ("shift", "-500,500"), ("rot", "-90000,90000,15"),
+        ("light1.w", "0"), ("light1.h", "95"),
+    ]), true);
+    assert_eq!(s.shape().beads, gf_core::limits::BEADS.1);
+    assert_eq!(s.shape().bead_period, gf_core::limits::BEAD_PERIOD.0);
+    assert_eq!(s.shape().thick, gf_core::limits::THICK.0);
+    assert_eq!(s.shape().len, gf_core::limits::LEN.0);
+    assert_eq!(s.shape().melt, gf_core::limits::MELT.0);
+    assert_eq!(s.shape().puff, gf_core::limits::PUFF.1);
+    assert_eq!(s.p.absorb, [0.0, 1000.0, 0.2]);
+    assert_eq!(s.p.get("tintR"), Some(1.0));
+    assert_eq!(s.p.shift, [-100.0, 100.0]);
+    assert_eq!((s.rig().lights[0].w, s.rig().lights[0].h), gf_core::limits::LIGHT_SIZE);
+
+    s.clock = 1.5;
+    let job = s.shape_job(Detail::Quick, Some(64)).expect("curve builds cleanly");
+    if let ShapeJob::Curve { curve, .. } = job.shape {
+        assert!(curve.pts.iter().all(|v| v.is_finite()), "NaN in curve points");
+    }
+
+    assert!(s.apply_arg("rot", "-90000,90000,15"));
+    assert_eq!(s.p.rot, [-36000.0, 36000.0, 15.0]);
+
+    assert!(s.apply_arg("beadPeriod", "-3"));
+    assert_eq!(s.shape().bead_period, gf_core::limits::BEAD_PERIOD.0);
+    assert!(s.apply_arg("absorb", "-1,-2,5000"));
+    assert_eq!(s.p.absorb, [0.0, 0.0, 1000.0]);
+    assert!(s.apply_arg("light1", "0,20,0,120,1,1,1"));
+    assert_eq!((s.rig().lights[0].w, s.rig().lights[0].h), gf_core::limits::LIGHT_SIZE);
 }

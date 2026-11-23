@@ -86,14 +86,16 @@ fn fs(@builtin(position) pos: vec4f) -> Out {
     for (var k = 0; k < 4; k++) {
       let corner = fc + vec2f(f32(k & 1), f32(k >> 1)) - 0.5;
       let uvk = (2.0 * corner - a.res) / a.res.y + a.shift;
-      let t = drop / dot(n, normalize(vec3f(uvk * a.cam.y, -1.0)));
+      let dn = dot(n, normalize(vec3f(uvk * a.cam.y, -1.0)));
+      let t = select(-1.0, drop / dn, dn < -1e-5);       // (a level or rising ray meets no floor)
       if (t > 0.0) { lo = min(lo, t); hi = max(hi, t); } else { hi = 1e9; }
     }
     if (d > lo * 0.996 - 0.002 && d < hi * 1.004 + 0.002) {
       at = fc;
       let uv = (2.0 * fc - a.res) / a.res.y + a.shift;
       let dir = normalize(vec3f(uv * a.cam.y, -1.0));
-      let tf = drop / dot(n, dir);
+      let dn = dot(n, dir);
+      let tf = select(-1.0, drop / dn, dn < -1e-5);
       if (tf > 0.0) {
         let p = eye + dir * tf;
         var q = p.x * a.room0.xyz + p.y * a.room1.xyz + p.z * a.room2.xyz;

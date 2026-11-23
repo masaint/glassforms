@@ -30,8 +30,12 @@ pub fn centre(src: &str) -> Option<String> {
     // fract(0.5 + jitter) - 0.5 = jitter: the first ray of every pixel goes through its middle plus the jitter
     // (the wavelengths stay at a different place in the spectrum in every pixel: tried with every pixel's at
     // the same place in a frame, stepping on from frame to frame, DLSS kept whole patches of one colour)
-    (src.matches(SCATTERED).count() == 1).then(|| src.replace(SCATTERED, "let shift = vec2f(0.5);"))
+    (crate::weave::found(src, "dlss.centre", SCATTERED) == 1).then(|| src.replace(SCATTERED, "let shift = vec2f(0.5);"))
 }
+
+/// This program's identifier for NVIDIA's runtime (any fixed UUID will do; shared by Super Resolution and Ray Reconstruction).
+#[cfg(feature = "dlss")]
+pub const PROJECT_ID: &str = "9ed1b06a-911b-40f4-9d5b-d520be6407e5";
 
 /// Is DLSS in this build?
 pub const BUILT: bool = cfg!(feature = "dlss");
@@ -91,8 +95,7 @@ mod imp {
 
     use super::Upscale;
 
-    /// This program's identifier for NVIDIA's runtime (any fixed UUID will do).
-    const PROJECT: &str = "9ed1b06a-911b-40f4-9d5b-d520be6407e5";
+    const PROJECT: &str = super::PROJECT_ID;
     const PREP_WGSL: &str = include_str!("shaders/dlss_prep.wgsl");
     const RESOLVE_WGSL: &str = include_str!("shaders/dlss_resolve.wgsl");
     const MV: wgpu::TextureFormat = wgpu::TextureFormat::Rg32Float;
@@ -131,6 +134,7 @@ mod imp {
             trace: wgpu::Trace::Off,
         };
         let (device, queue) = dlss_wgpu::request_device(project(), &adapter, &dd, &mut support, Some(wanted_limits(&adapter))).map_err(|e| format!("could not open the graphics device: {e}"))?;
+        crate::dlss_rr::note_support(support.ray_reconstruction_supported);
         if !support.super_resolution_supported {
             return Err("DLSS Super Resolution is not supported on this device".into());
         }

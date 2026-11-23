@@ -1,6 +1,7 @@
 //! The camera, in a photographer's terms, as one thing: a section of the left panel holding all of it
 //! (everything a photographer would call the camera's, whatever part of the program reads it). From the top:
-//! the lens (named lenses, the focal length with the field it takes in, the kind of lens, the sensor);
+//! the projection (perspective or orthographic at a touch, or any of the fisheye, panorama and cylindrical
+//! projections); the lens (named lenses, the focal length with the field it takes in, the sensor);
 //! the focus (everything sharp, or the lens opened: the subject's real size, the f-stop, where it is
 //! focused, how deep a range is held sharp, what that comes to, how the blur is made); where the camera
 //! stands (distance, height, the picture slid across, roll, the scene's turn); the exposure with the tone
@@ -25,19 +26,34 @@ use super::{knob, Panels};
 
 /// What the group says beside its title while it is folded: the lens, its stop and where it is focused.
 pub fn summary(st: &State, aspect: f64) -> String {
-    let r = st.camera().readout(aspect);
+    let c = st.camera();
+    let r = c.readout(aspect);
+    let head = match c.proj {
+        Projection::Perspective => focal_text(r.focal),
+        Projection::Orthographic => match r.view_mm {
+            Some(h) => format!("orthographic · {}", length_text(h)),
+            None => "orthographic".to_owned(),
+        },
+        p => format!("{} · {}", p.id(), focal_text(r.focal)),
+    };
     match r.fstop {
-        Some(n) => format!("{} · f/{} · {}", focal_text(r.focal), stop_text(n), length_text(r.focus_mm)),
-        None => format!("{} · everything sharp", focal_text(r.focal)),
+        Some(n) => format!("{head} · f/{} · {}", stop_text(n), length_text(r.focus_mm)),
+        None => format!("{head} · everything sharp"),
     }
 }
 
-/// The same, shorter, for the picture section's title: "52 mm · all sharp", "85 mm · f/4.0".
+/// The same, shorter, for the picture section's title: "52 mm · all sharp", "ortho · all sharp", "85 mm · f/4.0".
 pub fn brief(st: &State, aspect: f64) -> String {
-    let r = st.camera().readout(aspect);
+    let c = st.camera();
+    let r = c.readout(aspect);
+    let head = match c.proj {
+        Projection::Perspective => focal_text(r.focal),
+        Projection::Orthographic => "ortho".to_owned(),
+        p => p.id().to_owned(),
+    };
     match r.fstop {
-        Some(n) => format!("{} · f/{}", focal_text(r.focal), stop_text(n)),
-        None => format!("{} · all sharp", focal_text(r.focal)),
+        Some(n) => format!("{head} · f/{}", stop_text(n)),
+        None => format!("{head} · all sharp"),
     }
 }
 
@@ -84,6 +100,8 @@ pub fn section(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     if !px.group(ui, "camera", "camera", &says) { return; }
     let names = label_width(ui);
     set_label_width(ui, COL_LABEL_WIDE);
+    px.heading(ui, "cam-projection", "projection");
+    projection(ui, st, px);
     px.heading(ui, "cam-lens", "lens");
     lens(ui, st, px);
     character(ui, st, px);
@@ -98,6 +116,35 @@ pub fn section(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     set_label_width(ui, names);
     // (where the whole camera is, for tests)
     px.note("camera", Rect::from_min_max(Pos2::new(ui.cursor().left(), top), Pos2::new(ui.cursor().left() + ui.available_width(), ui.cursor().top())));
+}
+
+/// Projection type: perspective or orthographic at one click, plus the full projection menu (including
+/// fisheye, 360° panorama and cylindrical lenses).
+fn projection(ui: &mut Ui, st: &mut State, px: &mut Panels) {
+    let proj = st.camera().proj;
+    let modes = [
+        Item::new("perspective", proj == Projection::Perspective).tip("perspective projection: parallel lines converge with distance, as an ordinary camera lens draws"),
+        Item::new("orthographic", proj == Projection::Orthographic).tip("orthographic projection: parallel rays with no perspective foreshortening (telecentric view)"),
+    ];
+    let run = filled_run(ui, Id::unique(("projection mode", px.place)), &modes, egui::vec2(6.0, 2.0), &mono(SIZE));
+    for (place, name) in run.places.iter().zip(["proj:perspective", "proj:orthographic"]) {
+        px.note(format!("{}{name}", px.whose()), *place);
+    }
+    match run.clicked {
+        Some(0) => st.lens_kind(Projection::Perspective.index()),
+        Some(1) => st.lens_kind(Projection::Orthographic.index()),
+        _ => {}
+    }
+    gap(ui, 3.0);
+    let kinds: Vec<String> = Projection::ALL.iter().map(|p| p.name().to_owned()).collect();
+    let at = ui.cursor().min;
+    if let Some(i) = pick(ui, Id::unique(("projection", px.place)), "projection", &kinds, st.camera().proj.index()) {
+        st.lens_kind(i);
+    }
+    let r = Rect::from_min_max(at, Pos2::new(at.x + ui.available_width(), ui.cursor().top()));
+    px.note(format!("{}projection", px.whose()), r);
+    ui.interact(Rect::from_min_size(r.min, egui::vec2(label_width(ui), r.height())), Id::unique(("projection name", px.place)), egui::Sense::hover())
+        .on_hover_text("camera projection type: perspective, orthographic (parallel rays), fisheye (equidistant, equisolid, stereographic), 360 × 180 panorama, or cylindrical");
 }
 
 /// All sharp, or the lens open (at the f-stop it was last open at, f/4 the first time).
@@ -133,23 +180,25 @@ fn lens(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     gap(ui, 3.0);
 
     // the focal length, on a slider that zooms evenly; greyed for a panorama, which takes in everything
-    let r = st.camera().readout(px.aspect);
-    let panorama = st.camera().proj == Projection::Panorama;
+    let c = st.camera();
+    let r = c.readout(px.aspect);
+    let panorama = c.proj == Projection::Panorama;
+    let zoom_tip = if c.proj == Projection::Orthographic {
+        "in orthographic projection, zooms the parallel view scale (mouse wheel on the picture scales it too)"
+    } else {
+        "the lens's focal length: shift-wheel on the picture changes it and keeps the subject's size"
+    };
     ui.scope(|ui| {
         if panorama { ui.disable(); }
-        worded(ui, st, px, "zoom", &focal_text(r.focal), "the lens's focal length: shift-wheel on the picture changes it and keeps the subject's size");
+        worded(ui, st, px, "zoom", &focal_text(r.focal), zoom_tip);
     });
     let field = match r.view_mm {
-        Some(h) => format!("shows {} top to bottom", length_text(h)),
+        Some(h) => format!("shows {} high", length_text(h)),
         None => format!("takes in {:.0}° × {:.0}°", r.field_v, r.field_h),
     };
     aside(ui, &field, pal().dim);
 
-    // the kind of lens, and the sensor (the picture is as tall as the sensor)
-    let kinds: Vec<String> = Projection::ALL.iter().map(|p| p.name().to_owned()).collect();
-    if let Some(i) = pick(ui, Id::unique(("lens kind", px.place)), "kind", &kinds, st.camera().proj.index()) {
-        st.lens_kind(i);
-    }
+    // the sensor (the picture is as tall as the sensor)
     let sensor = st.camera().readout(px.aspect).sensor;
     let mut sensors: Vec<String> = SENSORS.iter().map(|s| s.0.to_owned()).collect();
     let now = SENSORS.iter().position(|s| (s.2 - sensor).abs() < 0.05).unwrap_or_else(|| {
@@ -423,5 +472,18 @@ mod tests {
     fn the_lenses_have_short_names() {
         let words: Vec<String> = LENSES.iter().map(lens_word).collect();
         assert_eq!(words, ["24", "35", "50", "85", "100 macro", "200", "fisheye 15", "fisheye 8"]);
+    }
+
+    #[test]
+    fn summary_and_brief_name_orthographic_projection() {
+        let mut st = State::new();
+        assert!(brief(&st, 1.5).contains("all sharp") && !brief(&st, 1.5).contains("ortho"));
+        assert!(summary(&st, 1.5).contains("everything sharp") && !summary(&st, 1.5).contains("orthographic"));
+        st.lens_kind(Projection::Orthographic.index());
+        assert_eq!(brief(&st, 1.5), "ortho · all sharp");
+        assert!(summary(&st, 1.5).starts_with("orthographic · ") && summary(&st, 1.5).ends_with(" · everything sharp"));
+        st.set_depth_of_field(Some(4.0));
+        assert_eq!(brief(&st, 1.5), "ortho · f/4.0");
+        assert!(summary(&st, 1.5).starts_with("orthographic · ") && summary(&st, 1.5).contains(" · f/4.0 · "));
     }
 }

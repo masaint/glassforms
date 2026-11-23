@@ -33,6 +33,12 @@ fn milky() -> Vec<material::Variant> {
 
 #[test]
 fn the_compute_shaders() {
+    for entry in ["fn cs_seed(", "fn cs_edt_x(", "fn cs_edt_y(", "fn cs_edt_z(", "fn cs_finish("] {
+        assert!(BODIES_WGSL.contains(entry), "cast_bodies.wgsl missing {entry}");
+    }
+    assert!(CAST_WGSL.contains("fn castSample("), "cast.wgsl missing castSample");
+    assert!(CAST_WGSL.contains("fn castFloorDirect(p: vec3f) -> vec3f"), "cast.wgsl missing castFloorDirect");
+    assert!(CAST_WGSL.contains("fn castUnderCone("), "cast.wgsl missing multi-cone castUnderCone");
     check("cast_bodies.wgsl", BODIES_WGSL);
     check("cast_light.wgsl + cast_land.wgsl", LIGHT_WGSL);
     check("scatter.wgsl", SCATTER_WGSL);
@@ -88,6 +94,44 @@ fn tracers_with_casting() {
 
 /// Without `cast` a tracer's text is what it is without any of this; and a tracer with nothing in it that
 /// gathers light diffusely (glass, metal) is left as it is even when casting is asked for.
+#[test]
+fn assembly_paint_receives_focused_light_once() {
+    for film in [false, true] {
+        for exchange in [false, true] {
+            let mat = material::Variant { bodies: 2, paint_bodies: true, paint_film_bodies: film, film, paint_exchange: exchange, ..Default::default() };
+            let view = Variant { mat, ..Default::default() };
+            let off = tracer_source(&MARCH, view, false);
+            let on = tracer_source(&MARCH, Variant { cast: true, ..view }, false);
+            assert!(!off.contains("castFocused("));
+            assert_eq!(on.matches("return castFocused(p,n);").count(), 1);
+            assert_eq!(on.matches("paintFocusedLight(p,n)").count(), 1, "film {film}, exchange {exchange}: direct paint receiver");
+            assert_eq!(on.matches("paintFocusedLight(q,normal)").count(), usize::from(exchange), "film {film}, exchange {exchange}: exchanged receiver");
+            check("paint receiving focused light", &on);
+        }
+    }
+}
+
+#[test]
+fn construction_paint_receives_focused_light_once() {
+    let fams = gf_core::presets::families();
+    let (fi, _) = fams.iter().enumerate().find(|(_, f)| f.id == "algebraic").unwrap();
+    let decl = gf_core::csg::wgsl(&fams, &[(fi, 0)], gf_core::sdf::BINDING, false);
+    for film in [false, true] {
+        let class = material::Variant { ceramic: true, sss: true, mono: true, film, ..Default::default() };
+        let tree = format!("{decl}\nfn cnSample(p: vec3f) -> vec3f {{ return vec3f(csgDist(p),0.0,-1.0); }}\n// construction surface materials {}", serde_json::to_string(&[class]).unwrap());
+        let generated = glassforms::sdf::weave(&tracer_source(&MARCH, Variant::default(), false), &tree);
+        assert!(generated.contains("fn cn1_paintFocusedLight"));
+        assert!(generated.contains("return vec3f(0.0); /* PAINT_FOCUS_STUB */"));
+        let on = weave(&generated).expect("the generated painted face is a focused-light receiver");
+        assert_eq!(on.matches("return castFocused(p,n); /* PAINT_FOCUS_STUB */").count(), 1);
+        assert_eq!(on.matches("fn castFocused(").count(), 1, "casting declarations must not be duplicated");
+        // A second receiver-only pass is harmless when a later generator needs it.
+        let again = weave(&on).unwrap_or_else(|| on.clone());
+        assert_eq!(again.matches("fn castFocused(").count(), 1);
+        check("construction paint receiving focused light", &again);
+    }
+}
+
 #[test]
 fn nothing_cast_nothing_changed() {
     for clay in [false, true] {

@@ -13,7 +13,7 @@ fn engine(args: &[(&str, &str)]) -> Option<Engine> {
     let args: Vec<(String, String)> = args.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
     let mut e = Engine::new(gpu, State::with_args(&args, true), true);
     e.resize(320, 180);
-    if let Some(mode) = e.state.want.take() { e.bake(mode).ok()?; }
+    if let Some(r) = e.state.take_request() { e.bake(r.detail).ok()?; }
     e.render(1);
     Some(e)
 }
@@ -71,10 +71,35 @@ fn a_switch_uses_the_tracer_made_beforehand() {
     assert!(e.renderer.has_tracer(&want.0), "the formula's tracer was not made beforehand");
     e.auto = true;
     assert!(e.state.apply_arg("trace", "sdf"));
-    let mode = e.state.want.take().unwrap_or(Detail::Full);
+    let mode = e.state.take_request().map_or(Detail::Full, |r| r.detail);
     e.bake(mode).expect("built");
     e.render(1);
     let got = e.renderer.live_key_text().unwrap();
     assert_eq!(got.0, want.0, "formula: key");
     assert!(got.1 == want.1, "formula: text");
+}
+
+#[test]
+fn reduced_resolution_keeps_drawing_while_its_pipeline_is_prepared() {
+    let Some(mut e) = engine(&[("scene", "studio"), ("preset", "sphere"), ("denoise", "0"), ("smooth", "0.9")]) else {
+        eprintln!("no graphics device: skipped");
+        return;
+    };
+    e.auto = false;
+    e.keep = Some(glassforms::autoscale::Keep::new(&e.gpu, 90.0));
+    let turn = glassforms::core::math::axis_angle(0.3, 1.0, 0.2, 0.01);
+    let update = |e: &mut Engine| {
+        e.state.turn(&turn);
+        let passes = e.renderer.trace_passes;
+        e.frame(320, 180, 1.0 / 90.0);
+        assert!(e.renderer.trace_passes > passes);
+        e.renderer.dyn_used
+    };
+    assert_eq!(update(&mut e), 1.0);
+    e.keep.as_mut().unwrap().ctl.scale = 0.65;
+    assert_eq!(update(&mut e), 1.0, "full-size fallback on the first request");
+    e.renderer.ready_dyn();
+    assert_eq!(update(&mut e), 0.65, "the prepared pipeline draws at the requested scale");
+    e.keep = None;
+    assert_eq!(update(&mut e), 1.0);
 }

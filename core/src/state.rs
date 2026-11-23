@@ -25,22 +25,12 @@ pub fn valid_res(v: f64) -> u32 {
     (((r.clamp(64, RES_MAX as i64) + 4) / 8) * 8) as u32
 }
 
-/// How carefully a shape is built.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Detail {
-    /// full detail
-    Full,
-    /// a slider is being dragged
-    Quick,
-    /// one frame of live animation
-    Anim,
-    /// one frame of a video: full detail, nothing approximated
-    Hq,
-}
+pub use crate::build::{BuildRequest, Detail, Quality};
 
 /// What the last build of a shape came to.
 #[derive(Clone, Debug, Default)]
 pub struct Meta {
+    pub bounds: Option<crate::mods::Box3>,
     pub res: u32,
     pub ms: f64,
     pub segments: usize,
@@ -73,8 +63,10 @@ pub struct ShapeState {
     /// the model file the user chose (for the `file` shape of the family of models): a full path, or
     /// one below the program's folder
     pub model: String,
-    /// the surface studio's layers and cleanups (see sculpt.rs): empty unless something was added
-    pub sculpt: crate::sculpt::Sculpt,
+    /// its modifiers (mods.rs), the surface studio among them: empty unless something was added
+    pub mods: crate::mods::Mods,
+    /// its strokes, as the first part of a csg object's tree (gf_core::csg::Strokes)
+    pub strokes: crate::csg::Strokes,
     /// traced from its baked volume (as always) or from its formula (gf_core::sdf)
     pub trace: crate::sdf::Trace,
     pub meta: Meta,
@@ -97,7 +89,9 @@ pub const LIGHT_SOFT: f64 = 0.6;
 pub fn light_from_text(text: &str) -> Option<Light> {
     let v: Vec<f64> = text.split(',').map(|s| s.trim().parse::<f64>().ok().filter(|x| x.is_finite())).collect::<Option<_>>()?;
     if v.len() != 7 && v.len() != 8 { return None; }
-    Some(Light { az: v[0], el: v[1], w: v[2], h: v[3], rgb: [v[4], v[5], v[6]], soft: v.get(7).copied().unwrap_or(LIGHT_SOFT) })
+    let w = crate::limits::hold(v[2], crate::limits::LIGHT_SIZE);
+    let h = crate::limits::hold(v[3], crate::limits::LIGHT_SIZE);
+    Some(Light { az: v[0], el: v[1], w, h, rgb: [v[4], v[5], v[6]], soft: v.get(7).copied().unwrap_or(LIGHT_SOFT) })
 }
 /// The same text back.
 pub fn light_to_text(l: &Light) -> String {
@@ -155,15 +149,34 @@ pub struct Parked {
 /// What the GPU side has to build.
 pub enum ShapeJob {
     Curve { curve: Curve, melt: f64 },
-    Field { uniforms: [f32; 12] },
+    /// (`table`: the formula's table, `field::table`, for a preset that has one; empty otherwise)
+    Field { uniforms: [f32; 12], table: Vec<f32> },
     /// a polygon model: the file and what its sliders say (reading it is the GPU side's business)
     Mesh(crate::mesh::MeshJob),
 }
 pub struct Job {
+    /// built for a playing animation (Detail::Anim): rebuilt every frame, so kept quick to make
+    pub anim: bool,
     pub family: usize,
     pub preset: usize,
     pub res: u32,
     pub shape: ShapeJob,
+}
+
+impl Job {
+    /// Bake and trace the same equation for a generated curve. The curve already includes
+    /// its placement, travel window, animated radii and lengths, exactly as set in the editor.
+    pub fn prepare_formula(&mut self, families: &[Family]) -> Result<(), String> {
+        let p = &families[self.family].presets[self.preset];
+        if !p.exact_tubes { return Ok(()); }
+        let ShapeJob::Curve { curve, melt } = &self.shape else { return Ok(()) };
+        let entries = crate::presets::tubes::table(curve, *melt, families[self.family].id == "trees", self.anim, self.res)?;
+        self.shape = ShapeJob::Field {
+            uniforms: field::uniforms(p, &[], self.res, 0.0),
+            table: entries.into_flattened(),
+        };
+        Ok(())
+    }
 }
 
 /// Which value a knob stands for.
@@ -186,7 +199,7 @@ pub enum KnobRef {
     /// a layer's placement: 0..2 position, 3..5 turn, 6 size
     Place(usize, usize),
     /// a numeric option of a pair, a triple or the quad of layers (a mask of their places)
-    Combo(u8, Opt),
+    Combo(crate::layers::Mask, Opt),
     /// a setting of the material of the body whose lowest layer is at this place in the list
     Body(usize, &'static str),
     /// a number of the lamp at this place in the list (`lamps::LAMP_KNOBS`)
@@ -259,6 +272,9 @@ const ENGINE_KNOBS: &[(&str, &str, f64, f64, f64, bool)] = &[
     ("ior", "index", 1.05, 2.7, 0.01, true),
     ("disp", "dispersion", 0.0, 0.4, 0.005, true),
     ("nb", "bounces", 1.0, 12.0, 1.0, true),
+    ("giBounces", "color bounces", 1.0, 4.0, 1.0, false),
+    ("giStrength", "bounce ×", 0.0, 2.0, 0.05, true),
+    ("giSamples", "bounce rays", 1.0, 4.0, 1.0, false),
     ("exposure", "exposure", 0.2, 4.0, 0.05, true),
     ("bloom", "bloom", 0.0, 1.5, 0.01, true),
     ("smooth", "antialias", 0.0, 0.95, 0.01, false),
@@ -300,6 +316,13 @@ pub struct State {
     /// The layers: where each sits, whether it shows, and every combination's options. `fam` and `shapes`
     /// are the selected layer's; the other layers' are kept in `parked` (see layers.rs).
     pub stack: Stack,
+    /// The group whose tools the editor displays, when a group row is selected.
+    pub selected_group: Option<u32>,
+    pub edit_scope: crate::edit_scope::EditScope,
+    /// Last evaluated modifier positions in geometry coordinates, for viewport editing.
+    pub world_modifier_target: Option<crate::groups::Item>,
+    pub construction_pivots: std::collections::HashMap<(usize,u64,usize), [f64;3]>,
+    pub modifier_pivots: std::collections::HashMap<(crate::groups::Item, usize), [f64; 3]>,
     pub(crate) parked: Vec<Option<Parked>>,
     pub p: Settings,
     pub render: RenderOpts,
@@ -322,14 +345,20 @@ pub struct State {
     rest: BTreeMap<String, f64>,
     /// a video is being rendered: everything is played exactly as it loops
     pub rendering: bool,
-    /// the shape must be built again, this carefully
-    pub want: Option<Detail>,
+    /// the shape must be built again: how carefully and why (`request`; the last request in a frame wins)
+    build: Option<BuildRequest>,
+    /// the most voxels a side a shape that animates is rebuilt at (none: as each shape says). Set only by
+    /// the window's frame-rate keeping, while it is on (app/src/autoscale.rs); never for stills or videos
+    pub anim_cap: Option<u32>,
     /// something changed outright (a new family): the picture so far is useless
     pub cut: bool,
     /// a focus plane was moved: show the planes for a moment
     pub flash_planes: bool,
     /// one per family: each keeps its own lights while another is up
     rigs: Vec<Rig>,
+    /// The studio family that lit the scene before a World hierarchy edit moved
+    /// another family to the first layer. The family light banks stay independent.
+    pub(crate) rig_family: Option<usize>,
     /// goes up whenever the lights or the environment picture change
     pub lights_rev: u64,
     /// the lamps standing in the scene (none unless added: lamps.rs), and a number that goes up whenever
@@ -342,6 +371,8 @@ pub struct State {
     pub empty: bool,
     /// the ten camera slots (history.rs): stored views, kept in a setup
     pub views: Vec<Option<crate::history::ViewSlot>>,
+    /// how the viewport draws: the full render or a matcap (view_mode.rs); kept in a setup, not undone
+    pub view: crate::view_mode::ViewSettings,
     /// the environment picture in use: its path, as given (one that is not absolute is looked for in the
     /// program's folder)
     pub hdri: Option<String>,
@@ -350,10 +381,10 @@ pub struct State {
     /// layer: an entry is used only while its layer is the lowest of a body, and never for the first
     /// layer, whose body is made of the scene's own material.
     pub body_mats: [Option<Box<Settings>>; material::MAX_BODIES],
+    /// Opt-in lossless material ownership. The legacy settings above remain the renderer projection.
+    pub canonical: Option<crate::setup::CanonicalMaterials>,
     first_scene: bool,
     pub(crate) args: Vec<(String, String)>,
-    #[allow(dead_code)]
-    auto: bool,
 }
 
 pub(crate) fn arg<'a>(args: &'a [(String, String)], k: &str) -> Option<&'a str> {
@@ -370,8 +401,8 @@ impl State {
 
     /// `args`: name=value pairs as the web version takes them in its URL (scene, preset, any setting,
     /// thick, len, melt, puff, travel, beads, beadPeriod, res, animRes, p.<name>, rx, ry, rz).
-    /// `auto`: a still or a benchmark is being made, so nothing spins unless asked to.
-    pub fn with_args(args: &[(String, String)], auto: bool) -> Self {
+    /// `_auto`: a still or a benchmark is being made, so nothing spins unless asked to.
+    pub fn with_args(args: &[(String, String)], _auto: bool) -> Self {
         let families = families();
         let mut shapes = Self::fresh_shapes(&families, args);
         // (model=<file> alone shows the family of models with that file up)
@@ -379,10 +410,10 @@ impl State {
         let fam = arg(args, "scene").and_then(|id| families.iter().position(|f| f.id == id)).or(model).unwrap_or(0);
         let rigs = families.iter().map(|f| Rig { lights: f.lights.clone(), ambient: f.ambient }).collect();
         let mut s = Self {
-            families, fam, shapes, stack: Stack::new(), parked: vec![None], p: Settings::default(), render: RenderOpts::default(),
+            families, fam, shapes, stack: Stack::new(), selected_group: None, edit_scope: Default::default(), modifier_pivots: Default::default(), construction_pivots: Default::default(), world_modifier_target: None, parked: vec![None], p: Settings::default(), render: RenderOpts::default(),
             r0: I3, theta: 0.0, r: I3, lphi: 0.0, playing: false, clock: 0.0, tracks: BTreeMap::new(), moved: BTreeMap::new(), rest: BTreeMap::new(),
-            rendering: false, want: None, cut: true, flash_planes: false, rigs, lights_rev: 0, lamps: Vec::new(), lamps_rev: 0, csg: Default::default(), empty: false, views: Vec::new(), hdri: None, body_mats: Default::default(),
-            first_scene: true, args: args.to_vec(), auto,
+            rendering: false, build: None, anim_cap: None, cut: true, flash_planes: false, rigs, rig_family: None, lights_rev: 0, lamps: Vec::new(), lamps_rev: 0, csg: Default::default(), empty: false, views: Vec::new(), view: Default::default(), hdri: None, body_mats: Default::default(), canonical: None,
+            first_scene: true, args: args.to_vec(),
         };
         s.set_scene(fam);
         // the materials of bodies that are given one of their own (`B2.material=gold`): before the
@@ -391,7 +422,7 @@ impl State {
         s.layer_args();
         // the tree of formula parts (csg.rs)
         for (k, v) in args {
-            if k == "csg" || k == "csgGrid" || k == "csgCoarse" || k == "csgPlace" { s.apply_arg(k, v); }
+            if k == "csg" || k == "csgJson" || k == "csgGrid" || k == "csgCoarse" || k == "csgPlace" { s.apply_arg(k, v); }
         }
         // the words of the 3D text
         if let Some(t) = arg(args, "text") { s.apply_arg("text", t); }
@@ -399,6 +430,8 @@ impl State {
         for (k, v) in args {
             if Self::is_light_arg(k) { s.apply_arg(k, v); }
         }
+        // how the viewport draws (view=matcap, matcap=<built-in or picture>, matcapCavity=...: view_mode.rs)
+        for (k, v) in args { s.view.apply_arg(k, v); }
         s
     }
 
@@ -420,11 +453,14 @@ impl State {
                 let vals = p.params.iter().map(|d| arg_num(args, &format!("p.{}", d.id)).map_or(d.value, |v| crate::limits::hold(v, crate::limits::widen(d.lo, d.hi)))).collect();
                 ShapeState {
                     preset, vals,
-                    thick: arg_num(args, "thick").unwrap_or(1.0), len: arg_num(args, "len").unwrap_or(1.0),
-                    melt: arg_num(args, "melt").unwrap_or(f.melt), puff: arg_num(args, "puff").unwrap_or(0.0),
-                    travel: arg_num(args, "travel").unwrap_or(0.0), beads: arg_num(args, "beads").unwrap_or(0.0),
-                    bead_period: arg_num(args, "beadPeriod").unwrap_or(2.0),
-                    res, anim_res: arg_num(args, "animRes").map(valid_res).unwrap_or_else(|| Self::family_anim_res(f)), model: String::new(), sculpt: arg(args, "sculpt").and_then(crate::sculpt::Sculpt::from_arg).unwrap_or_default(),
+                    thick: arg_num(args, "thick").map_or(1.0, |v| crate::limits::hold(v, crate::limits::THICK)),
+                    len: arg_num(args, "len").map_or(1.0, |v| crate::limits::hold(v, crate::limits::LEN)),
+                    melt: arg_num(args, "melt").map_or(f.melt, |v| crate::limits::hold(v, crate::limits::MELT)),
+                    puff: arg_num(args, "puff").map_or(0.0, |v| crate::limits::hold(v, crate::limits::PUFF)),
+                    travel: arg_num(args, "travel").map_or(0.0, |v| crate::limits::hold(v, (0.0, TRAVEL))),
+                    beads: arg_num(args, "beads").map_or(0.0, |v| crate::limits::hold(v, crate::limits::BEADS)),
+                    bead_period: arg_num(args, "beadPeriod").map_or(2.0, |v| crate::limits::hold(v, crate::limits::BEAD_PERIOD)),
+                    res, anim_res: arg_num(args, "animRes").map(valid_res).unwrap_or_else(|| Self::family_anim_res(f)), model: String::new(), mods: crate::mods::Mods::from_args(arg(args, "mods"), arg(args, "sculpt")), strokes: arg(args, "strokes").and_then(|v| serde_json::from_str(v).ok()).unwrap_or_default(),
                     trace: arg(args, "trace").and_then(crate::sdf::Trace::parse).unwrap_or_default(), meta: Meta::default(), orbit: None, e: None,
                 }
             })
@@ -474,15 +510,16 @@ impl State {
         if self.playing { self.set_playing(false); }
         // (the surface studio belongs to the layer: it goes with it to the new family's shape; so does what
         // kind of object it is, volume or csg, fixed when it was made)
-        let (sculpt, trace) = (self.shapes[self.fam].sculpt.clone(), self.shapes[self.fam].trace);
+        let (mods, strokes, trace) = (self.shapes[self.fam].mods.clone(), self.shapes[self.fam].strokes, self.shapes[self.fam].trace);
         self.fam = idx.min(self.families.len() - 1);
-        self.shapes[self.fam].sculpt = sculpt;
+        self.shapes[self.fam].mods = mods;
+        self.shapes[self.fam].strokes = strokes;
         self.shapes[self.fam].trace = trace;
         if self.stack.sel != 0 {
             // only the first layer's family decides the settings, the view and the lights
             self.cut = true;
             self.default_tracks();
-            self.want = Some(Detail::Full);
+            self.request(BuildRequest::edit());
             if was_playing { self.set_playing(true); }
             return;
         }
@@ -491,10 +528,16 @@ impl State {
             self.p = Settings::default();
             self.apply_defaults(&d);
             let args = self.args.clone();
-            // a material by name first, so that settings given beside it are laid over it
-            if let Some(v) = arg(&args, "material").or_else(|| arg(&args, "mat")) { self.material_arg(v); }
-            // a studio likewise: its lights, backdrop and floor first, then whatever was given beside it
-            if let Some(v) = arg(&args, "studio") { self.studio_arg(v); }
+            // Apply the named material, studio, and physical sky preset before individual setting overrides.
+            for (name, value) in &args {
+                match name.as_str() {
+                    "material" | "mat" => { self.material_arg(value); }
+                    "studio" => { self.studio_arg(value); }
+                    "skyPreset" => { self.sky_arg(value); }
+                    "sky" if value.trim().parse::<f64>().is_err() => { self.sky_arg(value); }
+                    _ => {}
+                }
+            }
             for name in Settings::NAMES {
                 if *name == "mat" { continue; }
                 if let Some(v) = arg_num(&args, name) { self.p.set(name, v); }
@@ -537,33 +580,72 @@ impl State {
             }
         }
         self.default_tracks();
-        self.want = Some(Detail::Full);
+        self.request(BuildRequest::edit());
+        if self.canonical.is_some() {
+            let mut owner = self.canonical.clone().unwrap();
+            owner.scene = crate::pbr::MaterialSpec::from_legacy(&self.p, crate::pbr::MaterialId::from("material:scene"));
+            let _ = self.install_canonical_owner(owner);
+        }
         if was_playing { self.set_playing(true); }
     }
 
-    /// Make the shape of a named material (a position in `material::NAMED`): the glass of the family that
-    /// owns the look first, then everything the material sets. False if there is no such material.
-    pub fn set_material(&mut self, i: usize) -> bool {
-        let Some(n) = material::NAMED.get(i) else { return false };
+    /// Resolve an assigned recipe over the owning family's glass. The Lab uses the same
+    /// values for detecting edits, resetting the scene and assigning a secondary body.
+    pub fn named_material_settings(&self, i: usize) -> Option<Settings> {
+        let named = material::NAMED.get(i)?;
+        let mut settings = self.p.clone();
         for (k, v) in &self.scene_defaults() {
             match (*k, v) {
-                ("absorb", Setting::Vec3(a)) => self.p.absorb = *a,
-                ("ior" | "disp" | "nb", Setting::Num(x)) => { self.p.set(k, *x); }
+                ("absorb", Setting::Vec3(a)) => settings.absorb = *a,
+                ("ior" | "disp" | "nb", Setting::Num(x)) => { settings.set(k, *x); }
                 _ => {}
             }
         }
-        n.apply(&mut self.p);
-        self.p.mat = i as f64;
-        // While a studio is up, a metal gets the studio for metals and a milky body (not a ceramic, lit at its surface) the one for
-        // translucent bodies (an even studio shows a mirror nothing but itself, and lights a milky body
-        // only from the outside); glass keeps whatever studio there is, and so does a ceramic (lit at its
-        // surface, it is judged in the studio it is in)
-        if self.p.backdrop > 0.5 {
-            let v = material::Variant::of(&self.p);
-            let want = if v.metal { Some("metal") } else if v.sss && !v.ceramic { Some("translucent") } else { None };
-            if let Some(i) = want.and_then(crate::stage::studio_index) { self.apply_studio(i); }
+        named.apply(&mut settings);
+        settings.mat = i as f64;
+        Some(settings)
+    }
+
+    /// Set the scene material to the named recipe.
+    pub fn set_material(&mut self, i: usize) -> bool {
+        let Some(settings) = self.named_material_settings(i) else { return false };
+        if self.canonical.is_some() {
+            let mut owner = self.canonical.clone().unwrap();
+            owner.scene = crate::pbr::MaterialSpec::from_legacy(&settings, crate::pbr::MaterialId::from("material:scene"));
+            self.install_canonical_owner(owner).is_ok()
+        } else {
+            self.p = settings;
+            true
         }
-        true
+    }
+
+    /// Apply an already clamped legacy control to a candidate owner, then preflight the complete
+    /// renderer projection and every inherited construction patch before changing live state.
+    fn sync_legacy_material_edits(
+        &mut self,
+        layer: usize,
+        values: &std::collections::BTreeMap<String, f64>,
+    ) -> Result<(), String> {
+        let Some(current) = &self.canonical else { return Ok(()) };
+        if layer >= current.bodies.len() { return Err(format!("layer {} has no material of its own", layer + 1)); }
+        let mut owner = current.clone();
+        if layer > 0 && owner.bodies[layer].is_none() {
+            let mut spec = owner.scene.clone();
+            spec.id = crate::pbr::MaterialId::from(format!("material:body:{}", layer + 1));
+            spec.transvolume.values.medium = crate::pbr::MediumDescriptor {
+                id: crate::pbr::legacy_medium_id(&spec.id),
+                interface_priority: 0,
+            };
+            owner.bodies[layer] = Some(Box::new(spec));
+        }
+        let spec = if layer == 0 { &mut owner.scene } else { owner.bodies[layer].as_deref_mut().unwrap() };
+        let patch = crate::pbr::MaterialPatch::from_legacy_map(spec, values)
+            .map_err(|error| format!("cannot convert legacy material controls: {error}"))?;
+        *spec = patch.apply(spec).map_err(|error| format!("cannot apply legacy material controls: {error}"))?;
+        self.install_canonical_owner(owner)
+    }
+    fn sync_legacy_material_edit(&mut self, layer: usize, name: &str, value: f64) -> Result<(), String> {
+        self.sync_legacy_material_edits(layer, &std::collections::BTreeMap::from([(name.to_string(), value)]))
     }
     // ---- a material for each body ----------------------------------------------------------------
     /// Has the body whose lowest layer this is a material of its own? (Never the first layer: its body
@@ -575,7 +657,21 @@ impl State {
     /// take it away again, and the body is made of the scene's material once more.
     pub fn set_body_own(&mut self, layer: usize, own: bool) {
         if layer == 0 || layer >= self.body_mats.len() { return; }
-        if !own {
+        if let Some(current) = &self.canonical {
+            let mut owner = current.clone();
+            if own && owner.bodies[layer].is_none() {
+                let mut spec = owner.scene.clone();
+                spec.id = crate::pbr::MaterialId::from(format!("material:body:{}", layer + 1));
+                spec.transvolume.values.medium = crate::pbr::MediumDescriptor {
+                    id: crate::pbr::legacy_medium_id(&spec.id),
+                    interface_priority: 0,
+                };
+                owner.bodies[layer] = Some(Box::new(spec));
+            } else if !own {
+                owner.bodies[layer] = None;
+            }
+            let _ = self.install_canonical_owner(owner);
+        } else if !own {
             self.body_mats[layer] = None;
         } else if self.body_mats[layer].is_none() {
             self.body_mats[layer] = Some(Box::new(self.p.clone()));
@@ -592,27 +688,39 @@ impl State {
     /// (For the first layer this is the scene's setting.) False if the name is not part of a material.
     pub fn body_set(&mut self, layer: usize, name: &str, v: f64) -> bool {
         if layer >= self.body_mats.len() || !material::body_names().any(|n| n == name) { return false; }
-        if layer == 0 { return self.p.set(name, v); }
-        self.set_body_own(layer, true);
-        self.body_mats[layer].as_mut().is_some_and(|m| m.set(name, v))
+        // `Settings::set` deliberately treats NaN as a recognised no-op. Do not create a body owner or
+        // forward the original NaN into canonical conversion.
+        if v.is_nan() { return true; }
+        let mut stored = self.body_settings(layer).clone();
+        if !stored.set(name, v) { return false; }
+        let Some(value) = stored.get(name).filter(|value| value.is_finite()) else { return false };
+        if self.canonical.is_some() {
+            return self.sync_legacy_material_edit(layer, name, value).is_ok();
+        }
+        if layer == 0 {
+            self.p.set(name, value);
+        } else {
+            self.set_body_own(layer, true);
+            self.body_mats[layer].as_mut().unwrap().set(name, value);
+        }
+        true
     }
     /// Make that body of a named material (a position in `material::NAMED`).
     pub fn set_body_material(&mut self, layer: usize, i: usize) -> bool {
         if layer == 0 { return self.set_material(i); }
-        let Some(n) = material::NAMED.get(i) else { return false };
         if layer >= self.body_mats.len() { return false; }
-        let mut m = self.p.clone();
-        for (k, v) in &self.scene_defaults() {
-            match (*k, v) {
-                ("absorb", Setting::Vec3(a)) => m.absorb = *a,
-                ("ior" | "disp" | "nb", Setting::Num(x)) => { m.set(k, *x); }
-                _ => {}
-            }
+        let Some(settings) = self.named_material_settings(i) else { return false };
+        if let Some(current) = &self.canonical {
+            let mut owner = current.clone();
+            owner.bodies[layer] = Some(Box::new(crate::pbr::MaterialSpec::from_legacy(
+                &settings,
+                crate::pbr::MaterialId::from(format!("material:body:{}", layer + 1)),
+            )));
+            self.install_canonical_owner(owner).is_ok()
+        } else {
+            self.body_mats[layer] = Some(Box::new(settings));
+            true
         }
-        n.apply(&mut m);
-        m.mat = i as f64;
-        self.body_mats[layer] = Some(Box::new(m));
-        true
     }
     /// The material of every body, in the order of `bodies()`, when at least one of them has its own, or
     /// when the scene's material glows under pressure (it then glows also where one body presses on
@@ -623,9 +731,58 @@ impl State {
         // (a pressure glow that is animated counts while it is at nothing too: the way of drawing does not
         // change back and forth as it pulses)
         let pressed = self.p.piezo > 0.0 || self.tracks.get("piezo").is_some_and(|t| t.on);
-        if bodies.len() < 2 || !(pressed || bodies.iter().any(|b| self.body_own(b[0]))) { return None; }
-        Some(bodies.iter().map(|b| self.body_settings(b[0])).collect())
+        if bodies.len() < 2 { return None; }
+        let painted_cuts = || bodies.iter().flatten().any(|&i| self.layer_csg(i).construction.as_ref().is_some_and(|tree| tree.has_material()));
+        if !(pressed || bodies.iter().any(|b| self.body_own(b[0])) || painted_cuts()) { return None; }
+        // (one material for each body that has a channel of its own: bodies past MAX_BODIES wear the first's)
+        Some(bodies.iter().take(crate::material::MAX_BODIES).map(|b| self.body_settings(b[0])).collect())
     }
+
+    /// The effective scene descriptor. Legacy projection uses the same material ID as `from_legacy`.
+    pub fn scene_medium_descriptor(&self) -> crate::pbr::MediumDescriptor {
+        if let Some(owner) = &self.canonical {
+            return owner.scene.transvolume.values.medium.clone();
+        }
+        crate::pbr::MediumDescriptor {
+            id: crate::pbr::legacy_medium_id(&crate::pbr::MaterialId::from("material:scene")),
+            interface_priority: 0,
+        }
+    }
+
+    /// Effective descriptors in exactly `bodies()` order. Full owners keep their own descriptor;
+    /// absent overrides inherit the scene. Sparse construction patches use these same effective owners.
+    pub fn medium_descriptors(&self) -> Vec<crate::pbr::MediumDescriptor> {
+        let scene = self.scene_medium_descriptor();
+        self.bodies()
+            .iter()
+            .map(|members| {
+                let layer = members.first().copied().unwrap_or(0);
+                if layer > 0 {
+                    if let Some(owner) = &self.canonical {
+                        // (a body past the fourth has no material of its own: it wears the scene's)
+                        if let Some(Some(spec)) = owner.bodies.get(layer) {
+                            return spec.transvolume.values.medium.clone();
+                        }
+                    } else if self.body_mats.get(layer).is_some_and(|m| m.is_some()) {
+                        return crate::pbr::MediumDescriptor {
+                            id: crate::pbr::legacy_medium_id(&crate::pbr::MaterialId::from(format!("material:body:{}", layer + 1))),
+                            interface_priority: 0,
+                        };
+                    }
+                }
+                scene.clone()
+            })
+            .collect()
+    }
+
+    /// Renderer-local tokens shared by camera bodies and forward caustics.
+    pub fn compiled_media(&self) -> crate::pbr::CompiledMedia {
+        crate::pbr::CompiledMedia::from_descriptors(
+            &self.scene_medium_descriptor(),
+            &self.medium_descriptors(),
+        )
+    }
+
     /// The sliders of the material of the body whose lowest layer this is (none unless it has its own).
     pub fn body_knobs(&self, layer: usize) -> Vec<Knob> {
         if !self.body_own(layer) { return Vec::new(); }
@@ -668,27 +825,68 @@ impl State {
     /// first keeps the scene's old one as its own.
     pub(crate) fn move_bodies(&mut self, to: &[Option<usize>]) {
         let place = |i: usize| to.get(i).copied().flatten();
-        let mut old = std::mem::take(&mut self.body_mats);
-        if let Some(i) = (1..old.len()).find(|i| place(*i) == Some(0) && old[*i].is_some()) {
-            let mine = old[i].take().expect("just looked");
-            if place(0).is_some() { old[0] = Some(Box::new(self.p.clone())); }
-            for name in material::body_names() {
-                if let Some(v) = mine.get(name) { self.p.set(name, v); }
+        let promoted = (1..material::MAX_BODIES).find(|&i| {
+            place(i) == Some(0)
+                && if let Some(owner) = &self.canonical {
+                    owner.bodies[i].is_some()
+                } else {
+                    self.body_mats[i].is_some()
+                }
+        });
+        if let Some(mut owner) = self.canonical.clone() {
+            // Rearrange a candidate only. Installing it also revalidates and rebases every dependent
+            // construction patch; a failure must not leave half-moved owners beside stale patches.
+            let mut old = std::mem::take(&mut owner.bodies);
+            if let Some(i) = promoted {
+                let mine = old[i].take().expect("just looked");
+                if place(0).is_some() { old[0] = Some(Box::new(owner.scene.clone())); }
+                owner.scene = *mine;
+            }
+            for (i, m) in old.into_iter().enumerate() {
+                if let (Some(m), Some(j)) = (m, place(i)) {
+                    if j > 0 && j < owner.bodies.len() { owner.bodies[j] = Some(m); }
+                }
+            }
+            if self.install_canonical_owner(owner).is_err() { return; }
+        } else {
+            let mut old = std::mem::take(&mut self.body_mats);
+            if let Some(i) = promoted {
+                let mine = old[i].take().expect("just looked");
+                if place(0).is_some() { old[0] = Some(Box::new(self.p.clone())); }
+                for name in material::body_names() {
+                    if let Some(v) = mine.get(name) { self.p.set(name, v); }
+                }
+            }
+            for (i, m) in old.into_iter().enumerate() {
+                if let (Some(m), Some(j)) = (m, place(i)) {
+                    if j > 0 && j < self.body_mats.len() { self.body_mats[j] = Some(m); }
+                }
             }
         }
-        for (i, m) in old.into_iter().enumerate() {
-            if let (Some(m), Some(j)) = (m, place(i)) {
-                if j > 0 && j < self.body_mats.len() { self.body_mats[j] = Some(m); }
+        let mut moved = Vec::new();
+        if promoted.is_some() {
+            let scene_keys: Vec<String> = self.tracks.keys().filter(|k| {
+                k.strip_prefix("P.").is_some_and(|f| material::body_names().any(|n| n == f))
+            }).cloned().collect();
+            for k in scene_keys {
+                let Some(tr) = self.tracks.remove(&k) else { continue };
+                if let Some(j) = place(0).filter(|&j| j > 0) {
+                    moved.push((format!("B{}{}", j + 1, &k[1..]), tr));
+                }
             }
         }
         let keys: Vec<String> = self.tracks.keys().filter(|k| {
             let b = k.as_bytes();
             b.len() > 3 && b[0] == b'B' && (b'1'..=b'4').contains(&b[1]) && b[2] == b'.'
         }).cloned().collect();
-        let mut moved = Vec::new();
         for k in keys {
             let Some(tr) = self.tracks.remove(&k) else { continue };
-            if let Some(j) = place((k.as_bytes()[1] - b'1') as usize).filter(|j| *j > 0) { moved.push((format!("B{}{}", j + 1, &k[2..]), tr)); }
+            let src = (k.as_bytes()[1] - b'1') as usize;
+            match place(src) {
+                Some(0) if promoted == Some(src) => moved.push((format!("P{}", &k[2..]), tr)),
+                Some(j) if j > 0 => moved.push((format!("B{}{}", j + 1, &k[2..]), tr)),
+                _ => {}
+            }
         }
         self.tracks.extend(moved);
     }
@@ -700,6 +898,32 @@ impl State {
         // (a tree is not one tube: its thickness is measured)
         (f.kind == Kind::Curve && f.id != crate::presets::trees::FAMILY && f.id != crate::presets::paths::FAMILY).then(|| 2.0 * p.tube.unwrap_or(f.tube) * self.shape().thick)
     }
+    /// A scalar material control or the three-channel absorption control supplied as a script argument.
+    /// Canonical scenes use the same conversion/preflight path as an ordinary Materials Lab edit.
+    fn material_text_arg(&mut self, name: &str, value: &str) -> Option<bool> {
+        if name == "absorb" {
+            if self.canonical.is_none() {
+                return Some(self.p.set_text(name, value));
+            }
+            let nums: Vec<f64> = value.split(',').filter_map(|s| s.trim().parse::<f64>().ok().filter(|v| v.is_finite())).collect();
+            if nums.len() != 3 || nums.len() != value.split(',').count() {
+                return Some(false);
+            }
+            let mut owner = self.canonical.clone().expect("canonical owner was checked above");
+            let patch = crate::pbr::MaterialPatch::from_legacy_absorption(&owner.scene, [nums[0], nums[1], nums[2]]);
+            owner.scene = match patch.apply(&owner.scene) {
+                Ok(scene) => scene,
+                Err(_) => return Some(false),
+            };
+            return Some(self.install_canonical_owner(owner).is_ok());
+        }
+        if material::body_names().any(|known| known == name) {
+            let value = value.trim().parse::<f64>().ok().filter(|value| value.is_finite());
+            return Some(value.is_some_and(|value| self.body_set(0, name, value)));
+        }
+        None
+    }
+
     /// A material given as text: its id (`gold`), or its position in the list.
     fn material_arg(&mut self, v: &str) -> bool {
         match material::named_index(v).or_else(|| v.trim().parse::<usize>().ok()) {
@@ -724,7 +948,7 @@ impl State {
             self.set_r(&euler(rot[0], rot[1], rot[2]));
         }
         self.default_tracks();
-        self.want = Some(Detail::Full);
+        self.request(BuildRequest::edit());
     }
     /// Step to the next (+1) or previous (-1) preset.
     pub fn step_preset(&mut self, dir: i32) {
@@ -758,6 +982,7 @@ impl State {
             .chain(material::knobs())
             // and the studio's with the studio
             .chain(crate::stage::KNOBS.iter().copied())
+            .chain(crate::sky::KNOBS.iter().copied())
             .map(|(name, label, lo, hi, step, wave)| Knob {
                 key: format!("P.{name}"), id: name.into(), label: label.into(), lo, hi, step, shape: false, wave: wave && step < 1.0, r: KnobRef::P(name),
             })
@@ -828,7 +1053,12 @@ impl State {
     }
     pub fn set(&mut self, r: &KnobRef, v: f64) {
         match r {
-            KnobRef::P(name) => { if !crate::camera::set(&mut self.p, name, v) { self.p.set(name, v); } }
+            KnobRef::P(name) => {
+                if !crate::camera::set(&mut self.p, name, v) {
+                    if material::body_names().any(|material| material == *name) { self.body_set(0, name, v); }
+                    else { self.p.set(name, v); }
+                }
+            }
             KnobRef::Orient(i) => {
                 let mut e = euler_of(&self.r);
                 e[*i] = v;
@@ -854,7 +1084,7 @@ impl State {
         if k.shape {
             // the animation rebuilds the shape every frame when it changes the shape; otherwise a moved slider must
             if !(self.playing && self.shape_moving()) {
-                self.want = Some(if quick { Detail::Quick } else { Detail::Full });
+                self.request(BuildRequest::slider(quick));
             }
         }
         match k.r {
@@ -932,6 +1162,7 @@ impl State {
         crate::camera::set(&mut self.p, "fov", num("fov", base.fov));
         self.p.shift = [0.0, 0.0];
         self.p.azim = 0.0;
+        self.p.elev = num("elev", base.elev);
         self.reset_eye();
         self.p.roll = num("roll", 0.0);
         self.reset_orientation();
@@ -954,6 +1185,15 @@ impl State {
     pub fn light_m(&self) -> Mat3 {
         mul(&self.light_base(), &self.light_turn())
     }
+    /// The lights' own frame -> the level-horizon preview frame: horizontal camera azimuth stays centred,
+    /// while camera elevation and roll are left out so the horizon stays straight across `v = 0.5`.
+    pub fn preview_m(&self) -> Mat3 {
+        if self.p.azim == 0.0 {
+            self.lights_to_room()
+        } else {
+            mul(&axis_angle(0.0, 1.0, 0.0, self.p.azim * DEG), &self.lights_to_room())
+        }
+    }
     /// Turn what the lights look like from the camera by a rotation about the screen's axes (the ball being dragged).
     pub fn turn_lights(&mut self, s: &Mat3) {
         // the lights appear at  base . turned . a ; turning what appears by S means  turned' = base^T . S . base . turned
@@ -972,21 +1212,23 @@ impl State {
     }
 
     // ---- the lights themselves -----------------------------------------------------------------
-    /// The lights of the first layer's family (the one the scene's look belongs to), as they stand.
-    pub fn rig(&self) -> &Rig { &self.rigs[self.layer_fam(0)] }
+    pub(crate) fn rig_family_index(&self) -> usize { self.rig_family.unwrap_or_else(|| self.layer_fam(0)) }
+
+    /// The current studio rig, including any changes made in the editor.
+    pub fn rig(&self) -> &Rig { &self.rigs[self.rig_family_index()] }
     /// The same, to change them. Whoever watches `lights_rev` takes it that they have changed.
     pub fn rig_mut(&mut self) -> &mut Rig {
         self.lights_rev += 1;
-        let look = self.layer_fam(0);
+        let look = self.rig_family_index();
         &mut self.rigs[look]
     }
     /// The lights as the family ships them.
     pub fn rig_default(&self) -> Rig {
-        let f = self.look_family();
+        let f = &self.families[self.rig_family_index()];
         Rig { lights: f.lights.clone(), ambient: f.ambient }
     }
     pub fn rig_is_default(&self) -> bool {
-        let (f, r) = (self.look_family(), self.rig());
+        let (f, r) = (&self.families[self.rig_family_index()], self.rig());
         r.lights == f.lights && r.ambient == f.ambient
     }
     /// Put the family's own lights back.
@@ -1007,11 +1249,11 @@ impl State {
     /// Where a light at this azimuth and elevation shows on the picture of the lighting (`env::preview_dir`
     /// says how that picture is laid out): fractions of its width and height from the top left.
     pub fn light_on_preview(&self, az: f64, el: f64) -> (f64, f64) {
-        crate::env::preview_uv(apply(&self.light_m(), Self::light_dir(az, el)))
+        crate::env::preview_uv(apply(&self.preview_m(), Self::light_dir(az, el)))
     }
     /// The other way: the azimuth and elevation (degrees) a light must have to show at that point.
     pub fn light_at_preview(&self, u: f64, v: f64) -> (f64, f64) {
-        let d = apply(&transpose(&self.light_m()), crate::env::preview_dir(u, v));
+        let d = apply(&transpose(&self.preview_m()), crate::env::preview_dir(u, v));
         (d[0].atan2(-d[2]) / DEG, d[1].clamp(-1.0, 1.0).asin() / DEG)
     }
     /// Is this one of the names `apply_arg` takes for the lights or the environment picture?
@@ -1069,9 +1311,9 @@ impl State {
                 match field {
                     "az" => l.az = v[0],
                     "el" => l.el = v[0],
-                    "w" => l.w = v[0],
-                    "h" => l.h = v[0],
-                    _ => l.soft = v[0],
+                    "w" => l.w = crate::limits::hold(v[0], crate::limits::LIGHT_SIZE),
+                    "h" => l.h = crate::limits::hold(v[0], crate::limits::LIGHT_SIZE),
+                    _ => l.soft = crate::limits::hold(v[0], (0.0, 1.0)),
                 }
                 true
             }
@@ -1079,31 +1321,43 @@ impl State {
     }
 
     // ---- camera gestures -----------------------------------------------------------------------
-    /// Dragging on the picture, by (dx, dy) screen points.
+    /// Dragging on the picture, by (dx, dy) screen points: always orbits the camera in world space so
+    /// the shape and the environment lighting stay anchored in space.
     pub fn drag_turn(&mut self, dx: f64, dy: f64) {
-        // Over a floor the camera goes round the shape instead, as round a table: across, round the room's
-        // vertical; up and down, higher or lower on its arc. The shape stays where it stands on the floor,
-        // and floor, backdrop and lights turn with it in the picture.
-        if self.p.floor > 0.5 {
-            self.drag_orbit(dx, dy);
-            return;
-        }
-        self.turn(&mul(&axis_angle(0.0, 1.0, 0.0, dx * 0.006), &axis_angle(1.0, 0.0, 0.0, dy * 0.006)));
+        self.drag_orbit(dx, dy);
     }
     /// Carry the camera round the room by a drag of (dx, dy) points (at the rate a drag turns the shape).
     pub fn drag_orbit(&mut self, dx: f64, dy: f64) {
         let k = 0.006 / DEG;
-        self.p.azim = ((self.p.azim + dx * k + 540.0) % 360.0) - 180.0;
-        // (a camera that flew below the level, or looks up, is not jerked back onto the arc)
-        self.p.elev = (self.p.elev + dy * k).clamp(0f64.min(self.p.elev), 89.5f64.max(self.p.elev));
+        self.p.azim = ((self.p.azim + dx * k + 540.0) % 360.0 + 360.0) % 360.0 - 180.0;
+        if self.p.floor > 0.5 {
+            // (a camera that flew below the level, or looks up, is not jerked back onto the arc)
+            self.p.elev = (self.p.elev + dy * k).clamp(0f64.min(self.p.elev), crate::view::PITCH_MAX.max(self.p.elev));
+        } else {
+            self.p.elev = (self.p.elev + dy * k).clamp(-crate::view::PITCH_MAX, crate::view::PITCH_MAX);
+        }
     }
-    /// `height`: the picture's height in the same units as dx, dy.
+    /// `height`: the picture's height in the same units as dx, dy. Translates the camera and pivot in
+    /// the view plane rather than shearing frustum `shift`, so panning never warps the light map.
     pub fn drag_pan(&mut self, dx: f64, dy: f64, height: f64) {
-        let k = 2.0 / height;
-        self.p.shift = [self.p.shift[0] - dx * k, self.p.shift[1] + dy * k];
+        let cam = self.camera();
+        let half = if cam.proj == crate::camera::Projection::Orthographic {
+            cam.half_height()
+        } else {
+            let s = apply(&self.view_r(), self.pivot());
+            let depth = (self.p.dist - s[2]).abs().max(0.25);
+            depth * (self.p.fov * DEG / 2.0).tan()
+        };
+        let k = (2.0 * half) / height.max(1.0);
+        let delta = [-dx * k, dy * k, 0.0];
+        let e = self.eye();
+        self.set_eye([e[0] + delta[0], e[1] + delta[1], e[2]]);
+        let p = self.pivot();
+        let dp = apply(&transpose(&self.view_r()), delta);
+        self.set_pivot([p[0] + dp[0], p[1] + dp[1], p[2] + dp[2]], self.p.pivot_r);
     }
     pub fn drag_roll(&mut self, dx: f64) {
-        self.p.roll = ((self.p.roll + dx * 0.3 + 540.0) % 360.0) - 180.0;
+        self.p.roll = (self.p.roll + dx * 0.3 + 180.0).rem_euclid(360.0) - 180.0;
     }
     /// The wheel, in the browser's units (about 100 a notch). `lens`: change the lens instead, moving
     /// the camera to keep the shape the same size.
@@ -1238,10 +1492,46 @@ impl State {
         }
         shape
     }
+    // ---- build requests ------------------------------------------------------------------------
+    /// Ask for the shape to be built again. The last request in a frame wins (a pause after a played
+    /// frame asks for the settled shape; a slider dragged after an edit asks for a draft, and its
+    /// release asks for the settled shape again).
+    pub fn request(&mut self, r: BuildRequest) {
+        self.build = Some(r);
+    }
+    /// Ask only if nothing has asked yet this frame (upkeep that must not override a user's request).
+    pub fn request_if_idle(&mut self, r: BuildRequest) {
+        if self.build.is_none() { self.build = Some(r); }
+    }
+    /// The request waiting, if any, taken: the builder's to act on.
+    pub fn take_request(&mut self) -> Option<BuildRequest> {
+        self.build.take()
+    }
+    /// The request waiting, if any, left in place.
+    pub fn request_pending(&self) -> Option<BuildRequest> {
+        self.build
+    }
+    /// How carefully the waiting request asks for the shape to be built (none: nothing waits).
+    pub fn wanted(&self) -> Option<Detail> {
+        self.build.map(|r| r.detail)
+    }
+    /// Something has asked for a build.
+    pub fn build_wanted(&self) -> bool {
+        self.build.is_some()
+    }
+    /// Forget the waiting request (its build was done by hand, or is not to happen).
+    pub fn drop_request(&mut self) {
+        self.build = None;
+    }
+    /// Put back a request taken earlier (or none), replacing whatever asked since.
+    pub fn restore_request(&mut self, r: Option<BuildRequest>) {
+        self.build = r;
+    }
+
     pub fn set_playing(&mut self, on: bool) {
         if on == self.playing { return; }
         self.playing = on;
-        if on { self.rephase_all(); } else { self.want = Some(Detail::Full); }
+        if on { self.rephase_all(); } else { self.request(BuildRequest::paused()); }
     }
     /// Move everything on by dt seconds.
     pub fn tick(&mut self, dt: f64) {
@@ -1255,13 +1545,13 @@ impl State {
         if self.playing {
             self.clock += dt;
             let shape = self.apply_time();
-            if shape || !self.beads_all().is_empty() || !self.sculpt_periods().is_empty() { self.want = Some(Detail::Anim); }
+            if shape || !self.beads_all().is_empty() || !self.sculpt_periods().is_empty() { self.request(BuildRequest::played()); }
         }
     }
     /// Show everything as it is at the present clock (after setting the clock by hand).
     pub fn apply_clock(&mut self, hq: bool) {
         self.apply_time();
-        self.want = Some(if hq { Detail::Hq } else { Detail::Anim });
+        self.request(BuildRequest::clock(hq));
     }
 
     // ---- video ---------------------------------------------------------------------------------
@@ -1308,7 +1598,7 @@ impl State {
         self.moved = keep.moved;
         self.rendering = false;
         self.update_r();
-        self.want = Some(Detail::Full);
+        self.request(BuildRequest::video_done());
         self.cut = true;
         if keep.playing { self.playing = true; }
     }
@@ -1323,17 +1613,21 @@ impl State {
     pub fn shape_job(&mut self, mode: Detail, res_override: Option<u32>) -> Result<Job, String> {
         let phase = self.cycles(self.shape().bead_period);
         let fam_i = self.fam;
-        let fam = &self.families[fam_i];
-        let st = &mut self.shapes[fam_i];
+        Self::shape_job_of(&self.families, fam_i, &mut self.shapes[fam_i], phase, self.anim_cap, mode, res_override)
+    }
+
+    /// `shape_job` for a shape of family `fam_i` in its own state `st` (any layer's): `phase`, the beads'
+    /// place in their period now; `anim_cap`, frame-rate keeping's cap. It reads nothing else, so the
+    /// layers' jobs can be worked out side by side (`layer_jobs`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn shape_job_of(families: &[Family], fam_i: usize, st: &mut ShapeState, phase: f64, anim_cap: Option<u32>, mode: Detail, res_override: Option<u32>) -> Result<Job, String> {
+        let fam = &families[fam_i];
         let p = &fam.presets[st.preset];
-        let moving = matches!(mode, Detail::Anim | Detail::Hq);
-        let res = valid_res(res_override.unwrap_or(match mode {
-            Detail::Anim => st.anim_res.min(st.res),
-            Detail::Quick => RES_DRAG.min(st.res),
-            _ => st.res,
-        }) as f64);
-        // (the surface studio works on volumes up to its own largest)
-        let res = if st.sculpt.is_empty() { res } else { res.min(crate::sculpt::RES_MAX) };
+        let moving = mode.is_clock_frame();
+        let res = match res_override {
+            Some(r) => Detail::studio_res(valid_res(r as f64), st),
+            None => mode.res(st, anim_cap),
+        };
         let shape = match &p.shape {
             Shape::Mesh { file } => {
                 st.meta.length = 0.0;
@@ -1342,7 +1636,7 @@ impl State {
             Shape::Field { .. } => {
                 st.meta.info = String::new();
                 st.meta.length = 0.0;
-                ShapeJob::Field { uniforms: field::uniforms(p, &st.vals, res, st.puff) }
+                ShapeJob::Field { uniforms: field::uniforms(p, &st.vals, res, st.puff), table: field::table(p, &st.vals, &st.model) }
             }
             curve_shape => {
                 let tube = p.tube.unwrap_or(fam.tube) * st.thick;
@@ -1362,7 +1656,7 @@ impl State {
                         // not jump about as it slides.
                         let n = (js_round(flow.steps as f64 * st.len) as usize).max(40);
                         let key = format!("{}|{:?}|{}", p.id, st.vals.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), n);
-                        let exact = matches!(mode, Detail::Full | Detail::Hq);
+                        let exact = mode.is_final();
                         if !st.orbit.as_ref().is_some_and(|c| c.key == key && !(exact && c.quick)) {
                             let line = curve::orbit_line(flow, &st.vals, js_round(n as f64 * (1.0 + TRAVEL)) as usize, !exact);
                             st.orbit = Some(OrbitCache { key, quick: !exact, line, pose: None });
@@ -1375,7 +1669,7 @@ impl State {
                         pose = c.pose.clone();
                         RawCurve { lines: vec![c.line[off * 3..end * 3].to_vec()], closed: false, ..Default::default() }
                     }
-                    Shape::Curve(f) => f(&st.vals, &CurveOpts { len: st.len, quick: matches!(mode, Detail::Quick | Detail::Anim), text: &st.model }),
+                    Shape::Curve(f) => f(&st.vals, &CurveOpts { len: st.len, quick: mode.is_draft(), text: &st.model }),
                     Shape::Field { .. } | Shape::Mesh { .. } => unreachable!(),
                 };
                 // Beads: lumps of thickness that travel along the tube while the animation plays (a plain
@@ -1415,13 +1709,14 @@ impl State {
                 ShapeJob::Curve { curve: c, melt }
             }
         };
-        Ok(Job { family: fam_i, preset: st.preset, res, shape })
+        Ok(Job { anim: mode.is_played(), family: fam_i, preset: st.preset, res, shape })
     }
 
     // ---- by name -------------------------------------------------------------------------------
     /// Change one thing by name, as the command line and saved setups do. False if the name means nothing.
     pub fn apply_arg(&mut self, name: &str, value: &str) -> bool {
         let num = value.trim().parse::<f64>().ok().filter(|v| v.is_finite());
+        if self.view.apply_arg(name, value) { return true; }
         if let Some(done) = self.apply_body_arg(name, value) { return done; }
         if let Some(done) = self.apply_layer_arg(name, value) { return done; }
         if let Some(done) = self.apply_lamp_arg(name, value) { return done; }
@@ -1432,6 +1727,8 @@ impl State {
             },
             "material" | "mat" => self.material_arg(value),
             "studio" => self.studio_arg(value),
+            "skyPreset" => self.sky_arg(value),
+            "sky" if num.is_none() => self.sky_arg(value),
             "preset" => match self.family().presets.iter().position(|p| p.id == value) {
                 Some(i) => { self.choose(i); true }
                 None => false,
@@ -1439,7 +1736,7 @@ impl State {
             "rx" | "ry" | "rz" => match num {
                 Some(v) => {
                     let mut e = euler_of(&self.r);
-                    e[match name { "rx" => 0, "ry" => 1, _ => 2 }] = v;
+                    e[match name { "rx" => 0, "ry" => 1, _ => 2 }] = crate::limits::hold(v, (-36000.0, 36000.0));
                     self.set_r(&euler(e[0], e[1], e[2]));
                     true
                 }
@@ -1453,18 +1750,38 @@ impl State {
             }
             // the tree's parts: as text (csg.rs `parse_arg`), or a cube of n of one shape for timing
             // (csgGrid=n:family/preset); the parts traced from the volume they are measured into
+            // (the parts as a setup keeps them, strokes and all: JSON)
+            "csgJson" => match serde_json::from_str::<Vec<crate::csg::Part>>(value) {
+                Ok(parts) => {
+                    self.csg.construction = None;
+                    self.csg.parts = parts.into_iter().take(crate::csg::MAX_PARTS).collect();
+                    self.request(BuildRequest::edit());
+                    true
+                }
+                Err(_) => false,
+            },
+            "strokes" => match serde_json::from_str::<crate::csg::Strokes>(value) {
+                Ok(s) => {
+                    self.shape_mut().strokes = s;
+                    self.request(BuildRequest::edit());
+                    true
+                }
+                Err(_) => false,
+            },
             "csg" => match crate::csg::parse_arg(value) {
                 Some(parts) => {
+                    self.csg.construction = None;
                     self.csg.parts = parts.into_iter().take(crate::csg::MAX_PARTS).collect();
-                    self.want = Some(Detail::Full);
+                    self.request(BuildRequest::edit());
                     true
                 }
                 None => false,
             },
             "csgGrid" => match value.split_once(':').and_then(|(n, s)| Some((n.parse::<usize>().ok()?, s.split_once('/')?))) {
                 Some((n, (f, p))) => {
+                    self.csg.construction = None;
                     self.csg.parts = crate::csg::grid_of(n.min(crate::csg::MAX_PARTS), f, p);
-                    self.want = Some(Detail::Full);
+                    self.request(BuildRequest::edit());
                     true
                 }
                 None => false,
@@ -1473,7 +1790,7 @@ impl State {
             "csgPlace" => match crate::csg::parse_arg(&format!("studio/sphere@{value}")).and_then(|p| p.first().map(|p| p.place)) {
                 Some(place) => {
                     self.csg.place = place;
-                    self.want = Some(Detail::Full);
+                    self.request(BuildRequest::edit());
                     true
                 }
                 None => false,
@@ -1481,15 +1798,16 @@ impl State {
             "csgCoarse" => match num {
                 Some(v) => {
                     self.csg.coarse = v > 0.5;
-                    self.want = Some(Detail::Full);
+                    self.request(BuildRequest::edit());
                     true
                 }
                 None => false,
             },
             "trace" => match crate::sdf::Trace::parse(value) {
                 Some(t) => {
+                    if !self.permits_object_kind(self.stack.sel, t) { return false; }
                     self.shape_mut().trace = t;
-                    self.want = Some(Detail::Full);
+                    self.request(BuildRequest::edit());
                     true
                 }
                 None => false,
@@ -1498,17 +1816,17 @@ impl State {
                 Some(v) => {
                     let st = self.shape_mut();
                     match name {
-                        "thick" => st.thick = v,
-                        "len" => st.len = v,
-                        "melt" => st.melt = v,
-                        "puff" => st.puff = v,
-                        "travel" => st.travel = v,
-                        "beads" => st.beads = v,
-                        "beadPeriod" => st.bead_period = v,
+                        "thick" => st.thick = crate::limits::hold(v, crate::limits::THICK),
+                        "len" => st.len = crate::limits::hold(v, crate::limits::LEN),
+                        "melt" => st.melt = crate::limits::hold(v, crate::limits::MELT),
+                        "puff" => st.puff = crate::limits::hold(v, crate::limits::PUFF),
+                        "travel" => st.travel = crate::limits::hold(v, (0.0, TRAVEL)),
+                        "beads" => st.beads = crate::limits::hold(v, crate::limits::BEADS),
+                        "beadPeriod" => st.bead_period = crate::limits::hold(v, crate::limits::BEAD_PERIOD),
                         "res" => st.res = valid_res(v),
                         _ => st.anim_res = valid_res(v),
                     }
-                    self.want = Some(Detail::Full);
+                    self.request(BuildRequest::edit());
                     true
                 }
                 None => false,
@@ -1522,7 +1840,7 @@ impl State {
             "path" => match self.families.iter().position(|f| f.id == crate::presets::paths::FAMILY) {
                 Some(f) => {
                     self.shapes[f].model = value.to_string();
-                    self.want = Some(Detail::Full);
+                    self.request(BuildRequest::edit());
                     true
                 }
                 None => false,
@@ -1531,7 +1849,7 @@ impl State {
             "text" => match self.families.iter().position(|f| f.id == crate::presets::text3d::FAMILY) {
                 Some(f) => {
                     self.shapes[f].model = value.to_string();
-                    self.want = Some(Detail::Full);
+                    self.request(BuildRequest::edit());
                     true
                 }
                 None => false,
@@ -1542,12 +1860,16 @@ impl State {
                     let d = &self.preset().params[i];
                     let v = crate::limits::hold(v, crate::limits::widen(d.lo, d.hi));
                     self.shape_mut().vals[i] = v;
-                    self.want = Some(Detail::Full);
+                    self.request(BuildRequest::edit());
                     true
                 }
                 _ => false,
             },
-            _ => self.camera_arg(name, value) || self.p.set_text(name, value),
+            _ => {
+                if self.camera_arg(name, value) { true }
+                else if let Some(applied) = self.material_text_arg(name, value) { applied }
+                else { self.p.set_text(name, value) }
+            },
         }
     }
 }

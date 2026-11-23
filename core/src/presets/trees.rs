@@ -100,17 +100,7 @@ fn params() -> Vec<ParamDef> {
 
 // ---- small tools -----------------------------------------------------------------------------------
 type V = [f64; 3];
-fn add(a: V, b: V) -> V { [a[0] + b[0], a[1] + b[1], a[2] + b[2]] }
-fn sub(a: V, b: V) -> V { [a[0] - b[0], a[1] - b[1], a[2] - b[2]] }
-fn mul(a: V, s: f64) -> V { [a[0] * s, a[1] * s, a[2] * s] }
-fn dot(a: V, b: V) -> f64 { a[0] * b[0] + a[1] * b[1] + a[2] * b[2] }
-fn cross(a: V, b: V) -> V { [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]] }
-fn len(a: V) -> f64 { dot(a, a).sqrt() }
-fn unit(a: V) -> V {
-    let l = len(a);
-    if l > 1e-12 { mul(a, 1.0 / l) } else { [0.0, 1.0, 0.0] }
-}
-fn lerp(a: V, b: V, t: f64) -> V { add(a, mul(sub(b, a), t)) }
+use crate::math::{add, cross, dot, len, lerp, scale as mul, sub, unit};
 const UP: V = [0.0, 1.0, 0.0];
 const DOWN: V = [0.0, -1.0, 0.0];
 /// A unit vector at right angles to d (any one).
@@ -1121,16 +1111,7 @@ pub fn family() -> Family {
             ("dist", Setting::Num(6.6)), ("fov", Setting::Num(26.0)), ("rot", Setting::Vec3([4.0, 0.0, 0.0])),
         ],
         // broad soft lights that fade to their edges, as for the models, and two small ones for glints
-        lights: vec![
-            Light { az:   40.0, el:  20.0, w: 24.0, h: 38.0, rgb: [3.6, 3.5, 3.3],   soft: 0.9 },
-            Light { az:  -58.0, el:  -6.0, w: 18.0, h: 44.0, rgb: [0.45, 1.25, 3.6], soft: 0.9 },
-            Light { az: -140.0, el:   5.0, w: 15.0, h: 44.0, rgb: [4.4, 1.45, 0.24], soft: 0.9 },
-            Light { az:  150.0, el:  29.0, w: 28.0, h: 20.0, rgb: [2.6, 2.5, 2.45],  soft: 0.9 },
-            Light { az:    0.0, el:  85.0, w: 38.0, h: 38.0, rgb: [0.8, 0.9, 1.1],   soft: 1.0 },
-            Light { az:    0.0, el: -80.0, w: 34.0, h: 34.0, rgb: [0.5, 0.22, 0.05], soft: 1.0 },
-            Light { az:   95.0, el:  46.0, w:  5.0, h:  5.0, rgb: [6.0, 6.0, 6.0],   soft: 0.5 },
-            Light { az: -100.0, el: -36.0, w:  4.0, h:  8.0, rgb: [4.5, 5.0, 6.0],   soft: 0.5 },
-        ],
+        lights: geo::solid_lights(),
         ..Family::new(FAMILY, "Trees", Kind::Curve)
     }
 }

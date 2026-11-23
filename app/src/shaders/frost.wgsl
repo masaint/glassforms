@@ -24,7 +24,7 @@
 
 // The widest a cone is ever taken to be: a lobe cannot be wider than the half of the sphere it leaves into.
 const FR_WIDE: f32 = 0.8;
-fn frCap(v: f32) -> f32 { return v / (1.0 + v / (FR_WIDE * FR_WIDE)); }
+fn frCap(v: f32) -> f32 { return pbr_var_cap(v, FR_WIDE); }   // pbr/widen.wgsl
 // A path inside the body whose directions are spread this far (from, to) has been scattered every way:
 // it shows nothing of where it has been, and is ended.
 const FR_LOST: vec2f = vec2f(0.25, 1.0);
@@ -42,13 +42,56 @@ var<private> frTopLight: vec3f;
 // light behind it times the rest: it is the light behind that is blurred).
 var<private> frTopShare: f32;
 
-//#if ROUGH_REF
+//#if GLOSSY_DISTRIBUTIONS
+struct FrLampMix { weights: array<f32, 8>, total: f32, contrast: f32 }
+// lamps::weave supplies these three functions for a scene with finite lamps.
+fn frSceneLights(p: vec3f, n: vec3f) -> FrLampMix { return FrLampMix(); }
+fn frSceneRay(p: vec3f, lights: FrLampMix, r: vec2f) -> vec3f { return vec3f(0.0); }
+fn frScenePdf(p: vec3f, lights: FrLampMix, wo: vec3f) -> f32 { return 0.0; }
+
+fn frCapDirection(cap: vec4f, r: vec2f) -> vec3f {
+  let z = 1.0 - cap.w * r.x;
+  let tangent = normalize(cross(cap.xyz, select(vec3f(0,0,1), vec3f(0,1,0), abs(cap.z) > 0.9)));
+  let phi = 6.283185307 * r.y;
+  return z * cap.xyz + sqrt(max(0.0, 1.0 - z*z)) * (cos(phi)*tangent + sin(phi)*cross(cap.xyz,tangent));
+}
+fn frEnvDirection(r: vec2f) -> vec3f {
+  var index = 0u;
+  var previous = 0.0;
+  while (index < 3u && r.x >= mu.proposalCdf[index]) {
+    previous = mu.proposalCdf[index];
+    index++;
+  }
+  let fraction = (r.x - previous) / max(mu.proposalCdf[index] - previous, 1e-8);
+  let local = frCapDirection(mu.proposals[index], vec2f(fraction, r.y));
+  return vec3f(dot(local, u.env0.xyz), dot(local, u.env1.xyz), dot(local, u.env2.xyz));
+}
+fn frEnvPdf(wo: vec3f) -> f32 {
+  let local = toEnv(wo);
+  var density = 0.0;
+  var previous = 0.0;
+  for (var i = 0u; i < 4u; i++) {
+    let cap = mu.proposals[i];
+    if (cap.w > 0.0 && dot(cap.xyz, local) >= 1.0 - cap.w) {
+      density += (mu.proposalCdf[i] - previous) / (6.283185307 * cap.w);
+    }
+    previous = mu.proposalCdf[i];
+  }
+  return density;
+}
+fn frHalfDensity(nh: f32, a2: f32) -> f32 {
+  let denominator = max((1.0 - nh*nh) + a2*nh*nh, 1e-8);
+  return a2 / (3.141592654 * denominator * denominator);
+}
+
+//#endif
+
+//#if GGX_SAMPLE
 // One facet's normal, drawn from those a ray arriving along -wi can see, in proportion to how much of
 // each it sees (Heitz 2018, "Sampling the GGX distribution of visible normals"). n: the surface's own
 // normal on the side the ray arrives from; wi: back along the ray; r: two numbers in 0..1.
 // A facet drawn this way always faces the ray, so nothing has to fall back on the smooth surface.
-fn facetV(n: vec3f, wi: vec3f, r: vec2f) -> vec3f {
-  let a = mu.surf.x;
+fn facetAlpha(n: vec3f, wi: vec3f, r: vec2f, a: f32) -> vec3f {
   let s = select(-1.0, 1.0, n.z >= 0.0);
   let k = -1.0 / (s + n.z);
   let b = n.x * n.y * k;
@@ -70,6 +113,70 @@ fn facetV(n: vec3f, wi: vec3f, r: vec2f) -> vec3f {
   let ne = normalize(vec3f(a * nh.x, a * nh.y, max(nh.z, 1e-6)));
   return ne.x * t1 + ne.y * t2 + ne.z * n;
 }
+fn facetV(n: vec3f, wi: vec3f, r: vec2f) -> vec3f { return facetAlpha(n, wi, r, mu.surf.x); }
+// Sample the single-scattering Smith/GGX reflection or a bright part of the actual environment.
+// The BSDF proposal covers every visible reflection. The cap mixture can miss or overlap lights:
+// its PDF includes every cap containing the sampled direction, irrespective of which was drawn.
+struct FrGlossySample { direction: vec3f, facetCosine: f32, weight: f32 }
+fn frGlossyFrame(p: vec3f, rd: vec3f, n: vec3f, r: vec2f, alpha: f32, folded: bool,
+                 across: vec3f, slopes: vec2f, brushed: bool) -> FrGlossySample {
+  let lampsHere = frSceneLights(p, n);
+  let hasEnv = mu.proposalCdf.x > 0.0;
+  let hasNear = lampsHere.total > 0.0;
+  let envStrength = select(0.0, 1.0, hasEnv);
+  let nearStrength = select(0.0, lampsHere.contrast, hasNear);
+  let lightChance = 0.4 * max(envStrength, nearStrength);
+  let nearShare = nearStrength / max(envStrength + nearStrength, 1e-8);
+  let nearChance = lightChance * nearShare;
+  let frameAcross = select(normalize(cross(n, select(vec3f(0,1,0), vec3f(1,0,0), abs(n.y) > 0.9))), across, brushed);
+  let along = cross(n,frameAcross);
+  var wo: vec3f;
+  if (r.x < nearChance) {
+    wo = frSceneRay(p, lampsHere, vec2f(r.x / nearChance, r.y));
+  } else if (r.x < lightChance) {
+    wo = frEnvDirection(vec2f((r.x - nearChance) / (lightChance - nearChance), r.y));
+  } else {
+    let uv = vec2f((r.x - lightChance) / (1.0 - lightChance), r.y);
+    if (brushed) {
+      let view = normalize(vec3f(dot(-rd,across)*slopes.x, dot(-rd,along)*slopes.y, max(dot(-rd,n),1e-6)));
+      let z = mix(-view.z,1.0,uv.x);
+      let azimuth = 6.283185307*uv.y;
+      let radial = sqrt(max(1.0-z*z,0.0));
+      let cap = view + vec3f(radial*cos(azimuth),radial*sin(azimuth),z);
+      let facet = normalize(across*(slopes.x*cap.x) + along*(slopes.y*cap.y) + n*max(cap.z,1e-7));
+      wo = reflect(rd,facet);
+    } else {
+      wo = reflect(rd, facetAlpha(n, -rd, uv, alpha));
+    }
+    if (folded) { wo = frUp(wo, n); }
+  }
+  let nl = dot(n,wo);
+  if (nl <= 0.0) { return FrGlossySample(wo, 0.0, 0.0); }
+  let h = normalize(wo - rd);
+  let vh = clamp(dot(-rd,h), 0.0, 1.0);
+  // Direction and light proposals above are transport policy. The actual
+  // microfacet response and its proposal density come from the common closure.
+  let frame = PbrFrame(frameAcross, along, n);
+  let alphaUsed = max(select(vec2f(alpha), slopes, brushed), vec2f(1e-4));
+  var pdfBrdf = pbr_ggx_pdf(frame, alphaUsed, -rd, wo);
+  var response = pbr_ggx_evaluate(frame, alphaUsed, -rd, wo) * nl;
+  if (folded) {
+    // The coating model reflects below-surface substrate directions upwards. Both preimages
+    // contribute to its direction PDF; the substrate's integrated reflectance is applied by the caller.
+    let second = reflect(wo, n);
+    let preimage = second - rd;
+    if (dot(preimage, n) > 0.0) {
+      pdfBrdf += pbr_ggx_pdf(frame, alphaUsed, -rd, second);
+    }
+    response = pdfBrdf;
+  }
+  var pdf = (1.0 - lightChance)*pdfBrdf + (lightChance - nearChance)*frEnvPdf(wo);
+  if (hasNear) { pdf += nearChance * frScenePdf(p, lampsHere, wo); }
+  return FrGlossySample(wo, vh, response / max(pdf, 1e-12));
+}
+fn frGlossySample(p: vec3f, rd: vec3f, n: vec3f, r: vec2f, alpha: f32, folded: bool) -> FrGlossySample {
+  return frGlossyFrame(p,rd,n,r,alpha,folded,vec3f(0.0),vec2f(alpha),false);
+}
 // A direction that has been sent below the surface it left (the facet was steep) meets another facet
 // on its way and comes back up: taken as mirrored in the surface, which keeps its light.
 fn frUp(d: vec3f, n: vec3f) -> vec3f {
@@ -77,6 +184,9 @@ fn frUp(d: vec3f, n: vec3f) -> vec3f {
   if (c < 0.0) { return d - 2.0 * c * n; }
   return d;
 }
+//#endif
+
+//#if ROUGH_REF
 fn seen(rd: vec3f, sig: f32) -> vec3f { return envL(rd, sig); }
 
 // The facet light gets into the body through.
@@ -118,7 +228,14 @@ fn frCover(p: vec3f, rd: vec3f, n: vec3f, r: f32) -> f32 { return 1.0; }
 fn spreadR() -> f32 { return 0.0; }
 // A metal: the reflection goes off one facet, to the next surface or to the lights as they are.
 fn frMetalDir(rd: vec3f, n: vec3f, b: i32, rd0: vec3f, xi: f32) -> vec3f { return frUp(reflect(rd, facetV(n, -rd, rnd2(b, rd0, xi))), n); }
-fn frMetalLit(dir: vec3f, mid: vec3f, v: f32, b: i32) -> vec3f { return env(dir); }
+fn frMetalLit(dir: vec3f, mid: vec3f, v: f32, b: i32) -> vec3f {
+//#if PICTURE
+  return env(dir);
+//#else
+  // Integrate the same studio illumination that the live conductor prefilters.
+  return mirrorEnv(dir, 0.0);
+//#endif
+}
 fn frMetalV(v: f32, bend: vec2f) -> f32 { return 0.0; }
 fn frMetalHid(p: vec3f, n: vec3f, mid: vec3f, v: f32, lit: vec3f, R: vec3f) -> vec3f { return lit; }
 fn frFollow(v: f32) -> f32 { return 1.0; }
@@ -391,12 +508,20 @@ fn frMetalLit(dir: vec3f, mid: vec3f, v: f32, b: i32) -> vec3f { return seenH(mi
 fn frFollow(v: f32) -> f32 { return 1.0 - smoothstep(0.02, 0.12, v); }
 // How much of a lobe leaving p about the direction d (spread sig) gets clear of the shape: the distance
 // field is asked at a few points along d how near the shape comes, against how wide the lobe is there.
-fn frOpen(p: vec3f, d: vec3f, sig: f32) -> f32 {
+fn frOpen(p: vec3f, n: vec3f, d: vec3f, sig: f32) -> f32 {
   var open = 1.0;
   var t = 0.045;
+  let bound = HB * (1.0 - 1.0 / u.vres);
   for (var i = 0; i < 6; i++) {
+    let q = toObj(p + n * 0.01 + d * t);
+    // Outside the sampled field the clamped edge texel no longer gives the distance to the shape.
+    if (any(abs(q) >= vec3f(bound))) { break; }
     let r = max(sig * t, 0.01);
-    open = min(open, clamp(0.5 + 0.5 * mapW(p + d * t) / r, 0.0, 1.0));
+    // The directional albedo already includes masking at the local tangent plane. Count only the
+    // extra fraction blocked by an approaching wall of the model.
+    let plane = clamp(0.5 + 0.5 * (0.01 + t * dot(n,d)) / r, 0.5, 1.0);
+    let visible = clamp(0.5 + 0.5 * map(q) / r, 0.0, 1.0);
+    open = min(open, visible / plane);
     t *= 1.75;
   }
   return open;
@@ -406,8 +531,8 @@ fn frOpen(p: vec3f, d: vec3f, sig: f32) -> f32 {
 // round, tinted once more (so hollows are darker and deeper in colour, as they are in the metal).
 fn frMetalHid(p: vec3f, n: vec3f, mid: vec3f, v: f32, lit: vec3f, R: vec3f) -> vec3f {
   if (v <= 0.02) { return lit; }            // (a lobe this narrow is followed whole)
-  let open = frOpen(p + n * 0.01, mid, sqrt(v));
-  return lit * open + (1.0 - open) * 0.7 * R * frAll(n);
+  let open = frOpen(p, n, mid, sqrt(v));
+  return lit * open + (1.0 - open) * R * frAll(n);
 }
 
 // What a further piece of the body mirrors of the lights: spread by what the light was spread by

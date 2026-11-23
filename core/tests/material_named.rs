@@ -306,3 +306,74 @@ fn a_saved_setup_keeps_the_material() {
     t.apply_setup_json(&old.to_string()).unwrap();
     assert!(Variant::of(&t.p).plain() && t.p.mat == 0.0);
 }
+
+#[test]
+fn bare_pigmented_finishes_use_their_own_index_on_assignment() {
+    for (name, index) in [("modelclay", 1.46), ("moulded", 1.49)] {
+        let recipe = named_index(name).unwrap();
+        // A face override starts from the host material, which may itself be high-index glass.
+        let mut face = Settings::default();
+        face.ior = 2.42;
+        NAMED[recipe].apply(&mut face);
+        assert_eq!(face.ior, index, "{name} on a glass face");
+        assert_eq!(face.coat, 0.0);
+        assert!(Variant::of(&face).ceramic);
+
+        let mut scene = State::with_args(&args(&[
+            ("scene", "solids"), ("preset", "ring"), ("layer", "solids:ring"),
+            ("J12.op", "apart"), ("material", "crown"),
+        ]), true);
+        let crown = scene.p.ior;
+        assert!(scene.set_body_material(1, recipe));
+        assert_eq!(scene.body_settings(1).ior, index);
+        assert_eq!(scene.p.ior, crown);
+        assert!(scene.set_body_material(0, recipe));
+        assert_eq!(scene.p.ior, index);
+
+        // An explicit saved value remains authoritative when the scene opens.
+        assert!(scene.apply_arg("B2.ior", "1.62"));
+        let mut reopened = State::new();
+        reopened.apply_setup(&scene.setup()).unwrap();
+        assert_eq!(reopened.p.ior, index);
+        assert_eq!(reopened.body_settings(1).ior, 1.62);
+    }
+}
+
+#[test]
+fn ceramic_only_exposes_sss_interior_when_ceramic_through_or_sss_is_open() {
+    let mut modelclay = Settings::default();
+    NAMED[named_index("modelclay").unwrap()].apply(&mut modelclay);
+    assert!(!applies("sssDepth", &modelclay));
+    assert!(applies("sssWalk", &modelclay) && applies("ceramicThrough", &modelclay));
+    modelclay.ceramic_through = 0.35;
+    assert!(applies("sssDepth", &modelclay));
+
+    for mat in ["crown", "modelclay"] {
+        let mut s = State::with_args(&args(&[("material", mat)]), true);
+        s.enable_canonical_materials().unwrap();
+        assert!(s.body_set(0, "sss", 0.5), "canonical sss=0.5 failed on {mat}");
+        assert!((s.body_settings(0).sss - 0.5).abs() < 1e-6, "sss not applied on {mat}");
+        if mat == "modelclay" {
+            assert!(s.body_set(0, "ceramicThrough", 0.35), "canonical ceramicThrough=0.35 failed");
+            assert!((s.body_settings(0).ceramic_through - 0.35).abs() < 1e-6);
+        }
+    }
+}
+
+#[test]
+fn opaque_subsurface_and_candle_preset_suppress_sharp_dispersion() {
+    assert_eq!(NAMED.last().unwrap().id, "candle");
+    for id in ["wax", "candle"] {
+        let mut p = Settings::default();
+        NAMED[named_index(id).unwrap()].apply(&mut p);
+        assert_eq!(p.sss_opaque, 1.0, "{id} should enable sssOpaque");
+        assert_eq!(uniforms(&p, 1.0)[MU_SSS_OPAQUE], 1.0, "{id} MU_SSS_OPAQUE mismatch");
+    }
+    let mut p = Settings::default();
+    p.disp = 0.08;
+    p.sss = 1.0;
+    p.sss_opaque = 1.0;
+    let v = Variant::of(&p);
+    assert!(v.sss && v.mono, "sssOpaque=1 must force mono to suppress rainbow dispersion");
+    assert_eq!(uniforms(&p, 1.0)[MU_SSS_OPAQUE], 1.0);
+}

@@ -2,7 +2,7 @@
 //! layers and how they are joined (see `layers`; one layer is one shape, as ever). Then the parts of the
 //! selected layer's shape: the families, the family's shapes, the mathematics of the one chosen, its own
 //! sliders, where it is placed. At the foot, what is not any one shape's: the animation (see `animate`).
-//! (How finely the shape is built is with the rest of the quality, in the left panel's output.)
+//! Volume detail belongs to the selected object.
 
 use eframe::egui::{self, Align2, Id, Pos2, Rect, Sense, Ui};
 use gf_core::presets::Kind;
@@ -10,7 +10,7 @@ use gf_core::state::{Knob, State, RES_MAX};
 
 use super::theme::*;
 use super::widgets::*;
-use super::{animate, knob, layers, Panels, Request};
+use super::{animate, knob, layers, Panels};
 
 /// Voxels per side offered for the still shape, and for the shape while it animates.
 pub const DETAIL_STILL: [u32; 5] = [384, 512, 768, 1024, RES_MAX];
@@ -19,9 +19,6 @@ pub const DETAIL_MOVING: [u32; 5] = [192, 256, 320, 384, 512];
 const INSET: f32 = 9.0;
 /// Where the detail buttons begin, leaving room for their name.
 const DETAIL_INDENT: f32 = 68.0;
-/// The fewest lines of buttons the list of shapes keeps when the panel is short of room (one layer; with
-/// several, one line).
-const LIST_LEAST: f32 = 3.0;
 
 /// A whole number with commas between its thousands.
 pub fn with_commas(n: usize) -> String {
@@ -55,46 +52,119 @@ pub fn show(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     if px.rendering { ui.disable(); }
     set_label_width(ui, COL_LABEL_WIDE);
     let top = ui.cursor().top();
+    let width = ui.available_width();
 
-    // Two tabs at the head: volume objects and csg objects, made from the same shapes. The tab is the
-    // selected object's kind; the other tab, chosen, makes a new object of its kind from the shape picked.
-    let creating = tabs(ui, st, px);
-    // the objects (which is selected decides what everything below shows)
-    if st.object_count() > 0 { layers::strip(ui, st, px); }
-    let list = if creating {
-        // the shapes to make one from (the selected object is left as it is)
-        families_new(ui, st, px);
-        let list = shapes_new(ui, st, px);
-        let what = if px.tab.unwrap_or(false) { "a csg object: a tree whose first part is this shape, its formula traced exactly, or a grid of it" } else { "a volume object: the shape baked into a grid of distances" };
-        paragraph(ui, &format!("a shape picked here makes {what}"), mono(SMALL), pal().faint, LINE, INSET);
-        gap(ui, 6.0);
-        list
-    } else {
-        // the selected object's shape, its own sliders, its tree (a csg object), where it is placed, then how
-        // the objects are joined
-        families(ui, st, px);
-        let list = shapes(ui, st, px);
+    // Keep the tabs, objects and shape picker visible above the scrolling controls.
+    let tools = row(ui, 20.0);
+    let open = button(ui, tools, Id::unique("open layer hierarchy"), "layers", px.palette.open, mono(SMALL));
+    px.note("outline:toggle", tools);
+    if open.on_hover_text("layers and groups (O)").clicked() { px.palette.open = !px.palette.open; }
+    super::outline::breadcrumbs(ui, st, px);
+    let world = st.edit_scope.object().is_none();
+    let creating = world && tabs(ui, st, px);
+    if world && (st.edit_scope.world.is_some() || st.stack.hierarchy.as_ref().is_some_and(|h| h.0.iter().any(|n| matches!(n, gf_core::groups::Node::Group(_))))) {
+        super::world::contents(ui, st, px);
+    } else if world && st.object_count() > 0 { layers::strip(ui, st, px); }
+    let group_name = st.selected_group.and_then(|id| st.stack.hierarchy.as_ref()?.group(id)).map(|g| g.name.clone());
+    if let Some(name) = &group_name {
+        let header = row(ui, 28.0);
+        text_in(ui, header, Align2::LEFT_CENTER, name, mono(SIZE), pal().bright);
+    } else if creating {
+        super::picker::add_button(ui, st, px);
+    } else if world && matches!(st.world_selection().last(), Some(gf_core::groups::Item::Object(_))) {
+        // one object: its shape card as inside it (a press changes its shape), and the way inside for its parts
+        if one_object(st) {
+            super::picker::shape_card(ui, st, px);
+            gap(ui, 4.0);
+        }
+        let (edit, at) = wide_button(ui, Id::unique("scope edit"), &format!("inside {}…", st.layer_title(st.stack.sel).to_lowercase()), false);
+        px.note("scope:edit", at);
+        if edit.on_hover_text("go inside the object: its csg parts, modifiers of its own, its construction").clicked() { st.enter_world_item(gf_core::groups::Item::Object(st.stack.sel)); }
+    } else if !world && st.object_count() > 0 {
+        super::picker::shape_card(ui, st, px);
+    }
+    let head = ui.cursor().top() - top;
+
+    // The selected object's own controls, which scroll when they need more room than is left: its shape's
+    // mathematics and sliders, how finely it is built (a volume object), its tree (a csg object), where it is
+    // placed, how the objects are joined, the surface studio.
+    let room = (px.room_h - head - px.anim_h - 4.0).max(40.0);
+    // (as tall as the room there is, however little is in it: the animation stays at the foot)
+    let mut area = egui::ScrollArea::vertical().id_salt("object controls").max_height(room).min_scrolled_height(room).auto_shrink([false, false]);
+    if let Some(y) = px.right_scroll.take() { area = area.vertical_scroll_offset(y.clamp(0.0, px.controls_max)); }
+    let controls = area.show(ui, |ui| {
+        ui.set_width(width);
+        px.clip = Some(ui.clip_rect());
+        if group_name.is_some() {
+            super::world::transform(ui, st, px);
+            if let Some(id) = st.selected_group { super::world_modifiers::show(ui, st, px, gf_core::groups::Item::Group(id)); }
+            return;
+        }
+        if creating {
+            let what = if px.tab.unwrap_or_else(|| st.object_count() > 0 && st.is_csg_object(st.stack.sel)) { "a csg object: a tree whose first part is this shape, its formula traced exactly, or a grid of it" } else { "a volume object: the shape baked into a grid of distances" };
+            paragraph(ui, &format!("a shape picked there makes {what}"), mono(SMALL), pal().faint, LINE, INSET);
+            gap(ui, 6.0);
+            return;
+        }
+        if world {
+            if !st.world_selection().is_empty() {
+                // one object chosen: its shape's formula, sliders and detail straight away, then where it is
+                // placed (going inside is for its parts and construction)
+                if one_object(st) { shape_folds(ui, st, px, false); }
+                super::world::transform(ui, st, px);
+                super::world_modifiers::show(ui, st, px, gf_core::groups::Item::Object(st.stack.sel));
+            }
+            return;
+        }
+        shape_folds(ui, st, px, true);
+        // A volume can supply the base of a construction just as an analytic shape can.
+        let n = st.csg.parts.len();
+        let says = [format!("{n} part{}", if n == 1 { "" } else { "s" }), super::csg::hint(st).to_owned()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
+        if px.window_group(ui, "object-parts", "csg parts", &says) { super::csg::show_headed(ui, st, px); }
+        let m = st.selected_modifiers().list.len();
+        let says = match m { 0 => "none".to_owned(), 1 => "1".to_owned(), _ => format!("{m} · applied from bottom to top") };
+        if px.window_group(ui, "object-modifiers", "modifiers", &says) { super::mods::show_in(ui, st, px, true); }
+    });
+    px.clip = None;
+    let controls_h = controls.content_size.y;
+    px.controls_max = (controls_h - controls.inner_rect.height()).max(0.0);
+
+    // everything that moves, at the foot, wherever the controls above have scrolled to
+    let a0 = ui.cursor().top();
+    animate::show(ui, st, px);
+    let anim_h = ui.cursor().top() - a0;
+
+    // Remeasure when the pinned animation changes height.
+    let rest = head + controls_h + anim_h + 4.0;
+    if (rest - px.right_rest).abs() > 0.5 || (anim_h - px.anim_h).abs() > 0.5 {
+        px.right_rest = rest;
+        px.anim_h = anim_h;
+        ui.ctx().request_repaint();
+    }
+}
+
+/// One object is chosen at the world level (the one the panel's controls are for).
+fn one_object(st: &State) -> bool {
+    let sel = st.world_selection();
+    sel.len() == 1 && sel.last() == Some(&gf_core::groups::Item::Object(st.stack.sel))
+}
+
+/// The object's shape and how finely it is built, each folding with a word of what it is set to. `inside`:
+/// within the object (a path's builder shows there too).
+fn shape_folds(ui: &mut Ui, st: &mut State, px: &mut Panels, inside: bool) {
+    let says = format!("{} · {}", st.preset().name.to_lowercase(), st.family().name.to_lowercase());
+    if px.window_group(ui, "object-shape", "shape", &says) {
         maths(ui, st, px);
         words(ui, st, px);
         sliders(ui, st, px);
         // (a path: the builder, under the profile's sliders)
-        super::paths::panel(ui, st, px);
-        // (and, from setups of before, a volume object with parts beside it; not one baked from a tree)
-        if st.is_csg_object(st.stack.sel) || (!st.csg.baked && !st.csg.parts.is_empty()) { super::csg::show(ui, st, px); }
-        layers::placement(ui, st, px);
-        layers::joins(ui, st, px);
-        // the surface studio: what the surface of the selected object's solid is made into
-        super::sculpt::button(ui, st, px);
-        list
-    };
-    // everything that moves
-    animate::show(ui, st, px);
-
-    // what everything but the list of shapes came to: next frame the list is given the height that is left
-    let rest = ui.cursor().top() - top - list;
-    if (rest - px.right_rest).abs() > 0.5 {
-        px.right_rest = rest;
-        ui.ctx().request_repaint();
+        if inside { super::paths::panel(ui, st, px); }
+    }
+    let sel = st.stack.sel;
+    // (how finely the object is built is the volume object's; a csg object's when its first part is a grid)
+    if !st.is_csg_object(sel) || st.csg_tree_layer(sel).0.first().is_some_and(|p| p.grid.is_some()) {
+        let says = format!("voxels a side · {} · {} moving", st.shape().res, st.shape().anim_res);
+        if px.window_group(ui, "object-detail", "detail", &says) { detail_rows(ui, st, px); }
     }
 }
 
@@ -109,125 +179,36 @@ fn tabs(ui: &mut Ui, st: &mut State, px: &mut Panels) -> bool {
     if px.tab_seen != seen {
         px.tab_seen = seen;
         px.tab = None;
+        px.adding = false;
         px.browse_fam = st.fam;
     }
     let csg = px.tab.unwrap_or(kind);
     let items = [
-        Item::new("volume", !csg).tip("volume objects: a shape baked into a grid of distances, which the tracer reads; joined to the others"),
+        Item::new("volume", !csg).tip("volume objects: an independent shape traced from a sampled distance field"),
         Item::new("csg", csg).tip("csg objects: a tree of parts joined by union, subtract or intersect with smooth seams; each part a shape's formula, traced exactly, or a grid of a shape with none"),
     ];
     let run = filled_run(ui, Id::unique("object tabs"), &items, egui::vec2(8.0, 3.0), &mono(SIZE));
     for (w, place) in ["volume", "csg"].iter().zip(&run.places) { px.note(format!("tab:{w}"), *place); }
+    // A bar under the tab that is up, which slides to the other when the tab changes (by a click, or when an
+    // object is converted or another selected): the change is seen to happen, not only found to have.
+    if let [a, b] = run.places[..] {
+        let t = ui.ctx().animate_value_with_time(Id::unique("tab slide"), if csg { 1.0 } else { 0.0 }, 0.22);
+        let x0 = egui::lerp(a.left()..=b.left(), t) + 10.0;
+        let x1 = egui::lerp(a.right()..=b.right(), t) - 10.0;
+        let y = a.bottom() + 2.0;
+        ui.painter().line_segment([Pos2::new(x0, y), Pos2::new(x1, y)], egui::Stroke::new(2.0, white(0.85)));
+    }
     if let Some(i) = run.clicked {
+        st.selected_group = None;
         let want = i == 1;
+        // (the selected object's own tab, pressed again: a shape picked now adds another object of its kind;
+        // pressed once more, back to the object)
+        if want == kind && count > 0 && px.tab.is_none() { px.adding = !px.adding; } else { px.adding = false; }
         px.tab = (want != kind || count == 0).then_some(want);
         px.browse_fam = st.fam;
     }
     gap(ui, 6.0);
-    count == 0 || px.tab.is_some_and(|t| t != kind)
-}
-
-/// The families, while making a new object: the one browsed is the panel's own, not the selected object's.
-fn families_new(ui: &mut Ui, st: &mut State, px: &mut Panels) {
-    let fam = px.browse_fam.min(st.families.len() - 1);
-    let items: Vec<Item> = st.families.iter().enumerate().map(|(i, f)| Item::new(f.name, i == fam)).collect();
-    let run = filled_run(ui, Id::unique("families new"), &items, egui::vec2(7.0, 2.0), &mono(SIZE));
-    drop(items);
-    for (f, place) in st.families.iter().zip(&run.places) { px.note(format!("family:{}", f.id), *place); }
-    if let Some(i) = run.clicked { px.browse_fam = i; }
-    gap(ui, 8.0);
-}
-
-/// The shapes of the family browsed, while making a new object: picking one makes it, of the tab's kind, and
-/// selects it (the tab then is its kind). Returns the height the list was shown at.
-fn shapes_new(ui: &mut Ui, st: &mut State, px: &mut Panels) -> f32 {
-    let fam = px.browse_fam.min(st.families.len() - 1);
-    let n = st.families[fam].presets.len();
-    let r = row(ui, 13.0);
-    text_in(ui, r, Align2::LEFT_CENTER, &format!("{n} shapes"), mono(10.0), pal().hint);
-    gap(ui, 5.0);
-    let (width, pad, font) = (ui.available_width(), egui::vec2(8.0, 3.0), mono(SIZE));
-    let line = button_size(ui, "x", &font, pad).y + RUN_SPACE;
-    let lines = ((px.room_h - px.right_rest - 1.0 + RUN_SPACE) / line).floor().max(LIST_LEAST);
-    let list = egui::ScrollArea::vertical().id_salt("shapes new").max_height(lines * line - RUN_SPACE).min_scrolled_height(line - RUN_SPACE).auto_shrink([false, true]).show(ui, |ui| {
-        ui.set_width(width);
-        let items: Vec<Item> = st.families[fam].presets.iter().map(|p| Item::new(p.name, false)).collect();
-        button_run(ui, Id::unique("shapes new"), 0.0, &items, pad, &font, 0.0)
-    });
-    let shown = Rect::from_min_size(list.inner_rect.min, egui::vec2(list.inner_rect.width(), list.inner_rect.height().min(list.content_size.y)));
-    px.note("shapes", shown);
-    for (p, place) in st.families[fam].presets.iter().zip(&list.inner.places) {
-        if shown.contains_rect(*place) { px.note(format!("shape:{}", p.id), *place); }
-    }
-    if let Some(i) = list.inner.clicked {
-        let csg = px.tab.unwrap_or(false);
-        // (a model that stands for a file of the user's asks for one)
-        if st.create_object(fam, i, csg).is_some() && st.needs_file(st.stack.sel) { px.requests.push(Request::LoadModel); }
-    }
-    if st.object_count() >= gf_core::layers::MAX_LAYERS {
-        gap(ui, 3.0);
-        paragraph(ui, &format!("{} objects at most: take one away to make another", gf_core::layers::MAX_LAYERS), mono(SMALL), pal().hint, LINE, INSET);
-    }
-    shown.height()
-}
-
-/// The families: a button each. However many there are, they fill whole lines. (The buttons are as tall
-/// as those of the groups of materials across the window, a little lower than a shape's: with eight
-/// families there are four lines of them.)
-fn families(ui: &mut Ui, st: &mut State, px: &mut Panels) {
-    let items: Vec<Item> = st.families.iter().enumerate().map(|(i, f)| Item::new(f.name, i == st.fam).tip(format!("key {}", i + 1))).collect();
-    let run = filled_run(ui, Id::unique("families"), &items, egui::vec2(7.0, 2.0), &mono(SIZE));
-    drop(items);
-    for (f, place) in st.families.iter().zip(&run.places) { px.note(format!("family:{}", f.id), *place); }
-    if let Some(i) = run.clicked { st.set_scene(i); }
-    gap(ui, 8.0);
-}
-
-/// The shapes of the family that is up: a run of buttons that takes what height the rest of the panel
-/// leaves, and scrolls. Returns the height the list was shown at.
-fn shapes(ui: &mut Ui, st: &mut State, px: &mut Panels) -> f32 {
-    // how many there are, and how to step through them
-    let r = row(ui, 13.0);
-    let n = st.family().presets.len();
-    text_in(ui, r, Align2::LEFT_CENTER, &format!("{n} shapes"), mono(10.0), pal().hint);
-    text_in(ui, r, Align2::RIGHT_CENTER, "← → to step", mono(10.0), pal().hint);
-    gap(ui, 5.0);
-
-    let chosen = st.shape().preset;
-    // a shape newly chosen (with the arrow keys, perhaps) is brought into view
-    let moved = px.lit_shape.replace((st.fam, chosen)) != Some((st.fam, chosen));
-    let (width, pad, font) = (ui.available_width(), egui::vec2(8.0, 3.0), mono(SIZE));
-    // whole lines of buttons only: as many as the height left over holds
-    let line = button_size(ui, "x", &font, pad).y + RUN_SPACE;
-    // (with several layers the joins and the animation need the room: the list may shrink to the one line
-    // that holds the chosen shape, and scrolls within its box)
-    let least = if st.layer_count() > 1 { 1.0 } else { LIST_LEAST };
-    let lines = ((px.room_h - px.right_rest - 1.0 + RUN_SPACE) / line).floor().max(least);
-    let list = egui::ScrollArea::vertical().id_salt("shapes").max_height(lines * line - RUN_SPACE).min_scrolled_height(line - RUN_SPACE).auto_shrink([false, true]).show(ui, |ui| {
-        ui.set_width(width);
-        let items: Vec<Item> = st.family().presets.iter().enumerate().map(|(i, p)| Item::new(p.name, i == chosen).reveal(moved && i == chosen)).collect();
-        button_run(ui, Id::unique("shapes"), 0.0, &items, pad, &font, 0.0)
-    });
-    // (the list is as tall as its buttons when they need less than they were allowed)
-    let shown = Rect::from_min_size(list.inner_rect.min, egui::vec2(list.inner_rect.width(), list.inner_rect.height().min(list.content_size.y)));
-    px.note("shapes", shown);
-    for (p, place) in st.family().presets.iter().zip(&list.inner.places) {
-        if shown.contains_rect(*place) { px.note(format!("shape:{}", p.id), *place); }
-    }
-    if let Some(i) = list.inner.clicked {
-        st.choose(i);
-        // the shape that stands for a file of the user's, chosen with no file yet: that asks for one
-        if st.needs_file(st.stack.sel) { px.requests.push(Request::LoadModel); }
-    }
-    // a model is a file: any file can be loaded in place of the ones that come with the program
-    if st.family().kind == Kind::Mesh {
-        let (resp, at) = wide_button(ui, Id::unique("load a model"), "load a file…", false);
-        px.note("model load", at);
-        if resp.on_hover_text("any OBJ, STL, PLY, glTF or GLB file. Or drop one on the window: it takes this layer's place, or with shift held becomes one more layer").clicked() {
-            px.requests.push(Request::LoadModel);
-        }
-    }
-    shown.height()
+    count == 0 || px.adding || px.tab.is_some_and(|t| t != kind)
 }
 
 /// What there is to say of a model, where a shape's mathematics go: its file and what it is made of, and
@@ -314,7 +295,7 @@ fn words(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     let r = r.on_hover_text("the words to make solid; a | starts another line");
     if r.changed() {
         st.shape_mut().model = text;
-        st.want = Some(gf_core::state::Detail::Full);
+        st.request(gf_core::build::BuildRequest::edit());
     }
     gap(ui, 6.0);
 }
@@ -407,11 +388,31 @@ fn sliders(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     }
 }
 
-/// How finely the shape is built: when still, and while it animates (in the output group's quality).
+/// What the scene's volumes hold in video memory at full detail, as a thin bar against the budget, and
+/// a word when every volume has been built coarser to stay within it.
+fn memory_meter(ui: &mut Ui, st: &State) {
+    let plan = st.detail_plan(gf_core::state::Detail::Full);
+    let budget = gf_core::budget::TOTAL_MAX;
+    let r = row(ui, 12.0);
+    let words = format!("video memory {} of {}", memory(plan.bytes), memory(budget));
+    text_in(ui, r, Align2::LEFT_CENTER, &words, mono(SMALL), pal().faint);
+    let bar = Rect::from_min_max(Pos2::new(r.right() - 60.0, r.center().y - 1.5), Pos2::new(r.right(), r.center().y + 1.5));
+    let share = (plan.bytes as f32 / budget as f32).clamp(0.0, 1.0);
+    ui.painter().rect_filled(bar, 1.0, pal().button);
+    ui.painter().rect_filled(Rect::from_min_size(bar.min, egui::vec2(bar.width() * share, bar.height())), 1.0, if plan.lowered { pal().costly } else { pal().dim });
+    let note = st.memory_note(gf_core::state::Detail::Full);
+    ui.allocate_rect(r, Sense::hover()).on_hover_text(format!(
+        "every object's volume, the scene's and the bodies': at most {} together. {}", memory(budget),
+        note.clone().unwrap_or_else(|| "Within it, everything is built at the detail asked for".to_string())));
+    if plan.lowered {
+        paragraph(ui, &format!("detail held to {}³ to fit {} of video memory", plan.scene, memory(budget)), mono(SMALL), pal().costly, LINE, 0.0);
+    }
+}
+
+/// How finely the object is built: when still, and while it animates (the volume object's own controls).
+/// (The heading over them, "detail", is the fold's: see `object_controls`.)
 pub fn detail_rows(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     let (still, moving) = (st.shape().res, st.shape().anim_res);
-    let r = row(ui, 14.0);
-    text_in(ui, r, Align2::LEFT_CENTER, "shape detail, voxels a side", mono(10.0), pal().faint);
     let name = |ui: &Ui, r: Rect, text: &str| {
         text_in(ui, Rect::from_min_size(r.min, egui::vec2(DETAIL_INDENT, r.height())), Align2::LEFT_CENTER, text, mono(SIZE), pal().dim);
     };
@@ -439,6 +440,7 @@ pub fn detail_rows(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     gap(ui, 3.0);
     paragraph(ui, &built_text(st, px.joined), mono(SMALL), pal().dim, LINE, 0.0);
     gap(ui, 1.0);
+    memory_meter(ui, st);
 }
 
 #[cfg(test)]

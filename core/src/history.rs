@@ -19,6 +19,12 @@
 //! typed or turned for a moment) and at every press. A change between two of them is one entry, however
 //! many frames a drag lasted. Esc while a button is down puts back the snapshot taken at the press.
 //!
+//! **Selection.** An entry also keeps what was selected (`selection.rs`), so a click or a drag-select is an
+//! entry of its own (taken at the same quiet moments, so a whole drag-select is one), and undo puts back
+//! the selection with the setup. Moving between levels (entering an object, a group) is navigation:
+//! it makes no entry, and a selection is put back only at the level it was made at. Entries read from a
+//! history file have no selection: undoing them leaves the selection as it is.
+//!
 //! **What an entry leaves out.** It leaves out what moves by itself: the animation's clock and what
 //! the animation writes into the animated sliders, the spin's phase, and the lights' own circling.
 //! The snapshot is taken with those set aside, so playing never makes an entry, and an undo leaves the
@@ -26,6 +32,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::selection::Selection;
 use crate::setup::Setup;
 use crate::state::{Rig, State};
 
@@ -60,6 +67,8 @@ impl State {
         (self.r, self.clock, self.lphi) = (self.r0, 0.0, 0.0);
         let mut s = self.setup();
         s.views = Vec::new();
+        // (how the viewport draws is not part of what is undone)
+        s.view = Default::default();
         (self.r, self.clock, self.lphi) = (r, clock, lphi);
         for (k, v) in active.iter().zip(keep) { self.set(&k.r, v); }
         self.lamps_rev = rev;
@@ -71,16 +80,35 @@ impl State {
     /// put up whole, as loading it does, with everything that follows. The animation's clock, the spin's
     /// phase, whether it plays and the camera slots stay as they are.
     pub fn restore_snapshot(&mut self, s: &Setup) {
+        let scope = self.edit_scope.clone();
+        let outline = self.outline();
+        let enclosing = scope.world.and_then(|id| outline.ancestors(crate::groups::Item::Group(id))).unwrap_or_default();
+        let object_count = self.object_count();
         let (playing, clock, theta, lphi) = (self.playing, self.clock, self.theta, self.lphi);
         // (what the animation has the animated sliders at now, to the last place: worked out again below, it
         // could come out a rounding away)
         let had: std::collections::BTreeMap<String, f64> = self.active().iter().map(|k| (k.key.clone(), self.get(&k.r))).collect();
         let views = std::mem::take(&mut self.views);
+        let view = self.view.clone();
         let cur = self.undo_snapshot();
         let same_scene = cur.family == s.family && cur.preset == s.preset && cur.values == s.values && cur.shape == s.shape
             && cur.layers == s.layers && cur.bodies == s.bodies && cur.hdri == s.hdri && cur.empty == s.empty;
         if same_scene {
             self.p = s.settings.clone();
+            self.canonical = s.canonical.as_ref().map(|saved| crate::setup::CanonicalMaterials {
+                scene: saved.scene.clone(),
+                bodies: {
+                    let mut bodies: [Option<Box<crate::pbr::MaterialSpec>>; crate::material::MAX_BODIES] = Default::default();
+                    for (key, spec) in &saved.bodies {
+                        if let Ok(layer) = key.parse::<usize>() {
+                            if (2..=crate::material::MAX_BODIES).contains(&layer) {
+                                bodies[layer - 1] = Some(Box::new(spec.clone()));
+                            }
+                        }
+                    }
+                    bodies
+                },
+            });
             crate::camera::sync(&mut self.p);
             self.tracks = s.tracks.clone();
             self.render = s.render.clone();
@@ -96,8 +124,9 @@ impl State {
             // the tree of formula parts (csg.rs): put back by itself, and built again (which part the panel
             // has selected stays, if there still is one)
             // (a setup's own tree is the first object's: the others' are with their layers, above)
-            if cur.csg != s.csg || cur.csg_place != s.csg_place || cur.csg_coarse != s.csg_coarse || cur.csg_baked != s.csg_baked {
+            if cur.construction != s.construction || cur.csg != s.csg || cur.csg_place != s.csg_place || cur.csg_coarse != s.csg_coarse || cur.csg_baked != s.csg_baked {
                 if let Some(c) = self.layer_csg_mut(0) {
+                    c.construction = s.construction.clone();
                     c.parts = s.csg.iter().take(crate::csg::MAX_PARTS).cloned().collect();
                     c.place = s.csg_place;
                     c.coarse = s.csg_coarse;
@@ -105,13 +134,43 @@ impl State {
                     if c.sel.is_some_and(|i| i >= c.parts.len()) { c.sel = None; }
                     if c.parts.is_empty() { c.whole = false; }
                 }
-                self.want = Some(crate::state::Detail::Full);
+                self.request(crate::build::BuildRequest::edit());
             }
         } else {
             // (it was a setup a moment ago: it puts up)
             let _ = self.apply_setup(s);
         }
+        if scope.inside.is_some() || scope.world.is_some() || !scope.selection.is_empty() {
+            use crate::groups::Item;
+            let tree = self.outline();
+            self.edit_scope = scope;
+            self.edit_scope.world = self.edit_scope.world.filter(|&id| tree.group(id).is_some())
+                .or_else(|| enclosing.into_iter().rev().find(|&id| tree.group(id).is_some()));
+            if let Some(o) = &mut self.edit_scope.inside { o.return_world = o.return_world.filter(|&id| tree.group(id).is_some()); }
+            self.edit_scope.selection.retain(|&item| tree.ancestors(item).is_some());
+            if let Some(i) = self.edit_scope.object().filter(|&i| object_count == self.object_count() && i < self.object_count()) {
+                self.select_layer(i);
+                self.edit_scope.world = tree.ancestors(Item::Object(i)).and_then(|p| p.last().copied());
+                let construction = self.csg.construction_tree();
+                let o = self.edit_scope.inside.as_mut().expect("object scope");
+                while construction.children(&o.construction_level).is_none() {
+                    o.construction_level.pop();
+                }
+                let path = &mut o.construction;
+                while !path.is_empty() && construction.node(path).is_none() { path.pop(); }
+                o.marked.retain(|p| construction.node(p).is_some());
+                o.isolated = o.isolated.take().filter(|p| construction.node(p).is_some());
+            } else {
+                self.edit_scope.inside = None;
+                match self.edit_scope.selection.last().copied() {
+                    Some(Item::Object(i)) => self.select_layer(i),
+                    Some(Item::Group(id)) => self.selected_group = Some(id),
+                    None => self.selected_group = None,
+                }
+            }
+        }
         self.views = views;
+        self.view = view;
         (self.clock, self.theta, self.lphi) = (clock, theta, lphi);
         self.r0 = crate::math::orthonormalise(&s.orientation);
         self.update_r();
@@ -165,21 +224,49 @@ pub fn history_path(setup: &std::path::Path) -> std::path::PathBuf {
     setup.with_extension("history.json")
 }
 
+/// One entry: the setup, and what was selected (none for an entry read from a file).
+#[derive(Clone, Debug, PartialEq)]
+struct Entry {
+    setup: Setup,
+    sel: Option<Selection>,
+}
+
+impl Entry {
+    fn of(st: &mut State) -> Self {
+        Self { setup: st.undo_snapshot(), sel: Some(st.selection_snapshot()) }
+    }
+    fn restore(&self, st: &mut State) {
+        st.restore_snapshot(&self.setup);
+        if let Some(s) = &self.sel { st.restore_selection(s); }
+    }
+    /// Only where the editor is changed between the two: navigation, not an entry.
+    fn moved_only(&self, now: &Entry) -> bool {
+        self.setup == now.setup && match (&self.sel, &now.sel) {
+            (Some(a), Some(b)) => a.level != b.level,
+            _ => true,
+        }
+    }
+}
+
 /// The undo and redo stacks, and the snapshot of the state as it last settled.
 #[derive(Default)]
 pub struct History {
-    undo: Vec<Setup>,
-    redo: Vec<Setup>,
-    last: Option<Setup>,
+    undo: Vec<Entry>,
+    redo: Vec<Entry>,
+    last: Option<Entry>,
 }
 
 impl History {
     /// A quiet moment, or a gesture about to begin: if the state has changed since the last snapshot, that
     /// change becomes one entry. True if it did.
     pub fn settle(&mut self, st: &mut State) -> bool {
-        let now = st.undo_snapshot();
+        let now = Entry::of(st);
         match &self.last {
             Some(l) if *l == now => false,
+            Some(l) if l.moved_only(&now) => {
+                self.last = Some(now);
+                false
+            }
             None => {
                 self.last = Some(now);
                 false
@@ -193,41 +280,53 @@ impl History {
             }
         }
     }
+    /// The newest entry and the state it led to: what the last settle recorded.
+    pub fn latest(&self) -> Option<(&Setup, &Setup)> {
+        Some((&self.undo.last()?.setup, &self.last.as_ref()?.setup))
+    }
     /// Esc during a gesture: the state goes back to the snapshot taken when it began.
     pub fn cancel(&mut self, st: &mut State) {
         if let Some(l) = &self.last {
             let l = l.clone();
-            if st.undo_snapshot() != l { st.restore_snapshot(&l); }
+            if Entry::of(st) != l { l.restore(st); }
         }
     }
     pub fn undo(&mut self, st: &mut State) -> bool {
         self.settle(st);
         let Some(before) = self.undo.pop() else { return false };
-        if let Some(now) = self.last.replace(before.clone()) { self.redo.push(now); }
-        st.restore_snapshot(&before);
+        if let Some(now) = self.last.take() { self.redo.push(now); }
+        before.restore(st);
+        // (taken again: whatever putting it back tidied is not a change, and redo is kept)
+        self.last = Some(Entry::of(st));
         true
     }
     pub fn redo(&mut self, st: &mut State) -> bool {
         self.settle(st);
         let Some(after) = self.redo.pop() else { return false };
-        if let Some(now) = self.last.replace(after.clone()) { self.undo.push(now); }
-        st.restore_snapshot(&after);
+        if let Some(now) = self.last.take() { self.undo.push(now); }
+        after.restore(st);
+        self.last = Some(Entry::of(st));
         true
     }
     /// The history as a file keeps it beside a setup: every entry is itself a setup.
     pub fn to_json(&self) -> String {
-        serde_json::to_string(&SavedHistory { version: crate::setup::VERSION, undo: self.undo.clone(), redo: self.redo.clone() }).expect("setups always serialise")
+        serde_json::to_string(&SavedHistory {
+            version: crate::setup::VERSION,
+            undo: self.undo.iter().map(|e| e.setup.clone()).collect(),
+            redo: self.redo.iter().map(|e| e.setup.clone()).collect(),
+        }).expect("setups always serialise")
     }
     /// Take up a history read from beside a setup that has just been put up (`st` is that setup): undo
     /// then walks back through what was done before it was saved. Fails, changing nothing, if the text
     /// is not a history.
     pub fn adopt_json(&mut self, text: &str, st: &mut State) -> Result<(), String> {
         let h: SavedHistory = serde_json::from_str(text).map_err(|e| format!("not a history: {e}"))?;
-        self.undo = h.undo;
-        self.redo = h.redo;
+        let read = |setups: Vec<Setup>| setups.into_iter().map(|setup| Entry { setup, sel: None }).collect::<Vec<_>>();
+        self.undo = read(h.undo);
+        self.redo = read(h.redo);
         let cut = self.undo.len().saturating_sub(CAP);
         self.undo.drain(..cut);
-        self.last = Some(st.undo_snapshot());
+        self.last = Some(Entry::of(st));
         Ok(())
     }
     pub fn can_undo(&self) -> usize { self.undo.len() }

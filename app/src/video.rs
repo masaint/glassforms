@@ -118,12 +118,11 @@ pub struct VideoJob {
     t0: Instant,
 }
 
-/// Where ffmpeg is: beside the program, or on the PATH.
+/// Where ffmpeg is: beside the program, in the program's shared folder (`hdri::home`), or on the PATH.
 pub fn ffmpeg() -> Option<PathBuf> {
     let exe = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
-    if let Some(here) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join(exe))) {
-        if here.exists() { return Some(here); }
-    }
+    let beside = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join(exe)));
+    if let Some(here) = beside.into_iter().chain([crate::hdri::home().join(exe)]).find(|p| p.exists()) { return Some(here); }
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path).map(|d| d.join(exe)).find(|p| p.exists())
 }
@@ -222,7 +221,7 @@ impl VideoJob {
         if e.state.video_frame(keep, self.done as f64, self.whole) {
             e.bake(Detail::Hq)?;
         }
-        e.state.want = None;
+        e.state.drop_request();
         e.restart();
         e.averaging = shutter > 0.0;
         for k in 0..n {
@@ -237,7 +236,7 @@ impl VideoJob {
                         return Err(err);
                     }
                 }
-                e.state.want = None;
+                e.state.drop_request();
             }
             e.draw(k + 1 < n);
             if k % 16 == 15 { e.gpu.wait(); }

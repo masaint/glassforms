@@ -43,10 +43,7 @@ const STAND_AT: f64 = 2.6;
 
 const LUM: [f64; 3] = [0.2126, 0.7152, 0.0722];
 
-fn sstep(e0: f64, e1: f64, x: f64) -> f64 {
-    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
+use crate::math::smoothstep as sstep;
 
 /// Smooth value noise, about 0 to 1, one bump about every unit.
 fn hash(i: i64, j: i64, k: i64) -> f64 {
@@ -99,7 +96,9 @@ fn body(l: &Light, to_room: &Mat3) -> Body {
     let ul = (u[0] * u[0] + u[2] * u[2]).sqrt();
     let u = if ul > 1e-6 { [u[0] / ul, 0.0, u[2] / ul] } else { [1.0, 0.0, 0.0] };
     let v = [a[1] * u[2] - a[2] * u[1], a[2] * u[0] - a[0] * u[2], a[0] * u[1] - a[1] * u[0]];
-    Body { a: apply(to_room, a), u: apply(to_room, u), v: apply(to_room, v), tw: (l.w * D).tan(), th: (l.h * D).tan() }
+    let w_deg = crate::limits::hold(l.w, crate::limits::LIGHT_SIZE);
+    let h_deg = crate::limits::hold(l.h, crate::limits::LIGHT_SIZE);
+    Body { a: apply(to_room, a), u: apply(to_room, u), v: apply(to_room, v), tw: (w_deg * D).tan(), th: (h_deg * D).tan() }
 }
 
 /// How bright the room is for these lights (before `gain`): a share of their light averaged over the
@@ -110,8 +109,8 @@ pub fn level(lights: &[Light]) -> ([f64; 3], f64) {
     for l in lights {
         // a lit rectangle of half-tangents tw, th covers about 4 tw th / (1 + ...) of the sphere: near
         // enough for a share of it
-        let tw = (l.w.min(80.0) * D).tan();
-        let th = (l.h.min(80.0) * D).tan();
+        let tw = (crate::limits::hold(l.w, (0.5, 80.0)) * D).tan();
+        let th = (crate::limits::hold(l.h, (0.5, 80.0)) * D).tan();
         let area = 4.0 * (tw * th / (1.0 + tw * tw + th * th).sqrt()).atan();
         // (a light that fades over its whole half-size gives about a third of a hard one's light)
         let fill = 1.0 - 0.6 * l.soft.clamp(0.0, 1.0);

@@ -12,6 +12,9 @@ use gf_core::HB;
 use crate::bake::Volume;
 use crate::gpu::*;
 
+#[path = "scatter_sparse.rs"]
+mod sparse;
+
 pub const SCATTER_WGSL: &str = include_str!("shaders/scatter.wgsl");
 /// What the tracer reads, and what the beams' own light is kept in: 16-bit floats, interpolated.
 const OUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -116,6 +119,7 @@ struct Level {
     g_begin: wgpu::BindGroup,
     /// read phi[i], write phi[1 - i]
     g_diffuse: [wgpu::BindGroup; 2],
+    sparse: Option<sparse::Grid>,
     /// read phi[i], write the tracer's volume
     g_finish: [wgpu::BindGroup; 2],
     /// the body's balance: sums over blocks of cells of phi[i]; over blocks of those, twice; and
@@ -133,6 +137,8 @@ pub struct Scatter {
     gpu: Gpu,
     lin: wgpu::Sampler,
     p_inject: wgpu::ComputePipeline,
+    p_inject_coarse: wgpu::ComputePipeline,
+    sparse: Option<sparse::Passes>,
     /// makes the small copy of the shape's volume that the beams march through, where it can be made
     p_shape: Option<(wgpu::ComputePipeline, wgpu::BindGroupLayout)>,
     /// that copy, and which shape it was made from (the volume, the count of its changes, the channel)
@@ -182,7 +188,7 @@ struct Calibrated {
     shape_no: u64,
     chan: usize,
     res: u32,
-    medium: [u64; 4],
+    medium: [u64; 6],
     hb: u64,
 }
 
@@ -241,6 +247,7 @@ impl Scatter {
         Self {
             gpu: gpu.clone(),
             lin: gpu.sampler(wgpu::FilterMode::Linear, wgpu::AddressMode::ClampToEdge),
+            p_inject_coarse: pipe("scatter: coarse beams", &l_inject, "cs_inject_coarse"),
             p_inject: pipe("scatter: beams", &l_inject, "cs_inject"),
             p_shape, copy: None,
             p_begin: pipe("scatter: begin", &l_step, "cs_begin"),
@@ -251,7 +258,7 @@ impl Scatter {
             p_fold: pipe("scatter: fold", &l_fold, "cs_fold"),
             p_level: pipe("scatter: level", &l_level, "cs_level"),
             l_inject, l_refine, l_step, l_finish, l_sum, l_fold, l_level,
-            levels: Vec::new(), res: 0, steps: [8, 12, 24, 24, 24], steps_after: 4,
+            sparse: None, levels: Vec::new(), res: 0, steps: [8, 12, 24, 24, 24], steps_after: 4,
             blank: blank(gpu), calibrated: None, calibrate: true, hb: HB, lamps: Vec::new(),
         }
     }
@@ -308,7 +315,10 @@ impl Scatter {
         let g_sum = [0, 1].map(|i| group(&self.l_sum, &[uniform(), entry(4, &src), entry(5, &phi[i]), entry(10, &sum[0][0]), entry(11, &sum[0][1])]));
         let g_fold = [0, 1].map(|i| group(&self.l_fold, &[entry(8, &sum[i][0]), entry(9, &sum[i][1]), entry(10, &sum[i + 1][0]), entry(11, &sum[i + 1][1])]));
         let g_level = [0, 1].map(|i| group(&self.l_level, &[entry(5, &phi[i]), entry(6, &phi[1 - i]), entry(8, &sum[2][0]), entry(9, &sum[2][1])]));
-        self.levels.push(Level { res, u, src, phi, out, calib, g_inject: None, g_begin, g_diffuse, g_finish, g_sum, g_fold, g_level, sums, cur: 0 });
+        let sparse = sparse::worthwhile(res).then(|| {
+            self.sparse.get_or_insert_with(|| sparse::Passes::new(gpu)).grid(gpu,res,&u,&src,&phi,&sum[0])
+        });
+        self.levels.push(Level { res, u, src, phi, out, calib, g_inject: None, g_begin, g_diffuse, sparse, g_finish, g_sum, g_fold, g_level, sums, cur: 0 });
         self.levels.len() - 1
     }
 
@@ -381,7 +391,14 @@ impl Scatter {
     /// scattering changes.
     #[allow(clippy::too_many_arguments)]
     pub fn solve(&mut self, vol: &Volume, shape_no: u64, light: &Lighting, m: &Medium, to_shape: &[f64; 9], res: u32, chan: usize, cast: Option<&Casting>) {
-        let key = Calibrated { view: vol.view.clone(), shape_no, chan, res, medium: [m.sig_s[0].to_bits(), m.hold.to_bits(), m.enters.to_bits(), m.ior.to_bits()], hb: self.hb.to_bits() };
+        let key = Calibrated {
+            view: vol.view.clone(),
+            shape_no,
+            chan,
+            res,
+            medium: [m.sig_s[0], m.sig_s[1], m.sig_s[2], m.hold, m.enters, m.ior].map(f64::to_bits),
+            hb: self.hb.to_bits(),
+        };
         if self.calibrate && self.calibrated.as_ref() != Some(&key) {
             let clear = Medium { sig_a: [0.0; 3], mottle: 0.0, ..*m };
             // (the furnace has no lamps: its light is white from everywhere)
@@ -476,35 +493,52 @@ impl Scatter {
             let (before, after) = (self.steps[(ids.len() - 1 - n).min(4)], self.steps_after);
             let l = &mut self.levels[i];
             let cells = r.div_ceil(4);
-            let run = |enc: &mut wgpu::CommandEncoder, pipe: &wgpu::ComputePipeline, group: &wgpu::BindGroup, n: u32| {
-                // (a pass of its own for every step: each reads what the one before wrote)
-                let mut c = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
-                c.set_pipeline(pipe);
-                c.set_bind_group(0, group, &[]);
-                c.dispatch_workgroups(n, n, n);
+            // The storage accesses of compute dispatches are ordered inside a pass.
+            // Keep every relaxation step and reduction in the original order.
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("scatter: level"), timestamp_writes: None });
+            let run = |pass: &mut wgpu::ComputePass, pipe: &wgpu::ComputePipeline, group: &wgpu::BindGroup, n: u32| {
+                pass.set_pipeline(pipe);
+                pass.set_bind_group(0, group, &[]);
+                pass.dispatch_workgroups(n, n, n);
             };
-            run(&mut enc, &self.p_inject, &l.g_inject.as_ref().expect("just made").1, cells);
+            let (inject, groups) = if r <= 40 {
+                (&self.p_inject_coarse, r)
+            } else {
+                (&self.p_inject, cells)
+            };
+            run(&mut pass, inject, &l.g_inject.as_ref().unwrap().1, groups);
             match &g_refine {
-                Some(g) => run(&mut enc, &self.p_refine, g, cells),
-                None => run(&mut enc, &self.p_begin, &l.g_begin, cells),
+                Some(g) => run(&mut pass, &self.p_refine, g, cells),
+                None => run(&mut pass, &self.p_begin, &l.g_begin, cells),
             }
+            let compact = self.sparse.as_ref().zip(l.sparse.as_ref()).filter(|_| before >= 3);
+            if let Some((passes, grid)) = compact { passes.classify(&gpu, &mut pass, grid, cells); }
+            let relax = |pass: &mut wgpu::ComputePass, current: &mut usize, steps: u32| {
+                for k in 0..steps {
+                    let colour = (k % 2) as usize;
+                    if let Some((passes, grid)) = compact {
+                        passes.relax(pass, grid, colour, *current);
+                    } else {
+                        run(pass, &self.p_relax[colour], &l.g_diffuse[*current], cells);
+                    }
+                    *current = 1 - *current;
+                }
+            };
             l.cur = 0;
-            for k in 0..before {
-                run(&mut enc, &self.p_relax[(k % 2) as usize], &l.g_diffuse[l.cur], cells);
-                l.cur = 1 - l.cur;
-            }
+            relax(&mut pass, &mut l.cur, before);
             // the body brought into balance as a whole
-            run(&mut enc, &self.p_sum, &l.g_sum[l.cur], l.sums[0]);
-            run(&mut enc, &self.p_fold, &l.g_fold[0], l.sums[1]);
-            run(&mut enc, &self.p_fold, &l.g_fold[1], l.sums[2]);
-            run(&mut enc, &self.p_level, &l.g_level[l.cur], cells);
-            l.cur = 1 - l.cur;
-            for k in 0..after {
-                run(&mut enc, &self.p_relax[(k % 2) as usize], &l.g_diffuse[l.cur], cells);
-                l.cur = 1 - l.cur;
+            if let Some((passes,grid))=compact {
+                passes.sum(&mut pass,grid,l.cur,l.sums[0]);
+            } else {
+                run(&mut pass, &self.p_sum, &l.g_sum[l.cur], l.sums[0]);
             }
+            run(&mut pass, &self.p_fold, &l.g_fold[0], l.sums[1]);
+            run(&mut pass, &self.p_fold, &l.g_fold[1], l.sums[2]);
+            run(&mut pass, &self.p_level, &l.g_level[l.cur], cells);
+            l.cur = 1 - l.cur;
+            relax(&mut pass, &mut l.cur, after);
             // (every size is finished: the next one up reads it for the body's own light)
-            run(&mut enc, &self.p_finish, &l.g_finish[l.cur], cells);
+            run(&mut pass, &self.p_finish, &l.g_finish[l.cur], cells);
             below = Some(i);
         }
         gpu.queue.submit([enc.finish()]);
@@ -536,4 +570,72 @@ pub fn blank(gpu: &Gpu) -> wgpu::TextureView {
         usage: wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     }).create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chromatic_sss_calibrates_each_channel_and_updates_when_spread_changes() {
+        let Ok(gpu) = Gpu::headless("vulkan") else { return };
+        let vres = 64u32;
+        let vol = Volume::new(&gpu, vres, gpu.storage16);
+        let mut sdf = Vec::with_capacity((vres * vres * vres) as usize);
+        for iz in 0..vres {
+            let z = ((iz as f64 + 0.5) / vres as f64 * 2.0 - 1.0) * HB;
+            for iy in 0..vres {
+                let y = ((iy as f64 + 0.5) / vres as f64 * 2.0 - 1.0) * HB;
+                for ix in 0..vres {
+                    let x = ((ix as f64 + 0.5) / vres as f64 * 2.0 - 1.0) * HB;
+                    // Thin slab along z so coarse-grid diffusion leakage differs strongly across chromatic sig_s.
+                    let d = (x.abs() - 0.85).max(y.abs() - 0.85).max(z.abs() - 0.08);
+                    sdf.push(half::f16::from_f32(d as f32));
+                }
+            }
+        }
+        gpu.queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &vol.tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            bytemuck::cast_slice(&sdf),
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(vres * 2), rows_per_image: Some(vres) },
+            wgpu::Extent3d { width: vres, height: vres, depth_or_array_layers: vres },
+        );
+
+        let ior = 1.5;
+        let enters = 1.0 - gf_core::scatter::diffuse_reflectance(1.0, ior);
+        let back = 1.0 - enters / (ior * ior);
+        let hold = (1.0 + back) / (1.0 - back);
+        let chrom = Medium { sig_s: [5.0, 22.0, 80.0], sig_a: [0.0; 3], hold, enters, ior, mottle: 0.0 };
+        let id = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        // res = 24 climbs [6, 12, 24], also exercising COARSEST = 6 in cs_level.
+        let res = 24u32;
+        assert_eq!(sizes(res), vec![6, 12, 24]);
+
+        let mut sc = Scatter::new(&gpu);
+        let centre_rgb = |sc: &Scatter| -> [f32; 3] {
+            let (r, px) = sc.read().unwrap();
+            let c = (r / 2) as usize;
+            let o = ((c * r as usize + c) * r as usize + c) * 4;
+            [px[o], px[o + 1], px[o + 2]]
+        };
+
+        sc.calibrate = false;
+        sc.solve(&vol, 1, furnace(), &chrom, &id, res, 0, None);
+        let raw = centre_rgb(&sc);
+        assert!((raw[2] - raw[0]).abs() > 0.5, "expected thin-slab chromatic spread before calibration: {raw:?}");
+
+        sc.calibrate = true;
+        sc.solve(&vol, 1, furnace(), &chrom, &id, res, 0, None);
+        let cal = centre_rgb(&sc);
+        let want = furnace_level(ior) as f32;
+        for (ch, &v) in cal.iter().enumerate() {
+            assert!((v - want).abs() / want < 0.02, "channel {ch} furnace calibration off: got {v}, want {want} ({cal:?})");
+        }
+
+        // Keep sig_s[0] unchanged and alter sig_s[1..3]: calibration cache must invalidate and recalibrate G/B.
+        let achrom = Medium { sig_s: [5.0, 5.0, 5.0], ..chrom };
+        sc.solve(&vol, 1, furnace(), &achrom, &id, res, 0, None);
+        let eq = centre_rgb(&sc);
+        assert!((eq[1] - eq[0]).abs() < 0.02 && (eq[2] - eq[0]).abs() < 0.02, "stale calibration when sig_s[1..3] changed: {eq:?}");
+    }
 }

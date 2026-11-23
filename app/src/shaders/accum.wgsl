@@ -43,7 +43,7 @@ struct A {
   env2: vec4f,
   envp0: vec4f,           // and at the previous frame
   envp1: vec4f,
-  envp2: vec4f,
+  envp2: vec4f,           // xyz: previous light rotation; w: the scene geometry changed
   room0: vec4f,           // the room -> what the camera sees now, as three rows
   room1: vec4f,
   room2: vec4f,
@@ -70,7 +70,7 @@ fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
 // the result is read again next frame the softening compounds: one-pixel lines are gone within a dozen
 // frames. A Catmull-Rom filter keeps them (nine linear lookups, after Jimenez / Pettineo). Its negative
 // lobes can ring around bright highlights, so the result is held within the four pixels it lies between.
-fn sharp(at: vec2f) -> vec3f {
+fn sharpImage(at: vec2f, tex: texture_2d<f32>, last: vec2i) -> vec3f {
   let p1 = floor(at - 0.5) + 0.5;
   let f = at - p1;
   let w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
@@ -78,25 +78,28 @@ fn sharp(at: vec2f) -> vec3f {
   let w2 = f * (0.5 + f * (2.0 - 1.5 * f));
   let w3 = f * f * (-0.5 + 0.5 * f);
   let w12 = w1 + w2;
-  let t0 = (p1 - 1.0) / a.res;
-  let t3 = (p1 + 2.0) / a.res;
-  let t12 = (p1 + w2 / w12) / a.res;
-  let r = textureSampleLevel(prevTex, lin, vec2f(t0.x,  t0.y),  0.0).rgb * (w0.x  * w0.y)
-        + textureSampleLevel(prevTex, lin, vec2f(t12.x, t0.y),  0.0).rgb * (w12.x * w0.y)
-        + textureSampleLevel(prevTex, lin, vec2f(t3.x,  t0.y),  0.0).rgb * (w3.x  * w0.y)
-        + textureSampleLevel(prevTex, lin, vec2f(t0.x,  t12.y), 0.0).rgb * (w0.x  * w12.y)
-        + textureSampleLevel(prevTex, lin, vec2f(t12.x, t12.y), 0.0).rgb * (w12.x * w12.y)
-        + textureSampleLevel(prevTex, lin, vec2f(t3.x,  t12.y), 0.0).rgb * (w3.x  * w12.y)
-        + textureSampleLevel(prevTex, lin, vec2f(t0.x,  t3.y),  0.0).rgb * (w0.x  * w3.y)
-        + textureSampleLevel(prevTex, lin, vec2f(t12.x, t3.y),  0.0).rgb * (w12.x * w3.y)
-        + textureSampleLevel(prevTex, lin, vec2f(t3.x,  t3.y),  0.0).rgb * (w3.x  * w3.y);
+  let t0 = clamp(p1 - 1.0, vec2f(0.5), vec2f(last) + 0.5) / a.res;
+  let t3 = clamp(p1 + 2.0, vec2f(0.5), vec2f(last) + 0.5) / a.res;
+  let t12 = clamp(p1 + w2 / w12, vec2f(0.5), vec2f(last) + 0.5) / a.res;
+  let r = textureSampleLevel(tex, lin, vec2f(t0.x,  t0.y),  0.0).rgb * (w0.x  * w0.y)
+        + textureSampleLevel(tex, lin, vec2f(t12.x, t0.y),  0.0).rgb * (w12.x * w0.y)
+        + textureSampleLevel(tex, lin, vec2f(t3.x,  t0.y),  0.0).rgb * (w3.x  * w0.y)
+        + textureSampleLevel(tex, lin, vec2f(t0.x,  t12.y), 0.0).rgb * (w0.x  * w12.y)
+        + textureSampleLevel(tex, lin, vec2f(t12.x, t12.y), 0.0).rgb * (w12.x * w12.y)
+        + textureSampleLevel(tex, lin, vec2f(t3.x,  t12.y), 0.0).rgb * (w3.x  * w12.y)
+        + textureSampleLevel(tex, lin, vec2f(t0.x,  t3.y),  0.0).rgb * (w0.x  * w3.y)
+        + textureSampleLevel(tex, lin, vec2f(t12.x, t3.y),  0.0).rgb * (w12.x * w3.y)
+        + textureSampleLevel(tex, lin, vec2f(t3.x,  t3.y),  0.0).rgb * (w3.x  * w3.y);
   let i = vec2i(p1);
-  let top = vec2i(textureDimensions(prevTex)) - 1;
-  let c0 = textureLoad(prevTex, clamp(i, vec2i(0), top), 0).rgb;
-  let c1 = textureLoad(prevTex, clamp(i + vec2i(1, 0), vec2i(0), top), 0).rgb;
-  let c2 = textureLoad(prevTex, clamp(i + vec2i(0, 1), vec2i(0), top), 0).rgb;
-  let c3 = textureLoad(prevTex, clamp(i + vec2i(1, 1), vec2i(0), top), 0).rgb;
+  let c0 = textureLoad(tex, clamp(i, vec2i(0), last), 0).rgb;
+  let c1 = textureLoad(tex, clamp(i + vec2i(1, 0), vec2i(0), last), 0).rgb;
+  let c2 = textureLoad(tex, clamp(i + vec2i(0, 1), vec2i(0), last), 0).rgb;
+  let c3 = textureLoad(tex, clamp(i + vec2i(1, 1), vec2i(0), last), 0).rgb;
   return clamp(r, min(min(c0, c1), min(c2, c3)), max(max(c0, c1), max(c2, c3)));
+}
+
+fn sharp(at: vec2f) -> vec3f {
+  return sharpImage(at, prevTex, vec2i(textureDimensions(prevTex)) - 1);
 }
 
 @fragment
@@ -115,16 +118,22 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   var near = 1e9;
   var far = 0.0;
   var misses = 0.0;
+  // How much of the local colour variation is an edge or a slope, rather than uncorrelated
+  // Monte Carlo noise. These first moments reuse the moving antialiaser's nine current texels.
+  let roughFloor = a.floor.w > 0.0;
+  var gradX = vec3f(0.0);
+  var gradY = vec3f(0.0);
   for (var y = -1; y <= 1; y++) {
     for (var x = -1; x <= 1; x++) {
       let q = textureLoad(curTex, clamp(c + vec2i(x, y), vec2i(0), top), 0);
       m1 += q.rgb;
       m2 += q.rgb * q.rgb;
+      if (roughFloor) { gradX += f32(x)*q.rgb; gradY += f32(y)*q.rgb; }
       if (q.a > 0.0) { near = min(near, q.a); far = max(far, q.a); } else { misses += 1.0; }
     }
   }
   m1 /= 9.0;
-  let dev = sqrt(max(m2 / 9.0 - m1 * m1, vec3f(0.0)));
+  var dev = sqrt(max(m2 / 9.0 - m1 * m1, vec3f(0.0)));
   // An outline: glass next to background, or next to glass much further away. It moves with whatever is
   // in front, so it is followed using the nearest distance around it, whichever side this pixel's own ray
   // happened to land on. That keeps outlines smooth instead of flipping between two sources.
@@ -150,6 +159,7 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     // (if it was behind the camera then, there is no old picture of it: a place off the screen says so)
     at = select(vec2f(-1.0), ((v.xy / (-v.z * a.cam_p.y) - a.shift_p) * a.res.y + a.res) * 0.5, v.z < -1e-4);
   }
+  var floorPatch = false;
   var onFloor = false;               // this pixel shows the floor
   var nearest = 0.0;                 // and the nearest the floor comes within the pixel
   if (a.floor.x > 0.5 && cur.a > 0.0) {
@@ -164,26 +174,33 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     for (var k = 0; k < 4; k++) {
       let corner = fc + vec2f(f32(k & 1), f32(k >> 1)) - 0.5;
       let uvk = (2.0 * corner - a.res) / a.res.y + a.shift;
-      let t = drop / dot(n, normalize(vec3f(uvk * a.cam.y, -1.0)));
+      let dn = dot(n, normalize(vec3f(uvk * a.cam.y, -1.0)));
+      let t = select(-1.0, drop / dn, dn < -1e-5);       // (a level or rising ray meets no floor)
       if (t > 0.0) { lo = min(lo, t); hi = max(hi, t); } else { hi = 1e9; }
     }
     // (at the outline of glass that stands in front of the floor the glass is followed, as at any outline)
     if (cur.a > lo * 0.996 - 0.002 && cur.a < hi * 1.004 + 0.002 && !(edge && d < lo * 0.95)) {
       onFloor = true;
       nearest = lo;
+      // The three-by-three patch must contain only this plane. The distances at one pixel's
+      // corners give its local gradient even close to the horizon and under a tilted camera.
+      let margin = 2.0 * (hi - lo) + 0.004 + 0.002 * cur.a;
+      floorPatch = misses < 0.5 && near >= lo - margin && far <= hi + margin;
       at = fc;
       expect = cur.a;
       // the spot of the floor under the middle of the pixel, and where the camera saw it at the previous
       // frame (the floor stands in the room: it moves in the picture only when the camera does)
       let uv = (2.0 * fc - a.res) / a.res.y + a.shift;
       let dir = normalize(vec3f(uv * a.cam.y, -1.0));
-      let tf = drop / dot(n, dir);
+      let dn = dot(n, dir);
+      let tf = select(-1.0, drop / dn, dn < -1e-5);
       if (tf > 0.0) {
         let p = eye + dir * tf;
         var q = p.x * a.room0.xyz + p.y * a.room1.xyz + p.z * a.room2.xyz;    // what the camera sees -> the room
         q.y = a.floor.z;                                                      // the same spot, at the height the floor had then
         let v = vec3f(dot(a.roomp0.xyz, q), dot(a.roomp1.xyz, q), dot(a.roomp2.xyz, q)) - vec3f(a.eye.zw, a.cam_p.x);
         at = select(vec2f(-1.0), ((v.xy / (-v.z * a.cam_p.y) - a.shift_p) * a.res.y + a.res) * 0.5, v.z < -1e-4);
+        if (roughFloor) { nearest = length(v); }
       }
     }
   }
@@ -232,8 +249,43 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   // noisy) the limit is wide and the accumulated picture survives. Unfollowed pixels get the tighter
   // multiple of one.
   let k = select(1.0, a.spread, same);
+  var present = cur.rgb;
+  var floorResponse = 0.0;
+  if (roughFloor && onFloor && floorPatch) {
+    // A linear slope accounts for |gradient|^2 / 6 of the nine samples' summed variance.
+    // Average more where the neighbours disagree randomly and leave coherent reflection edges crisp.
+    let variation = 54.0 * dot(dev, dev);
+    let coherence = (dot(gradX, gradX) + dot(gradY, gradY)) / max(variation, 1e-12);
+    let strength = 0.90 * smoothstep(0.0, 0.045, a.floor.w) * (1.0 - smoothstep(0.28, 0.75, coherence));
+    present = mix(cur.rgb, m1, strength);
+    if (a.envp2.w > 0.5) {
+      // Geometry may move its reflection across a stationary patch of floor.
+      // Compare the previous light to the mean and sampling error of this patch.
+      let noise = max(length(dev)/3.0, 0.002 + 0.004*length(m1));
+      floorResponse = smoothstep(1.5, 3.5, length(hist-m1)/noise);
+    }
+  }
+  if (same && !(roughFloor && onFloor) && a.envp2.w < 0.5) {
+    // Sub-pixel glints hit and miss on alternating Halton-2 frames; while surface and light motion are
+    // slow, decay the box towards the new neighbourhood over a couple of frames instead of wiping the
+    // running highlight to zero on every miss frame.
+    let rot = length(a.obj0.xyz - a.objp0.xyz) + length(a.obj1.xyz - a.objp1.xyz) + length(a.obj2.xyz - a.objp2.xyz)
+            + length(a.env0.xyz - a.envp0.xyz) + length(a.env1.xyz - a.envp1.xyz) + length(a.env2.xyz - a.envp2.xyz);
+    let motion = max(length(at - fc), rot * 0.06 * a.res.y);
+    let hold = 0.60 * (1.0 - smoothstep(0.0, 3.5, motion));
+    let lo = min(m1 - dev * k, mix(m1 - dev * k, hist, hold));
+    let hi = max(m1 + dev * k, mix(m1 + dev * k, hist, hold));
+    m1 = 0.5 * (lo + hi);
+    dev = (hi - lo) / max(2.0 * k, 1e-4);
+  }
   hist = clamp(hist, m1 - dev * k, m1 + dev * k);
   var out = vec4f(mix(hist, cur.rgb, a.w), cur.a);
+  if (roughFloor && onFloor) {
+    out = vec4f(select(present, out.rgb + a.w * (present - cur.rgb), same), cur.a);
+    if (same && floorResponse > 0.0) {
+      out = vec4f(mix(out.rgb, mix(hist, present, max(a.w,0.8)), floorResponse), cur.a);
+    }
+  }
   // debug view: red = the old picture could not be followed, blue = outline
   if (a.debug > 0.5) {
     if (!same) { out = vec4f(1.0, 0.0, 0.0, out.a); }

@@ -39,10 +39,12 @@ fn F(v: vec3i) -> f32 {
   return textureLoad(fld, clamp(v, vec3i(0), vec3i(n)), 0).r + r.pre;
 }
 fn pack(v: vec3i) -> u32 {
-  return u32(v.x) | (u32(v.y) << 10u) | (u32(v.z) << 20u);
+  return u32(v.x) + r.res * (u32(v.y) + r.res * u32(v.z));
 }
 fn unpack(s: u32) -> vec3i {
-  return vec3i(i32(s & 1023u), i32((s >> 10u) & 1023u), i32((s >> 20u) & 1023u));
+  let res = max(r.res, 1u);
+  let q = s / res;
+  return vec3i(i32(s % res), i32(q % res), i32(q / res));
 }
 fn pos(v: vec3i) -> vec3f {
   return ((vec3f(v) + 0.5) / f32(r.res) * 2.0 - 1.0) * r.hb;
@@ -62,7 +64,7 @@ fn cs_seed(@builtin(global_invocation_id) gid: vec3u) {
   let f = F(v);
   var s = NONE;
   // (a voxel whose value is this far from zero cannot have a neighbour across it)
-  if (abs(f) <= 4.0 * r.slope * r.h) {
+  if (abs(f) <= 4.0 * abs(r.slope) * r.h) {
     let inside = f < 0.0;
     let ds = array<vec3i, 6>(vec3i(1, 0, 0), vec3i(-1, 0, 0), vec3i(0, 1, 0), vec3i(0, -1, 0), vec3i(0, 0, 1), vec3i(0, 0, -1));
     for (var k = 0; k < 6; k++) {
@@ -81,7 +83,7 @@ fn cs_jfa(@builtin(global_invocation_id) gid: vec3u) {
   if (any(v >= vec3i(n))) { return; }
   // outside the band nothing is wanted of the seeds
   var best = textureLoad(seeds, v).x;
-  if (abs(F(v)) > r.reach * r.slope) {
+  if (abs(F(v)) > r.reach * abs(r.slope)) {
     textureStore(seedsOut, v, vec4u(best, 0u, 0u, 0u));
     return;
   }
@@ -113,7 +115,7 @@ fn cs_resolve(@builtin(global_invocation_id) gid: vec3u) {
   let f = F(v);
   var d = 1e9;
   let s = textureLoad(seeds, v).x;
-  if (abs(f) <= r.reach * r.slope && s != NONE) {
+  if (abs(f) <= r.reach * abs(r.slope) && s != NONE) {
     // The nearest seed and the seeds about it (every voxel of the surface within one of it): for each,
     // the point of the surface it stands for (one Newton step from it) and the surface's direction
     // there. The distance to each is to its tangent plane while the voxel lies over that point, and
@@ -145,10 +147,83 @@ fn cs_resolve(@builtin(global_invocation_id) gid: vec3u) {
   }
   if (d > 1e8) {
     // no seed found: as far as the field's slope allows (never more than the true distance)
-    d = abs(f) / r.slope;
+    d = abs(f) / abs(r.slope);
   }
+  // (a negative slope: the field read is itself never more than the distance, and is kept where it is
+  // less than the distance to the surface the voxels found: there a thin piece lies between them)
+  if (r.slope < 0.0) { d = min(d, abs(f)); }
   let out = select(d, -d, f < 0.0) + r.post;
   textureStore(outv, v, vec4f(out, 0.0, 0.0, 0.0));
+}
+
+
+// A coarse cell covers eight fine samples per axis. Include its three positive
+// faces, so an interface exactly between two otherwise uniform cells is counted.
+var<workgroup> cellSigns: atomic<u32>;
+fn warpSign(p: vec3i) -> u32 {
+  let f = F(p);
+  return select(0u, 1u, f >= 0.0) | select(0u, 2u, f <= 0.0);
+}
+@compute @workgroup_size(8, 8, 4)
+fn cs_warp_cells(@builtin(workgroup_id) cell: vec3u, @builtin(local_invocation_id) local: vec3u,
+                 @builtin(local_invocation_index) index: u32) {
+  if (index == 0u) { atomicStore(&cellSigns, 0u); }
+  workgroupBarrier();
+  let p = vec3i(cell * 8u + local);
+  var signs = warpSign(p) | warpSign(p + vec3i(0, 0, 4));
+  if (local.x == 7u) {
+    signs |= warpSign(p + vec3i(1, 0, 0)) | warpSign(p + vec3i(1, 0, 4));
+  }
+  if (local.y == 7u) {
+    signs |= warpSign(p + vec3i(0, 1, 0)) | warpSign(p + vec3i(0, 1, 4));
+  }
+  if (local.z == 0u) { signs |= warpSign(p + vec3i(0, 0, 8)); }
+  atomicOr(&cellSigns, signs);
+  workgroupBarrier();
+  if (index == 0u) {
+    textureStore(seedsOut, vec3i(cell), vec4u(select(0x10000000u, 0u, atomicLoad(&cellSigns) == 3u)));
+  }
+}
+
+@compute @workgroup_size(8, 8, 4)
+fn cs_warp_axis(@builtin(global_invocation_id) id: vec3u) {
+  let count = (r.res + 7u) / 8u;
+  if (any(id >= vec3u(count))) { return; }
+  let cell = vec3i(id);
+  var q = cell;
+  let axis = u32(r.step);
+  var best = textureLoad(seeds, cell).x;
+  for (var i = 0; i < i32(count); i++) {
+    let delta = i - cell[axis];
+    let d2 = u32(delta * delta);
+    if (d2 < best) {
+      q[axis] = i;
+      best = min(best, d2 + textureLoad(seeds, q).x);
+    }
+  }
+  textureStore(seedsOut, cell, vec4u(best));
+}
+
+@compute @workgroup_size(8, 8, 4)
+fn cs_warp_distance(@builtin(global_invocation_id) id: vec3u) {
+  if (any(id >= vec3u(r.res))) { return; }
+  let voxel = vec3i(id);
+  let cell = voxel / 8;
+  let cellDistance = sqrt(f32(textureLoad(seeds, cell).x)) * 8.0;
+  let toCentre = length(vec3f(voxel - cell * 8) - 3.5);
+  // From the nearest mixed cell centre subtract the distance to this cell's
+  // centre, and the radius enclosing its fine samples and neighbouring face.
+  let lower = max(0.0, cellDistance - toCentre - 7.8) * r.h;
+  let f = F(voxel);
+  let cellRadius = 13.86 * r.h;
+  var magnitude = lower;
+  if (lower < cellRadius) {
+    // The local field divided by its slope follows the zero crossing as closely
+    // as the fine grid. Use the coarse-cell upper bound at a stationary point.
+    let local = abs(f) / max(length(grad(voxel)), 1e-9);
+    magnitude = clamp(local, lower, lower + cellRadius);
+  }
+  textureStore(outv, voxel, vec4f(select(magnitude, -magnitude, f < 0.0), 0.0, 0.0, 0.0));
 }
 
 // Rounding: the distance is smoothed along one axis (step: 0 x, 1 y, 2 z) with a bump-shaped weight
@@ -161,7 +236,7 @@ fn cs_blur(@builtin(global_invocation_id) gid: vec3u) {
   let v = vec3i(gid);
   if (any(v >= vec3i(n))) { return; }
   let f = F(v);
-  if (abs(f) > r.reach * r.slope) {
+  if (abs(f) > r.reach * abs(r.slope)) {
     textureStore(outv, v, vec4f(f, 0.0, 0.0, 0.0));
     return;
   }

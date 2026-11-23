@@ -188,7 +188,7 @@ fn every_new_preset_builds_at_its_defaults_and_at_each_sliders_two_ends() {
                 s.shape_mut().vals = vals.clone();
                 let job = s.shape_job(Detail::Full, Some(96)).unwrap_or_else(|e| panic!("{who} at {vals:?}: {e}"));
                 match &job.shape {
-                    ShapeJob::Field { uniforms } => {
+                    ShapeJob::Field { uniforms, .. } => {
                         assert!(uniforms.iter().all(|v| v.is_finite()), "{who} at {vals:?}");
                         for (i, v) in vals.iter().enumerate() {
                             assert_eq!(uniforms[4 + i], *v as f32, "{who}: slider {i} is not where the shader reads it");

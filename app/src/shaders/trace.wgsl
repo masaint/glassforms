@@ -34,6 +34,7 @@ struct U {
   pad0: i32,
   pad1: i32,
   pad2: i32,
+  medium: vec4i,           // raw identity, signed interface priority, two reserved zero lanes
 }
 
 @group(0) @binding(0) var<uniform> u: U;
@@ -104,10 +105,50 @@ fn mapN(p: vec3f) -> f32 {
 fn mapW(p: vec3f) -> f32 { return map(toObj(p)); }
 fn mapNW(p: vec3f) -> f32 { return mapN(toObj(p)); }
 
-// Rays are marched through map() and then settled onto mapN()'s surface, and normals come from mapN().
+fn volumeSlopePlane(a: vec3f, b: vec3f, g: vec3f, axis: u32) -> f32 {
+  if (axis == 0u) {
+    return mix(mix(vol(vec3f(a.x, a.y, a.z)), vol(vec3f(a.x, b.y, a.z)), g.y),
+               mix(vol(vec3f(a.x, a.y, b.z)), vol(vec3f(a.x, b.y, b.z)), g.y), g.z);
+  }
+  if (axis == 1u) {
+    return mix(mix(vol(vec3f(a.x, a.y, a.z)), vol(vec3f(b.x, a.y, a.z)), g.x),
+               mix(vol(vec3f(a.x, a.y, b.z)), vol(vec3f(b.x, a.y, b.z)), g.x), g.z);
+  }
+  return mix(mix(vol(vec3f(a.x, a.y, a.z)), vol(vec3f(b.x, a.y, a.z)), g.x),
+             mix(vol(vec3f(a.x, b.y, a.z)), vol(vec3f(b.x, b.y, a.z)), g.x), g.y);
+}
+
+// Rays are marched through map() and then settled onto mapN()'s surface, and normals come from the
+// analytic derivative of the cubic B-spline (24 trilinear lookups, continuous across voxel boundaries).
+fn nrmVolume(p: vec3f) -> vec3f {
+  {{PROFILE_MAPN}}{{PROFILE_MAPN}}{{PROFILE_MAPN}}let res = u.vres;
+  let t = (toObj(p) / (2.0 * HB) + 0.5) * res - 0.5;
+  let i = floor(t);
+  let f = t - i;
+  let f2 = f * f;
+  let f3 = f2 * f;
+  let w0 = (1.0 - 3.0 * f + 3.0 * f2 - f3) / 6.0;
+  let w1 = (4.0 - 6.0 * f2 + 3.0 * f3) / 6.0;
+  let w3 = f3 / 6.0;
+  let g0 = w0 + w1;
+  let g1 = 1.0 - g0;
+  let a = (i - 0.5 + w1 / g0) / res;
+  let b = (i + 1.5 + w3 / g1) / res;
+  let d0 = -0.5 * (1.0 - f) * (1.0 - f);
+  let d1 = 1.5 * f2 - 2.0 * f;
+  let d3 = 0.5 * f2;
+  let size = -(d0 + d1);
+  let lo = (i - 0.5 - d1 / size) / res;
+  let hi = (i + 1.5 + d3 / size) / res;
+  let dx = volumeSlopePlane(vec3f(hi.x, a.yz), b, g1, 0u) - volumeSlopePlane(vec3f(lo.x, a.yz), b, g1, 0u);
+  let dy = volumeSlopePlane(vec3f(a.x, hi.y, a.z), b, g1, 1u) - volumeSlopePlane(vec3f(a.x, lo.y, a.z), b, g1, 1u);
+  let dz = volumeSlopePlane(vec3f(a.xy, hi.z), b, g1, 2u) - volumeSlopePlane(vec3f(a.xy, lo.z), b, g1, 2u);
+  let local = size * vec3f(dx, dy, dz);
+  if (dot(local, local) < 1e-30) { return vec3f(0.0, 1.0, 0.0); }
+  return normalize(local.x * vec3f(u.obj0.x, u.obj1.x, u.obj2.x) + local.y * vec3f(u.obj0.y, u.obj1.y, u.obj2.y) + local.z * vec3f(u.obj0.z, u.obj1.z, u.obj2.z));
+}
 fn nrm(p: vec3f) -> vec3f {
-  let e = vec2f(1.0, -1.0) * (2.0 * HB / u.vres);
-  return normalize(e.xyy * mapNW(p + e.xyy) + e.yyx * mapNW(p + e.yyx) + e.yxy * mapNW(p + e.yxy) + e.xxx * mapNW(p + e.xxx));
+  return nrmVolume(p);
 }
 
 // CIE 1931 colour matching functions (Wyman, Sloan & Shirley 2013 fit) -> linear sRGB
@@ -130,21 +171,35 @@ fn specW(l: f32) -> vec3f {
 // Cauchy dispersion, normalised so that iorAt(400) - iorAt(700) = disp and iorAt(550) = ior
 fn iorAt(lam: f32) -> f32 { return u.ior + u.disp * (1.0e6 / (lam * lam) - 3.3058) / 4.2092; }
 
-// unpolarised Fresnel reflectance going from index n1 into n2
-fn fresnel(cosi: f32, n1: f32, n2: f32) -> f32 {
-  let sint = n1 / n2 * sqrt(max(0.0, 1.0 - cosi * cosi));
-  if (sint >= 1.0) { return 1.0; }
-  let cost = sqrt(max(0.0, 1.0 - sint * sint));
-  let rs = (n1 * cosi - n2 * cost) / (n1 * cosi + n2 * cost);
-  let rp = (n2 * cosi - n1 * cost) / (n2 * cosi + n1 * cost);
-  return 0.5 * (rs * rs + rp * rp);
+{{DIELECTRIC_FRESNEL}}
+
+fn airMedium() -> PbrMedium { return PbrMedium(1.0, 0.0, 0u, 0); }
+fn resolvedSceneMedium(ior: f32) -> PbrMedium {
+  return PbrMedium(ior, 0.0, bitcast<u32>(u.medium.x), u.medium.y);
+}
+fn faceIncident(normal: vec3f, wo: vec3f) -> vec3f {
+  let c = dot(wo, normal);
+  if (c >= 0.0) { return normal; }
+  let proj = normal - wo * c;
+  let len2 = dot(proj, proj);
+  if (len2 > 1e-12) { return normalize(proj + wo * 1e-4); }
+  return wo;
+}
+fn traceDielectricHit(normal: vec3f, incident: PbrMedium, destination: PbrMedium) -> PbrSurfaceHit {
+  let seed = select(vec3f(1.0, 0.0, 0.0), vec3f(0.0, 1.0, 0.0), abs(normal.y) < 0.9);
+  let tangent = normalize(cross(seed, normal));
+  return PbrSurfaceHit(
+    PbrFrame(tangent, cross(normal, tangent), normal), incident, destination, 550.0);
 }
 
 fn marchIn(ro: vec3f, rd: vec3f) -> f32 {
+  let px = 2.0 * u.tan_fov / u.res.y;
   var t = 0.0;
-  for (var i = 0; i < STEPS_IN; i++) {
-    let d = -mapW(ro + rd * t);
-    if (d < 0.0008) { break; }
+  for (var i = 0; i < 2 * STEPS_IN; i++) {
+    let p = ro + rd * t;
+    let d = -mapW(p);
+    let eps = clamp(0.25 * px * max(u.dist - p.z, 0.1), 0.00008, 0.0008);
+    if (d < eps) { break; }
     t += d * STEP_SCALE;
     if (t > 2.5 * BOUND) { break; }
   }
@@ -153,11 +208,41 @@ fn marchIn(ro: vec3f, rd: vec3f) -> f32 {
   return t;
 }
 
+fn marchBeyond(ro: vec3f, rd: vec3f, tFar: f32, px: f32, tOut: ptr<function, f32>) -> bool {
+  if (tFar < 0.0) { return false; }
+  let vox = 2.0 * HB / u.vres;
+  var t = 0.0;
+  var bestD = 1e9;
+  var bestT = 0.0;
+  for (var i = 0; i < STEPS_OUT; i++) {
+    let pos = ro + rd * t;
+    let d = mapW(pos);
+    if (d < bestD) { bestD = d; bestT = t; }
+    let eps = clamp(0.25 * px * max(u.dist - pos.z, 0.1), 0.00008, 0.0008);
+    if (d < eps) { *tOut = t; return true; }
+    t += d * STEP_SCALE;
+    if (t > tFar) { break; }
+  }
+  if (bestD < 0.75 * vox) {
+    let hitEps = clamp(0.25 * px * max(u.dist - (ro.z + rd.z * bestT), 0.1), 0.00008, 0.0008);
+    var rt = max(bestT - 0.75 * vox, 0.0);
+    let rtEnd = min(bestT + 1.5 * vox, tFar);
+    for (var ri = 0u; ri < 6u + u32(max(u.nb, 0) == 999); ri++) {
+      let rd0 = mapNW(ro + rd * rt);
+      if (rd0 < hitEps) { *tOut = max(rt + rd0, 0.0); return true; }
+      rt += max(rd0, 0.15 * vox);
+      if (rt > rtEnd) { break; }
+    }
+  }
+  return false;
+}
+
 // A ray has just left the glass at ro, heading rd. If it meets the glass again, carry it on:
 // add the reflection off that next surface and follow the refraction straight through it, for up
 // to LAYERS further pieces. Without this, anything behind a piece of glass would be invisible
 // through it. Returns the light arriving back along the ray.
 fn beyond(ro_in: vec3f, rd_in: vec3f, ior: f32) -> vec3f {
+  let px = 2.0 * u.tan_fov / u.res.y;
   var ro = ro_in;
   var rd = rd_in;
   var col = vec3f(0.0);
@@ -168,34 +253,31 @@ fn beyond(ro_in: vec3f, rd_in: vec3f, ior: f32) -> vec3f {
     if (h <= 0.0) { break; }
     let tFar = -b + sqrt(h);
     var t = 0.0;
-    var hit = false;
-    for (var i = 0; i < STEPS_OUT; i++) {
-      let d = mapW(ro + rd * t);
-      if (d < 0.0008) { hit = true; break; }
-      t += d * STEP_SCALE;
-      if (t > tFar) { break; }
-    }
+    let hit = marchBeyond(ro, rd, tFar, px, &t);
     if (!hit) { break; }
     t += mapNW(ro + rd * t);
+    t += mapNW(ro + rd * t);
     let p = ro + rd * t;
-    let n = nrm(p);
-    let ci = clamp(-dot(rd, n), 0.0, 1.0);
-    let F = fresnel(ci, 1.0, ior);
-    col += thr * F * env(reflect(rd, n));
-    let d2 = refract(rd, n, 1.0 / ior);
+    let n = faceIncident(nrm(p), -rd);
+    let entry = pbr_dielectric_split(traceDielectricHit(n, airMedium(), resolvedSceneMedium(ior)), -rd);
+    let F = entry.reflectance;
+    col += thr * F * env(entry.reflected);
+    let d2 = entry.transmitted;
     let q0 = p - n * 0.004;
     let s = marchIn(q0, d2);
     let q = q0 + d2 * s;
     var m = nrm(q);
     var co = dot(d2, m);
     if (co < 0.0) { m = -m; co = -co; }
-    let F2 = fresnel(co, ior, 1.0);
+    m = -faceIncident(-m, -d2);
+    let exit = pbr_dielectric_split(traceDielectricHit(-m, resolvedSceneMedium(ior), airMedium()), -d2);
+    let F2 = exit.reflectance;
     thr *= (1.0 - F) * exp(-u.absorb.xyz * s);
     if (F2 > 0.999) {                       // trapped by total reflection: take the bounce and stop there
-      return col + thr * env(reflect(d2, m));
+      return col + thr * env(exit.reflected);
     }
     thr *= 1.0 - F2;
-    rd = refract(d2, -m, ior);
+    rd = exit.transmitted;
     ro = q + m * 0.006;
   }
   return col + thr * env(rd);
@@ -204,10 +286,10 @@ fn beyond(ro_in: vec3f, rd_in: vec3f, ior: f32) -> vec3f {
 // W wavelengths, the i-th at (i + xi) / W of the way through the spectrum
 fn shade(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32) -> vec3f {
   let p = ro + rd * t;
-  let n = nrm(p);
-  let cosi = clamp(-dot(rd, n), 0.0, 1.0);
-  let envR = env(reflect(rd, n));
-  let F0 = fresnel(cosi, 1.0, u.ior);
+  let n = faceIncident(nrm(p), -rd);
+  let entry = pbr_dielectric_split(traceDielectricHit(n, airMedium(), resolvedSceneMedium(u.ior)), -rd);
+  let envR = env(entry.reflected);
+  let F0 = entry.reflectance;
 
   // With no dispersion every wavelength bends alike: all of them take the same path and bring back the same
   // light, so one path is followed and stands for them all (the same picture for a third of the work).
@@ -224,7 +306,8 @@ fn shade(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32) -> vec3f {
     let Fl = F0;
     racc += w * Fl;
 
-    var dir = refract(rd, n, 1.0 / ior);
+    let entry = pbr_dielectric_split(traceDielectricHit(n, airMedium(), resolvedSceneMedium(ior)), -rd);
+    var dir = entry.transmitted;
     var pos = p - n * 0.004;
     var thr = 1.0 - Fl;
     var att = vec3f(1.0);
@@ -237,9 +320,11 @@ fn shade(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32) -> vec3f {
       att *= exp(-u.absorb.xyz * s);
       var ci = dot(dir, m);
       if (ci < 0.0) { m = -m; ci = -ci; }
-      let F = fresnel(ci, ior, 1.0);
+      m = -faceIncident(-m, -dir);
+      let exit = pbr_dielectric_split(traceDielectricHit(-m, resolvedSceneMedium(ior), airMedium()), -dir);
+      let F = exit.reflectance;
       if (F < 0.999) {
-        let od = refract(dir, -m, ior);
+        let od = exit.transmitted;
         if (LAYERS > 0) {
           L += thr * (1.0 - F) * att * beyond(q + m * 0.006, od, ior);
         } else {
@@ -248,7 +333,7 @@ fn shade(ro: vec3f, rd: vec3f, t: f32, xi: f32, W: i32) -> vec3f {
       }
       thr *= F;
       if (thr < 0.02) { break; }
-      dir = reflect(dir, m);
+      dir = exit.reflected;
       pos = q - m * 0.004;
     }
     acc += w * L;
@@ -325,7 +410,7 @@ fn sampleAt(fc: vec2f, xi: f32, W: i32, lens: vec2f) -> vec4f {
 }
 
 // a value 0..1 that differs well between neighbouring pixels (interleaved gradient noise)
-fn ign(p: vec2f) -> f32 { return fract(52.9829189 * fract(dot(p, vec2f(0.06711056, 0.00583715)))); }
+fn ign(p: vec2f) -> f32 { return pbr_ign(p); }   // pbr/hash.wgsl
 
 // A point of the lens opening from two numbers in 0..1, spread evenly over its area. Round, or a regular
 // polygon like the blades of a real iris (which is what gives out-of-focus highlights their shape).

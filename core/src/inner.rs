@@ -14,7 +14,7 @@ use crate::settings::Settings;
 // ---- which parts are in use ------------------------------------------------------------------------------
 
 /// Which of the things inside the body are in use: the tracer is built for exactly these.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Parts {
     /// the tint changes through the body
     pub grad: bool,
@@ -398,11 +398,6 @@ pub fn gap_reflectance(cosi: f64, lam: f64, gap: f64, n: f64) -> f64 {
         g * k / (1.0 + g * k)
     };
     0.5 * (one(n * c) + one(c / n))
-}
-
-/// The same as a colour (linear RGB, white = 1), for a gap that is the same across the whole pixel.
-pub fn gap_colour(cosi: f64, gap: f64, n: f64) -> [f64; 3] {
-    crate::material::colour_of(|l| gap_reflectance(cosi, l, gap, n))
 }
 
 /// The wavelength (nm) a grain of opal sends back when light meets its layers at cosine `cosa` to their

@@ -79,9 +79,8 @@ fn layers_are_added_selected_and_removed() {
     assert_eq!((s.one_body(0b101), s.one_body(0b011), s.one_body(0b111)), (true, false, false));
     s.set_pair_op(0b011, Op::Join);
     s.set_pair_op(0b110, Op::Join);
-    // a fourth, and no fifth
+    // a fourth (how many more there may be: layer_limit.rs)
     assert_eq!(s.add_layer(), Some(3));
-    assert_eq!(s.add_layer(), None);
     assert_eq!(s.stack.combos().len(), 11);
     // two layers with the same shape are told apart by their numbers
     let (f, p) = (fam(&s, "attractors"), preset(&s, "attractors", "thomas"));
@@ -120,9 +119,9 @@ fn every_layer_placement_and_combination_has_its_knobs() {
     assert_eq!(keys, ["L2.x", "L2.y", "L2.z", "L2.rx", "L2.ry", "L2.rz", "L2.size"]);
     let k = &s.place_knobs(1)[6];
     s.user_set(k, 0.5, false);
-    assert_eq!((s.stack.layers[1].place.size, s.get(&k.r), s.want), (0.5, 0.5, Some(Detail::Full)));
+    assert_eq!((s.stack.layers[1].place.size, s.get(&k.r), s.wanted()), (0.5, 0.5, Some(Detail::Full)));
     // a pair's sliders follow its operation
-    let ids = |s: &State, m: u8| s.combo_knobs(m).iter().map(|k| k.key.clone()).collect::<Vec<_>>();
+    let ids = |s: &State, m: gf_core::layers::Mask| s.combo_knobs(m).iter().map(|k| k.key.clone()).collect::<Vec<_>>();
     assert_eq!(ids(&s, 0b011), ["J12.radius"]);
     s.set_pair_op(0b011, Op::BCutsA);
     assert_eq!(ids(&s, 0b011), ["J12.radius", "J12.gap"]);
@@ -162,11 +161,11 @@ fn placements_and_options_animate_and_loop() {
     assert_eq!(labels, ["Trefoil: turn y °", "Thomas + Gyroid: seam radius"]);
     // playing moves both, and asks for the volume to be made again
     s.set_playing(true);
-    s.want = None;
+    s.drop_request();
     let (r0, t0) = (s.stack.pair(0b011).radius, s.stack.layers[2].place.rot[1]);
     s.tick(1.0);
     assert!(s.stack.pair(0b011).radius != r0 && s.stack.layers[2].place.rot[1] != t0);
-    assert_eq!(s.want, Some(Detail::Anim));
+    assert_eq!(s.wanted(), Some(Detail::Anim));
     // after one whole loop everything is where it was
     s.p.lock = 1.0;
     let plan = s.loop_plan();

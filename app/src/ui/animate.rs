@@ -17,10 +17,10 @@ pub fn scrub(st: &mut State, seconds: f64) {
     // stay in the loop the clock has reached, so that nothing playing freely (not tied to the loop) jumps
     st.clock = (st.clock / l).floor() * l + seconds.clamp(0.0, l);
     if !st.playing {
-        let waiting = st.want.take();
+        let waiting = st.take_request();
         st.apply_clock(false);
         // with no slider of the shape travelling, the shape has not changed: nothing to build
-        if !st.shape_moving() { st.want = waiting; }
+        if !st.shape_moving() { st.restore_request(waiting); }
     }
 }
 

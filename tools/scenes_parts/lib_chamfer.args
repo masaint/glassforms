@@ -1,0 +1,13 @@
+scene=studio
+preset=sphere
+material=glass
+layer=studio:sphere
+J12.op=join
+J12.profile=bevel
+J12.radius=0.4
+L1.x=-0.5
+L2.x=0.5
+L1.size=0.7
+L2.size=0.7
+dist=5.0
+rot=0,0,0

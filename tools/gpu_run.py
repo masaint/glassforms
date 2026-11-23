@@ -42,7 +42,7 @@ def tickets():
     out = []
     now = time.time()
     for n in sorted(os.listdir(QUEUE)):
-        if not n.startswith('t-'):
+        if not n.startswith('t-') or n.endswith('.w'):
             continue
         p = os.path.join(QUEUE, n)
         try:
@@ -57,10 +57,24 @@ def tickets():
 
 
 def put(path, ticket):
-    tmp = path + '.w'
+    # A concurrent status reader can briefly prevent replacement on Windows.
+    # Keep the old ticket visible until the complete new one can be published.
+    tmp = os.path.join(os.path.dirname(path), '.%s.%d.w' % (os.path.basename(path), os.getpid()))
     with open(tmp, 'w', encoding='utf-8') as f:
         json.dump(ticket, f)
-    os.replace(tmp, path)
+    deadline = time.monotonic() + 2.0
+    try:
+        while True:
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError as error:
+                if getattr(error, 'winerror', None) not in (5, 32, 33) or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.025)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
 
 
 class Gate:
@@ -94,10 +108,7 @@ def reserved_by_other(me):
 
 
 def reserve(name, seconds):
-    tmp = QUIET + '.' + str(os.getpid())
-    with open(tmp, 'w', encoding='utf-8') as f:
-        json.dump({'name': name, 'until': time.time() + seconds, 'said': time.strftime('%H:%M:%S')}, f)
-    os.replace(tmp, QUIET)
+    put(QUIET, {'name': name, 'until': time.time() + seconds, 'said': time.strftime('%H:%M:%S')})
 
 
 def may_start(mine, timing, name):

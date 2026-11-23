@@ -8,6 +8,7 @@ const TRACE: &str = include_str!("../src/shaders/trace.wgsl");
 const ACCUM: &str = include_str!("../src/shaders/accum.wgsl");
 const DOF: &str = include_str!("../src/shaders/dof.wgsl");
 const POST: &str = include_str!("../src/shaders/post.wgsl");
+const DENOISE: &str = concat!(include_str!("../src/shaders/pbr/hash.wgsl"), include_str!("../src/shaders/denoise.wgsl"));
 
 fn check(name: &str, src: &str) {
     let module = naga::front::wgsl::parse_str(src).unwrap_or_else(|e| panic!("{name} does not parse:\n{}", e.emit_to_string(src)));
@@ -83,18 +84,58 @@ fn the_other_passes_for_any_lens() {
     check("accumulate, for any lens", &camera::accum(ACCUM));
     check("focus, for any lens", &camera::focus(DOF));
     check("post, for any lens", &camera::post(POST));
+    check("denoise, for any lens", &camera::denoise(DENOISE));
+    assert!(!DOF.contains("fn behind_of"), "dead behind_of helper should stay removed from dof.wgsl");
     // each still has its plain entry points, and reads the lens
-    assert!(camera::accum(ACCUM).contains("camFilm(v, a.lens_p)"));
+    let accum = camera::accum(ACCUM);
+    assert_eq!(accum.matches("camFilm(v, a.lens_p)").count(), 2);
+    assert!(!accum.contains("a.cam_p.y"), "floor reprojection in camera::accum still uses perspective a.cam_p.y");
     assert!(camera::focus(DOF).contains("camBlur(ro, rd, t,") && camera::focus(DOF).matches("fn blur_of(").count() == 1);
     assert!(camera::focus(DOF).matches("fn cover_far(").count() == 1 && camera::focus(DOF).matches("fn cover_near(").count() == 1);
     assert!(camera::post(POST).matches("fn fs_final(").count() == 1 && camera::post(POST).contains("fn fs_down("));
     assert!(camera::post(POST).contains("let e = lensDepth(q, t);") && camera::post(POST).contains("c *= lensLight(q);") && camera::post(POST).contains("lensFringe(s.rgb, q)"));
+    let dn = camera::denoise(DENOISE);
+    assert!(dn.contains("camRay(uv, da.lens, &ro, &rd)") && dn.contains("da.lens.c.x * g.w + da.lens.c.y"));
     // each block gets the lens at its very end, after whatever else it holds
     for (text, head) in [(camera::accum(ACCUM), "struct A {"), (camera::focus(DOF), "struct D {"), (camera::post(POST), "struct F {")] {
         let block = &text[text.find(head).unwrap()..];
         let block = &block[..block.find("\n}").unwrap()];
         let last = block.lines().filter(|l| l.contains(':')).last().unwrap();
         assert!(last.contains("Cam") || last.contains("fx: vec4f"), "{head}: the lens is not last ({last})");
+    }
+}
+
+#[test]
+fn stage_gi_and_focus_bounds_work_for_any_lens() {
+    use gf_core::camera::{Camera, Projection, BOUND};
+    use gf_core::settings::Settings;
+
+    // A studio floor with diffuse GI bounce must read `lensAt` rather than `rd.xy / (abs(rd.z) * u.tan_fov)`
+    // so orthographic and fisheye lenses get distinct per-pixel random seeds instead of one seed everywhere.
+    let m = March { step_scale: 0.95, steps_out: 220, steps_in: 56, layers: 2 };
+    let mut v = Variant::default();
+    v.stage = glassforms::stage::Seen { floor: true, gi: true, sky: true, ..Default::default() };
+    let src = tracer_source_lens(&m, v, false);
+    check("tracer for any lens with floor GI", &src);
+    assert!(src.contains("var<private> lensAt: vec2f;") && src.contains("let px = floor(lensAt * (0.5 * u.res.y) + 0.5 * u.res);"));
+    for (n, line) in src.lines().enumerate() {
+        let code = line.split("//").next().unwrap_or("");
+        assert!(!(code.contains("u.tan_fov") && code.contains("u.shift")), "floor GI line {}: {line}", n + 1);
+    }
+
+    // Foreground floor or multi-layer expanded bounds in front of focus must report `near > 0.0` under
+    // non-plain lenses (including fisheye and orthographic) so DoF runs `fs_under` instead of reading stale `underTex`.
+    for proj in [Projection::Perspective, Projection::Equidistant, Projection::Orthographic] {
+        let mut p = Settings::default();
+        p.proj = proj.index() as f64;
+        (p.dist, p.fov, p.aperture, p.fnear, p.ffar) = (4.0, 35.0, 0.12, -1.6, 0.4);
+        let c = Camera::of(&p);
+        let base = camera::focus_numbers(&c, 960, 540);
+        assert_eq!(base.near, 0.0, "{proj:?}: default bound lies behind fnear");
+        let with_layers = camera::focus_numbers_in(&c, 960, 540, 2.4, 0.0);
+        assert!(with_layers.near > 0.5, "{proj:?}: expanded multi-layer bound in front of focus must set near > 0 (got {})", with_layers.near);
+        let with_floor = camera::focus_numbers_in(&c, 960, 540, BOUND, 1.8);
+        assert!(with_floor.near > 0.5, "{proj:?}: foreground floor in front of focus must set near > 0 (got {})", with_floor.near);
     }
 }
 
@@ -148,7 +189,8 @@ fn the_plain_texts_are_as_they_were() {
 /// fingerprint here.
 #[test]
 fn the_first_ray_the_camera_stands_in_for() {
-    let plain = camera::plain_first_ray(TRACE);
+    // Fingerprint the WGSL lines as assembled by the renderer on either platform.
+    let plain = camera::plain_first_ray(TRACE).replace("\r\n", "\n");
     assert!(plain.contains("fn primary(") && plain.contains("fn sampleAt(") && plain.contains("fn lensPoint("));
     assert_eq!(fnv(&plain), 0x4b9e3e88a1bbb29c, "the tracer's first-ray code has changed: see the comment above this test");
 }

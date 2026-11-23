@@ -261,9 +261,20 @@ fn way(p: vec3f, w: vec3f, tanA: f32, t0: f32, outside: bool, h: f32, least: f32
 // what arrives on the surface near the cell (marched from just above it, for the shadows of other
 // parts), by the angle it strikes at, dying away below the surface along its bent path; the cell takes
 // what is lost between its upper and its lower face. In between, some of each.
-@compute @workgroup_size(4, 4, 4)
-fn cs_inject(@builtin(global_invocation_id) id: vec3u) {
-  if (any(id >= vec3u(u32(su.res)))) { return; }
+var<workgroup> beamVolume: array<vec3f, 20>;
+var<workgroup> beamSurface: array<vec3f, 20>;
+var<workgroup> environmentTerms: array<vec3f, 12>;
+
+// Fine levels march all directions in each cell's invocation. Coarse levels have fewer
+// occupied cells, so a workgroup marches one cell, one direction per invocation.
+struct Injection {
+  value: vec4f,
+  beamVolume: vec3f,
+  beamSurface: vec3f,
+  environment: vec3f,
+}
+fn inject(id: vec3u, lane: u32, parallel: bool) -> Injection {
+  var terms: Injection;
   let h = 2.0 * su.hb / su.res;
   let p = ((vec3f(id) + 0.5) / su.res - 0.5) * (2.0 * su.hb);
   let d = sdf(p);
@@ -299,7 +310,9 @@ fn cs_inject(@builtin(global_invocation_id) id: vec3u) {
       for (var k = 0; k < 4; k++) { if (c[k] < 0.0) { own = k; } }
       keep[own] = 1.0;
     }
-    for (var b = 0u; b < su.nb; b++) {
+    let firstBeam = select(0u, lane, parallel);
+    let lastBeam = select(su.nb, min(su.nb, lane + 1u), parallel);
+    for (var b = firstBeam; b < lastBeam; b++) {
       var w = su.beams[b].dir.xyz;
       var tanA = su.beams[b].dir.w;
       var brgb = su.beams[b].rgb.rgb;
@@ -342,6 +355,11 @@ fn cs_inject(@builtin(global_invocation_id) id: vec3u) {
           got *= mix(enters(clamp(dot(face, w), 0.05, 1.0)), su.zb.w, wide);
         }
         light += brgb * got * (1.0 - dense) * castThrough(p, w, tanA);
+        if (parallel) {
+          // Keep the preceding volume term separate from a near- or far-face term.
+          terms.beamVolume = light;
+          light = vec3f(0.0);
+        }
         if (dense > 0.0 && c < -0.03) {
           // ---- put in at the far side: the beam comes into this piece of the body through its other
           // face (in a thin piece the cell lies within reach of both; through a thick one nothing gets
@@ -368,6 +386,10 @@ fn cs_inject(@builtin(global_invocation_id) id: vec3u) {
         light += brgb * reaches * (dense * c * mix(enters(c), su.zb.w, wide)) * (exp(-st * (top / ci)) - exp(-st * (bottom / ci))) * castThrough(above, w, tanA);
       }
     }
+    if (parallel && lane < su.nb) {
+      terms.beamSurface = light;
+      light = vec3f(0.0);
+    }
     wayMax = 1e9;
     // ---- light from all round, and from the body itself
     // Two more kinds of light come through the surface near the cell. The rest of the lighting, which
@@ -384,7 +406,9 @@ fn cs_inject(@builtin(global_invocation_id) id: vec3u) {
       // weights are brought to what all directions together would come to)
       var squarely = 0.0;
       for (var b = 0; b < 12; b++) { squarely += max(dot(ROUND[b], away), 0.0); }
-      for (var b = 0; b < 12; b++) {
+      let firstRound = select(0, max(i32(lane) - 20, 0), parallel);
+      let lastRound = select(12, max(i32(lane) - 19, 0), parallel);
+      for (var b = firstRound; b < lastRound; b++) {
         let w = ROUND[b];
         let c = dot(w, away);
         // Light from this direction comes in through the face near the cell (it faces that way) or,
@@ -425,21 +449,61 @@ fn cs_inject(@builtin(global_invocation_id) id: vec3u) {
         }
         light += comes * (3.14159265 * fc / squarely * su.zb.w) * (exp(-st * sTop) - exp(-st * sBottom));
       }
+      if (parallel && lane >= 20u) {
+        terms.environment = light;
+        light = vec3f(0.0);
+      }
       // Light that a clear body has bent and focused on to the surface here (caustics: cast_light.wgsl
       // lands it on the surfaces that gather light, a little way off them). It is counted as the light from
       // all round is: what a white matte surface would show of it, from every direction of the outside
       // half at once, getting in and dying away below the surface as light slanting in at 45 degrees does.
-      if (su.caus.z > 1.5) {
+      if (lane == 0u && su.caus.z > 1.5) {
         let at = p + away * (su.caus.w - d);
         let arriving = textureSampleLevel(castLight, lin, at / (2.0 * su.hb) + 0.5, 0.0).rgb * su.caus.y;
         light += arriving * (3.14159265 * su.zb.w) * (exp(-st * (top / 0.7071)) - exp(-st * (bottom / 0.7071)));
       }
     }
     // (what was lost from the beams, as light per unit volume of the whole cell)
-    light /= st * h;
+    if (!parallel) { light /= st * h; }
   }
-  textureStore(srcOut, id, vec4f(light, d));
+  terms.value = vec4f(light, d);
+  return terms;
 }
+@compute @workgroup_size(4, 4, 4)
+fn cs_inject(@builtin(global_invocation_id) id: vec3u) {
+  if (any(id >= vec3u(u32(su.res)))) { return; }
+  textureStore(srcOut, id, inject(id, 0u, false).value);
+}
+@compute @workgroup_size(32)
+fn cs_inject_coarse(@builtin(workgroup_id) id: vec3u, @builtin(local_invocation_index) lane: u32) {
+  let terms = inject(id, lane, true);
+  if (lane < 20u) {
+    beamVolume[lane] = terms.beamVolume;
+    beamSurface[lane] = terms.beamSurface;
+  } else {
+    environmentTerms[lane - 20u] = terms.environment;
+  }
+  workgroupBarrier();
+  if (lane == 0u) {
+    let h = 2.0 * su.hb / su.res;
+    let st = su.st.rgb;
+    let least = min(st.r, min(st.g, st.b));
+    let d = terms.value.a;
+    var light = vec3f(0.0);
+    if (d < 0.5 * h && least * (-d - 0.87 * h) < 10.0) {
+      // Preserve the serial reduction order, including the two parts of each beam.
+      for (var b = 0u; b < su.nb; b++) {
+        light += beamVolume[b];
+        light += beamSurface[b];
+      }
+      for (var b = 0u; b < 12u; b++) { light += environmentTerms[b]; }
+      light += terms.value.rgb;
+      light /= st * h;
+    }
+    textureStore(srcOut, id, vec4f(light, d));
+  }
+}
+
 
 // How far the body reaches from p (inside it) along w: where a ray from p that way would leave it.
 // (Not far is all that matters: past ten distances between scatterings nothing gets across anyway.)
@@ -610,6 +674,7 @@ fn cs_fold(@builtin(global_invocation_id) id: vec3u) {
 // the scattered light, brought to the level at which the whole body is in balance
 @compute @workgroup_size(4, 4, 4)
 fn cs_level(@builtin(global_invocation_id) id: vec3u) {
+  if (any(id >= textureDimensions(phiTex))) { return; }
   let c = textureLoad(phiTex, vec3i(id), 0);
   let add = textureLoad(addTex, vec3i(0), 0).rgb;
   let lose = textureLoad(loseTex, vec3i(0), 0).rgb;
@@ -660,8 +725,8 @@ fn cs_finish(@builtin(global_invocation_id) id: vec3u) {
   // held there. (Kept within bounds: where the furnace's cell holds next to nothing, outside the body,
   // its share says nothing.)
   if (su.ab.w > 0.0) {
-    let f = textureLoad(calibTex, me, 0).g;
-    v *= clamp(su.ab.w / max(f, 1e-6), 0.5, 3.0);
+    let f = textureLoad(calibTex, me, 0).rgb;
+    v *= clamp(vec3f(su.ab.w) / max(f, vec3f(1e-6)), vec3f(0.5), vec3f(3.0));
   }
   if (su.mottle.x > 0.0) { v = mottled(v, ((vec3f(id) + 0.5) / su.res - 0.5) * (2.0 * su.hb), su.mottle.x); }
   textureStore(outTex, id, vec4f(max(v, vec3f(0.0)), mine.a));

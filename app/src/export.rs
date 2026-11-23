@@ -2,7 +2,7 @@
 //! the graphics device, read back a slice at a time and contoured on a thread of its own, so that the
 //! window carries on meanwhile. The mesh is written and forgotten; nothing reads it back.
 
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::time::Instant;
 
 use gf_core::export::{check, surface_net, write, Check};
@@ -25,9 +25,14 @@ pub struct Exporting {
     rx: Receiver<Result<Done, String>>,
 }
 impl Exporting {
-    /// Its result once it has one (only once).
+    /// Its result once it has one (only once). A worker that died without one (it panicked) is a
+    /// failed export, not one still under way.
     pub fn poll(&self) -> Option<Result<Done, String>> {
-        self.rx.try_recv().ok()
+        match self.rx.try_recv() {
+            Ok(r) => Some(r),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => Some(Err("the export stopped unexpectedly".into())),
+        }
     }
     /// Wait for it.
     pub fn wait(self) -> Result<Done, String> {
@@ -73,4 +78,27 @@ pub fn start(gpu: &Gpu, vol: &Volume, hb: f64, path: &str) -> Exporting {
 pub fn says(d: &Done) -> String {
     let whole = if d.check.open == 0 { "closed".to_string() } else { format!("{} open edges", d.check.open) };
     format!("{} triangles, {} points, {whole}, from {} voxels a side, in {:.1} s: {}", d.check.tris, d.check.points, d.res, d.ms / 1e3, d.path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_export_whose_worker_panicked_is_over() {
+        let (tx, rx) = channel::<Result<Done, String>>();
+        let worker = std::thread::spawn(move || {
+            let _tx = tx;
+            panic!("contouring failed");
+        });
+        assert!(worker.join().is_err());
+        let x = Exporting { path: "x.obj".into(), rx };
+        assert!(matches!(x.poll(), Some(Err(_))), "a dead worker must end the export, or every later one is refused");
+    }
+
+    #[test]
+    fn an_export_under_way_is_not_over() {
+        let (_tx, rx) = channel::<Result<Done, String>>();
+        assert!(Exporting { path: "x.obj".into(), rx }.poll().is_none());
+    }
 }

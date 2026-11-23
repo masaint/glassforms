@@ -253,7 +253,7 @@ impl Font {
 }
 
 /// A closed TrueType contour (points on and off the curve) as a polygon: each quadratic piece cut into
-/// steps fine enough that the polygon strays from the curve by under a 2000th of an em.
+/// steps fine enough that the polygon strays from the curve by under an 8000th of an em.
 fn flatten(pts: &[([f64; 2], bool)], upem: f64) -> Vec<[f64; 2]> {
     let n = pts.len();
     if n < 2 { return Vec::new(); }
@@ -267,11 +267,13 @@ fn flatten(pts: &[([f64; 2], bool)], upem: f64) -> Vec<[f64; 2]> {
     let mut out = vec![start];
     let mut cur = start;
     let mut ctrl: Option<[f64; 2]> = None;
-    let tol = upem / 2000.0;
+    // (an 8000th of an em: a tenth of a pixel on a letter a picture high at 4K, so the straight edges cannot
+    // be told from the curves; the formula then measures them exactly)
+    let tol = upem / 8000.0;
     let quad = |out: &mut Vec<[f64; 2]>, a: [f64; 2], c: [f64; 2], b: [f64; 2]| {
         // the most a quadratic strays from its chord is a quarter of the control point's distance from it
         let dev = 0.25 * ((a[0] - 2.0 * c[0] + b[0]).powi(2) + (a[1] - 2.0 * c[1] + b[1]).powi(2)).sqrt();
-        let k = ((dev / tol).sqrt().ceil() as usize).clamp(1, 24);
+        let k = ((dev / tol).sqrt().ceil() as usize).clamp(1, 48);
         for j in 1..=k {
             let t = j as f64 / k as f64;
             let u = 1.0 - t;
@@ -475,12 +477,12 @@ pub fn family() -> Family {
         eq: vec!["a font's outline, filled even-odd", "extruded: |z| ≤ depth/2, edges rounded"],
         note: "Type a word in the box below. A | starts another line. The letters are an installed font's own outlines, made solid.",
         params: params(),
-        fixed_length: true,
-        tube: Some(0.03),
         rot: Some([-8.0, 18.0, 0.0]),
         animate: Some(vec!["arc"]),
-        info: Some(Box::new(|raw, _v| format!("{} pieces, {} edges", raw.pieces.len(), raw.pieces.iter().map(|p| p.terms.iter().map(|t| if let Term::Glyph { edges, .. } = t { edges.len() } else { 0 }).sum::<usize>()).sum::<usize>()))),
-        ..Preset::new("word", "Word", Shape::Curve(Box::new(|v, o| word(v, o.text))))
+        // the letters as an exact formula: their outlines extruded and rounded, through the shared engine's
+        // cell lists (exact.rs)
+        table: Some(Box::new(|v: &[f64], text: &str| super::exact::table(&word(v, text), crate::FIT))),
+        ..Preset::new("word", "Word", Shape::Field { wgsl: super::exact::WGSL.to_string(), clip: crate::field::CLIP_DEFAULT.to_string(), shell: crate::field::SHELL_DEFAULT.to_string() })
     };
     Family {
         presets: vec![preset],
@@ -491,7 +493,7 @@ pub fn family() -> Family {
             ("ior", Setting::Num(1.5)), ("absorb", Setting::Vec3([0.16, 0.08, 0.035])),
             ("dist", Setting::Num(6.6)), ("fov", Setting::Num(26.0)), ("rot", Setting::Vec3([-8.0, 18.0, 0.0])),
         ],
-        ..Family::new(FAMILY, "3D text", Kind::Curve)
+        ..Family::new(FAMILY, "3D text", Kind::Field)
     }
 }
 

@@ -42,6 +42,31 @@ fn a_body_is_given_a_material_by_name() {
 }
 
 #[test]
+fn older_scene_and_body_recipes_reopen_with_their_authored_settings() {
+    let source = scene(&[("material", "gold"), ("rough", "0.19"), ("B2.material", "bisque"), ("B2.bodyR", "0.7")]);
+    let original = source.setup();
+    let mut file = serde_json::to_value(&original).unwrap();
+    for (path, index) in [("/settings", 59), ("/bodies/2", 103)] {
+        let values = file.pointer_mut(path).unwrap().as_object_mut().unwrap();
+        values.retain(|k, _| !k.starts_with("grating"));
+        values.insert("mat".into(), index.into());
+    }
+    let mut loaded = scene(&[]);
+    loaded.apply_setup_json(&file.to_string()).unwrap();
+    assert_eq!(loaded.p, source.p);
+    assert_eq!(loaded.body_settings(1).mat, source.body_settings(1).mat);
+    assert_eq!(loaded.body_settings(1).body_r, 0.7);
+    loaded.apply_setup_json(&loaded.setup_json()).unwrap();
+    assert_eq!(loaded.setup(), original);
+
+    // The intervening writer included the grating controls, even when the disc
+    // was unused. Its aluminium and optical-disc positions are already current.
+    let current = scene(&[("material", "aluminium"), ("B2.material", "discgrating")]);
+    loaded.apply_setup_json(&current.setup_json()).unwrap();
+    assert_eq!(loaded.setup(), current.setup());
+}
+
+#[test]
 fn settings_given_to_a_body_make_its_material_its_own() {
     let mut s = scene(&[("rough", "0.1")]);
     assert!(s.apply_arg("B2.rough", "0.4"));
@@ -123,9 +148,12 @@ fn the_tracer_is_given_each_bodys_numbers() {
     let m = s.body_materials().unwrap();
     let u = material::bodies_uniforms(&m, &[]);
     assert_eq!(u.len(), MB_FLOATS);
-    assert_eq!(MB_HEAD, 32);
+    assert_eq!(MB_HEAD, 48);
     // kind, index and dispersion of each body
     assert_eq!((u[0], u[1]), (0.0, 1.0));
+    assert_eq!(u[32].to_bits(), 2, "the legacy scene medium keeps its deterministic token");
+    assert_eq!(u[36].to_bits(), 1, "the legacy body medium uses the same from_legacy ID convention");
+    assert_eq!(u[33].to_bits() as i32, 0);
     assert_eq!(u[4], s.p.ior as f32);
     assert_eq!(u[8], s.p.disp as f32);
     // what the first body's inside absorbs: its tint by its depth; a metal's inside absorbs nothing
@@ -142,9 +170,32 @@ fn the_tracer_is_given_each_bodys_numbers() {
 }
 
 #[test]
+fn body_medium_rows_are_raw_signed_metadata_not_optical_floats() {
+    let s = scene(&[("B2.material", "gold")]);
+    let m = s.body_materials().unwrap();
+    let media = [
+        gf_core::pbr::CompiledMedium { identity: 9, interface_priority: -17 },
+        gf_core::pbr::CompiledMedium { identity: 9, interface_priority: 31 },
+    ];
+    let optical = material::bodies_uniforms(&m, &[]);
+    let u = material::bodies_uniforms_with_media(&m, &[], &media);
+    assert_eq!(u[32].to_bits(), 9);
+    assert_eq!(u[33].to_bits() as i32, -17);
+    assert_eq!(u[36].to_bits(), 9);
+    assert_eq!(u[37].to_bits() as i32, 31);
+    assert_eq!((u[34].to_bits(), u[35].to_bits()), (0, 0));
+    for k in 0..2 {
+        assert_eq!(u[4 + k], optical[4 + k]);
+        assert_eq!(u[8 + k], optical[8 + k]);
+        assert_eq!(&u[MB_HEAD + k * MU_FLOATS..MB_HEAD + (k + 1) * MU_FLOATS],
+                   &optical[MB_HEAD + k * MU_FLOATS..MB_HEAD + (k + 1) * MU_FLOATS]);
+    }
+}
+
+#[test]
 fn every_part_of_a_material_is_drawn_on_a_body_among_several() {
     // each named material that has colour by wavelength, a graded index, double refraction, bubbles or
-    // something inside it keeps that part as the heart of a knot (only true scattering is left out)
+    // something inside it keeps that part as the heart of a knot
     for (name, bit) in [("didymium", 1u32), ("gradient", 2), ("calcite", 4), ("crackedquartz", 8), ("whiteopal", 8), ("tigerseye", 8), ("agate", 8), ("piezoquartz", 24)] {
         let s = scene(&[("B2.material", name)]);
         let m = s.body_materials().unwrap();
@@ -156,10 +207,12 @@ fn every_part_of_a_material_is_drawn_on_a_body_among_several() {
     }
     let s = scene(&[("B2.material", "foam")]);
     assert!(material::body_variant(s.body_materials().unwrap()[1]).bubbles);
-    // true scattering is the light volume among several bodies; what lies inside is then still drawn
+    // A body can request true scattering alongside the other material effects.
     let s = scene(&[("B2.material", "whiteopal"), ("B2.sssWalk", "1")]);
     let m = s.body_materials().unwrap();
-    assert_eq!(material::body_lacks(m[1]).len(), 1);
+    assert!(material::body_lacks(m[1]).is_empty());
+    assert!(material::Variant::of_bodies(&m).walk);
+    assert_ne!(material::body_bits(m[1]) & 32, 0);
     assert!(material::body_variant(m[1]).inner.play && !material::body_variant(m[1]).walk);
     // each body is told its own numbers of what lies inside it
     let u = material::bodies_inner(&m, &[], 0.001);
@@ -174,4 +227,47 @@ fn a_scene_that_glows_under_pressure_is_drawn_body_by_body() {
     let s = scene(&[("material", "piezoquartz")]);
     assert!(s.body_materials().is_some_and(|m| m.len() == 2));
     assert!(scene(&[("material", "quartz")]).body_materials().is_none());
+}
+
+#[test]
+fn opaque_finishes_remain_independent_of_the_glass_in_a_saved_scene() {
+    assert_eq!(material::named_index("bisque"), Some(104));
+    for (name, index) in [("modelclay", 105), ("moulded", 106), ("satinpaint", 107)] {
+        let s = scene(&[("B2.material", name)]);
+        let mut restored = scene(&[]);
+        restored.apply_setup_json(&s.setup_json()).unwrap();
+        let bodies = restored.body_materials().unwrap();
+        assert_eq!(bodies[1].mat, index as f64, "{name}");
+        assert_eq!(material::NAMED[index].id, name);
+        assert_eq!(material::body_kind(bodies[0]), 0.0);
+        assert_eq!(material::body_kind(bodies[1]), 4.0);
+        assert_eq!(bodies[1].ceramic_through, 0.0);
+        let variant = material::Variant::of_bodies(&bodies);
+        assert!(variant.paint_bodies && !variant.paint_only);
+    }
+}
+
+#[test]
+fn a_conductor_keeps_its_sampled_surface_when_glass_is_added() {
+    let state = scene(&[("material", "crown"), ("B2.material", "copper"), ("B2.rough", ".65"), ("B2.roughRef", "1")]);
+    let materials = state.body_materials().unwrap();
+    let variant = material::Variant::of_bodies(&materials);
+    assert!(variant.sampled_metal);
+    assert!(!variant.rough_ref);
+    assert_eq!(material::body_bits(materials[0]) & 128, 0);
+    assert_eq!(material::body_bits(materials[1]) & 192, 128);
+}
+
+#[test]
+fn panel_shadow_specialization_tracks_the_only_transmitting_material() {
+    let glass = scene(&[("material", "crown")]).p;
+    let iron = scene(&[("material", "iron")]).p;
+    let clay = scene(&[("material", "modelclay")]).p;
+    let medium = |bodies: &[&gf_core::settings::Settings]| material::Variant::of_bodies(bodies).paint_shadow_medium;
+    assert_eq!(medium(&[&glass, &iron, &clay]), Some(0));
+    assert_eq!(medium(&[&clay, &glass, &iron]), Some(1));
+    assert_eq!(medium(&[&iron, &clay, &glass]), Some(2));
+    assert_eq!(medium(&[&glass, &iron]), None);
+    assert_eq!(medium(&[&iron, &clay]), None);
+    assert_eq!(medium(&[&glass, &clay, &glass]), None);
 }

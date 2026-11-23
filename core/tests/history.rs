@@ -116,3 +116,69 @@ fn the_history_is_kept_beside_a_setup() {
     assert_eq!(t.setup(), first);
     assert!(g.adopt_json("not a history", &mut t).is_err());
 }
+
+fn two_objects() -> State {
+    let mut s = State::with_args(&args(&[("layer", "add")]), true);
+    s.select_world_item(gf_core::groups::Item::Object(0), false);
+    s
+}
+
+#[test]
+fn a_selection_is_an_entry_and_undo_puts_the_one_before_back() {
+    use gf_core::groups::Item;
+    let mut s = two_objects();
+    let mut h = History::default();
+    h.settle(&mut s);
+    assert_eq!(s.world_selection(), [Item::Object(0)]);
+    s.select_world_item(Item::Object(1), false);
+    assert!(h.settle(&mut s), "a click that selects is an entry");
+    // nothing selected or hovered since: no entry
+    assert!(!h.settle(&mut s));
+    assert!(h.undo(&mut s));
+    assert_eq!((s.world_selection(), s.stack.sel), (vec![Item::Object(0)], 0));
+    assert!(h.redo(&mut s));
+    assert_eq!((s.world_selection(), s.stack.sel), (vec![Item::Object(1)], 1));
+    // emptied on purpose, and put back
+    s.clear_world_selection();
+    assert!(h.settle(&mut s));
+    h.undo(&mut s);
+    assert_eq!(s.world_selection(), [Item::Object(1)]);
+}
+
+#[test]
+fn a_drag_select_is_one_entry() {
+    use gf_core::groups::Item;
+    let mut s = two_objects();
+    let mut h = History::default();
+    h.settle(&mut s);
+    // the selection grows and shrinks as a box is dragged across; one quiet moment at the end
+    for i in 0..20 {
+        s.select_world_item(Item::Object(i % 2), false);
+        if i % 3 == 0 { s.select_world_item(Item::Object((i + 1) % 2), true); }
+    }
+    assert!(h.settle(&mut s));
+    assert_eq!(h.can_undo(), 1);
+    h.undo(&mut s);
+    assert_eq!(s.world_selection(), [Item::Object(0)]);
+}
+
+#[test]
+fn entering_an_object_is_no_entry_and_its_parts_selection_is_undone() {
+    use gf_core::groups::Item;
+    let mut s = two_objects();
+    let mut h = History::default();
+    h.settle(&mut s);
+    assert!(s.enter_world_item(Item::Object(0)));
+    assert!(!h.settle(&mut s), "navigation made an entry");
+    let outer = s.csg.edit_construction().group(&[], &[0], "Housing").unwrap();
+    h.settle(&mut s);
+    let marked = s.edit_scope.marked().to_vec();
+    s.select_construction_node(&outer, false);
+    assert_ne!(s.edit_scope.marked(), marked.as_slice());
+    assert!(h.settle(&mut s));
+    h.undo(&mut s);
+    assert_eq!(s.edit_scope.marked(), marked.as_slice());
+    assert_eq!(s.edit_scope.object(), Some(0), "undo left the object");
+    h.redo(&mut s);
+    assert_eq!(s.edit_scope.marked(), [outer]);
+}

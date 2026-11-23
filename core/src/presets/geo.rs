@@ -6,17 +6,7 @@ use std::f64::consts::PI;
 pub const TAU: f64 = 2.0 * PI;
 pub type V = [f64; 3];
 
-pub fn add(a: V, b: V) -> V { [a[0] + b[0], a[1] + b[1], a[2] + b[2]] }
-pub fn sub(a: V, b: V) -> V { [a[0] - b[0], a[1] - b[1], a[2] - b[2]] }
-pub fn mul(a: V, s: f64) -> V { [a[0] * s, a[1] * s, a[2] * s] }
-pub fn dot(a: V, b: V) -> f64 { a[0] * b[0] + a[1] * b[1] + a[2] * b[2] }
-pub fn cross(a: V, b: V) -> V { [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]] }
-pub fn len(a: V) -> f64 { dot(a, a).sqrt() }
-pub fn unit(a: V) -> V {
-    let l = len(a);
-    if l > 1e-300 { mul(a, 1.0 / l) } else { [0.0, 1.0, 0.0] }
-}
-pub fn lerp(a: V, b: V, t: f64) -> V { add(a, mul(sub(b, a), t)) }
+pub use crate::math::{add, cross, dot, len, lerp, scale as mul, sub, unit};
 /// A unit vector at right angles to d.
 pub fn across(d: V) -> V {
     let a = if d[1].abs() < 0.9 { [0.0, 1.0, 0.0] } else { [1.0, 0.0, 0.0] };
@@ -86,10 +76,7 @@ pub fn box_piece(c: V, axes: [V; 3], half: V) -> Piece {
     Piece { lo: sub(c, ext), hi: add(c, ext), terms }
 }
 
-/// A light, as the families give them.
-pub fn light(az: f64, el: f64, w: f64, h: f64, rgb: [f64; 3], soft: f64) -> Light {
-    Light { az, el, w, h, rgb, soft }
-}
+pub use super::light;
 /// The knots' coloured ring of lights: what fat glass tubes look best in.
 pub fn tube_lights() -> Vec<Light> {
     vec![

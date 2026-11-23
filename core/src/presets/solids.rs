@@ -211,10 +211,7 @@ pub enum Core {
     Icosahedron,
 }
 
-fn unit(v: [f64; 3]) -> [f64; 3] {
-    let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-    [v[0] / l, v[1] / l, v[2] / l]
-}
+use crate::math::unit;
 
 impl Core {
     /// The faces come in opposite pairs: one unit normal of each pair.
@@ -571,10 +568,6 @@ fn raw(p: vec3f) -> f32 {
   return smax(smax(block, -bore, k), -hollow, k);
 }";
 
-fn light(az: f64, el: f64, w: f64, h: f64, rgb: [f64; 3], soft: f64) -> Light {
-    Light { az, el, w, h, rgb, soft }
-}
-
 pub fn family() -> Family {
     let tail = |body: &str| Shape::Field { wgsl: format!("const FIT: f32 = {FIT:.4};\n{FINE}{SUPER}{body}"), clip: NO_CLIP.to_string(), shell: "0.0".to_string() };
     Family {
@@ -678,16 +671,7 @@ pub fn family() -> Family {
         // These are broad instead and fade from their centres all the way to their edges: a face then takes
         // its tone from where in a light it looks, and neighbouring faces differ. Two small bright ones
         // give the glints.
-        lights: vec![
-            light(40.0, 20.0, 30.0, 42.0, [3.0, 2.9, 2.7], 1.0),
-            light(-60.0, -5.0, 26.0, 46.0, [0.4, 1.1, 3.3], 1.0),
-            light(-140.0, 5.0, 22.0, 46.0, [3.9, 1.3, 0.22], 1.0),
-            light(150.0, 30.0, 32.0, 24.0, [2.1, 2.05, 2.0], 1.0),
-            light(0.0, 85.0, 40.0, 40.0, [0.8, 0.9, 1.1], 1.0),
-            light(0.0, -80.0, 36.0, 36.0, [0.5, 0.22, 0.05], 1.0),
-            light(95.0, 46.0, 5.0, 5.0, [7.0, 7.0, 7.0], 0.5),
-            light(-100.0, -36.0, 4.0, 8.0, [5.0, 5.5, 6.5], 0.5),
-        ],
+        lights: faceted_lights(),
         ..Family::new("solids", "Geometric solids", Kind::Field)
     }
 }

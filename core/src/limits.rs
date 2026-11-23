@@ -36,15 +36,17 @@ pub fn setting(name: &str) -> Option<(f64, f64)> {
         "ior" | "filmIor" | "coatIor" => (1.0, 4.0),
         "disp" => (0.0, 1.0),
         // bounces, rays and wavelengths are passes of the tracer every frame: beyond these a frame at 4K
-        // takes long enough for the device to be lost
-        "nb" => (0.0, 32.0),
+        // takes long enough for the device to be lost (`MAX_NB = 12` in `trace.wgsl`)
+        "nb" => (0.0, 12.0),
+        "giBounces" | "giSamples" => (1.0, 8.0),
+        "giStrength" => (0.0, 4.0),
         "ns" => (1.0, 32.0),
         "nw" => (1.0, 32.0),
         "heroSettle" => (0.0, 1.0),
         "lensN" => (1.0, 64.0),
         "exposure" => (0.0, 1000.0),
         "bloom" => (0.0, 10.0),
-        "bloomKind" | "dof" | "planes" | "lock" | "debug" | "raw" | "clay" | "hdriShow" | "hdriLights" | "envRoom" | "lights" | "spinMode" => SWITCH,
+        "bloomKind" | "dof" | "planes" | "lock" | "debug" | "raw" | "clay" | "hdriShow" | "hdriLights" | "envRoom" | "lights" | "spinMode" | "gi" => SWITCH,
         "vignette" => (0.0, 4.0),
         "grain" => (0.0, 1.0),
         "spread" => (0.0, 50.0),
@@ -62,7 +64,7 @@ pub fn setting(name: &str) -> Option<(f64, f64)> {
         "pivotR" => (0.0, 1000.0),
         // (the tangent of half the field of view runs to infinity at 180)
         "fov" => (0.1, 175.0),
-        "roll" | "lyaw" | "lpitch" | "lroll" | "bokehRot" | "birefAz" | "birefEl" | "gradAz" | "gradEl" | "silkAz" | "silkEl" | "azim" | "backGlowAz" => ANGLE,
+        "roll" | "lyaw" | "lpitch" | "lroll" | "bokehRot" | "birefAz" | "birefEl" | "gradAz" | "gradEl" | "silkAz" | "silkEl" | "azim" | "backGlowAz" | "brushAngle" => ANGLE,
         "spin" | "lspin" => (-50.0, 50.0),
         // (0 would stop the clock, and a trip's period is divided by it)
         "speed" => (0.01, 50.0),
@@ -125,6 +127,10 @@ pub fn setting(name: &str) -> Option<(f64, f64)> {
         // (the tint is the colour after one unit of travel; at 0 it would take everything away at once,
         // which `Settings` keeps it just short of)
         "tintR" | "tintG" | "tintB" => SHARE,
+        "grating" => SHARE,
+        "gratingPitch" => (300.0, 4500.0),
+        "gratingAngle" => (-360.0, 360.0),
+        "gratingRadial" => SWITCH,
         "film" => (0.0, 10000.0),
         "filmVar" | "filmDrain" => (-5.0, 5.0),
         // (the film's pattern is scaled by its size)
@@ -135,7 +141,7 @@ pub fn setting(name: &str) -> Option<(f64, f64)> {
         "sss" => SHARE,
         // (how far light travels between scatterings: the scattering is divided by it)
         "sssDepth" => (0.001, 100.0),
-        "sssSpread" | "sssHue" | "sssThrough" | "ceramicThrough" => SHARE,
+        "sssOpaque" | "sssSpread" | "sssHue" | "sssThrough" | "ceramicThrough" => SHARE,
         // (the scattering's mean cosine: at 1 or -1 the phase function is a spike)
         "sssForward" => (-0.95, 0.95),
         "glazeHaze" => (0.0, 1.5),
@@ -193,6 +199,25 @@ pub fn setting(name: &str) -> Option<(f64, f64)> {
         "tone" => (0.0, 3.0),
         "wbTemp" | "wbTint" => (-4.0, 4.0),
         "contrast" | "saturation" => (0.0, 10.0),
+        // ---- physical sky & sun
+        "sky" | "skyShow" | "skyLights" | "sunDisc" => SWITCH,
+        "skyGain" | "sunPower" => (0.0, 100.0),
+        "sunPitch" => (-90.0, 90.0),
+        "sunYaw" => (-360.0, 360.0),
+        "sunSize" => (0.1, 60.0),
+        "sunR" | "sunG" | "sunB" | "skyGroundR" | "skyGroundG" | "skyGroundB" => (0.0, 10.0),
+        "skyRayleigh" | "skyMie" | "skyOzone" => (0.0, 20.0),
+        "skyMieG" => (0.0, 0.99),
+        // ---- volumetric sky-space clouds & atmosphere
+        "cloudCover" | "cloudSoft" | "cloudShadow" => SHARE,
+        "cloudDensity" | "atmoHaze" | "atmoAerial" | "sunRays" => (0.0, 20.0),
+        "cloudScale" => (0.05, 20.0),
+        "cloudBase" | "cloudThick" => (0.1, 20.0),
+        "cloudDetail" => (0.0, 2.0),
+        "cloudSilver" => (0.0, 10.0),
+        "cloudWindX" | "cloudWindZ" => FREE,
+        "atmoFogH" => (0.02, 50.0),
+        "sunRayG" => (0.0, 0.98),
         _ => return None,
     })
 }
@@ -204,7 +229,11 @@ pub const THICK: (f64, f64) = (0.05, 10.0);
 pub const MELT: (f64, f64) = (0.0, 0.1);
 pub const LEN: (f64, f64) = (0.02, 10.0);
 pub const BEADS: (f64, f64) = (0.0, 0.95);
+pub const BEAD_PERIOD: (f64, f64) = (0.1, 3600.0);
 pub const PUFF: (f64, f64) = (-0.3, 0.3);
+/// Angular half-size (degrees) of a soft rectangular rig light: above zero so its tangent never divides
+/// `0 / 0 = NaN`, and short of 90° so its tangent stays finite and positive.
+pub const LIGHT_SIZE: (f64, f64) = (0.5, 85.0);
 
 /// A soft range made wider, for a knob with no hard limits of its own: twice its width past either end,
 /// never below zero for a knob whose range starts at zero or above (a count, a size, an amount).
@@ -276,5 +305,13 @@ mod tests {
         assert_eq!(widen(0.0, 1.0), (0.0, 3.0));
         assert_eq!(widen(-1.0, 1.0), (-5.0, 5.0));
         assert_eq!(hold(f64::NAN, (2.0, 3.0)), 2.0);
+    }
+
+    #[test]
+    fn bounce_limit_matches_shader_cap() {
+        assert_eq!(setting("nb"), Some((0.0, 12.0)));
+        let mut p = Settings::default();
+        assert!(p.set("nb", 32.0));
+        assert_eq!(p.nb, 12.0);
     }
 }

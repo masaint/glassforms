@@ -48,7 +48,7 @@ fn lum(c: vec3f) -> f32 { return dot(c, vec3f(0.2126, 0.7152, 0.0722)); }
 // where the surface is, as the camera sees it, for a pixel (as stored: counted from the top) and its
 // distance: along the ray the tracer sent through it this frame (trace.wgsl's fs: a shift of the pixel's
 // own and the frame's jitter), not through its middle, which would add the jitter's grain to the surface
-fn ign(p: vec2f) -> f32 { return fract(52.9829189 * fract(dot(p, vec2f(0.06711056, 0.00583715)))); }
+fn ign(p: vec2f) -> f32 { return pbr_ign(p); }   // pbr/hash.wgsl
 fn place(c: vec2i, t: f32) -> vec3f {
   let fc = vec2f(f32(c.x) + 0.5, dn.res.y - f32(c.y) - 0.5);
   let o = fract(vec2f(ign(fc + 19.19), ign(fc.yx + 47.3)) + dn.jitter) - 0.5;
@@ -102,7 +102,7 @@ fn fs_var(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     if (ws > 0.0) { v = max(v, s2 / ws - (s1 / ws) * (s1 / ws)); }
   }
   let doubt = 1.0 + dn.young / n;
-  return vec4f(h.rgb, v / n * doubt * doubt);
+  return vec4f(clamp(h.rgb, vec3f(0.0), vec3f(6e4)), clamp(v / n * doubt * doubt, 0.0, 6e4));
 }
 
 @fragment
@@ -124,7 +124,9 @@ fn fs_pass(@builtin(position) pos: vec4f) -> @location(0) vec4f {
       let q = clamp(c + vec2i(x, y), vec2i(0), top);
       let k = (2.0 - f32(abs(x))) * (2.0 - f32(abs(y)));
       let w = k * sameSurface(c, g, q, textureLoad(guide, q, 0));
+      if (w <= 0.0) { continue; }
       let s = textureLoad(src, q, 0);
+      if (!(s.a >= 0.0 && s.a <= 6e4)) { continue; }
       vs += s.a * w;
       ls += lum(s.rgb) * w;
       vw += w;
@@ -144,10 +146,13 @@ fn fs_pass(@builtin(position) pos: vec4f) -> @location(0) vec4f {
       var w = h * exp(-abs(lum(me.rgb) - l0) / sl);
       var s = me;
       if (x != 0 || y != 0) {
+        let surf = sameSurface(c, g, q, textureLoad(guide, q, 0));
+        if (surf <= 0.0) { continue; }
         s = textureLoad(src, q, 0);
-        w = h * sameSurface(c, g, q, textureLoad(guide, q, 0)) * exp(-abs(lum(s.rgb) - l0) / sl);
+        w = h * surf * exp(-abs(lum(s.rgb) - l0) / sl);
       }
-      sum += s.rgb * w;
+      if (w <= 0.0 || !(s.a >= 0.0 && s.a <= 6e4)) { continue; }
+      sum += clamp(s.rgb, vec3f(0.0), vec3f(6e4)) * w;
       var2 += s.a * w * w;
       ws += w;
     }
@@ -161,7 +166,7 @@ fn fs_pass(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let la = lum(avg);
     avg = select(me.rgb, avg * (lum(me.rgb) / max(la, 1e-8)), la > 1e-4 && la > 0.2 * max(avg.r, max(avg.g, avg.b)) && lum(me.rgb) > 0.0);
   }
-  return vec4f(avg, var2 / (ws * ws));
+  return vec4f(clamp(avg, vec3f(0.0), vec3f(6e4)), clamp(var2 / (ws * ws), 0.0, 6e4));
 }
 
 @fragment

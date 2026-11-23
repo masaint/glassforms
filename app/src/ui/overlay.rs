@@ -19,6 +19,114 @@ const MARK_GAP: f32 = 9.0;
 const MARK_SPACE: f32 = 5.0;
 const MARK_REACH: f32 = 152.0;
 
+/// A short note over the foot line: what was just saved, loaded or made, or what went wrong. A result
+/// fades after a few seconds; an error stays until the next note or a press on it.
+#[derive(Clone, Debug)]
+pub struct Message {
+    pub text: String,
+    pub error: bool,
+    pub at: std::time::Instant,
+}
+
+/// How long a result is shown, and how long it takes to fade.
+const MESSAGE_S: f32 = 5.0;
+const MESSAGE_FADE: f32 = 0.6;
+
+impl Panels {
+    /// Say something in the note over the foot line (`error`: it stays until dismissed).
+    pub fn say(&mut self, text: impl Into<String>, error: bool) {
+        let text = text.into();
+        if text.is_empty() { return; }
+        self.message = Some(Message { text, error, at: std::time::Instant::now() });
+    }
+}
+
+/// Draw the note, if there is one, centred over the foot line.
+pub fn message(ui: &mut Ui, px: &mut Panels, full: Rect) {
+    let Some(m) = px.message.clone() else { return };
+    let age = m.at.elapsed().as_secs_f32();
+    let a = if m.error { 1.0 } else { ((MESSAGE_S - age) / MESSAGE_FADE).clamp(0.0, 1.0) };
+    if a <= 0.0 {
+        px.message = None;
+        return;
+    }
+    if !m.error { ui.ctx().request_repaint_after(std::time::Duration::from_millis(if age < MESSAGE_S - MESSAGE_FADE { 250 } else { 16 })); }
+    let font = mono(LETTERS);
+    let first = m.text.lines().next().unwrap_or_default();
+    let more = m.text.lines().skip(1).collect::<Vec<_>>().join(" · ");
+    let line = if more.is_empty() { first.to_owned() } else { format!("{first} · {more}") };
+    // (as wide as the room between the panels allows; a long path is cut short at its start)
+    let lo = px.left_at.map_or(full.left() + 6.0, |r| r.right() + 10.0);
+    let hi = px.right_at.map_or(full.right() - 6.0, |r| r.left() - 10.0);
+    let room = (hi - lo - 24.0).max(80.0);
+    let mut shown = line.clone();
+    while text_width(ui, &shown, &font) > room && shown.chars().count() > 8 { shown = format!("…{}", shown.chars().skip(2).collect::<String>()); }
+    let w = text_width(ui, &shown, &font) + if m.error { 34.0 } else { 20.0 };
+    let y = full.bottom() - FOOT - 24.0;
+    let centre = ((lo + hi) / 2.0).clamp(full.left() + w / 2.0, full.right() - w / 2.0);
+    let pill = Rect::from_center_size(Pos2::new(centre, y), egui::vec2(w, 19.0));
+    let resp = ui.interact(pill, Id::unique("message"), Sense::click_and_drag());
+    let mut under = ui.painter().clone();
+    under.multiply_opacity(a);
+    under.add(on_glass(pill, true));
+    let ink = if m.error { pal().error_text } else { pal().bright };
+    let words = Rect::from_min_max(pill.min + egui::vec2(10.0, 0.0), pill.max - egui::vec2(if m.error { 24.0 } else { 10.0 }, 0.0));
+    text_in(ui, words, Align2::LEFT_CENTER, &shown, font, fade(ink, a));
+    if m.error {
+        let x = Pos2::new(pill.right() - 12.0, pill.center().y);
+        let s = Stroke::new(1.0, fade(ink, if resp.hovered() { 1.0 } else { 0.6 }));
+        ui.painter().line_segment([x + egui::vec2(-3.0, -3.0), x + egui::vec2(3.0, 3.0)], s);
+        ui.painter().line_segment([x + egui::vec2(-3.0, 3.0), x + egui::vec2(3.0, -3.0)], s);
+    }
+    if resp.hovered() { ui.ctx().set_cursor_icon(CursorIcon::PointingHand); }
+    let resp = if shown != line { resp.on_hover_text(&line) } else { resp };
+    px.note("message", pill);
+    if resp.clicked() { px.message = None; }
+}
+
+/// What there is about the scene that makes it slow to draw, in a few words for the foot line (empty when
+/// nothing stands out): many csg parts, a fine still detail, a fine detail rebuilt while it animates,
+/// many modifiers, a large video. Thresholds are where each begins to cost noticeably on this kind of PC.
+pub struct Heavy {
+    pub parts: usize,
+    pub detail: u32,
+    pub moving_detail: u32,
+    pub animating: bool,
+    pub modifiers: usize,
+    pub video: Option<(u32, u32)>,
+}
+
+pub fn heavy_words(h: &Heavy) -> Vec<String> {
+    let mut out = Vec::new();
+    if h.parts > 16 { out.push(format!("{} parts", h.parts)); }
+    if h.detail >= 1024 { out.push(format!("detail {}³", h.detail)); }
+    if h.animating && h.moving_detail >= 384 { out.push(format!("moving detail {}³", h.moving_detail)); }
+    if h.modifiers >= 4 { out.push(format!("{} modifiers", h.modifiers)); }
+    if let Some((w, hh)) = h.video.filter(|(w, hh)| *w as u64 * *hh as u64 > 2560 * 1440) { out.push(format!("video {w}×{hh}")); }
+    out
+}
+
+/// The offer of the last session's work, after it ended without closing: a line over the note with two
+/// buttons. It stays until one is pressed.
+pub fn restore_offer(ui: &mut Ui, px: &mut Panels, full: Rect) {
+    let Some(when) = px.restore.clone() else { return };
+    let font = mono(LETTERS);
+    let says = format!("the last session ended without closing · its work was kept {when}");
+    let (bw, nw) = (112.0, 40.0);
+    let w = text_width(ui, &says, &font) + bw + nw + 36.0;
+    let y = full.bottom() - FOOT - 52.0;
+    let card = Rect::from_center_size(Pos2::new(full.center().x, y), egui::vec2(w.min(full.width() - 24.0), 24.0));
+    ui.painter().add(glass(card, 7, Lift::Float, px.bright));
+    let words = Rect::from_min_max(card.min + egui::vec2(10.0, 0.0), card.max - egui::vec2(bw + nw + 20.0, 0.0));
+    text_in(ui, words, Align2::LEFT_CENTER, &says, font.clone(), pal().text);
+    let yes = Rect::from_min_size(Pos2::new(card.right() - bw - nw - 12.0, card.top() + 3.0), egui::vec2(bw, 18.0));
+    let no = Rect::from_min_size(Pos2::new(card.right() - nw - 6.0, card.top() + 3.0), egui::vec2(nw, 18.0));
+    px.note("restore:yes", yes);
+    px.note("restore:no", no);
+    if button(ui, yes, Id::unique("restore yes"), "bring it back", true, font.clone()).clicked() { px.requests.push(super::Request::Restore(true)); }
+    if button(ui, no, Id::unique("restore no"), "no", false, font).clicked() { px.requests.push(super::Request::Restore(false)); }
+}
+
 /// The line of figures and its "?", painted straight onto the picture, in the middle at the foot of the
 /// window. The figures are only paint: a press on them is a press on the picture. Where a panel reaches
 /// down beside them in a narrow window they move over to stay clear, and if there is no room they are
@@ -51,8 +159,16 @@ pub fn foot(ui: &mut Ui, px: &mut Panels, full: Rect) {
         for d in [egui::vec2(-1.0, 0.0), egui::vec2(1.0, 0.0), egui::vec2(0.0, -1.0), egui::vec2(0.0, 1.0)] {
             text_in(ui, words.translate(d), Align2::LEFT_CENTER, &px.perf, font.clone(), halo());
         }
-        text_in(ui, words, Align2::LEFT_CENTER, &px.perf, font.clone(), if px.bright || frost() != Frost::Off { fade(pal().bright, 0.8) } else { quiet() });
+        text_in(ui, words, Align2::LEFT_CENTER, &px.perf, font.clone(), if px.bright || frosted() { fade(pal().bright, 0.8) } else { quiet() });
         px.note("perf", words);
+        // while the still picture settles, a hairline along the foot of the bed fills as it does
+        if let Some(k) = px.settle {
+            let y = bed.bottom() - 2.5;
+            let (l, r) = (bed.left() + bed.height() / 2.0, bed.right() - bed.height() / 2.0);
+            ui.painter().line_segment([Pos2::new(l, y), Pos2::new(r, y)], Stroke::new(1.0, white(0.07)));
+            ui.painter().line_segment([Pos2::new(l, y), Pos2::new(l + (r - l) * k.clamp(0.0, 1.0), y)], Stroke::new(1.0, fade(pal().bright, 0.45)));
+            px.note("settle", Rect::from_min_max(Pos2::new(l, y - 1.0), Pos2::new(r, y + 1.0)));
+        }
     }
 
     let mark = Rect::from_center_size(Pos2::new(centre + half + MARK / 2.0, y), egui::vec2(MARK, MARK));
@@ -60,7 +176,7 @@ pub fn foot(ui: &mut Ui, px: &mut Panels, full: Rect) {
     let resp = ui.interact(mark.expand(2.0), Id::unique("help mark"), Sense::click_and_drag());
     let hot = resp.hovered() || px.help_open;
     if resp.hovered() { ui.ctx().set_cursor_icon(CursorIcon::PointingHand); }
-    let ink = if hot { pal().bright } else if px.bright || frost() != Frost::Off { fade(pal().bright, 0.8) } else { quiet() };
+    let ink = if hot { pal().bright } else if px.bright || frosted() { fade(pal().bright, 0.8) } else { quiet() };
     ui.painter().add(on_glass(mark, hot || px.bright));
     ui.painter().circle_stroke(mark.center(), MARK / 2.0, Stroke::new(1.0, fade(ink, if hot { 0.9 } else { 0.6 })));
     text_in(ui, mark, Align2::CENTER_CENTER, "?", mono(10.0), ink);
@@ -72,7 +188,7 @@ pub fn foot(ui: &mut Ui, px: &mut Panels, full: Rect) {
     let resp = ui.interact(gear.expand(2.0), Id::unique("settings mark"), Sense::click_and_drag());
     let hot = resp.hovered() || px.store.settings_open;
     if resp.hovered() { ui.ctx().set_cursor_icon(CursorIcon::PointingHand); }
-    let ink = if hot { pal().bright } else if px.bright || frost() != Frost::Off { fade(pal().bright, 0.8) } else { quiet() };
+    let ink = if hot { pal().bright } else if px.bright || frosted() { fade(pal().bright, 0.8) } else { quiet() };
     ui.painter().add(on_glass(gear, hot || px.bright));
     ui.painter().circle_stroke(gear.center(), MARK / 2.0, Stroke::new(1.0, fade(ink, if hot { 0.9 } else { 0.6 })));
     gear_mark(ui, gear.center(), ink);
@@ -84,7 +200,7 @@ pub fn foot(ui: &mut Ui, px: &mut Panels, full: Rect) {
 /// soft bed, darker (or in the light look, paler) over a picture bright from edge to edge and under a mark
 /// that is lit.
 fn on_glass(r: Rect, strong: bool) -> egui::Shape {
-    if frost() == Frost::Off { return egui::Shape::rect_filled(r, (r.height() / 2.0) as u8, bed(strong)); }
+    if !frosted() { return egui::Shape::rect_filled(r, (r.height() / 2.0) as u8, bed(strong)); }
     glass(r, (r.height() / 2.0) as u8, Lift::Bar, strong)
 }
 /// The faint outline round the figures that keeps them clear of the glass behind.
@@ -142,6 +258,8 @@ fn gestures(families: usize) -> [(&'static str, Vec<(String, &'static str)>); 4]
             (s("M"), "the materials lab"),
             (s("K"), "fold the camera section, or open it"),
             (s("C"), "clay, or the material again"),
+            (s("Z"), "the matcap, or the glass tier again (the row of round buttons under the camera's tools)"),
+            (s("shift+Z"), "the next tier of that row: matcap, draft where it is there, live glass, full render"),
             (s("H"), "hide the panels, or show them"),
             (s("G"), "the handles on what is chosen, or not"),
             (s("T"), "the handles: all at once, move, turn, size"),
@@ -150,9 +268,13 @@ fn gestures(families: usize) -> [(&'static str, Vec<(String, &'static str)>); 4]
             (s("W A S D  Q E"), "flying: forward, left, back, right; down, up (shift fast, ctrl slow)"),
             (s("F11"), "fullscreen (Esc leaves it)"),
             (s("ctrl+Z, ctrl+shift+Z"), "undo, redo (also ctrl+Y): the line under the camera's tools says what changed"),
+            (s("ctrl+S, ctrl+shift+S"), "save the setup over the file last saved or loaded; save it as a new file"),
+            (s("ctrl+I"), "choose all the rest (invert); with shift, the rest of what is shown; with alt, keep only what is shown"),
+            (s("drag on nothing"), "with the select tool: a box chooses what it meets (shift adds)"),
             (s("ctrl+1 – 0"), "store the view in a slot"),
             (s("shift+1 – 0"), "go to a stored view"),
             (s("Esc while dragging"), "call the drag off: back as it was"),
+            (s("Esc, click on nothing"), "let go of what is selected (ctrl+shift+A too); Esc again goes up a level"),
             (s("F1"), "this help (Esc closes it)"),
         ]),
     ]
@@ -183,8 +305,28 @@ pub fn help(ctx: &egui::Context, px: &mut Panels, families: usize, full: Rect) {
                 ui.painter().galley(Pos2::new(r.left() + HELP_KEYS + 4.0, top + (17.0 - SMALL * 1.35) / 2.0), g, pal().dim);
             }
         }
+        // which build this is (as the window's title and --version say)
+        section(ui, "this build", "");
+        let g = wrapped(ui, &crate::build_info::this(), mono(SMALL), pal().dim, ui.available_width(), 1.35);
+        let r = row(ui, g.size().y + 2.0);
+        ui.painter().galley(r.left_top(), g, pal().dim);
     });
     if out.closed { px.help_open = false; }
     px.note("help", out.rect);
     px.note("help:close", out.cross);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_what_stands_out_is_named() {
+        let quiet = Heavy { parts: 3, detail: 768, moving_detail: 256, animating: true, modifiers: 1, video: Some((1920, 1080)) };
+        assert!(heavy_words(&quiet).is_empty());
+        let busy = Heavy { parts: 40, detail: 1536, moving_detail: 512, animating: true, modifiers: 5, video: Some((3840, 2160)) };
+        assert_eq!(heavy_words(&busy), ["40 parts", "detail 1536³", "moving detail 512³", "5 modifiers", "video 3840×2160"]);
+        // a fine moving detail costs only while it animates
+        assert!(heavy_words(&Heavy { animating: false, ..busy }).iter().all(|w| !w.starts_with("moving")));
+    }
 }

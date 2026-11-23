@@ -96,6 +96,14 @@ fn compare_wide(gpu: &Gpu, comb: &mut Combiner, data: &[(usize, Vec<f16>)], wide
                 let want = c.eval_at(&d, p);
                 let g = got[(k * res + j) * res + i].to_f64();
                 let err = (g - want).abs();
+                // Near a surface the shader reads each layer through a cubic B-spline built from the
+                // hardware's linear taps, whose weights carry 8 bits below the texel (as the APIs allow):
+                // it cannot match the f64 reference closer than about 1/256 of a texel's step. A 32nd of a
+                // voxel is allowed there; everywhere else the reference holds to the last place. (The edge of
+                // the band is decided on each side by a value read at its own precision, so it is widened
+                // by a tenth: on a voxel at the edge one side may read cubic and the other linear.)
+                let cubic = (0..c.n).any(|l| d[l].abs() < 1.1 * 18.0 * HB / data[l].0 as f64);
+                let slack = if cubic { slack.max(2.0 * HB / data[0].0 as f64 / 32.0) } else { slack };
                 if err > worst_abs && err > 3e-4 && std::env::var_os("LAYERS_DEBUG").is_some() { eprintln!("voxel {i},{j},{k} at {p:?}: got {g:.9} want {want:.9} from {d:?}; in layer 2: {:?}", c.to_layer(1.min(c.n - 1), p)); }
                 worst_abs = worst_abs.max(err);
                 let w = (err - slack).max(0.0) / ulp16(want.abs().max(g.abs()));
@@ -290,14 +298,18 @@ fn the_shader_agrees_with_the_reference() {
                         let at = (k * res + j) * res + i;
                         let p = [centre(i, res), centre(j, res), centre(k, res)];
                         let mut d = [0.0; 4];
+                        // (each layer read as the shader reads it: through the B-spline near its surface)
                         for l in 0..4 {
-                            d[l] = all[l].1[at].to_f64();
+                            let v = &all[l].1;
+                            d[l] = read_layer(&|a: usize, b: usize, e: usize| v[(e * res + b) * res + a].to_f64(), res, None, p);
                         }
                         let want = c.eval_bodies_at(&d, p);
                         let got = &bodies[at * channels..(at + 1) * channels];
+                        let cubic = d.iter().any(|v| v.abs() < 1.1 * 18.0 * HB / res as f64);
+                        let slack = if cubic { SLACK.max(2.0 * HB / res as f64 / 32.0) } else { SLACK };
                         for b in 0..channels {
                             let err = (got[b].to_f64() - want[b]).abs();
-                            worst = worst.max((err - SLACK).max(0.0) / ulp16(want[b].abs().max(got[b].to_f64().abs())));
+                            worst = worst.max((err - slack).max(0.0) / ulp16(want[b].abs().max(got[b].to_f64().abs())));
                         }
                         // the scene's voxel is exactly the nearest body's
                         let nearest = got[..c.bodies].iter().map(|v| v.to_f32()).fold(f32::MAX, f32::min);

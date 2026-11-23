@@ -184,7 +184,7 @@ fn every_new_preset_builds_at_its_defaults_and_at_each_sliders_two_ends() {
                 s.shape_mut().vals = vals.clone();
                 let job = s.shape_job(Detail::Full, Some(96)).unwrap_or_else(|e| panic!("{who} at {vals:?}: {e}"));
                 match &job.shape {
-                    ShapeJob::Field { uniforms } => {
+                    ShapeJob::Field { uniforms, .. } => {
                         assert!(uniforms.iter().all(|v| v.is_finite()), "{who} at {vals:?}");
                         for (i, v) in vals.iter().enumerate() {
                             assert_eq!(uniforms[4 + i], *v as f32, "{who}: slider {i} is not where the shader reads it");
@@ -202,4 +202,21 @@ fn every_new_preset_builds_at_its_defaults_and_at_each_sliders_two_ends() {
         }
     }
     println!("{built} builds");
+}
+
+/// A shape's own tracing budget (presets::Budget) only ever asks the tracer for less than its family's, and
+/// within what has been measured to keep the look (docs/cache_bounces.md): no more further pieces than the
+/// family follows, paths inside cut no later than the family's and no earlier than a tenth, a step no longer
+/// than most families take.
+#[test]
+fn a_shapes_own_budget_asks_for_less_than_its_familys() {
+    for f in presets::families() {
+        for p in &f.presets {
+            let b = p.budget;
+            let who = format!("{}/{}", f.id, p.id);
+            if let Some(l) = b.layers { assert!(l <= f.layers, "{who}: {l} further pieces, its family {}", f.layers); }
+            if let Some(c) = b.thr_cut { assert!(c >= f.thr_cut && c <= 0.1, "{who}: paths inside end below {c}"); }
+            if let Some(s) = b.step_scale { assert!(s > 0.3 && s <= 0.95, "{who}: step {s}"); }
+        }
+    }
 }

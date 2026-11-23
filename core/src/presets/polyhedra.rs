@@ -22,25 +22,9 @@ use super::*;
 use super::solids::{FINE, FIT, KALEIDOSCOPE, TURN};
 
 type V = [f64; 3];
-fn add(a: V, b: V) -> V { [a[0] + b[0], a[1] + b[1], a[2] + b[2]] }
-fn sub(a: V, b: V) -> V { [a[0] - b[0], a[1] - b[1], a[2] - b[2]] }
-fn mul(a: V, s: f64) -> V { [a[0] * s, a[1] * s, a[2] * s] }
-fn dot(a: V, b: V) -> f64 { a[0] * b[0] + a[1] * b[1] + a[2] * b[2] }
-fn cross(a: V, b: V) -> V { [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]] }
-fn len(a: V) -> f64 { dot(a, a).sqrt() }
-fn unit(a: V) -> V { mul(a, 1.0 / len(a)) }
+use crate::math::{add, cross, dot, len, scale as mul, sub, unit};
 /// a vector turned by TURN
 fn turn(v: V) -> V { [dot(TURN[0], v), dot(TURN[1], v), dot(TURN[2], v)] }
-/// The starting orientation (as the program's x-y-z angles) that shows the upright polyhedron spun by
-/// want[1] degrees about its own vertical axis, then tipped towards the camera by want[0], then rolled by
-/// want[2]: TURN undone, since the shape in its own frame is the upright one turned by TURN.
-fn view(want: [f64; 3]) -> [f64; 3] {
-    use crate::math::{axis_angle, euler_of, mul, DEG};
-    let t = [TURN[0][0], TURN[1][0], TURN[2][0], TURN[0][1], TURN[1][1], TURN[2][1], TURN[0][2], TURN[1][2], TURN[2][2]];
-    let shown = mul(&axis_angle(0.0, 0.0, 1.0, want[2] * DEG), &mul(&axis_angle(1.0, 0.0, 0.0, want[0] * DEG), &axis_angle(0.0, 1.0, 0.0, want[1] * DEG)));
-    let e = euler_of(&mul(&shown, &t));
-    e.map(|a| (a * 10.0).round() / 10.0)
-}
 const PHI: f64 = 1.618_033_988_749_895;
 
 /// A 3x3 matrix as rows.
@@ -115,7 +99,7 @@ fn centred(pts: &[V], r: f64) -> Vec<V> {
 /// `fn <name>(q: vec3f, s1: f32) -> Top`: every plane tried in a loop over a table of them (written out a
 /// line a plane, the formula went into the shader dozens of times over and took seconds to compile). A
 /// plane is (normal, distance, and how far the distance moves for each unit of `s1`).
-fn planes_fn(name: &str, planes: &[(V, f64, f64)]) -> String {
+fn planes_fn(name: &str, planes: &[(V, f64, f64)], prune_sectors: bool) -> String {
     let n = planes.len();
     let pl: Vec<String> = planes.iter().map(|(v, h, _)| format!("vec4f({:.9}, {:.9}, {:.9}, {h:.9})", v[0], v[1], v[2])).collect();
     let moves = planes.iter().any(|(_, _, k)| k.abs() > 1e-12);
@@ -125,17 +109,124 @@ fn planes_fn(name: &str, planes: &[(V, f64, f64)]) -> String {
     } else {
         (String::new(), "pl.w".to_string())
     };
-    format!("var<private> {name}_pl: array<vec4f, {n}> = array<vec4f, {n}>({pls});
-{table_k}fn {name}(q: vec3f, s1: f32) -> Top {{
-  var t = top_new();
-  for (var i = 0; i < {n} + opaque(); i++) {{
+    let (masks, scan) = if prune_sectors && (30..=96).contains(&n) {
+        let masks = plane_masks(planes);
+        let words: Vec<_> = masks.iter().map(|m| format!("vec3u({}u,{}u,{}u)", m[0], m[1], m[2])).collect();
+        let masks = format!("const zono_masks = array<vec3u, 48>({});\n{ZONO_SECTOR}\n", words.join(","));
+        let scan = format!("  let mask = zono_masks[zono_sector(q)];
+  for (var word = 0u; word < {}u; word++) {{
+    var bits = mask[word];
+    while (bits != 0u) {{
+      let i = 32u * word + firstTrailingBit(bits);
+      bits &= bits - 1u;
+      let pl = {name}_pl[i];
+      let h = {h};
+      top_add(&t, dot(q, pl.xyz) - h, pl.xyz, h);
+    }}
+  }}", n.div_ceil(32));
+        (masks, scan)
+    } else {
+        (String::new(), format!("  for (var i = 0; i < {n} + opaque(); i++) {{
     let pl = {name}_pl[i];
     let h = {h};
     top_add(&t, dot(q, pl.xyz) - h, pl.xyz, h);
-  }}
+  }}"))
+    };
+    format!("var<private> {name}_pl: array<vec4f, {n}> = array<vec4f, {n}>({pls});
+{table_k}{masks}fn {name}(q: vec3f, s1: f32) -> Top {{
+  var t = top_new();
+{scan}
   return t;
 }}
 ", pls = pl.join(", "))
+}
+
+// Three ordered absolute coordinates and their signs select one of 48 cones. Within
+// a cone every query point is a nonnegative combination of its three extreme rays.
+// If three other faces score above a face on all three rays and have smaller offsets
+// at both stretch endpoints, that face cannot enter the three-plane distance there.
+fn plane_masks(planes: &[(V, f64, f64)]) -> Vec<[u32; 3]> {
+    let orders = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+    let mut masks = Vec::with_capacity(48);
+    for signs in 0..8 {
+        for axes in orders {
+            let mut rays = [[0.0; 3]; 3];
+            for k in 0..3 {
+                if k > 0 { rays[k] = rays[k - 1]; }
+                rays[k][axes[k]] = if signs & (1 << axes[k]) == 0 { 1.0 } else { -1.0 };
+            }
+            let mut mask = [0u32; 3];
+            for (i, &(n, h, slope)) in planes.iter().enumerate() {
+                let above = planes.iter().filter(|&&(m, mh, ms)| {
+                    let diff = sub(m, n);
+                    rays.iter().all(|r| dot(diff, *r) > 1e-7)
+                        && mh - 0.7 * ms <= h - 0.7 * slope + 1e-10
+                        && mh + 1.5 * ms <= h + 1.5 * slope + 1e-10
+                }).take(3).count();
+                if above < 3 { mask[i / 32] |= 1 << (i % 32); }
+            }
+            masks.push(mask);
+        }
+    }
+    masks
+}
+
+const ZONO_SECTOR: &str = "
+fn zono_sector(q: vec3f) -> u32 {
+  let a = abs(q);
+  let signs = select(0u, 1u, q.x < 0.0) | select(0u, 2u, q.y < 0.0) | select(0u, 4u, q.z < 0.0);
+  var order: u32;
+  if (a.x >= a.y) {
+    order = select(select(4u, 1u, a.x >= a.z), 0u, a.y >= a.z);
+  } else {
+    order = select(select(5u, 3u, a.y >= a.z), 2u, a.x >= a.z);
+  }
+  return signs * 6u + order;
+}
+";
+
+#[cfg(test)]
+mod plane_tests {
+    use super::*;
+
+    #[test]
+    fn cone_pruning_preserves_three_nearest_planes_and_inradius() {
+        let orders = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+        for id in ["triacontahedron", "enneacontahedron", "truncicosidodeca"] {
+            let gens: Vec<_> = star(id).into_iter().map(unit).collect();
+            let planes = zono_planes(&gens, 1.0);
+            let masks = plane_masks(&planes);
+            for signs in 0..8 {
+                for (order, axes) in orders.iter().enumerate() {
+                    let mask = masks[6 * signs + order];
+                    for radii in [[0.0, 0.0, 0.0], [0.001, 0.001, 0.0], [1.9, 1.9, 1.9], [2.0, 0.85, 0.11], [70.0, 2.0, 0.0]] {
+                        let mut q = [0.0; 3];
+                        for (k, axis) in axes.iter().copied().enumerate() {
+                            q[axis] = radii[k] * if signs & (1 << axis) == 0 { 1.0 } else { -1.0 };
+                        }
+                        for stretch in [-0.7, -0.25, 0.0, 0.31, 1.5] {
+                            let bounds = |prune: bool| {
+                                let mut values = Vec::new();
+                                let mut least = f64::INFINITY;
+                                for (i, &(n, h, slope)) in planes.iter().enumerate() {
+                                    if !prune || mask[i / 32] & (1 << (i % 32)) != 0 {
+                                        let offset = h + stretch * slope;
+                                        values.push(dot(q, n) - offset);
+                                        least = least.min(offset);
+                                    }
+                                }
+                                values.sort_by(|a, b| b.total_cmp(a));
+                                [values[0], values[1], values[2], least]
+                            };
+                            for (full, fast) in bounds(false).into_iter().zip(bounds(true)) {
+                                assert!((full - fast).abs() < 1e-9, "{id}, q={q:?}, stretch={stretch}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 // The three planes a point lies farthest beyond, the exact distance to the corner they make, and the
@@ -158,61 +249,61 @@ fn top_add(t: ptr<function, Top>, v: f32, n: vec3f, h: f32) {
 }
 // The distance to the edge where planes A and B meet, if its nearest point there lies inside plane C
 // (a, b, c: the point's distances from the planes; cab, cac, cbc: dot products of their normals).
-fn c3edge(a: f32, b: f32, c: f32, cab: f32, cac: f32, cbc: f32) -> f32 {
+fn c3edge(a: f32, b: f32, c: f32, cab: f32, cac: f32, cbc: f32, na: vec3f, nb: vec3f) -> vec4f {
   let s = 1.0 - cab * cab;
-  if (s < 1e-5) { return 1e9; }
+  if (s < 1e-5) { return vec4f(0.0, 0.0, 0.0, 1e9); }
   let al = (a - b * cab) / s;
   let be = (b - a * cab) / s;
-  if (al < 0.0 || be < 0.0 || c - al * cac - be * cbc > 0.0) { return 1e9; }
-  return sqrt(max(a * al + b * be, 0.0));
+  if (al < 0.0 || be < 0.0 || c - al * cac - be * cbc > 0.0) { return vec4f(0.0, 0.0, 0.0, 1e9); }
+  let d = sqrt(max(a * al + b * be, 0.0));
+  return vec4f((al * na + be * nb) / max(d, 1e-12), d);
 }
-// Signed distance to the region inside all three planes: inside, the largest plane distance; outside, the
-// nearest of the points of a face, an edge or the corner that lie inside the other planes (each such point
-// is a point of the region, so the least of them is the nearest of all).
-fn corner3(v: vec3f, n1: vec3f, n2: vec3f, n3: vec3f) -> f32 {
+// Signed distance and outward normal. A feasible projection onto a face or edge, with
+// nonnegative multipliers, is already the closest point of the convex intersection.
+fn corner3(v: vec3f, n1: vec3f, n2: vec3f, n3: vec3f) -> vec4f {
   let a = v.x;
   let b = v.y;
   let c = v.z;
-  let inside = max(a, max(b, c));
-  if (inside <= 0.0) { return inside; }
+  if (a <= 0.0) { return vec4f(n1, a); }
   let c12 = dot(n1, n2);
   let c13 = dot(n1, n3);
+  if (b <= a * c12 && c <= a * c13) { return vec4f(n1, a); }
   let c23 = dot(n2, n3);
-  var d = 1e9;
-  if (a > 0.0 && b - a * c12 <= 0.0 && c - a * c13 <= 0.0) { d = a; }
-  if (b > 0.0 && a - b * c12 <= 0.0 && c - b * c23 <= 0.0) { d = min(d, b); }
-  if (c > 0.0 && a - c * c13 <= 0.0 && b - c * c23 <= 0.0) { d = min(d, c); }
-  d = min(d, c3edge(a, b, c, c12, c13, c23));
-  d = min(d, c3edge(a, c, b, c13, c12, c23));
-  d = min(d, c3edge(b, c, a, c23, c12, c13));
-  // the corner: x with nᵢ·x = vᵢ, |x|² = vᵀ G⁻¹ v, G the normals' dot products
+  let ab = c3edge(a, b, c, c12, c13, c23, n1, n2);
+  if (ab.w < 1e8) { return ab; }
+  let ac = c3edge(a, c, b, c13, c12, c23, n1, n3);
+  if (ac.w < 1e8) { return ac; }
+  let bc = c3edge(b, c, a, c23, c12, c13, n2, n3);
+  if (bc.w < 1e8) { return bc; }
   let det = 1.0 + 2.0 * c12 * c13 * c23 - c12 * c12 - c13 * c13 - c23 * c23;
-  if (det > 1e-5) {
-    let q = a * a * (1.0 - c23 * c23) + b * b * (1.0 - c13 * c13) + c * c * (1.0 - c12 * c12)
-      + 2.0 * a * b * (c13 * c23 - c12) + 2.0 * a * c * (c12 * c23 - c13) + 2.0 * b * c * (c12 * c13 - c23);
-    d = min(d, sqrt(max(q, 0.0) / det));
-  }
-  return select(d, inside, d > 1e8);
+  if (det <= 1e-5) { return vec4f(n1, a); }
+  let l = vec3f(
+    (1.0 - c23*c23)*a + (c13*c23 - c12)*b + (c12*c23 - c13)*c,
+    (c13*c23 - c12)*a + (1.0 - c13*c13)*b + (c12*c13 - c23)*c,
+    (c12*c23 - c13)*a + (c12*c13 - c23)*b + (1.0 - c12*c12)*c) / det;
+  let d = sqrt(max(dot(v, l), 0.0));
+  return vec4f((l.x*n1 + l.y*n2 + l.z*n3) / max(d, 1e-12), d);
 }
-// The solid, its edges rounded to r, and hollowed to a wall of `wall` while there is room for it.
-fn top_solid(t: Top, r: f32, wall: f32, fe: f32) -> f32 {
-  var d = corner3(t.v + r, t.n1, t.n2, t.n3) - r;
+fn top_gradient(t: Top, r: f32, wall: f32, fe: f32) -> vec4f {
+  var outer = corner3(t.v + r, t.n1, t.n2, t.n3);
+  outer.w -= r;
   let w = max(wall, 3.0 * fe);
   let room = t.ih - w;
   if (wall > 0.0005 && room > fe) {
     let rc = min(max(r - w, fe), 0.5 * room);
-    d = max(d, rc - corner3(t.v + w + rc, t.n1, t.n2, t.n3));
+    let inner = corner3(t.v + w + rc, t.n1, t.n2, t.n3);
+    if (rc - inner.w > outer.w) { return vec4f(-inner.xyz, rc - inner.w); }
   }
-  return d;
+  return outer;
 }
+fn top_solid(t: Top, r: f32, wall: f32, fe: f32) -> f32 { return top_gradient(t, r, wall, fe).w; }
+
 ";
 
 fn turn_wgsl() -> String {
     // the inverse of TURN (its transpose): a point of the volume taken into the polyhedron's own frame
     format!("const TT: mat3x3f = {};\n", wgsl_mat(mat_t(TURN)))
 }
-
-fn light(az: f64, el: f64, w: f64, h: f64, rgb: [f64; 3], soft: f64) -> Light { Light { az, el, w, h, rgb, soft } }
 
 fn round_wall() -> Vec<ParamDef> {
     vec![
@@ -273,7 +364,7 @@ fn johnson(id: &'static str, name: &'static str, eq: Vec<&'static str>, note: &'
     let wgsl = format!("{FINE}{POLY}{tt}{f}
 fn raw(p: vec3f) -> f32 {{
   return top_solid(solid(p, 0.0), max(pr.round, fine()), pr.wall, fine());
-}}", tt = turn_wgsl(), f = planes_fn("solid", &planes));
+}}", tt = turn_wgsl(), f = planes_fn("solid", &planes, false));
     Preset {
         eq, note, params: round_wall(), rot: Some(view(rot)), animate: Some(vec!["round"]),
         ..Preset::new(id, name, Shape::Field { wgsl, clip: "-1.0".into(), shell: "0.0".into() })
@@ -285,6 +376,54 @@ fn raw(p: vec3f) -> f32 {{
 /// One member of a compound: which of the base solids, and the matrix from the compound's frame to its own.
 struct Member { base: usize, m: M }
 
+/// The cube and the octahedron have closed-form distances in their own axes.
+enum CompoundSolid { Cube, Octahedron, Hull(Vec<V>) }
+
+impl CompoundSolid {
+    fn wgsl(&self, i: usize) -> String {
+        let head = format!("fn member{i}(q: vec3f, r: f32, limit: f32) -> vec4f");
+        match self {
+            Self::Cube => format!("{head} {{
+  let d = abs(q) - vec3f(0.577350269) + r;
+  let out = max(d, vec3f(0.0));
+  let l = length(out);
+  let hi = max(d.x, max(d.y, d.z));
+  var n = select(vec3f(0, 0, 1), vec3f(0, 1, 0), d.y >= d.z);
+  n = select(n, vec3f(1, 0, 0), d.x >= hi);
+  n = select(n, out / max(l, 1e-12), l > 0.0);
+  return vec4f(n * sign(q), l + min(hi, 0.0) - r);
+}}\n"),
+            // Reflect into the positive octant; the projection is on its dominant face, edge or vertex.
+            Self::Octahedron => format!("{head} {{
+  let p = abs(q);
+  let s = 1.0 - 1.732050808 * r;
+  let sum = p.x + p.y + p.z;
+  let lo = min(p.x, min(p.y, p.z));
+  let m = sum - s;
+  let sg = sign(q);
+  if (3.0 * lo >= m) {{ return vec4f(sg * 0.577350269, m * 0.577350269 - r); }}
+  let hi = max(p.x, max(p.y, p.z));
+  let mid = sum - lo - hi;
+  let edge = 0.5 * (mid + hi - s);
+  var delta = min(p, vec3f(edge));
+  if (mid < edge) {{ delta = select(p, p - s, p == vec3f(hi)); }}
+  let d = length(delta);
+  return vec4f(sg * delta / max(d, 1e-12), d - r);
+}}\n"),
+            Self::Hull(points) => {
+                let planes = hull(&centred(points, 1.0)).into_iter().map(|(n, h)| (n, h, 0.0)).collect::<Vec<_>>();
+                let table = planes_fn(&format!("base{i}"), &planes, false);
+                // The farthest plane is a lower bound. A member beyond limit cannot affect the union.
+                format!("{table}{head} {{
+  let t = base{i}(q, 0.0);
+  if (t.v.x >= limit) {{ return vec4f(t.n1, t.v.x); }}
+  return top_gradient(t, r, 0.0, 0.0);
+}}\n")
+            }
+        }
+    }
+}
+
 /// How a compound moves when it animates.
 enum Motion {
     /// the members pushed apart along `dir` (in each member's own frame), by `explode`
@@ -294,13 +433,11 @@ enum Motion {
 }
 
 /// A compound of solids, each of circumradius 1 in its own frame.
-fn compound(id: &'static str, name: &'static str, eq: Vec<&'static str>, note: &'static str, bases: &[Vec<V>], members: Vec<Member>, motion: Motion, rot: [f64; 3]) -> Preset {
+fn compound(id: &'static str, name: &'static str, eq: Vec<&'static str>, note: &'static str, bases: &[CompoundSolid], members: Vec<Member>, motion: Motion, rot: [f64; 3]) -> Preset {
     use std::fmt::Write;
     let mut w = format!("{FINE}{POLY}");
     for (i, b) in bases.iter().enumerate() {
-        let pts = centred(b, 1.0);
-        let planes: Vec<(V, f64, f64)> = hull(&pts).into_iter().map(|(n, h)| (n, h, 0.0)).collect();
-        w += &planes_fn(&format!("base{i}"), &planes);
+        w += &b.wgsl(i);
     }
     let tt = mat_t(TURN);
     let (head, params, animate) = match motion {
@@ -324,31 +461,46 @@ fn compound(id: &'static str, name: &'static str, eq: Vec<&'static str>, note: &
     let balanced = matches!(motion, Motion::Balance(_));
     let mut tables = String::new();
     w += "
-fn raw(p: vec3f) -> f32 {
+fn join_member(a: vec4f, b: vec4f, frame: mat3x3f, scale: f32, k: f32) -> vec4f {
+  let d = b.w * scale;
+  if (d >= a.w + k) { return a; }
+  let n = transpose(frame) * b.xyz;
+  let t = clamp(0.5 + 0.5 * (a.w - d) / k, 0.0, 1.0);
+  return vec4f(mix(a.xyz, n, t), smin(a.w, d, k));
+}
+fn rawGrad(p: vec3f) -> vec4f {
 ";
     w += &head;
     w += "  let r = max(pr.round, fine()) * sc;
-  // the creases where members meet are filled, to about the least rounding an edge gets
   let k = 3.0 * fine() * sc;
   let q0 = p * sc;
-  var d = 1e9;
+  var d = vec4f(0.0, 0.0, 0.0, 1e9);
 ";
-    // the members of each base solid, in a loop over a table of their matrices
     for base in 0..bases.len() {
         let ms: Vec<String> = members.iter().filter(|m| m.base == base).map(|m| wgsl_mat(mat_mul(mat_t(m.m), tt))).collect();
         if balanced && base == 1 {
-            writeln!(w, "  d = smin(d, bal * top_solid(base1({} * q0 / bal, 0.0), r / bal, 0.0, fine() * sc / bal), k);", ms[0]).unwrap();
+            writeln!(w, "  d = join_member(d, member1({m} * q0 / bal, r / bal, (d.w + k) / bal), {m}, bal, k);", m = ms[0]).unwrap();
         } else if ms.len() == 1 {
-            writeln!(w, "  d = smin(d, top_solid(base{base}({} * q0 - off, 0.0), r, 0.0, fine() * sc), k);", ms[0]).unwrap();
+            writeln!(w, "  d = join_member(d, member{base}({m} * q0 - off, r, d.w + k), {m}, 1.0, k);", m = ms[0]).unwrap();
         } else {
             tables += &format!("var<private> members{base}: array<mat3x3f, {n}> = array<mat3x3f, {n}>({});\n", ms.join(", "), n = ms.len());
-            writeln!(w, "  for (var i = 0; i < {n} + opaque(); i++) {{ d = smin(d, top_solid(base{base}(members{base}[i] * q0 - off, 0.0), r, 0.0, fine() * sc), k); }}", n = ms.len()).unwrap();
+            writeln!(w, "  for (var i = 0; i < {n} + opaque(); i++) {{
+    let frame = members{base}[i];
+    d = join_member(d, member{base}(frame * q0 - off, r, d.w + k), frame, 1.0, k);
+  }}", n = ms.len()).unwrap();
         }
     }
-    w += "  return d / sc;\n}";
-    let w = format!("{tables}{w}");
+    w += "  return vec4f(d.xyz, d.w / sc);\n}\nfn raw(p: vec3f) -> f32 { return rawGrad(p).w; }";
+    // (the ten tetrahedra: too many members to read at every surface inside, traced from the formula)
+    let first = if id == "tentetra" { "// csg: the formula at the first surface only
+" } else { "" };
+    let w = format!("{first}{tables}{w}");
+    let budget = match id {
+        "tentetra" => Budget { thr_cut: Some(0.05), leave_cut: Some(true), ..Budget::default() },
+        _ => Budget::default(),
+    };
     Preset {
-        eq, note, params, rot: Some(view(rot)), animate: Some(vec![animate]),
+        eq, note, params, budget, rot: Some(view(rot)), animate: Some(vec![animate]),
         ..Preset::new(id, name, Shape::Field { wgsl: w, clip: "-1.0".into(), shell: "0.0".into() })
     }
 }
@@ -361,22 +513,8 @@ fn fivefold() -> (V, Vec<M>) {
 
 // ------------------------------------------------------------------------------------------ zonohedron
 
-/// The zonohedron of a star of vectors: the sum of the segments from -g/2 to g/2. Its faces are square to
-/// the cross products of pairs of the vectors; the first vector's length is a slider.
-fn zonohedron(id: &'static str, name: &'static str, eq: Vec<&'static str>, note: &'static str, star: &[V], rot: [f64; 3]) -> Preset {
-    let gens: Vec<V> = star.iter().map(|g| unit(*g)).collect();
+fn zono_planes(gens: &[V], far: f64) -> Vec<(V, f64, f64)> {
     let support = |u: V| 0.5 * gens.iter().map(|g| dot(*g, u).abs()).sum::<f64>();
-    // the farthest corner: for a direction u the corner is the sum of ½ sign(g·u) g
-    let mut far: f64 = 0.0;
-    let n = 20000;
-    for i in 0..n {
-        let y = 1.0 - 2.0 * (i as f64 + 0.5) / n as f64;
-        let r = (1.0 - y * y).sqrt();
-        let a = i as f64 * 2.399_963_229_728_653;
-        let u = [r * a.cos(), y, r * a.sin()];
-        let c = gens.iter().fold([0.0; 3], |s, g| add(s, mul(*g, 0.5 * dot(*g, u).signum())));
-        far = far.max(len(c));
-    }
     let mut normals: Vec<V> = Vec::new();
     for i in 0..gens.len() {
         for j in i + 1..gens.len() {
@@ -389,15 +527,35 @@ fn zonohedron(id: &'static str, name: &'static str, eq: Vec<&'static str>, note:
         }
     }
     // in units of the farthest corner: each plane's distance, and how it moves as the first vector stretches
-    let planes: Vec<(V, f64, f64)> = normals.iter().map(|n| (turn(*n), support(*n) / far, 0.5 * dot(gens[0], *n).abs() / far)).collect();
+    normals.iter().map(|n| (turn(*n), support(*n) / far, 0.5 * dot(gens[0], *n).abs() / far)).collect()
+}
+
+/// The zonohedron of a star of vectors: the sum of the segments from -g/2 to g/2. Its faces are square to
+/// the cross products of pairs of the vectors; the first vector's length is a slider.
+fn zonohedron(id: &'static str, name: &'static str, eq: Vec<&'static str>, note: &'static str, star: &[V], rot: [f64; 3]) -> Preset {
+    let gens: Vec<V> = star.iter().map(|g| unit(*g)).collect();
+    // the farthest corner: for a direction u the corner is the sum of ½ sign(g·u) g
+    let mut far: f64 = 0.0;
+    let n = 20000;
+    for i in 0..n {
+        let y = 1.0 - 2.0 * (i as f64 + 0.5) / n as f64;
+        let r = (1.0 - y * y).sqrt();
+        let a = i as f64 * 2.399_963_229_728_653;
+        let u = [r * a.cos(), y, r * a.sin()];
+        let c = gens.iter().fold([0.0; 3], |s, g| add(s, mul(*g, 0.5 * dot(*g, u).signum())));
+        far = far.max(len(c));
+    }
+    let planes = zono_planes(&gens, far);
     let wgsl = format!("{FINE}{POLY}{f}
-fn raw(p: vec3f) -> f32 {{
+fn rawGrad(p: vec3f) -> vec4f {{
   let s1 = pr.stretch - 1.0;
   // stretching the first vector moves the farthest corner out by no more than half the stretch
   let sc = (1.0 + max(s1, 0.0) * {g0:.6}) / {FIT:.4};
   let q = p * sc;
-  return top_solid(zono(q, s1), max(pr.round, fine()) * sc, pr.wall * sc, fine() * sc) / sc;
-}}", f = planes_fn("zono", &planes), g0 = 0.5 / far);
+  let hit = top_gradient(zono(q, s1), max(pr.round, fine()) * sc, pr.wall * sc, fine() * sc);
+  return vec4f(hit.xyz, hit.w / sc);
+}}
+fn raw(p: vec3f) -> f32 {{ return rawGrad(p).w; }}", f = planes_fn("zono", &planes, true), g0 = 0.5 / far);
     let mut params = vec![ParamDef::labelled("stretch", "first vector's length", 1.0, 0.3, 2.5, 0.01)];
     params.extend(round_wall());
     Preset {
@@ -551,10 +709,10 @@ fn raw(p: vec3f) -> f32 {
 }";
 
 const GEO_FRAME: &str = "
-fn geo_seg(q: vec3f, a: vec3f, b: vec3f) -> f32 {
+fn geo_seg(q: vec3f, a: vec3f, b: vec3f) -> vec3f {
   let ab = b - a;
   let h = clamp(dot(q - a, ab) / dot(ab, ab), 0.0, 1.0);
-  return length(q - a - ab * h);
+  return q - a - ab * h;
 }
 // whether grid corner (i, j) is in this face or one mirror away from it (a corner of the icosahedron has
 // five neighbours, not six: the sixth place round it would be two mirrors away, and is left out)
@@ -566,24 +724,46 @@ fn geo_near(i: f32, j: f32) -> bool {
   return true;
 }
 // the nearest of the struts that leave grid corner (i, j), and of its hub
-fn geo_star(q: vec3f, i: f32, j: f32, tube: f32, ball: f32) -> f32 {
+fn geo_star(q: vec3f, i: f32, j: f32, tube: f32, ball: f32) -> vec4f {
   let c = geo_v(i, j);
-  var e = 1e9;
+  var nearest = q - c;
+  var best_sq = dot(nearest, nearest);
   let di = array<f32, 6>(1.0, -1.0, 0.0, 0.0, 1.0, -1.0);
   let dj = array<f32, 6>(0.0, 0.0, 1.0, -1.0, -1.0, 1.0);
   for (var k = 0; k < 6 + opaque(); k++) {
     let ni = i + di[k];
     let nj = j + dj[k];
-    if (geo_near(ni, nj)) { e = min(e, geo_seg(q, c, geo_v(ni, nj))); }
+    if (geo_near(ni, nj)) {
+      let delta = geo_seg(q, c, geo_v(ni, nj));
+      let sq = dot(delta, delta);
+      if (sq < best_sq) { best_sq = sq; nearest = delta; }
+    }
   }
-  return smin(e - tube, length(q - c) - ball, 0.02);
+  let strut = sqrt(best_sq);
+  let hub = length(q - c);
+  let mix_t = clamp(0.5 + 0.5 * ((hub - ball) - (strut - tube)) / 0.02, 0.0, 1.0);
+  let normal = mix((q - c) / max(hub, 1e-10), nearest / max(strut, 1e-10), mix_t);
+  return vec4f(normal, smin(strut - tube, hub - ball, 0.02));
 }
-fn raw(p: vec3f) -> f32 {
+// Fold the point with the same five mirror rounds as kal_fold. Record each reflection so the
+// gradient of the winning strut or hub can be returned to the object's coordinate frame.
+var<private> geo_mirrors: u32;
+fn geo_frame(p: vec3f) -> vec4f {
   geo_setup();
   // the corners sit on a sphere this far out, so that struts and hubs just reach FIT
   let sc = 1.0 / (FIT - max(pr.tube, pr.ball));
   let k = kal(5.0);
-  let q = kal_fold(TT * p, k.nc) * sc;
+  var chamber = TT * p;
+  geo_mirrors = 0u;
+  for (var j = 0; j < 5; j++) {
+    var flips = select(0u, 1u, chamber.x < 0.0) | select(0u, 2u, chamber.y < 0.0);
+    chamber = vec3f(abs(chamber.xy), chamber.z);
+    let plane = dot(chamber, k.nc);
+    flips |= select(0u, 4u, plane < 0.0);
+    chamber -= 2.0 * min(plane, 0.0) * k.nc;
+    geo_mirrors = (geo_mirrors << 3u) | flips;
+  }
+  let q = chamber * sc;
   // the small triangle the point looks out through: every strut near it leaves one of its corners
   let g = q * (GHF / max(dot(q, GNF), 1e-4));
   let x = dot(g - GA, GDS) * geo_f;
@@ -593,9 +773,27 @@ fn raw(p: vec3f) -> f32 {
   let up = (x - i) + (y - j) < 1.0 || i + j > geo_f - 2.0;
   let t = pr.tube * sc;
   let bl = pr.ball * sc;
-  var d = min(geo_star(q, i + 1.0, j, t, bl), geo_star(q, i, j + 1.0, t, bl));
-  if (up) { d = min(d, geo_star(q, i, j, t, bl)); } else { d = min(d, geo_star(q, i + 1.0, j + 1.0, t, bl)); }
-  return d / sc;
+  let a = geo_star(q, i + 1.0, j, t, bl);
+  let b = geo_star(q, i, j + 1.0, t, bl);
+  let step = select(1.0, 0.0, up);
+  let c = geo_star(q, i + step, j + step, t, bl);
+  let ab = select(a, b, b.w < a.w);
+  let nearest = select(ab, c, c.w < ab.w);
+  return vec4f(nearest.xyz, nearest.w / sc);
+}
+fn raw(p: vec3f) -> f32 { return geo_frame(p).w; }
+fn rawGrad(p: vec3f) -> vec4f {
+  let nearest = geo_frame(p);
+  var n = nearest.xyz;
+  let nc = kal(5.0).nc;
+  var bits = geo_mirrors;
+  for (var j = 0; j < 5; j++) {
+    if ((bits & 4u) != 0u) { n -= 2.0 * dot(n, nc) * nc; }
+    n.x = select(n.x, -n.x, (bits & 1u) != 0u);
+    n.y = select(n.y, -n.y, (bits & 2u) != 0u);
+    bits >>= 3u;
+  }
+  return vec4f(transpose(TT) * n, nearest.w);
 }";
 
 fn geodesic(frame: bool) -> Preset {
@@ -713,10 +911,8 @@ fn presets() -> Vec<Preset> {
         }, [18.0, 20.0, 0.0]));
 
     // compounds
-    let cube: Vec<V> = (0..8).map(|i| [if i & 1 == 0 { -1.0 } else { 1.0 }, if i & 2 == 0 { -1.0 } else { 1.0 }, if i & 4 == 0 { -1.0 } else { 1.0 }]).collect();
     let tet_a: Vec<V> = vec![[1.0, 1.0, 1.0], [1.0, -1.0, -1.0], [-1.0, 1.0, -1.0], [-1.0, -1.0, 1.0]];
     let tet_b: Vec<V> = tet_a.iter().map(|p| mul(*p, -1.0)).collect();
-    let octa: Vec<V> = vec![[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, -1.0]];
     let (axis, five) = fivefold();
     let out = unit(cross(axis, [1.0, 0.0, 0.0]));
     let ring_of = |base: usize| -> Vec<Member> { five.iter().map(|m| Member { base, m: *m }).collect() };
@@ -724,22 +920,22 @@ fn presets() -> Vec<Preset> {
     // each member's own frame: the direction it is pushed is `out` turned with it, the same in every frame
     v.push(compound("fivecubes", "Compound of five cubes", vec!["five cubes, each turned a fifth of a turn", "about an axis through two faces of a dodecahedron"],
         "Their 40 corners are the dodecahedron’s 20, each shared by two cubes; every cube is one of the five that fit inside it.",
-        &[cube.clone()], ring_of(0), Motion::Explode(out), [16.0, 14.0, 0.0]));
+        &[CompoundSolid::Cube], ring_of(0), Motion::Explode(out), [16.0, 14.0, 0.0]));
     v.push(compound("fivetetra", "Compound of five tetrahedra", vec!["five tetrahedra on the corners of a dodecahedron,", "each turned a fifth of a turn"],
         "It has a hand: its mirror image is a different compound, and the two together are the compound of ten.",
-        &[tet_a.clone()], ring_of(0), Motion::Explode(out), [16.0, 14.0, 0.0]));
+        &[CompoundSolid::Hull(tet_a.clone())], ring_of(0), Motion::Explode(out), [16.0, 14.0, 0.0]));
     v.push(compound("tentetra", "Compound of ten tetrahedra", vec!["the compound of five tetrahedra", "and its mirror image"],
-        "Every corner of the dodecahedron is shared by two tetrahedra, one of each hand.",
-        &[tet_a.clone(), tet_b.clone()], { let mut m = ring_of(0); m.extend(ring_of(1)); m }, Motion::Explode(out), [16.0, 14.0, 0.0]));
+            "Every corner of the dodecahedron is shared by two tetrahedra, one of each hand.",
+            &[CompoundSolid::Hull(tet_a), CompoundSolid::Hull(tet_b)], { let mut m = ring_of(0); m.extend(ring_of(1)); m }, Motion::Explode(out), [16.0, 14.0, 0.0]));
     v.push(compound("fiveocta", "Compound of five octahedra", vec!["five octahedra whose corners are the 30", "corners of an icosidodecahedron"],
         "Pull it apart and five octahedra come away in a ring; together their faces make the shell of a great icosahedron-like star.",
-        &[octa.clone()], ring_of(0), Motion::Explode(out), [16.0, 14.0, 0.0]));
+        &[CompoundSolid::Octahedron], ring_of(0), Motion::Explode(out), [16.0, 14.0, 0.0]));
     v.push(compound("cubeocta", "Cube and octahedron", vec!["a cube and its dual, sized so that", "their edges cross at their midpoints"],
         "Each edge of one bisects an edge of the other at right angles. Shrink the octahedron and it hides inside the cube; grow it and the cube’s corners sink into its faces.",
-        &[cube.clone(), octa.clone()], vec![Member { base: 0, m: id3 }, Member { base: 1, m: id3 }], Motion::Balance(2.0 / 3f64.sqrt()), [20.0, 28.0, 0.0]));
+        &[CompoundSolid::Cube, CompoundSolid::Octahedron], vec![Member { base: 0, m: id3 }, Member { base: 1, m: id3 }], Motion::Balance(2.0 / 3f64.sqrt()), [20.0, 28.0, 0.0]));
     v.push(compound("dodecaicosa", "Dodecahedron and icosahedron", vec!["a dodecahedron and its dual, sized so that", "their edges cross at their midpoints"],
         "Kepler drew it in Harmonices Mundi. The thirty crossings are the corners of an icosidodecahedron.",
-        &[dodecahedron(), icosahedron()], vec![Member { base: 0, m: id3 }, Member { base: 1, m: id3 }],
+        &[CompoundSolid::Hull(dodecahedron()), CompoundSolid::Hull(icosahedron())], vec![Member { base: 0, m: id3 }, Member { base: 1, m: id3 }],
         Motion::Balance({
             // the icosahedron's circumradius when its edge midpoints meet the dodecahedron's (circumradius 1)
             let d = dodecahedron(); let i = icosahedron();
@@ -800,16 +996,7 @@ pub fn family() -> Family {
         ],
         // the geometric solids' lights: broad ones that fade to their edges, so neighbouring faces differ, and
         // two small bright ones for glints
-        lights: vec![
-            light(40.0, 20.0, 30.0, 42.0, [3.0, 2.9, 2.7], 1.0),
-            light(-60.0, -5.0, 26.0, 46.0, [0.4, 1.1, 3.3], 1.0),
-            light(-140.0, 5.0, 22.0, 46.0, [3.9, 1.3, 0.22], 1.0),
-            light(150.0, 30.0, 32.0, 24.0, [2.1, 2.05, 2.0], 1.0),
-            light(0.0, 85.0, 40.0, 40.0, [0.8, 0.9, 1.1], 1.0),
-            light(0.0, -80.0, 36.0, 36.0, [0.5, 0.22, 0.05], 1.0),
-            light(95.0, 46.0, 5.0, 5.0, [7.0, 7.0, 7.0], 0.5),
-            light(-100.0, -36.0, 4.0, 8.0, [5.0, 5.5, 6.5], 0.5),
-        ],
+        lights: faceted_lights(),
         ..Family::new("polyhedra", "Polyhedra", Kind::Field)
     }
 }

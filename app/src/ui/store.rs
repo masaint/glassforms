@@ -20,18 +20,19 @@ pub const ARRANGEMENT: u32 = 7;
 /// Every group that folds: those of the left panel from the top, those of the right, those of the light room.
 /// (The chooser of named materials and the layers of the materials lab fold too. They are not listed
 /// here: the material's own code names them, see `material::folds`.)
-pub const GROUPS: [&str; 17] = [
+pub const GROUPS: [&str; 24] = [
     "material", "camera", "camera-character", "camera-bokeh", "camera-grade", "quality", "output", "video", "placement", "joins", "animate", "animate-more", "room-surround",
-    "room-floor", "room-lights", "room-cast", "room-turn",
+    "room-sky-air", "room-clouds", "room-atmo", "room-floor", "room-lights", "room-cast", "room-turn",
+    "object-shape", "object-detail", "object-parts", "object-modifiers",
 ];
 
 /// What starts folded away: the picture section (it says its lens and size when folded) and the
-/// sub-groups (detail: quality, video, placement, easing and loop, the chooser of named materials, the
+/// sub-groups (detail: quality, video, placement, easing and loop, the
 /// camera's grade and lens character). Material and light on the left and the animation on the right
 /// start open.
-pub const FOLDED_AT_FIRST: [&str; 13] = [
-    "camera", "quality", "output", "video", "placement", "animate-more", "material-chooser", "lab-in it", "lab-special optics", "lab-casts", "camera-grade", "camera-character",
-    "camera-bokeh",
+pub const FOLDED_AT_FIRST: [&str; 14] = [
+    "camera", "quality", "output", "video", "placement", "animate-more", "lab-in it", "lab-special optics", "lab-casts", "camera-grade", "camera-character",
+    "camera-bokeh", super::material::ADVANCED, super::material::CANONICAL,
 ];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -40,6 +41,9 @@ pub struct Store {
     /// the arrangement of the panels the file was written for (a file from before there were any says nothing: 0)
     #[serde(default)]
     pub arrangement: u32,
+    /// A local migration for the advanced Lab fold, independent of panel positions and other folds.
+    #[serde(default)]
+    pub lab_sections_version: u8,
     /// the groups that are folded away
     pub closed: Vec<String>,
     /// the size of the window's inside, in points
@@ -67,21 +71,33 @@ pub struct Store {
     pub still_folder: Option<String>,
     /// stills are written with 16 bits a channel
     pub still_16: bool,
+    /// what a still shows where the shape is not: "seen" (as on screen: the sky, the studio, the picture),
+    /// "plate" (one flat colour, `plate`), or "clear" (transparent, for a cut-out). The lighting is untouched
+    pub still_bg: String,
+    pub plate: [u8; 3],
     /// the settings: the look ("dark", "light", or "system": as Windows has it), how frosted the panels
     /// are ("off", "subtle", "full"), the size of everything over the picture (none: as Windows sets it;
     /// otherwise that many times it), and whether the settings window is open and where
     pub theme: String,
     pub frost: String,
+    /// the panels' glass as set by its sliders (theme::blur, theme::opacity), 0 to 1; None: as `frost` names it
+    pub ui_blur: Option<f32>,
+    pub ui_opacity: Option<f32>,
     pub ui_scale: Option<f32>,
     pub settings_open: bool,
     pub settings_at: Option<[f32; 2]>,
+    /// keeping the frame rate while moving (autoscale.rs): on or off, and the rate aimed at. A setting of
+    /// this machine, not of a picture: it is kept here, not in a setup
+    pub keep_rate: crate::autoscale::KeepRate,
+    /// the quality tier at rest, Auto, and what draws while moving (tier.rs): also of this machine, not of a picture
+    pub tiers: crate::tier::TierChoice,
 }
 impl Default for Store {
     fn default() -> Self {
         Self {
-            arrangement: ARRANGEMENT, closed: FOLDED_AT_FIRST.iter().map(|g| g.to_string()).collect(), window: None, maximized: false,
-            room_open: false, room_at: None, lab_open: false, lab_at: None, camera_open: false, camera_at: None, sculpt_open: false, sculpt_at: None, video: RenderOpts::default(), folder: None, setup_folder: None, still_folder: None, still_16: false,
-            theme: "dark".into(), frost: "full".into(), ui_scale: None, settings_open: false, settings_at: None,
+            arrangement: ARRANGEMENT, lab_sections_version: 1, closed: FOLDED_AT_FIRST.iter().map(|g| g.to_string()).collect(), window: None, maximized: false,
+            room_open: false, room_at: None, lab_open: false, lab_at: None, camera_open: false, camera_at: None, sculpt_open: false, sculpt_at: None, video: RenderOpts::default(), folder: None, setup_folder: None, still_folder: None, still_16: false, still_bg: "seen".into(), plate: [255, 255, 255], keep_rate: Default::default(), tiers: Default::default(),
+            theme: "dark".into(), frost: "full".into(), ui_blur: None, ui_opacity: None, ui_scale: None, settings_open: false, settings_at: None,
         }
     }
 }
@@ -92,6 +108,13 @@ pub fn program_folder() -> PathBuf {
 }
 
 impl Store {
+    /// The panels' glass in use: blur and opacity, from the sliders, or else from the frost a file from
+    /// before the sliders named.
+    pub fn glass(&self) -> (f32, f32) {
+        let (b, o) = super::theme::frost_named(&self.frost);
+        (self.ui_blur.unwrap_or(b), self.ui_opacity.unwrap_or(o))
+    }
+
     /// Where the file is kept unless another place is asked for.
     pub fn default_path() -> PathBuf {
         program_folder().join(FILE_NAME)
@@ -110,6 +133,20 @@ impl Store {
             s.closed = Store::default().closed;
             (s.room_at, s.lab_at, s.camera_at, s.sculpt_at) = (None, None, None, None);
             s.arrangement = ARRANGEMENT;
+        }
+        if s.lab_sections_version == 0 {
+            // The canonical section did not exist in these files. Its absence is not a user's custom
+            // layer preference and must not suppress the older advanced-fold migration either.
+            let custom_layers = super::material::folds().into_iter()
+                .filter(|key| key != super::material::CANONICAL).skip(2)
+                .any(|key| s.is_closed(&key) != FOLDED_AT_FIRST.contains(&key.as_str()));
+            if !custom_layers && !s.is_closed(super::material::ADVANCED) {
+                s.closed.push(super::material::ADVANCED.to_owned());
+            }
+            if !s.is_closed(super::material::CANONICAL) {
+                s.closed.push(super::material::CANONICAL.to_owned());
+            }
+            s.lab_sections_version = 1;
         }
         s
     }
@@ -168,16 +205,35 @@ mod tests {
     fn groups_fold_and_unfold() {
         let mut s = Store::default();
         assert!(!s.is_closed("material") && !s.is_closed("light") && !s.is_closed("animate"), "{:?}", s.closed);
-        assert!(s.is_closed("video") && s.is_closed("camera") && s.is_closed("material-chooser"));
+        assert!(s.is_closed("video") && s.is_closed("camera") && !s.is_closed(super::super::material::CHOOSER));
         s.fold("camera");
         s.fold("material");
         assert!(!s.is_closed("camera") && s.is_closed("material"));
     }
 
     #[test]
+    fn legacy_lab_preferences_keep_explicit_layer_folds() {
+        let mut legacy = serde_json::to_value(Store::default()).unwrap();
+        let file = legacy.as_object_mut().unwrap();
+        file.remove("lab_sections_version");
+        let advance = super::super::material::ADVANCED;
+        let canonical = super::super::material::CANONICAL;
+        file.get_mut("closed").unwrap().as_array_mut().unwrap()
+            .retain(|key| key != advance && key != canonical);
+        let migrated = Store::read(&legacy.to_string());
+        assert!(migrated.is_closed(advance) && migrated.is_closed(canonical));
+        legacy["closed"].as_array_mut().unwrap().push("lab-made of".into());
+        let mut custom = Store::read(&legacy.to_string());
+        assert!(!custom.is_closed(advance) && custom.is_closed("lab-made of") && custom.is_closed(canonical));
+        custom.fold(advance);
+        let reopened = Store::read(&serde_json::to_string(&custom).unwrap());
+        assert!(reopened.is_closed(advance) && reopened.is_closed(canonical));
+    }
+
+    #[test]
     fn a_file_with_parts_missing_is_still_read() {
         let s = Store::read(r#"{ "arrangement": 7, "closed": ["animate"], "video": { "fps": 24 } }"#);
-        assert_eq!(s.closed, vec!["animate".to_string()]);
+        assert_eq!(s.closed, vec!["animate".to_string(), super::super::material::CANONICAL.to_string()]);
         assert_eq!((s.video.fps, s.video.samples, s.window, s.room_open, s.room_at), (24, RenderOpts::default().samples, None, false, None));
         assert_eq!((s.lab_open, s.lab_at), (false, None));
         // a file from before the settings were remembered: the dark look, fully frosted, the usual size

@@ -52,9 +52,142 @@ pub fn tree_entries(base: u32, vis: wgpu::ShaderStages, textures: bool) -> Vec<w
     e
 }
 
-/// A buffer for a tree's table of parts (the uniform block's parts again: gf_core::csg).
+/// A buffer for a tree's table of parts (the uniform block's parts again: gf_core::csg), and after them its
+/// object's modifiers, when they are traced exactly (gf_core::mods::TABLE_AT).
 pub fn table_buffer(gpu: &Gpu) -> wgpu::Buffer {
-    gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("csg parts"), size: (gf_core::csg::PART_FLOATS * gf_core::csg::MAX_PARTS * 4) as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false })
+    gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("csg parts"), size: (gf_core::csg::PART_FLOATS * (gf_core::mods::PROFILE_AT + gf_core::mods::PROFILE_ROWS) * 4) as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false })
+}
+
+/// How an object read as a tree has its modifiers applied (gf_core::mods).
+pub enum TreeMods {
+    None,
+    /// in the tracer and the merge pass, from these numbers (the table past the parts)
+    /// (and its bound, and the kinds in it: the text holds only theirs)
+    Exact(Vec<f32>, f64, Vec<u32>, Vec<usize>, Vec<u32>),
+    /// to the volume the tree is measured into, which the tree is then traced from
+    Baked(gf_core::mods::Bake),
+}
+
+impl TreeMods {
+    /// How an object's modifiers (`mods`) are applied to its tree of these parts, with these boxes, placed
+    /// so; `joined`: the tree is joined to a volume object (whose volume the stack cannot reach exactly).
+    pub fn plan(families: &[gf_core::presets::Family], mods: Option<&gf_core::mods::Mods>, parts: &[gf_core::csg::Resolved], extents: &[gf_core::csg::Extent], joined: bool, object: &gf_core::layers::Placement) -> Self {
+        let Some(m) = mods.filter(|m| m.any_live()) else { return Self::None };
+        let shape = gf_core::csg::tree_box(parts, extents);
+        if !joined && m.exact(&shape) {
+            // (read directly, a part is its bound alone: a part stretched unevenly is read by the tree)
+            let direct = if parts.len() <= 6 && gf_core::csg::plain(parts)
+                && parts.iter().all(|p| p.grid.is_none() && p.smooth == 0.0 && !p.stretched()) {
+                let kinds = gf_core::csg::kinds(parts);
+                parts.iter().map(|p| kinds.iter().position(|kind| *kind == p.kind()).unwrap()).collect()
+            } else { Vec::new() };
+            let codes = m.codes();
+            let motifs = if matches!(codes.as_slice(), [8] | [11] | [12]) && !direct.is_empty() {
+                parts.iter().map(|p| {
+                    let mut flags=gf_core::csg::studio_flags(p, families);
+                    if flags != 0 && object.is_identity() {
+                        flags |= gf_core::csg::studio_pose(p);
+                    }
+                    flags
+                }).collect()
+            } else { Vec::new() };
+            Self::Exact(m.exact_numbers(&shape, object), m.slope(&shape), codes, direct, motifs)
+        } else {
+            m.bake(&gf_core::mods::whole_box()).map_or(Self::None, Self::Baked)
+        }
+    }
+    pub fn exact(&self) -> bool {
+        matches!(self, Self::Exact(..))
+    }
+    /// The tree's text with the stack put in when it is traced exactly.
+    pub fn text(&self, tree: String) -> String {
+        match self {
+            Self::Exact(numbers, _, codes, direct, motifs) => {
+                let tree = gf_core::csg::direct_union(tree, direct);
+                let tree = gf_core::csg::studio_motif(tree, direct, motifs);
+                let t = gf_core::mods::wgsl_exact(&tree, codes);
+                let t = gf_core::mods::repeat_overlap(t,codes,numbers);
+                let t = gf_core::mods::specialize_profile(t, gf_core::mods::profile_layout(codes, numbers));
+                gf_core::mods::specialize_turns(t, &gf_core::mods::turn_layout(codes, numbers))
+            }
+            _ => tree,
+        }
+    }
+    /// A direct union has at most six source records. The last six uniform
+    /// records contain the prepared primitive dimensions. A small wrap or
+    /// polar repeat can use the space between them for its modifier and ring data.
+    fn uniform_profile(&self) -> Option<&[f32]> {
+        let Self::Exact(data, _, codes, direct, _) = self else { return None };
+        let stage = &data[gf_core::csg::PART_FLOATS..];
+        let rows = match codes.as_slice() {
+            [12] => stage[29] as usize,
+            [8] if stage[1] == 1.0 && data[2] != 0.0 => stage[20] as usize,
+            _ => return None,
+        };
+        (!direct.is_empty() && (1..=48).contains(&rows)).then_some(data)
+    }
+
+    pub fn tracer_uniforms(&self, numbers: &mut [f32]) {
+        let Some(data) = self.uniform_profile() else { return };
+        let stride = gf_core::csg::PART_FLOATS;
+        let start = 8 + 8 * stride;
+        let rows = start + 2 * stride;
+        numbers[start..rows].copy_from_slice(&data[..2 * stride]);
+        let stage = &data[stride..2 * stride];
+        if stage[0] == 12.0 && stage[1] == 1.0 {
+            let [r0, height, r1] = [stage[20], stage[21], stage[22]];
+            let [tx, ty] = [stage[30], stage[31]];
+            let half = 0.5 * height;
+            numbers[start+28..start+32].copy_from_slice(&[
+                -r0*tx+half*ty, -r0*ty-half*tx, stage[2].recip(), stage[11].recip(),
+            ]);
+            let slope = (r1-r0) / height.max(1e-6);
+            let stretch = (1.0+slope*slope).sqrt();
+            let min_size = (0..numbers[0] as usize).map(|i| numbers[8+i*stride+16]).fold(f32::INFINITY,f32::min);
+            numbers[start+32..start+36].copy_from_slice(&[
+                slope, stretch, 0.5*(r0+r1)+stage[19]*stretch, min_size,
+            ]);
+        }
+        let pitches = gf_core::mods::profile_rows(data);
+        numbers[rows..rows + pitches.len()].copy_from_slice(&pitches);
+    }
+
+    pub fn tracer_key(&self, key: &str) -> String {
+        if self.uniform_profile().is_some() { format!("{key}|uniform profile") } else { key.to_owned() }
+    }
+
+    pub fn tracer_text(&self, tree: String) -> String {
+        let tree = self.text(tree);
+        let Some(data) = self.uniform_profile() else { return tree };
+        let mut tree = tree.replace(&format!("csgP[{} + j]", gf_core::mods::TABLE_AT), "csgU.parts[8 + j]")
+            .replace(&format!("csgP[{}u+u32(select(row0,other,ring==1))]", gf_core::mods::PROFILE_AT),
+                     "csgU.parts[10u+u32(select(row0,other,ring==1))]");
+        if tree.contains("fn repeatHit(") {
+            let start = gf_core::mods::PROFILE_AT;
+            tree = tree.replace(&format!("csgP[{}]",gf_core::mods::TABLE_AT+1), "csgU.parts[9]")
+                .replace(&format!("csgP[{start}]"), "csgU.parts[10]")
+                .replace(&format!("csgP[{start}+idx]"), "csgU.parts[10+idx]")
+                .replace(&format!("csgP[{start}+i32(hit.angle)]"), "csgU.parts[10+i32(hit.angle)]");
+        }
+        if tree.contains("// cone envelope in object coordinates") && tree.contains("fn motifCloser(") {
+            // The generated WRAP_GRADIENT function is complete and last on
+            // this route. Keep the generic version for arbitrary pivots.
+            let start = tree.find("fn csgWarpGradient(p: vec3f) -> vec4f {").unwrap();
+            let end = start + tree[start..].find("\n}\n").unwrap() + 2;
+            let stage = &data[gf_core::csg::PART_FLOATS..];
+            let gradient = include_str!("shaders/cone_gradient.wgsl").replace("\r\n","\n")
+                .replace("CONE_FLIP", if stage[3] > 0.5 { "true" } else { "false" })
+                .replace("CONE_SKIN", if stage[15] > 0.0 { "true" } else { "false" });
+            tree.replace_range(start..end, &gradient);
+            tree.push_str("\n// precomputed cone envelope\n");
+        }
+        tree
+    }
+
+    /// The name its passes and tracers are kept under.
+    pub fn key(&self, key: &str) -> String {
+        match self { Self::Exact(numbers, _, codes, direct, motifs) => format!("{key}|mods{codes:?}|union{direct:?}|motif{motifs:?}|overlap{}|profile{:?}|axes{:?}", if codes == &[8] && numbers[2]!=0. {numbers[gf_core::csg::PART_FLOATS+1] as u8+1}else{0}, gf_core::mods::profile_layout(codes,numbers), gf_core::mods::turn_layout(codes, numbers)), _ => key.to_string() }
+    }
 }
 
 /// The most words a tree's cells' lists take: four for each cell, and every part in every cell.
@@ -100,8 +233,9 @@ pub struct GridVol {
 }
 
 pub struct CsgWork {
-    gpu: Gpu,
-    u: wgpu::Buffer,
+    pub(crate) gpu: Gpu,
+    pub(crate) u: wgpu::Buffer,
+    pub(crate) face_atlases: crate::construction_atlas::Atlases,
     layout: Option<wgpu::BindGroupLayout>,
     /// the passes for the kinds of parts asked for, under their keys
     pipes: std::collections::HashMap<String, wgpu::ComputePipeline>,
@@ -109,6 +243,9 @@ pub struct CsgWork {
     /// in a scene of several objects, each csg object's tree measured into a volume of its own (by layer),
     /// with what it was made from
     pub layer_vols: Vec<Option<(String, Volume)>>,
+    /// each object's tree volume of the other size it was last made at (`keep_layer_spares`)
+    layer_spares: Vec<Option<Volume>>,
+    pub(crate) faces: crate::world_faces::LocalFaces,
     /// the grid parts' volumes used by the build under way (csg_grids_done)
     pub grids_used: Vec<String>,
     /// what the tracer reads while there is no object: a small volume with nothing in it
@@ -127,6 +264,11 @@ pub struct CsgWork {
     pub lists_key: Vec<u64>,
     /// the table of parts of the tree last built
     pub table: wgpu::Buffer,
+    /// Cached part equations. Manipulating a part only changes its transform.
+    formulas: std::collections::HashMap<String, (u64, Vec<f32>)>,
+    formula_bytes: usize,
+    /// counts the cache's uses: each table is stamped with its last
+    formula_clock: u64,
     /// how long the last build of the tree took (its grid parts, boxes, lists and merge; to the end only when builds are timed)
     pub last_ms: f64,
 }
@@ -141,12 +283,58 @@ impl CsgWork {
             entries.extend(tree_entries(grid_binding(0), c, true));
             gpu.bind_layout("csg merge", &entries)
         });
-        Self { gpu: gpu.clone(), u: gpu.uniform_buffer("csg merge", (gf_core::csg::UNIFORM_FLOATS * 4) as u64), layout, pipes: Default::default(), vol: None, layer_vols: Vec::new(), grids_used: Vec::new(), empty_vol: None, active: false, ext: Extents::new(gpu), grids: Vec::new(), stand_in: GridStandIn::new(gpu), note: None, lists: lists_buffer(gpu), lists_key: Vec::new(), last_ms: 0.0, table: table_buffer(gpu) }
+        Self { face_atlases: Default::default(), gpu: gpu.clone(), u: gpu.uniform_buffer("csg merge", (gf_core::csg::UNIFORM_FLOATS * 4) as u64), layout, pipes: Default::default(), vol: None, layer_vols: Vec::new(), layer_spares: Vec::new(), faces: Default::default(), grids_used: Vec::new(), empty_vol: None, active: false, ext: Extents::new(gpu), grids: Vec::new(), stand_in: GridStandIn::new(gpu), note: None, lists: lists_buffer(gpu), lists_key: Vec::new(), last_ms: 0.0, table: table_buffer(gpu), formulas: Default::default(), formula_bytes: 0, formula_clock: 0 }
     }
 
     /// Can this device merge the parts into a volume?
     pub fn available(&self) -> bool {
         self.layout.is_some()
+    }
+
+    /// Bytes of the objects' spare tree volumes.
+    pub(crate) fn spare_bytes(&self) -> u64 {
+        self.layer_spares.iter().flatten().map(|v| (v.res as u64).pow(3) * 2).sum()
+    }
+    /// Let go of every object's spare tree volume.
+    pub(crate) fn drop_layer_spares(&mut self) {
+        self.layer_spares.clear();
+    }
+    /// Let go of the objects' spare tree volumes whose size is none of `sizes[i]` (object i's sizes now,
+    /// settled and drafted), and of those of objects past the last.
+    pub(crate) fn keep_layer_spares(&mut self, sizes: &[[u32; 3]]) {
+        self.layer_spares.truncate(sizes.len());
+        for (spare, sizes) in self.layer_spares.iter_mut().zip(sizes) {
+            if spare.as_ref().is_some_and(|v| !sizes.contains(&v.res)) { *spare = None; }
+        }
+    }
+
+    /// The cache key of a part's equation table (`csg_formula_tables`).
+    pub(crate) fn formula_key(formula: &str, mode: gf_core::state::Detail, res: u32) -> String {
+        format!("{formula}|{mode:?}|{res}")
+    }
+
+    /// Keep a part's equation table under its key (`formula_key`). Past 32 MB the tables used longest ago
+    /// are let go first (a played shape makes new ones every frame; emptying the whole cache let go of
+    /// tables made for the build under way too).
+    pub(crate) fn keep_formula(&mut self, key: String, table: Vec<f32>) {
+        let size = |t: &Vec<f32>| t.len() * std::mem::size_of::<f32>();
+        self.formula_clock += 1;
+        self.formula_bytes += size(&table);
+        if let Some((_, old)) = self.formulas.insert(key, (self.formula_clock, table)) { self.formula_bytes -= size(&old); }
+        while self.formula_bytes > 32 * 1024 * 1024 && self.formulas.len() > 1 {
+            let Some(oldest) = self.formulas.iter().min_by_key(|(_, (used, _))| *used).map(|(k, _)| k.clone()) else { break };
+            if let Some((_, t)) = self.formulas.remove(&oldest) { self.formula_bytes -= size(&t); }
+        }
+    }
+
+    /// A part's equation table kept under its key, if it is (stamped as used now).
+    pub(crate) fn formula(&mut self, key: &str) -> Option<&[f32]> {
+        self.formula_clock += 1;
+        let now = self.formula_clock;
+        self.formulas.get_mut(key).map(|(used, t)| {
+            *used = now;
+            &t[..]
+        })
     }
 
     /// The merged volume, while the scene reads it.
@@ -170,6 +358,28 @@ impl CsgWork {
         self.gpu.queue.write_buffer(&self.table, 0, bytemuck::cast_slice(&numbers[8..8 + n]));
     }
 
+    /// Hand the GPU the tree's paths' blocks (gf_core::csg::path_data), into the table past the modifiers.
+    pub fn set_paths(&self, data: &[f32]) {
+        if data.is_empty() { return; }
+        let at = (gf_core::csg::PART_FLOATS * gf_core::csg::PATH_AT * 4) as u64;
+        let n = data.len().min(gf_core::csg::PART_FLOATS * gf_core::csg::PATH_RECORDS);
+        self.gpu.queue.write_buffer(&self.table, at, bytemuck::cast_slice(&data[..n]));
+    }
+
+    /// Hand the GPU the object's modifiers, traced exactly (gf_core::mods::Mods::exact_numbers), into the
+    /// table past the parts.
+    pub fn set_mods(&self, numbers: &[f32]) {
+        let at = (gf_core::csg::PART_FLOATS * gf_core::mods::TABLE_AT * 4) as u64;
+        let n = numbers.len().min(gf_core::csg::PART_FLOATS * (gf_core::mods::TABLE_ENTRIES - gf_core::mods::TABLE_AT));
+        self.gpu.queue.write_buffer(&self.table, at, bytemuck::cast_slice(&numbers[..n]));
+        let rows = gf_core::mods::profile_rows(numbers);
+        if !rows.is_empty() {
+            let offset = (gf_core::csg::PART_FLOATS * gf_core::mods::PROFILE_AT * 4) as u64;
+            self.gpu.queue.write_buffer(&self.table, offset, bytemuck::cast_slice(&rows));
+        }
+
+    }
+
     /// Video memory the grid parts' own volumes hold.
     pub fn grid_bytes(&self) -> u64 {
         self.grids.iter().map(|g| gf_core::csg::grid_bytes(g.vol.res)).sum()
@@ -182,11 +392,12 @@ impl CsgWork {
     /// several (into its own volume, which the layers' combining step reads), kept under `made` (what it was
     /// made from).
     #[allow(clippy::too_many_arguments)]
-    pub fn merge(&mut self, layer: Option<(usize, &str)>, src: Option<&Volume>, res: u32, key: &str, text: impl FnOnce() -> String, numbers: &[f32], grids: &[Option<wgpu::TextureView>]) -> Option<&Volume> {
-        let layout = self.layout.as_ref()?;
+    pub fn merge(&mut self, layer: Option<(usize, &str)>, src: Option<&Volume>, res: u32, key: &str, text: impl FnOnce() -> String, numbers: &[f32], grids: &[Option<wgpu::TextureView>]) -> R<Option<&Volume>> {
+        // (None: this device cannot merge trees; an error: its volume could not be made)
+        let Some(layout) = self.layout.as_ref() else { return Ok(None) };
         if !self.pipes.contains_key(key) {
             let t0 = std::time::Instant::now();
-            let module = self.gpu.shader("csg merge", &format!("{}{MAIN}", text()), true);
+            let module = self.gpu.shader("csg merge", &merge_source(&text()), true);
             let pl = self.gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("csg merge"), bind_group_layouts: &[Some(layout)], immediate_size: 0 });
             let pipe = self.gpu.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("csg merge"), layout: Some(&pl), module: &module, entry_point: Some("cs"), compilation_options: Default::default(), cache: None });
             if std::env::var_os("GLASSFORMS_LOG_COMPILE").is_some() { eprintln!("[compile] csg merge: {:.0} ms", t0.elapsed().as_secs_f64() * 1e3); }
@@ -197,15 +408,23 @@ impl CsgWork {
             None => {
                 if self.vol.as_ref().is_none_or(|v| v.res != res) {
                     self.vol = None;
-                    self.vol = Some(Volume::new(&self.gpu, res, true));
+                    self.vol = Some(Volume::try_new(&self.gpu, res, true)?);
                 }
                 self.vol.as_ref().unwrap()
             }
             Some((i, made)) => {
                 if self.layer_vols.len() <= i { self.layer_vols.resize_with(i + 1, || None); }
+                if self.layer_spares.len() <= i { self.layer_spares.resize_with(i + 1, || None); }
                 if self.layer_vols[i].as_ref().is_none_or(|v| v.1.res != res) {
-                    self.layer_vols[i] = None;
-                    self.layer_vols[i] = Some((String::new(), Volume::new(&self.gpu, res, true)));
+                    // (the volume of the other size is kept: a draft's and the settled build's take turns,
+                    // and a new volume costs a clearing of its memory before its first use)
+                    let old = self.layer_vols[i].take().map(|v| v.1);
+                    let vol = match self.layer_spares[i].take_if(|v| v.res == res) {
+                        Some(v) => v,
+                        None => Volume::try_new(&self.gpu, res, true)?,
+                    };
+                    if old.is_some() { self.layer_spares[i] = old; }
+                    self.layer_vols[i] = Some((String::new(), vol));
                 }
                 let slot = self.layer_vols[i].as_mut().unwrap();
                 slot.0 = made.to_string();
@@ -228,13 +447,13 @@ impl CsgWork {
             c.dispatch_workgroups(res.div_ceil(8), res.div_ceil(8), res.div_ceil(4));
         }
         self.gpu.queue.submit([enc.finish()]);
-        match layer {
+        Ok(match layer {
             None => {
                 self.active = true;
                 self.vol.as_ref()
             }
             Some((i, _)) => self.layer_vols.get(i).and_then(|v| v.as_ref()).map(|v| &v.1),
-        }
+        })
     }
 
     /// Object i's tree as last measured into a volume of its own, if it was made from `made`.
@@ -258,7 +477,8 @@ fn ext_cs(@builtin(global_invocation_id) id: vec3u) {
   let cells = {{CELLS}}u;
   let part = i32(id.z / cells);
   if (part >= i32(csgU.info.x) || any(id.xy >= vec2u(cells))) { return; }
-  let reach = {{REACH}} + abs(csgU.parts[part].m.y);
+  let s2 = csgU.parts[part].s2;
+  let reach = {{REACH}} + abs(csgU.parts[part].m.y) + max(s2.x, max(s2.y, s2.z));
   let h = 2.0 * reach / f32(cells);
   let q = (vec3f(f32(id.x), f32(id.y), f32(id.z % cells)) + 0.5) * h - reach;
   let d = csgPartAt(part, q, false);
@@ -388,7 +608,7 @@ impl crate::engine::Engine {
         use gf_core::csg::GridFrom;
         let mut views: Vec<Option<wgpu::TextureView>> = vec![None; MAX_GRIDS];
         let mut used: Vec<String> = Vec::new();
-        let moving = matches!(mode, gf_core::state::Detail::Anim | gf_core::state::Detail::Quick);
+        let moving = mode.is_draft();
         let mut gone: Vec<usize> = Vec::new();
         for (pi, r) in parts.iter_mut().enumerate() {
             let Some(g) = &mut r.grid else { continue };
@@ -429,10 +649,64 @@ impl crate::engine::Engine {
     /// go (while things move the fine ones are kept too, to go back to, unless there are too many).
     pub(crate) fn csg_grids_done(&mut self, mode: gf_core::state::Detail) {
         let used = std::mem::take(&mut self.csg.grids_used);
-        let moving = matches!(mode, gf_core::state::Detail::Anim | gf_core::state::Detail::Quick);
+        let moving = mode.is_draft();
         if !moving || self.csg.grids.len() > 2 * MAX_GRIDS * gf_core::layers::MAX_LAYERS {
             self.csg.grids.retain(|g| used.contains(&g.key));
         }
+    }
+
+    /// Upload each procedural part's equation data into the same storage buffer used by
+    /// the merge, bounds and tracer shaders. Other parts can be transformed independently.
+    pub(crate) fn csg_formula_tables(&mut self, layer_for: impl Fn(usize) -> usize, parts: &mut [gf_core::csg::Resolved],
+                                      mode: gf_core::state::Detail, up: Option<&[f32]>, construction: &[f32]) -> Result<(), String> {
+        use gf_core::csg::{GridFrom, FORMULA_AT};
+        use gf_core::state::ShapeJob;
+        let mut data = construction.to_vec();
+        for (i, part) in parts.iter_mut().enumerate() {
+            let layer = layer_for(i);
+            let preset = &self.state.families[part.fam].presets[part.preset];
+            if part.grid.is_some() || !preset.has_table() { continue; }
+            part.formula_at = Some(FORMULA_AT + data.len() / 4);
+            if part.source == GridFrom::Up {
+                if let Some(table) = up { data.extend_from_slice(table); continue; }
+            }
+            let res = match part.source {
+                GridFrom::Up => self.state.layer_build_res(layer, mode),
+                GridFrom::Part(i) => self.state.layer_csg(layer).parts[i].grid_res(),
+            };
+            let cache_key = CsgWork::formula_key(&part.formula_key, mode, res);
+            if let Some(table) = self.csg.formula(&cache_key) { data.extend_from_slice(table); continue; }
+            let mut job = match part.source {
+                GridFrom::Up => self.state.layer_job(layer, mode, None)?,
+                GridFrom::Part(i) => {
+                    let source = self.state.layer_csg(layer).parts[i].clone();
+                    self.state.part_job(&source, source.grid_res())?
+                }
+            };
+            job.prepare_formula(&self.state.families)?;
+            let ShapeJob::Field { table, .. } = job.shape else { return Err("missing procedural part equation".into()); };
+            data.extend_from_slice(&table);
+            self.csg.keep_formula(cache_key, table);
+        }
+        if data.is_empty() { return Ok(()); }
+        let offset = FORMULA_AT as u64 * 16;
+        let end = offset + data.len() as u64 * 4;
+        // Storage arrays expose whole part records, including the final equation sample.
+        let stride = (gf_core::csg::PART_FLOATS * size_of::<f32>()) as u64;
+        let size = end.div_ceil(stride) * stride;
+        let limit = u64::from(self.gpu.device.limits().max_storage_buffer_binding_size);
+        if size > limit || (size / 16) > (1 << 24) {
+            return Err(format!("the part equations require {size} bytes, exceeding the tree buffer limit"));
+        }
+        if self.csg.table.size() < size {
+            self.csg.table = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("csg parts and equations"), size,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        self.gpu.queue.write_buffer(&self.csg.table, offset, bytemuck::cast_slice(&data));
+        Ok(())
     }
 
     /// No object at all: the tracer reads a small volume with nothing in it (the backdrop, the floor and the
@@ -461,53 +735,122 @@ impl crate::engine::Engine {
     /// it was made now, Some(false) if the one kept will do, None if the object has no tree.
     pub(crate) fn csg_layer_volume(&mut self, layer: usize, fresh: bool, mode: gf_core::state::Detail) -> Result<Option<bool>, String> {
         let (mut parts, joined, _) = self.state.csg_tree_layer(layer);
-        if parts.is_empty() || !self.csg.available() { return Ok(None); }
-        let res = self.baker.layer_volume(layer).ok_or_else(|| format!("layer {} has no volume", layer + 1))?.res;
+        if parts.is_empty() || !self.csg.available() {
+            self.csg.faces.clear(layer);
+            return Ok(None);
+        }
+        // (the size the object was built at: a csg object whose tree stands for it has no volume of its own)
+        let res = self.layers.built_res(layer).or_else(|| self.baker.layer_volume(layer).map(|v| v.res)).ok_or_else(|| format!("layer {} has no volume", layer + 1))?;
         let c = self.state.layer_csg(layer);
-        let made = format!("{}|{}|{:?}|{res}", self.state.layer_key(layer), serde_json::to_string(&c.parts).unwrap_or_default(), c.place);
+        let mods = self.state.tree_mods(layer).filter(|_| self.state.show_construction_parents(layer)).cloned();
+        let tree_made = format!("{}|{}|{:?}|{res}", self.state.layer_key(layer), serde_json::to_string(&c.parts).unwrap_or_default(), c.place);
+        let view_key = self.state.construction_program(layer, &parts).map(|p| p.field_key());
+        let made = format!("{tree_made}|{view_key:?}|{}", mods.as_ref().map(|m| serde_json::to_string(m).unwrap_or_default()).unwrap_or_default());
+        // (an object whose modifiers are baked into its tree's volume: the tree as measured is kept aside under
+        // this, the same while only the modifiers change)
+        let tkey = format!("tree{layer}:{tree_made}|{res}|{}", mode.quality().tag());
         if !fresh && self.csg.layer_volume(layer, &made).is_some() {
-            // (its grid parts' volumes are still in use)
+            // (its grid parts' volumes are still in use; so is the tree kept aside for its modifiers)
             let _ = self.csg_grids(layer, &mut parts, mode);
+            if self.sculptor.has(&tkey) { self.sculptor.trees.push(tkey); }
             return Ok(Some(false));
         }
-        let grids = self.csg_grids(layer, &mut parts, mode);
+        let mut laps = crate::engine::Laps::new(&format!("tree {layer}"));
+        let mut grids = self.csg_grids(layer, &mut parts, mode);
+        laps.lap("grids");
+        let authored = self.state.layer_csg(layer).construction.is_some();
+        let sigs: Vec<String> = parts.iter().map(|p| p.sig()).collect();
+        let measure = !self.csg.ext.knows(&sigs, !mode.measures_boxes());
+        if !authored || measure {
+            self.csg_formula_tables(|_| layer, &mut parts, mode, None, &[])?;
+        }
+        laps.lap("tables");
         if parts.is_empty() { return Ok(None); }
         let fams = &self.state.families;
         let kinds = gf_core::csg::kinds(&parts);
-        let plain = gf_core::csg::plain(&parts);
-        let key = gf_core::csg::key_tree(fams, &kinds, plain);
+        let plain = !authored && gf_core::csg::plain(&parts);
+        let strokes = gf_core::csg::any_strokes(&parts);
+        let stretch = gf_core::csg::any_stretch(&parts);
+        let key = gf_core::csg::key_tree_x(fams, &kinds, plain, strokes, stretch);
         let object = self.state.layer_csg(layer).place;
-        let sigs: Vec<String> = parts.iter().map(|p| p.sig()).collect();
-        let extents = if !self.csg.ext.knows(&sigs, matches!(mode, gf_core::state::Detail::Anim)) {
+        let extents = if measure {
             let (unboxed, lists) = gf_core::csg::numbers(fams, &parts, &kinds, res, joined, &[], &object);
             self.csg.set_lists(&lists);
             self.csg.set_table(&unboxed);
-            self.csg.ext.measure(&key, || gf_core::csg::wgsl_tree(fams, &kinds, 0, false, plain), &unboxed, &sigs, matches!(mode, gf_core::state::Detail::Anim), &grids, &self.csg.stand_in, &self.csg.lists, &self.csg.table)
+            self.csg.set_paths(&gf_core::csg::path_data(fams, &parts).0);
+            self.csg.ext.measure(&key, || gf_core::csg::wgsl_tree_x(fams, &kinds, 0, false, plain, strokes, stretch), &unboxed, &sigs, !mode.measures_boxes(), &grids, &self.csg.stand_in, &self.csg.lists, &self.csg.table)
         } else {
             self.csg.ext.known(&sigs)
         };
+        laps.lap("measure");
+        let mut construction = self.state.construction_program_measured(layer, &parts, &extents);
+        if let Some(program) = &construction {
+            self.csg_formula_tables(|_| layer, &mut parts, mode, None, &program.numbers)?;
+        }
+        let fams = &self.state.families;
         let (numbers, lists) = gf_core::csg::numbers(fams, &parts, &kinds, res, joined, &extents, &object);
         self.csg.set_lists(&lists);
         self.csg.set_table(&numbers);
+        self.csg.set_paths(&gf_core::csg::path_data(fams, &parts).0);
+        laps.lap("numbers");
+        if let Some(program)=construction.as_mut() {
+            crate::construction_cache::prepare(&mut self.csg,&mut self.sculptor,layer,program,fams,&parts,&numbers,&mut grids,res,&object,mode.quality())?;
+        }
+
+        // its modifiers: in the merge pass when they can be traced exactly, else baked into what it makes
+        let plan = TreeMods::plan(fams, mods.as_ref(), &parts, &extents, joined, &object);
+        if let TreeMods::Exact(m, ..) = &plan { self.csg.set_mods(m); }
+        let key = plan.key(&construction.as_ref().map_or_else(|| key.clone(), |p| p.key(&key)));
         // (the lists of the object alone, if there is one again, are worked out afresh)
         self.csg.lists_key = Vec::new();
+        let timed = self.waits_for(mode);
         let src = if joined { self.baker.layer_volume(layer) } else { None };
-        self.csg.merge(Some((layer, &made)), src, res, &key, || gf_core::csg::wgsl_tree(fams, &kinds, 0, true, plain), &numbers, &grids)
+        let tree = |guides| plan.text(gf_core::construction_eval::shader(construction.as_ref(), gf_core::csg::wgsl_tree_x(fams, &kinds, 0, true, plain, strokes, stretch),0,guides));
+        if let Some(program) = construction.as_ref().filter(|p| p.has_materials) {
+            self.csg.faces.layers[layer]=Some(self.csg.faces.bake(&self.gpu, false, res.min(128), &key, tree(false), &numbers, &grids,
+                &self.csg.u, &self.csg.stand_in, &self.csg.lists, &self.csg.table, &program.faces));
+        } else {
+            self.csg.faces.clear(layer);
+        }
+        let mut faces=self.csg.faces.layers[layer].take();
+        let vol = self.csg.merge(Some((layer, &made)), src, res, &key, ||tree(true), &numbers, &grids)?
             .ok_or("the tree could not be measured into a volume")?;
+        laps.done("merge");
+        // (read through warps, or with parts stretched unevenly, the volume holds the distance shortened by
+        // their bound: made a distance again, so that the march among the objects is not shortened by as much)
+        let warped = matches!(&plan, TreeMods::Exact(_, slope, ..) if *slope > 1.05);
+        if (warped || stretch) && self.sculptor.available() { self.sculptor.redistance(vol, 1.0)?; }
+        if let TreeMods::Baked(b) = &plan {
+            if self.sculptor.available() {
+                let phases = self.state.sculpt_phases(layer);
+                let slot = crate::sculpt::TREE_SLOT + layer;
+                self.sculptor.keep(slot, vol, &tkey)?;
+                self.sculptor.run_with_faces(slot, vol, &tkey, b, &phases, timed, mode.is_draft(), &object, faces.as_mut())?;
+                self.sculptor.trees.push(tkey);
+            }
+        }
+        self.csg.faces.layers[layer]=faces;
         Ok(Some(true))
     }
 
     /// Bake one grid part (`key`: what it is made from and its size) into a volume of its own.
     fn bake_grid(&mut self, part: &gf_core::csg::Part, res: u32, key: &str, mode: gf_core::state::Detail) -> Result<(), String> {
         use gf_core::state::ShapeJob;
-        let job = self.state.part_job(part, res)?;
+        let mut job = self.state.part_job(part, res)?;
+        job.prepare_formula(&self.state.families)?;
         let slot = GRID_LAYER;
         let was = self.baker.layer();
         self.baker.set_layer(slot);
         let built = match &job.shape {
             ShapeJob::Curve { curve, melt } => self.baker.curve(curve, job.res, *melt).map(|_| ()),
             ShapeJob::Mesh(m) => self.models.build(&self.gpu, &mut self.baker, slot, m, job.res, mode).map(|_| ()),
-            ShapeJob::Field { .. } => Err("a formula is traced from its formula, not baked as a grid part".into()),
+            // (a formula with a table: a tree's parts have no room for one, so it is baked as a grid part)
+            ShapeJob::Field { uniforms, table } => {
+                let (f, p) = (&self.state.families[job.family], job.preset);
+                let p = &f.presets[p];
+                let key = format!("{}/{}", f.id, p.id);
+                self.baker.field(&key, p, uniforms, table, job.res).map(|_| ())
+            }
         };
         let vol = self.baker.take_volume(slot);
         self.baker.set_layer(was);

@@ -24,6 +24,11 @@ pub const GROUP: u32 = 8;
 const SLAB_STRIDE: u32 = 256;
 const MAX_SLABS: u32 = 256;
 const BAKE_WGSL: &str = include_str!("shaders/bake_curve.wgsl");
+/// The baker's text, with a path's primitive's exact distance put in where it says (`gf_core::path_formula`:
+/// the same text a tree of formulas reads a path with), its outline's edges read from the points.
+fn bake_wgsl() -> String {
+    BAKE_WGSL.replace("//#path", &gf_core::path_formula::wgsl("pts[eb + j]"))
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -51,6 +56,7 @@ struct BakeU {
     pad: [u32; 3],
 }
 
+#[derive(Clone)]
 pub struct Volume {
     pub tex: wgpu::Texture,
     pub view: wgpu::TextureView,
@@ -62,6 +68,12 @@ impl Volume {
         let tex = gpu.volume("volume", res, res, VOL_FORMAT, storage);
         let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
         Self { tex, view, res }
+    }
+    /// `new`, catching the device running out of memory (`Gpu::allocate`).
+    pub fn try_new(gpu: &Gpu, res: u32, storage: bool) -> R<Self> {
+        let tex = gpu.try_volume("volume", res, res, VOL_FORMAT, storage)?;
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        Ok(Self { tex, view, res })
     }
     /// A volume holding these distances: voxel (i, j, k) at `data[(k * res + j) * res + i]`.
     pub fn from_data(gpu: &Gpu, res: u32, data: &[half::f16]) -> Self {
@@ -84,19 +96,19 @@ struct Kept {
 }
 impl Kept {
     /// A volume of this size to build into: one kept from before, or a new one. Big ones are not hoarded.
-    fn take(&mut self, gpu: &Gpu, res: u32, storage: bool) -> usize {
+    fn take(&mut self, gpu: &Gpu, res: u32, storage: bool) -> R<usize> {
         if let Some(i) = self.vols.iter().position(|v| v.res == res) {
             self.cur = i;
-            return i;
+            return Ok(i);
         }
         // keep the small ones (an animation alternates between a small volume and the full one); of the
         // big ones only the newest
         if res > 384 {
             self.vols.retain(|v| v.res <= 384);
         }
-        self.vols.push(Volume::new(gpu, res, storage));
+        self.vols.push(Volume::try_new(gpu, res, storage)?);
         self.cur = self.vols.len() - 1;
-        self.cur
+        Ok(self.cur)
     }
 }
 
@@ -170,6 +182,8 @@ pub struct Baker {
     sheet_format: wgpu::TextureFormat,
     l_field: wgpu::BindGroupLayout,
     field_u: wgpu::Buffer,
+    /// a formula's table (`field::table`)
+    field_tbl: wgpu::Buffer,
     g_field: wgpu::BindGroup,
     field_pipes: HashMap<String, FieldPipe>,
     computed: Option<Computed>,
@@ -190,7 +204,8 @@ impl Baker {
         let vf = wgpu::ShaderStages::VERTEX_FRAGMENT;
         let all = vf | wgpu::ShaderStages::COMPUTE;
         // the part of the shader that draws; the rest needs volumes that compute shaders can write
-        let drawn = BAKE_WGSL.split("//#compute").next().unwrap();
+        let text = bake_wgsl();
+        let drawn = text.split("//#compute").next().unwrap();
         let module = gpu.shader("bake curve", drawn, false);
         let l0 = gpu.bind_layout("bake params", &[uniform_entry(0, all, false)]);
         let l_cloud = gpu.bind_layout("bake cloud", &[storage_entry(0, wgpu::ShaderStages::FRAGMENT)]);
@@ -224,9 +239,11 @@ impl Baker {
         let g_pts = Self::buf_group(gpu, &l_pts, 4, &pts.buf);
         let g_cloud = Self::buf_group(gpu, &l_cloud, 0, &cloud.buf);
 
-        let l_field = gpu.bind_layout("field params", &[uniform_entry(0, vf, false)]);
+        // (2: a formula's table, `field::TABLE_BINDING`, read only by presets with one)
+        let l_field = gpu.bind_layout("field params", &[uniform_entry(0, vf, false), storage_entry(field::TABLE_BINDING, wgpu::ShaderStages::FRAGMENT)]);
         let field_u = gpu.uniform_buffer("field params", field::UNIFORM_SIZE as u64);
-        let g_field = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &l_field, entries: &[wgpu::BindGroupEntry { binding: 0, resource: field_u.as_entire_binding() }] });
+        let field_tbl = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("field table"), size: (16 * field::TABLE_MAX) as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let g_field = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &l_field, entries: &[wgpu::BindGroupEntry { binding: 0, resource: field_u.as_entire_binding() }, wgpu::BindGroupEntry { binding: field::TABLE_BINDING, resource: field_tbl.as_entire_binding() }] });
 
         // writing volumes by compute shader
         let computed = gpu.storage16.then(|| {
@@ -246,17 +263,17 @@ impl Baker {
                 layout: &l_slabs,
                 entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &slabs, offset: 0, size: wgpu::BufferSize::new(16) }) }],
             });
-            let whole = gpu.shader("bake curve (computed)", BAKE_WGSL, false);
+            let whole = gpu.shader("bake curve (computed)", &bake_wgsl(), false);
             let layout = gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("bake resolve (computed)"), bind_group_layouts: &[Some(&l0), Some(&l_resolve), Some(&l_slabs)], immediate_size: 0 });
             let resolve = gpu.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("bake resolve (computed)"), layout: Some(&layout), module: &whole, entry_point: Some("cs_resolve"), compilation_options: Default::default(), cache: None });
-            let l_field = gpu.bind_layout("field (computed)", &[uniform_entry(0, c, false), out(1)]);
+            let l_field = gpu.bind_layout("field (computed)", &[uniform_entry(0, c, false), out(1), storage_entry(field::TABLE_BINDING, c)]);
             Computed { resolve, l_resolve, slabs, g_slabs, l_field }
         });
         Self {
             gpu: gpu.clone(), lin: gpu.sampler(wgpu::FilterMode::Linear, wgpu::AddressMode::ClampToEdge), u, g0,
             l_cloud, l_resolve, l_pts, p_coarse, p_splat, p_melt, p_resolve,
             pts, cloud, segs, g_pts, g_cloud, coarse: HashMap::new(), sheets: Vec::new(), sheet_format,
-            l_field, field_u, g_field, field_pipes: HashMap::new(), computed, kept: vec![Kept::default()], layer: 0, wide: Vec::new(),
+            l_field, field_u, field_tbl, g_field, field_pipes: HashMap::new(), computed, kept: vec![Kept::default()], layer: 0, wide: Vec::new(),
         }
     }
 
@@ -302,6 +319,13 @@ impl Baker {
     pub fn wide_volume(&self, layer: usize) -> Option<&Volume> {
         self.wide.get(layer).and_then(|k| k.vols.get(k.cur))
     }
+    /// Let go of a layer's volumes (nothing reads them: `Engine::own_volume_unread`).
+    pub fn clear_layer(&mut self, layer: usize) {
+        if let Some(k) = self.kept.get_mut(layer) {
+            k.vols.clear();
+            k.cur = 0;
+        }
+    }
     /// Forget a layer's wide volume (its shape is no longer a tube, or no seam reaches that far).
     pub fn drop_wide(&mut self, layer: usize) {
         if let Some(k) = self.wide.get_mut(layer) { k.vols.clear(); }
@@ -309,11 +333,11 @@ impl Baker {
 
     /// A volume of `res` voxels a side for the layer being built, for a shape that is built outside
     /// this file (a polygon model): the view to write it through, and whether a compute shader can.
-    pub fn target(&mut self, res: u32) -> (wgpu::TextureView, bool) {
+    pub fn target(&mut self, res: u32) -> R<(wgpu::TextureView, bool)> {
         let storage = self.computed.is_some();
         let k = &mut self.kept[self.layer];
-        let vi = k.take(&self.gpu, res, storage);
-        (k.vols[vi].view.clone(), storage)
+        let vi = k.take(&self.gpu, res, storage)?;
+        Ok((k.vols[vi].view.clone(), storage))
     }
 
     /// How many slices across the sheet the coarse volume of this size is worked out on.
@@ -548,11 +572,11 @@ impl Baker {
                 self.wide.push(Kept::default());
             }
             let k = &mut self.wide[self.layer];
-            let vi = k.take(&gpu, res, storage);
+            let vi = k.take(&gpu, res, storage)?;
             k.vols[vi].view.clone()
         } else {
             let k = &mut self.kept[self.layer];
-            let vi = k.take(&gpu, res, storage);
+            let vi = k.take(&gpu, res, storage)?;
             k.vols[vi].view.clone()
         };
         // computed: what each slab's dispatch reads and writes, and each slab's first slice and size
@@ -645,7 +669,13 @@ impl Baker {
 
     /// An equation: every voxel walks to the surface and stores how far it went.
     /// `res` must be a multiple of eight.
-    pub fn field(&mut self, key: &str, p: &Preset, uniforms: &[f32; 12], res: u32) -> R<BakeStats> {
+    /// (`table`: the formula's table, `field::table`, written after its numbers; empty for most)
+    pub fn field(&mut self, key: &str, p: &Preset, uniforms: &[f32; 12], table: &[f32], res: u32) -> R<BakeStats> {
+        self.field_slices(key, p, uniforms, table, res, 0..res)
+    }
+
+    /// Write complete xy planes of the same field used by a full bake.
+    pub(crate) fn field_slices(&mut self, key: &str, p: &Preset, uniforms: &[f32; 12], table: &[f32], res: u32, slices: std::ops::Range<u32>) -> R<BakeStats> {
         if res % GROUP != 0 { return Err(format!("a volume's size must be a multiple of {GROUP}, not {res}")); }
         let gpu = self.gpu.clone();
         if !self.field_pipes.contains_key(key) {
@@ -662,10 +692,15 @@ impl Baker {
             };
             self.field_pipes.insert(key.to_string(), pipe);
         }
-        gpu.queue.write_buffer(&self.field_u, 0, bytemuck::cast_slice(uniforms));
+        let mut numbers = *uniforms;
+        numbers[3] = slices.start as f32;
+        gpu.queue.write_buffer(&self.field_u, 0, bytemuck::cast_slice(&numbers));
+        if !table.is_empty() {
+            gpu.queue.write_buffer(&self.field_tbl, 0, bytemuck::cast_slice(&table[..table.len().min(4 * field::TABLE_MAX)]));
+        }
         let storage = self.computed.is_some();
         let k = &mut self.kept[self.layer];
-        let vi = k.take(&gpu, res, storage);
+        let vi = k.take(&gpu, res, storage)?;
         let view = k.vols[vi].view.clone();
         let mut enc = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("bake field") });
         match (&self.field_pipes[key], &self.computed) {
@@ -674,16 +709,20 @@ impl Baker {
                 let g = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: None,
                     layout: &cp.l_field,
-                    entries: &[wgpu::BindGroupEntry { binding: 0, resource: self.field_u.as_entire_binding() }, wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) }],
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: self.field_u.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
+                        wgpu::BindGroupEntry { binding: field::TABLE_BINDING, resource: self.field_tbl.as_entire_binding() },
+                    ],
                 });
                 let mut c = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
                 c.set_pipeline(pipe);
                 c.set_bind_group(0, &g, &[]);
-                c.dispatch_workgroups(res / 8, res / 8, res / 4);
+                c.dispatch_workgroups(res / 8, res / 8, (slices.end - slices.start) / 4);
             }
             (FieldPipe::Drawn(pipe), _) => {
                 // one slice per pass
-                for z in 0..res {
+                for z in slices {
                     let mut rp = pass(&mut enc, &view, Some(z), true);
                     rp.set_pipeline(pipe);
                     rp.set_bind_group(0, &self.g_field, &[]);

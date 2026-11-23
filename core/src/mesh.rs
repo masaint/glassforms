@@ -164,10 +164,7 @@ impl Hasher for Fx {
 }
 type FxMap<K, V> = HashMap<K, V, BuildHasherDefault<Fx>>;
 
-fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] { [a[0] - b[0], a[1] - b[1], a[2] - b[2]] }
-fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] { [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]] }
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 { a[0] * b[0] + a[1] * b[1] + a[2] * b[2] }
-fn len(a: [f64; 3]) -> f64 { dot(a, a).sqrt() }
+use crate::math::{cross, dot, len, sub};
 fn f64s(p: [f32; 3]) -> [f64; 3] { [p[0] as f64, p[1] as f64, p[2] as f64] }
 
 impl Mesh {

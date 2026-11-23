@@ -6,6 +6,7 @@ license = "MIT OR Apache-2.0"
 description = "Glass Forms: everything that needs no GPU. Shapes, curves, animation, settings."
 
 [dependencies]
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 libm = "0.2"          # the same sin/cos/exp as the browser's (fdlibm), so chaotic orbits come out the same
 rayon = "1.11"
 serde = { version = "1", features = ["derive"] }

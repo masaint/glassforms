@@ -29,17 +29,26 @@ pub const BODIES_WGSL: &str = include_str!("shaders/cast_bodies.wgsl");
 /// Voxels a side of the volume of distances that marches step through.
 pub const BODIES_RES: u32 = 192;
 
+/// The stable receiver boundary shared by ordinary, filmed, exchanged and construction-face paint.
+/// Paint already accounts for emitter visibility, so only focused radiance belongs here.
+pub(crate) const PAINT_FOCUS_STUB: &str = "return vec3f(0.0); /* PAINT_FOCUS_STUB */";
+const PAINT_FOCUS_CAST: &str = "return castFocused(p,n); /* PAINT_FOCUS_STUB */";
+
+pub(crate) fn weave_paint_focus(src: &str) -> String {
+    crate::weave::replace(src, "cast.paint_focus", PAINT_FOCUS_STUB, PAINT_FOCUS_CAST)
+}
+
 /// Where diffuse light is gathered in the tracer's text, and the same lines with what the bodies cast
 /// taken into account.
 ///   clay (trace_light.wgsl): the gathered light is multiplied, and the sheen dimmed where light is hidden
 /// A milky body (of the scene's one material, or one of several bodies) is not among them: it is lit by a
 /// light volume worked out beforehand (scatter.rs), and what the bodies cast reaches it there
 /// (`Cast::for_light_volume`), not in the tracer.
-const SITES: [(&str, &str); 2] = [
+const SITES: [(&str, &str, &str); 2] = [
     // (what is hidden multiplies the gathered light; what the bodies focus onto it is added, so that a lamp's
     // caustic shows however dim the lights at infinity are)
-    ("  var light = nine(0, toEnv(n));", "  let castP = castParts(p, n);\n  let castM = max(castP.total - castP.lost, vec3f(0.0)) / max(castP.total, vec3f(1e-5));\n  var light = nine(0, toEnv(n)) * castM + castP.added;"),
-    ("* (sheen * open);", "* (sheen * open * min(dot(castM, vec3f(0.2126, 0.7152, 0.0722)), 1.0));"),
+    ("cast.clay_light", "  var light = nine(0, toEnv(n));","  let castP = castParts(p, n);\n  let castM = max(castP.total - castP.lost, vec3f(0.0)) / max(castP.total, vec3f(1e-5));\n  var light = nine(0, toEnv(n)) * castM + castP.added;"),
+    ("cast.clay_sheen", "* (sheen * open);","* (sheen * open * min(dot(castM, vec3f(0.2126, 0.7152, 0.0722)), 1.0));"),
 ];
 /// What a ray from the camera sees where it misses the shape, when nothing lies behind it; and the same
 /// with the floor that stands in for a real one in checks (see `test_floor`).
@@ -50,16 +59,20 @@ const BEHIND: (&str, &str) = ("  var col = vec3f(0.0);                       // 
 /// the tracer was built to draw; None if it has none (nothing in it gathers light diffusely, or the
 /// places have been reworded).
 pub fn weave(src: &str) -> Option<String> {
-    let mut out = src.to_string();
+    let paint_receivers = src.matches(PAINT_FOCUS_STUB).count();
+    let mut out = weave_paint_focus(src);
     // (a floor that asks what is cast on it is a place too)
-    let mut found = usize::from(out.contains("castFloor("));
-    for (old, new) in SITES {
-        if out.matches(old).count() == 1 {
+    let mut found = usize::from(out.contains("castFloor(") || out.contains("castFloorDirect(")) + paint_receivers;
+    // (both clay lines or neither: the surface pass rewords both, so that casting stays out of its clay)
+    let counts = SITES.map(|(name, old, _)| crate::weave::found(&out, name, old));
+    crate::weave::all_once("cast.clay", &counts);
+    for ((_, old, new), count) in SITES.into_iter().zip(counts) {
+        if count == 1 {
             out = out.replacen(old, new, 1);
             found += 1;
         }
     }
-    if test_floor().is_some() && out.matches(BEHIND.0).count() == 1 {
+    if test_floor().is_some() && crate::weave::found(&out, "cast.behind", BEHIND.0) == 1 {
         out = out.replacen(BEHIND.0, BEHIND.1, 1);
         found += 1;
     }
@@ -70,7 +83,12 @@ pub fn weave(src: &str) -> Option<String> {
         let head = "fn clay(p: vec3f, rd: vec3f) -> vec3f {\n  let n = nrm(p);\n";
         out = out.replacen(head, &format!("{head}  if (true) {{ let cp = castParts(p, n); return max(cp.total - cp.lost + cp.added, vec3f(0.0)); }}\n"), 1);
     }
-    out.push_str(CAST_WGSL);
+    // Construction-face closures are generated after the ordinary casting pass.
+    // A final receiver-only pass may therefore see an existing cast implementation.
+    // Never append its declarations twice.
+    if !out.contains("fn castFocused(") {
+        out.push_str(CAST_WGSL);
+    }
     Some(out)
 }
 
@@ -118,7 +136,8 @@ pub struct CastU {
 struct BodiesU {
     count: u32,
     res: u32,
-    pad: [u32; 2],
+    ch: u32,
+    hb: f32,
 }
 
 /// A floor under the shape, as whoever owns the room describes it.
@@ -137,7 +156,7 @@ pub struct FloorSpec {
 
 /// The lights taken apart, and what they were taken apart from.
 struct Lit {
-    key: (usize, u64, u64, bool, u64, u64, u64),
+    key: (usize, u64, u64, bool, u64, u64, u64, Vec<u64>),
     lights: Vec<CastLight>,
     /// what a white matte surface gathers from the whole lighting: nine terms a colour
     total: [[f64; 3]; 9],
@@ -154,12 +173,21 @@ pub struct Cast {
     u: wgpu::Buffer,
     last_u: Option<CastU>,
     /// the distances to the bodies at modest detail, and what they were read from (the volume, how many
-    /// bodies, and the count of builds at the time)
+    /// bodies, the count of builds at the time, and the half-width bits)
     bodies: Option<(wgpu::Texture, wgpu::TextureView)>,
-    bodies_from: Option<(wgpu::TextureView, u32, u64)>,
-    p_bodies: wgpu::ComputePipeline,
-    l_bodies: wgpu::BindGroupLayout,
-    u_bodies: wgpu::Buffer,
+    bodies_stage: Option<(wgpu::Texture, wgpu::TextureView)>,
+    edt_a: Option<wgpu::Buffer>,
+    edt_b: Option<wgpu::Buffer>,
+    bodies_from: Option<(wgpu::TextureView, u32, u64, u32)>,
+    p_seed: wgpu::ComputePipeline,
+    p_edt_x: wgpu::ComputePipeline,
+    p_edt_y: wgpu::ComputePipeline,
+    p_edt_z: wgpu::ComputePipeline,
+    p_finish: wgpu::ComputePipeline,
+    l_seed: wgpu::BindGroupLayout,
+    l_edt: wgpu::BindGroupLayout,
+    l_finish: wgpu::BindGroupLayout,
+    u_bodies: [wgpu::Buffer; MAX_BODIES],
     /// stand in for the volume of arriving light and for the floor's map while there is none: one empty
     /// voxel, one empty texel
     no_light: wgpu::TextureView,
@@ -186,26 +214,50 @@ pub struct Cast {
 impl Cast {
     pub fn new(gpu: &Gpu, layout: &wgpu::BindGroupLayout) -> Self {
         let c = wgpu::ShaderStages::COMPUTE;
-        let l_bodies = gpu.bind_layout("cast: bodies", &[
+        let tex_d3 = wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D3, multisampled: false };
+        let rw_buf = |binding| wgpu::BindGroupLayoutEntry { binding, visibility: c, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None };
+        let l_seed = gpu.bind_layout("cast: seed", &[
             uniform_entry(0, c, false),
-            wgpu::BindGroupLayoutEntry { binding: 1, visibility: c, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D3, multisampled: false }, count: None },
+            wgpu::BindGroupLayoutEntry { binding: 1, visibility: c, ty: tex_d3, count: None },
+            wgpu::BindGroupLayoutEntry { binding: 2, visibility: c, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
+            rw_buf(5),
+        ]);
+        let l_edt = gpu.bind_layout("cast: edt", &[
+            uniform_entry(0, c, false),
+            storage_entry(4, c),
+            rw_buf(5),
+        ]);
+        let l_finish = gpu.bind_layout("cast: finish", &[
+            uniform_entry(0, c, false),
+            wgpu::BindGroupLayoutEntry { binding: 1, visibility: c, ty: tex_d3, count: None },
             wgpu::BindGroupLayoutEntry { binding: 2, visibility: c, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
             wgpu::BindGroupLayoutEntry { binding: 3, visibility: c, ty: wgpu::BindingType::StorageTexture { access: wgpu::StorageTextureAccess::WriteOnly, format: wgpu::TextureFormat::Rgba16Float, view_dimension: wgpu::TextureViewDimension::D3 }, count: None },
+            storage_entry(4, c),
+            wgpu::BindGroupLayoutEntry { binding: 6, visibility: c, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: false }, view_dimension: wgpu::TextureViewDimension::D3, multisampled: false }, count: None },
         ]);
         let module = gpu.shader("cast: bodies", BODIES_WGSL, false);
-        let pl = gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("cast: bodies"), bind_group_layouts: &[Some(&l_bodies)], immediate_size: 0 });
-        let p_bodies = gpu.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("cast: bodies"), layout: Some(&pl), module: &module, entry_point: Some("cs"), compilation_options: Default::default(), cache: None });
+        let pipe = |label, entry, layout_ref| {
+            let pl = gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some(label), bind_group_layouts: &[Some(layout_ref)], immediate_size: 0 });
+            gpu.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some(label), layout: Some(&pl), module: &module, entry_point: Some(entry), compilation_options: Default::default(), cache: None })
+        };
+        let p_seed = pipe("cast: seed", "cs_seed", &l_seed);
+        let p_edt_x = pipe("cast: edt_x", "cs_edt_x", &l_edt);
+        let p_edt_y = pipe("cast: edt_y", "cs_edt_y", &l_edt);
+        let p_edt_z = pipe("cast: edt_z", "cs_edt_z", &l_edt);
+        let p_finish = pipe("cast: finish", "cs_finish", &l_finish);
         let rgba = wgpu::TextureFormat::Rgba16Float;
         let no_light = gpu.volume("cast: no light", 1, 1, rgba, false).create_view(&wgpu::TextureViewDescriptor::default());
         let no_map = gpu.target("cast: no light on the floor", 1, 1, rgba, &[]).create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() });
+        let u_bodies = std::array::from_fn(|_| gpu.uniform_buffer("cast: bodies", std::mem::size_of::<BodiesU>() as u64));
         Self {
             gpu: gpu.clone(),
             layout: layout.clone(),
             smp: gpu.sampler(wgpu::FilterMode::Linear, wgpu::AddressMode::ClampToEdge),
             u: gpu.uniform_buffer("cast", std::mem::size_of::<CastU>() as u64),
             last_u: None,
-            bodies: None, bodies_from: None, p_bodies, l_bodies,
-            u_bodies: gpu.uniform_buffer("cast: bodies", std::mem::size_of::<BodiesU>() as u64),
+            bodies: None, bodies_stage: None, edt_a: None, edt_b: None, bodies_from: None,
+            p_seed, p_edt_x, p_edt_y, p_edt_z, p_finish,
+            l_seed, l_edt, l_finish, u_bodies,
             no_light, no_map, caustics: Caustics::new(gpu), focusing: false, floor: false,
             group: None, lit: None, on: false, casters: [Caster::none(); MAX_BODIES], lights: 0, count: 0, strength: 0.0,
         }
@@ -258,9 +310,11 @@ impl Cast {
 
     /// Read the distances to the bodies into the volume the marches step through, if the volume they
     /// are read from is another one or has been built again. `fine`: the bodies' volume (or the scene's,
-    /// with one body), `count`: how many bodies, `built`: a number that changes with every build.
-    fn read_bodies(&mut self, fine: &wgpu::TextureView, count: u32, built: u64) {
-        if self.bodies.is_some() && self.bodies_from.as_ref().is_some_and(|f| f.0 == *fine && f.1 == count && f.2 == built) { return; }
+    /// with one body), `count`: how many bodies, `built`: a number that changes with every build,
+    /// `hb`: half-width of the scene volume in world units.
+    fn read_bodies(&mut self, fine: &wgpu::TextureView, count: u32, built: u64, hb: f64) {
+        let hb_bits = (hb as f32).to_bits();
+        if self.bodies.is_some() && self.bodies_from.as_ref().is_some_and(|f| f.0 == *fine && f.1 == count && f.2 == built && f.3 == hb_bits) { return; }
         let gpu = &self.gpu;
         if self.bodies.is_none() {
             let tex = gpu.volume("cast: bodies", BODIES_RES, BODIES_RES, wgpu::TextureFormat::Rgba16Float, true);
@@ -268,27 +322,84 @@ impl Cast {
             self.bodies = Some((tex, view));
             self.group = None;
         }
-        let out = &self.bodies.as_ref().expect("just made").1;
-        gpu.queue.write_buffer(&self.u_bodies, 0, bytemuck::bytes_of(&BodiesU { count, res: BODIES_RES, pad: [0; 2] }));
-        let g = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("cast: bodies"),
-            layout: &self.l_bodies,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.u_bodies.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(fine) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.smp) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(out) },
-            ],
-        });
+        let buf_bytes = (BODIES_RES as u64).pow(3) * std::mem::size_of::<f32>() as u64;
+        if self.edt_a.is_none() {
+            let mk = |label| gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: buf_bytes, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
+            self.edt_a = Some(mk("cast: edt_a"));
+            self.edt_b = Some(mk("cast: edt_b"));
+        }
+        if count > 1 && self.bodies_stage.is_none() {
+            let tex = gpu.volume("cast: bodies stage", BODIES_RES, BODIES_RES, wgpu::TextureFormat::Rgba16Float, false);
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            self.bodies_stage = Some((tex, view));
+        }
+        let (bodies_tex, out_view) = self.bodies.as_ref().expect("just made");
+        let edt_a = self.edt_a.as_ref().expect("just made");
+        let edt_b = self.edt_b.as_ref().expect("just made");
+        let g3d = BODIES_RES.div_ceil(8);
+        let g3d_z = BODIES_RES.div_ceil(4);
         let mut enc = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("cast: bodies") });
-        {
-            let mut p = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
-            p.set_pipeline(&self.p_bodies);
-            p.set_bind_group(0, &g, &[]);
-            p.dispatch_workgroups(BODIES_RES.div_ceil(8), BODIES_RES.div_ceil(8), BODIES_RES.div_ceil(4));
+        for ch in 0..count.min(MAX_BODIES as u32) {
+            let ub = &self.u_bodies[ch as usize];
+            gpu.queue.write_buffer(ub, 0, bytemuck::bytes_of(&BodiesU { count, res: BODIES_RES, ch, hb: hb as f32 }));
+            let prev_view = if ch > 0 {
+                let (stage_tex, stage_view) = self.bodies_stage.as_ref().expect("just made");
+                enc.copy_texture_to_texture(
+                    bodies_tex.as_image_copy(),
+                    stage_tex.as_image_copy(),
+                    wgpu::Extent3d { width: BODIES_RES, height: BODIES_RES, depth_or_array_layers: BODIES_RES },
+                );
+                stage_view
+            } else {
+                fine
+            };
+            let g_seed = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("cast: seed"),
+                layout: &self.l_seed,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: ub.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(fine) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.smp) },
+                    wgpu::BindGroupEntry { binding: 5, resource: edt_a.as_entire_binding() },
+                ],
+            });
+            let edt_group = |label, src: &wgpu::Buffer, dst: &wgpu::Buffer| gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(label),
+                layout: &self.l_edt,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: ub.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: src.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 5, resource: dst.as_entire_binding() },
+                ],
+            });
+            let g_edt_ab = edt_group("cast: edt a->b", edt_a, edt_b);
+            let g_edt_ba = edt_group("cast: edt b->a", edt_b, edt_a);
+            let g_finish = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("cast: finish"),
+                layout: &self.l_finish,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: ub.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(fine) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.smp) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(out_view) },
+                    wgpu::BindGroupEntry { binding: 4, resource: edt_b.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(prev_view) },
+                ],
+            });
+            let run = |enc: &mut wgpu::CommandEncoder, pipe: &wgpu::ComputePipeline, bg: &wgpu::BindGroup, x, y, z| {
+                let mut p = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
+                p.set_pipeline(pipe);
+                p.set_bind_group(0, bg, &[]);
+                p.dispatch_workgroups(x, y, z);
+            };
+            run(&mut enc, &self.p_seed, &g_seed, g3d, g3d, g3d_z);
+            run(&mut enc, &self.p_edt_x, &g_edt_ab, g3d, g3d, 1);
+            run(&mut enc, &self.p_edt_y, &g_edt_ba, g3d, g3d, 1);
+            run(&mut enc, &self.p_edt_z, &g_edt_ab, g3d, g3d, 1);
+            run(&mut enc, &self.p_finish, &g_finish, g3d, g3d, g3d_z);
         }
         gpu.queue.submit([enc.finish()]);
-        self.bodies_from = Some((fine.clone(), count, built));
+        self.bodies_from = Some((fine.clone(), count, built, hb_bits));
     }
 
     /// The group the tracer reads, made if it is not there.
@@ -437,8 +548,8 @@ impl Engine {
         }
         // The bodies' distances are needed apart and were not made when the scene was last built (the
         // bodies' switches have come to differ since): build it again, this time with them.
-        if self.cast_wants_bodies() && !self.layers.combiner.bodies_wanted && self.state.want.is_none() {
-            self.state.want = Some(gf_core::state::Detail::Full);
+        if self.cast_wants_bodies() && !self.layers.combiner.bodies_wanted {
+            self.state.request_if_idle(gf_core::build::BuildRequest::lighting());
         }
         // the bodies and how each casts
         let groups = self.state.bodies();
@@ -453,23 +564,37 @@ impl Engine {
             },
         };
         let mut casters = [Caster::none(); MAX_BODIES];
+        let media = self.state.compiled_media();
+        let active = &media.bodies[..count as usize];
+        self.cast.caustics.set_medium_priority(active.first().is_some_and(|first| active.iter()
+            .any(|medium| medium.interface_priority != first.interface_priority)));
         for (k, c) in casters.iter_mut().enumerate().take(count as usize) {
             // (with one volume for everything, every body is as the first)
             let layer = if count == 1 { 0 } else { groups.get(k).and_then(|g| g.first().copied()).unwrap_or(0) };
-            *c = Caster::of(mode, core::switches(&self.state.p, layer), self.cast_optics(if count == 1 { 0 } else { k }, layer));
+            let thin_wall = gf_core::material::Variant::of(self.state.body_settings(layer)).hollow
+                && !matches!(kinds_override().get(k), Some(Some(_)));
+            let medium = if thin_wall {
+                Default::default()
+            } else {
+                media.bodies[k]
+            };
+            *c = Caster::of(mode, core::switches(&self.state.p, layer), self.cast_optics(if count == 1 { 0 } else { k }, layer)).with_medium(medium);
         }
         if !casters.iter().any(|c| c.shadow || c.caustic) {
             self.cast.on = false;
             return false;
         }
         let built = self.layers.builds.iter().map(|b| *b as u64).sum::<u64>() + self.layers.combines as u64;
-        self.cast.read_bodies(&fine, count, built);
+        let hb = self.state.scene_hb();
+        self.cast.read_bodies(&fine, count, built, hb);
 
         // the lights, taken apart (again only when they change)
+        let sky_active = self.sky_active();
         let key = {
             let p = &self.state.p;
             let (rig_lit, picture) = self.cast_lighting();
-            (self.state.layer_fam(0), self.state.lights_rev, p.light_gain.to_bits(), rig_lit, picture.map_or(0, |x| x.2), p.hdri_gain.to_bits(), p.hdri_blur.to_bits())
+            let sky_key = if sky_active { gf_core::sky::Sky::of(p).paint_key(&self.state.lights_to_room()) } else { Vec::new() };
+            (self.state.layer_fam(0), self.state.lights_rev, p.light_gain.to_bits(), rig_lit, picture.map_or(0, |x| x.2), p.hdri_gain.to_bits(), p.hdri_blur.to_bits(), sky_key)
         };
         if self.cast.lit.as_ref().is_none_or(|l| l.key != key) {
             let p = &self.state.p;
@@ -489,7 +614,7 @@ impl Engine {
                 ambient = [rig.ambient[0] * p.light_gain, rig.ambient[1] * p.light_gain, rig.ambient[2] * p.light_gain];
                 for c in 0..3 { total[0][c] += ambient[c]; }
             }
-            let picture_terms = picture.map(|(_, sh, _)| {
+            let (picture_terms, lights) = if let Some((glows, sh, _)) = picture {
                 let t = env::sh_terms(sh, env::SH_MATTE);
                 let mut out = [[0.0f64; 3]; 9];
                 for k in 0..9 {
@@ -498,9 +623,35 @@ impl Engine {
                         total[k][c] += out[k][c];
                     }
                 }
-                out
-            });
-            let lights = core::lights(of_rig, picture.map(|x| (x.0, p.hdri_gain, crate::hdri::blur_sigma(p.hdri_blur))));
+                (Some(out), core::lights(of_rig, Some((glows, p.hdri_gain, crate::hdri::blur_sigma(p.hdri_blur)))))
+            } else if sky_active {
+                let l2r = self.state.lights_to_room();
+                let sky = gf_core::sky::Sky::of(p);
+                let dome = if let Some((pano, pw, ph)) = self.clouds.pano() {
+                    sky.sh_dome_from_sky_space(&l2r, pano, pw, ph)
+                } else {
+                    sky.sh_dome(&l2r)
+                };
+                let t = env::sh_terms(&dome, env::SH_MATTE);
+                let mut out = [[0.0f64; 3]; 9];
+                for k in 0..9 {
+                    for c in 0..3 {
+                        out[k][c] = t[k][c] as f64;
+                        total[k][c] += out[k][c];
+                    }
+                }
+                let sun = sky.sun_glow_scaled(&l2r, self.sky_sun_atten());
+                if let Some(ref g) = sun {
+                    let sun_l = core::of_glow(g, 1.0, 0.0);
+                    for k in 0..9 {
+                        for c in 0..3 { total[k][c] += sun_l.rgb[c] * sun_l.terms[k]; }
+                    }
+                }
+                let ls = core::lights(of_rig, sun.as_ref().map(|g| (std::slice::from_ref(g), 1.0, 0.0)));
+                (Some(out), ls)
+            } else {
+                (None, core::lights(of_rig, None))
+            };
             self.cast.lit = Some(Lit { key, lights, total, ambient, picture: picture_terms });
         }
 
@@ -512,7 +663,6 @@ impl Engine {
         // the object sees it
         let cam_to_obj = transpose(&self.state.view_r());
         let to_obj = mul(&cam_to_obj, &self.state.light_m());
-        let hb = self.state.scene_hb();
         let h = 2.0 * hb / BODIES_RES as f64;
         // Caustics: only while a body focuses light and something can show it. The volumes of arriving
         // light are for the bodies that gather light; with only a floor to show it they are kept tiny.
@@ -580,12 +730,11 @@ impl Engine {
             let (nf, half0) = crate::cast_light::floor_levels(f.half);
             u.floor = [f.height as f32, half0 as f32, 1.0, if focusing { 1.0 } else { 0.0 }];
             let g = p.floor_gain.max(0.0);
-            u.floor_albedo = [(p.floor_r * g) as f32, (p.floor_g * g) as f32, (p.floor_b * g) as f32, 0.0];
+            u.floor_albedo = [(p.floor_r * g) as f32, (p.floor_g * g) as f32, (p.floor_b * g) as f32, strength as f32];
             u.k2[2] = nf as f32;
-            // (and the share of it that comes from all round, not from the lights: the backdrop, the light from
-            // everywhere, a picture; the bodies standing over the floor hide part of that too, softly)
-            let all_round = 1.0 - shares.iter().zip(&lit.lights).map(|(sh, l)| core::lum(l.rgb) * sh).sum::<f64>() / core::lum(total).max(1e-9);
-            let under = if under_off() { 0.0 } else { all_round.clamp(0.0, 1.0) * strength };
+            // (the strength of the ambient pool of shade under bodies standing over the floor; castFloor applies it
+            // by luminance-balanced ambient share so direct sunlight never shifts neutral floor shade yellow-brown)
+            let under = if under_off() { 0.0 } else { strength };
             u.floor_total = [total[0] as f32, total[1] as f32, total[2] as f32, under as f32];
             // and as the light meets it: in the object's frame
             let room_to_obj = mul(&cam_to_obj, &f.m);
@@ -690,6 +839,7 @@ mod tests {
         assert!(weave(include_str!("shaders/trace.wgsl")).is_none());
         // a floor that asks what is cast on it counts as a place
         assert!(weave("var fl = su.floor.rgb * castFloor(p);").is_some_and(|s| s.contains("fn castFloor(p: vec3f)")));
+        assert!(weave("var fl = su.floor.rgb * castFloorDirect(p);").is_some_and(|s| s.contains("fn castFloorDirect(p: vec3f)")));
         // the tracer still says what lies behind the shape the way the stand-in floor expects
         assert_eq!(include_str!("shaders/trace.wgsl").replace("{{BACKGROUND}}", "vec3f(0.0)").matches(BEHIND.0).count(), 1);
     }

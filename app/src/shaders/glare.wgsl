@@ -17,12 +17,20 @@ struct G {
   energy: vec4f,    // rgb: the share of light the spread carries (the kernel is normalised to this); w: the core's radius (texels)
 }
 
+struct GT {
+  alpha: f32,       // blend weight for this frame's glare (1 = stateless)
+  knee: f32,        // soft-shoulder knee for 1-spp fireflies while moving (0 = pure linear when settled)
+  shift: vec2f,     // rigid centre shift (current -> previous) in glare-grid texels
+}
+
 @group(0) @binding(0) var<uniform> g: G;
 @group(0) @binding(1) var<storage, read_write> spec: array<vec2f>;   // [3][1024][1025]
 @group(0) @binding(2) var<storage, read_write> kern: array<f32>;     // [3][1024][1025], the kernel's spectrum (real)
 @group(0) @binding(3) var srcTex: texture_2d<f32>;
 @group(0) @binding(4) var lin: sampler;
 @group(0) @binding(5) var outTex: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(6) var histTex: texture_2d<f32>;
+@group(0) @binding(7) var<uniform> gt: GT;
 
 const NX: u32 = 2048u;
 const NY: u32 = 1024u;
@@ -58,19 +66,91 @@ fn fft(t: u32) {
 
 // ---- the picture, drawn onto the grid, transformed along x ----
 
+// Exact antiderivative of the quadratic B-spline B_2 on [-1.5, 1.5]. Its integer shifts sum to 1
+// everywhere, so integrating B_2 across each source texel's footprint on the glare grid conserves a
+// moving 1-pixel highlight's total energy at every sub-grid phase and resolution ratio.
+fn b2_cdf(t: f32) -> f32 {
+  if (t <= -1.5) { return 0.0; }
+  if (t >= 1.5) { return 1.0; }
+  if (t <= -0.5) {
+    let u = t + 1.5;
+    return (u * u * u) * (1.0 / 6.0);
+  }
+  if (t < 0.5) {
+    return 0.5 + t * (0.75 - t * t * (1.0 / 3.0));
+  }
+  let u = 1.5 - t;
+  return 1.0 - (u * u * u) * (1.0 / 6.0);
+}
+
+fn clean_sample(q: vec3f) -> vec3f {
+  let c = clamp(select(q, vec3f(0.0), q != q), vec3f(0.0), vec3f(65000.0));
+  if (gt.knee <= 0.0) { return c; }
+  let peak = max(c.r, max(c.g, c.b));
+  if (peak <= gt.knee) { return c; }
+  let span = 3.0 * gt.knee;
+  let ex = peak - gt.knee;
+  return c * ((gt.knee + (ex * span) / (ex + span)) / peak);
+}
+
 fn picture(x: u32, y: u32) -> vec3f {
   if (x >= u32(g.img.x) || y >= u32(g.img.y)) { return vec3f(0.0); }
   // (scale.w > 0: one bright point in the middle instead of the picture, to look at the spread itself)
   if (g.scale.w > 0.0) { return select(vec3f(0.0), vec3f(g.scale.w), x == u32(g.img.x) / 2u && y == u32(g.img.y) / 2u); }
-  // four bilinear taps a quarter texel either way: a box about one grid texel wide, so that small
-  // highlights neither flicker nor vanish as the picture moves
-  let uv = (vec2f(f32(x), f32(y)) + 0.5) / g.img.xy;
-  let o = 0.25 / g.img.xy;
-  var c = textureSampleLevel(srcTex, lin, uv + vec2f(-o.x, -o.y), 0.0).rgb + textureSampleLevel(srcTex, lin, uv + vec2f(o.x, -o.y), 0.0).rgb
-        + textureSampleLevel(srcTex, lin, uv + vec2f(-o.x, o.y), 0.0).rgb + textureSampleLevel(srcTex, lin, uv + vec2f(o.x, o.y), 0.0).rgb;
-  c *= 0.25;
-  // (nothing that is not a number, and nothing so bright that a stray sample would light the frame)
-  return clamp(select(c, vec3f(0.0), c != c), vec3f(0.0), vec3f(65000.0));
+  let xc = f32(x) + 0.5;
+  let yc = f32(y) + 0.5;
+  let srcDim = vec2i(textureDimensions(srcTex, 0));
+  let srcF = vec2f(srcDim);
+  let rx = srcF.x / g.img.x;
+  let ry = srcF.y / g.img.y;
+  let ix = g.img.x / srcF.x;
+  let iy = g.img.y / srcF.y;
+  let sx0 = i32(floor((xc - 1.5) * rx));
+  let sx1 = i32(ceil((xc + 1.5) * rx)) - 1;
+  let sy0 = i32(floor((yc - 1.5) * ry));
+  let sy1 = i32(ceil((yc + 1.5) * ry)) - 1;
+  let nx = sx1 - sx0 + 1;
+  let ny = sy1 - sy0 + 1;
+  if (nx > 16 || ny > 16) {
+    var acc = vec3f(0.0);
+    for (var j = 0; j < 8; j++) {
+      let v0 = -1.5 + 0.375 * f32(j);
+      let wv = b2_cdf(v0 + 0.375) - b2_cdf(v0);
+      let v = (yc + v0 + 0.1875) / g.img.y;
+      for (var i = 0; i < 8; i++) {
+        let u0 = -1.5 + 0.375 * f32(i);
+        let wu = b2_cdf(u0 + 0.375) - b2_cdf(u0);
+        let u = (xc + u0 + 0.1875) / g.img.x;
+        acc += clean_sample(textureSampleLevel(srcTex, lin, vec2f(u, v), 0.0).rgb) * (wu * wv);
+      }
+    }
+    return acc;
+  }
+  var wx: array<f32, 16>;
+  var wy: array<f32, 16>;
+  var px0 = b2_cdf(f32(sx0) * ix - xc);
+  for (var i = 0; i < nx; i++) {
+    let px1 = b2_cdf(f32(sx0 + i + 1) * ix - xc);
+    wx[i] = px1 - px0;
+    px0 = px1;
+  }
+  var py0 = b2_cdf(f32(sy0) * iy - yc);
+  for (var j = 0; j < ny; j++) {
+    let py1 = b2_cdf(f32(sy0 + j + 1) * iy - yc);
+    wy[j] = py1 - py0;
+    py0 = py1;
+  }
+  let top = srcDim - vec2i(1);
+  var c = vec3f(0.0);
+  for (var j = 0; j < ny; j++) {
+    let wyj = wy[j];
+    let sy = clamp(sy0 + j, 0, top.y);
+    for (var i = 0; i < nx; i++) {
+      let sx = clamp(sx0 + i, 0, top.x);
+      c += clean_sample(textureLoad(srcTex, vec2i(sx, sy), 0).rgb) * (wx[i] * wyj);
+    }
+  }
+  return c;
 }
 
 // The spread at offset d (grid texels, y down) for one colour, before normalising.
@@ -243,7 +323,17 @@ fn cs_rows_inverse(@builtin(local_invocation_id) l: vec3u, @builtin(workgroup_id
     let n = t + q * 256u;
     for (var e = 0u; e < 2u; e++) {
       let x = 2u * n + e;
-      if (x < wd) { textureStore(outTex, vec2u(x, y), vec4f(max(px[q * 2u + e], vec3f(0.0)), 1.0)); }
+      if (x < wd) {
+        var cur = max(px[q * 2u + e], vec3f(0.0));
+        if (gt.alpha < 0.9999) {
+          let huv = (vec2f(f32(x), f32(y)) + 0.5 + gt.shift) / g.img.xy;
+          if (all(huv >= vec2f(0.0)) && all(huv <= vec2f(1.0))) {
+            let prev = max(textureSampleLevel(histTex, lin, huv, 0.0).rgb, vec3f(0.0));
+            cur = mix(prev, cur, gt.alpha);
+          }
+        }
+        textureStore(outTex, vec2u(x, y), vec4f(cur, 1.0));
+      }
     }
   }
 }

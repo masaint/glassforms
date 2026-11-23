@@ -1,11 +1,41 @@
-//! 3x3 rotations, row-major, as the web engine keeps them.
+//! 3D vector arithmetic, scalar helpers, and row-major 3x3 rotations (as the web engine keeps them).
 
+pub type Vec3 = [f64; 3];
 pub type Mat3 = [f64; 9];
 
 pub const DEG: f64 = std::f64::consts::PI / 180.0;
 pub const TAU: f64 = 2.0 * std::f64::consts::PI;
 
 pub const I3: Mat3 = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+
+pub fn add(a: Vec3, b: Vec3) -> Vec3 { [a[0] + b[0], a[1] + b[1], a[2] + b[2]] }
+pub fn sub(a: Vec3, b: Vec3) -> Vec3 { [a[0] - b[0], a[1] - b[1], a[2] - b[2]] }
+pub fn scale(a: Vec3, s: f64) -> Vec3 { [a[0] * s, a[1] * s, a[2] * s] }
+pub fn dot(a: Vec3, b: Vec3) -> f64 { a[0] * b[0] + a[1] * b[1] + a[2] * b[2] }
+pub fn cross(a: Vec3, b: Vec3) -> Vec3 {
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+}
+pub fn len(a: Vec3) -> f64 { dot(a, a).sqrt() }
+pub fn unit(a: Vec3) -> Vec3 {
+    let l = len(a);
+    if l > 1e-300 { scale(a, 1.0 / l) } else { [0.0, 1.0, 0.0] }
+}
+pub fn norm(a: Vec3) -> Vec3 {
+    let l = len(a);
+    if l > 1e-300 { scale(a, 1.0 / l) } else { a }
+}
+pub fn lerp(a: Vec3, b: Vec3, t: f64) -> Vec3 { add(a, scale(sub(b, a), t)) }
+
+/// smoothstep(0, 1, x), the one copy (env, stage and cast lights use it).
+pub fn sstep(x: f64) -> f64 {
+    let x = x.clamp(0.0, 1.0);
+    x * x * (3.0 - 2.0 * x)
+}
+
+pub fn smoothstep(a: f64, b: f64, x: f64) -> f64 {
+    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
 
 pub fn mul(a: &Mat3, b: &Mat3) -> Mat3 {
     let mut o = [0.0; 9];
@@ -108,5 +138,24 @@ mod tests {
         for i in 0..9 {
             assert!((m[i] - o[i]).abs() < 1e-12);
         }
+    }
+
+    #[test]
+    fn vec3_and_smoothstep_helpers() {
+        let a = [1.0, 2.0, -2.0];
+        let b = [2.0, -1.0, 0.0];
+        assert_eq!(add(a, b), [3.0, 1.0, -2.0]);
+        assert_eq!(sub(a, b), [-1.0, 3.0, -2.0]);
+        assert_eq!(scale(a, 0.5), [0.5, 1.0, -1.0]);
+        assert_eq!(dot(a, b), 0.0);
+        assert_eq!(len(a), 3.0);
+        assert!((len(unit(a)) - 1.0).abs() < 1e-12);
+        assert_eq!(unit([0.0; 3]), [0.0, 1.0, 0.0]);
+        assert_eq!(norm([0.0; 3]), [0.0; 3]);
+        assert_eq!(cross([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]), [0.0, 0.0, 1.0]);
+        assert_eq!(lerp(a, b, 0.5), [1.5, 0.5, -1.0]);
+        assert_eq!(smoothstep(0.0, 2.0, -1.0), 0.0);
+        assert_eq!(smoothstep(0.0, 2.0, 1.0), 0.5);
+        assert_eq!(smoothstep(0.0, 2.0, 3.0), 1.0);
     }
 }

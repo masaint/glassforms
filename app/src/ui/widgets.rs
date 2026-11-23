@@ -922,7 +922,7 @@ pub fn tail(ui: &Ui, text: &str, font: &FontId, width: f32) -> String {
 }
 
 /// The small cross that closes a floating window.
-fn close_button(ui: &mut Ui, rect: Rect, id: Id) -> Response {
+pub fn close_button(ui: &mut Ui, rect: Rect, id: Id) -> Response {
     let resp = ui.interact(rect, id, Sense::click());
     let hot = resp.hovered();
     if hot {

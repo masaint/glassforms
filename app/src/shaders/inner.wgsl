@@ -50,11 +50,7 @@ struct IU {
 //#endif
 
 // a whole number scrambled into another
-fn ihash(v: u32) -> u32 {
-  let x = v * 747796405u + 2891336453u;
-  let w = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u;
-  return (w >> 22u) ^ w;
-}
+fn ihash(v: u32) -> u32 { return pbr_pcg(v); }   // pbr/hash.wgsl
 // three numbers in 0..1 from one scrambled number
 fn ten3(h: u32) -> vec3f { return vec3f(f32(h & 1023u), f32((h >> 10u) & 1023u), f32((h >> 20u) & 1023u)) * (1.0 / 1023.0); }
 // a scrambled number for a cell of a lattice

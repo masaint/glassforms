@@ -1,0 +1,6 @@
+scene=studio
+preset=capsule
+material=glass
+mods=[{"kind":"bend","a":{"v":[0,140,0],"link":false}}]
+dist=5.0
+trace=csg

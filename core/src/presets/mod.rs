@@ -11,6 +11,7 @@ pub mod attractors;
 pub mod braids;
 pub mod branching;
 pub mod crystals;
+pub mod exact;
 pub mod fieldlines;
 pub mod foam;
 pub mod forms;
@@ -29,6 +30,7 @@ pub mod surfaces;
 pub mod text3d;
 pub mod topology;
 pub mod trees;
+pub mod tubes;
 pub mod geo;
 
 /// One slider of a preset: `id` is what the code calls it, `label` what the panel shows.
@@ -122,13 +124,20 @@ pub enum Term {
     /// band's), `edges` need hold only those within `margin` of the band (with every edge that crosses
     /// it), and no distance beyond `margin` is told. A margin of 0: the whole outline, no band.
     Glyph { o: [f64; 3], ux: [f64; 3], uy: [f64; 3], depth: f64, round: f64, band: [f64; 3], edges: Vec<[f64; 4]> },
+    /// a primitive of a path, exactly (`path_formula`): its record (six groups of four: `path_formula::record`),
+    /// and the outline swept, if any (edges in a square from -1 to 1)
+    Path { rec: [f64; 24], outline: Option<std::sync::Arc<Vec<[f64; 4]>>> },
     /// a stretch of a profile swept along a path (`path::sweep`): a rounded rectangle from `a` to `c`, its
     /// half-sizes (across, through) `size_a` at a and `size_c` at c, its across direction `side_a` and
     /// `side_c` (square to the stretch, or nearly), its corners rounded by `round`; cut at a by the plane
     /// through a across `n0` and at c by the plane through c across `n1` (both pointing along the stretch).
-    /// `ends`: which of those cuts is an open end of the path. A cut between two stretches only shares out
+    /// `ends`: which of those cuts is an open end of the path (0: a joint, 1: an end cut flat, 2: an end
+    /// rounded over by `round`). A cut between two stretches only shares out
     /// the space between them; inside the solid it is no surface, so the depth there is not measured to it.
-    Sweep { a: [f64; 3], c: [f64; 3], side_a: [f64; 3], side_c: [f64; 3], size_a: [f64; 2], size_c: [f64; 2], round: f64, n0: [f64; 3], n1: [f64; 3], ends: [bool; 2] },
+    Sweep { a: [f64; 3], c: [f64; 3], side_a: [f64; 3], side_c: [f64; 3], size_a: [f64; 2], size_c: [f64; 2], round: f64, n0: [f64; 3], n1: [f64; 3], ends: [u8; 2],
+        /// a flat outline swept in place of the rounded rectangle: closed outlines as edges (x0, y0, x1, y1),
+        /// filled by the even-odd rule, in a square from -1 to 1 that the half-sizes stretch (across, through)
+        outline: Option<std::sync::Arc<Vec<[f64; 4]>>> },
 }
 
 /// A flat leaf: from `base` to `tip` along its midrib; `side` a unit vector across it in its plane; its
@@ -170,6 +179,11 @@ pub struct Flow {
 pub type CurveFn = Box<dyn Fn(&[f64], &CurveOpts) -> RawCurve + Send + Sync>;
 pub type RadiusFn = Box<dyn Fn(f64) -> f64 + Send + Sync>;
 pub type InfoFn = Box<dyn Fn(&RawCurve, &[f64]) -> String + Send + Sync>;
+/// A formula's table: numbers worked out on the CPU from the sliders and the words typed for the shape
+/// (`ShapeState::model`: only the 3D text reads them) (a snowflake's arms and branches, grown from the
+/// weather; a word's letters), four to an entry, that the formula reads as `tbl[i]` (`field::TABLE_MAX`
+/// entries at most).
+pub type TableFn = Box<dyn Fn(&[f64], &str) -> Vec<[f32; 4]> + Send + Sync>;
 
 pub enum Shape {
     /// One orbit of a flow. The tube is a window on a longer stretch of it, and can travel along it.
@@ -184,6 +198,19 @@ pub enum Shape {
     /// A polygon model read from a file: `file` is its path below the program's folder, or "" for the
     /// file the user chose (which is kept with the shape's sliders: `ShapeState::model`).
     Mesh { file: &'static str },
+}
+
+/// What a preset asks of the tracer instead of its family's (each None: the family's own). A shape that puts
+/// many glass surfaces in a ray's path can follow less of the faint light through them and keep its look
+/// (docs/cache_bounces.md): `layers`, how many further pieces light leaving the glass is followed through;
+/// `thr_cut`, below what share of the sample a path inside ends; `leave_cut`, whether light leaving the glass
+/// faintly sees the lights at once; `step_scale`, the share of the distance a ray steps.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Budget {
+    pub layers: Option<u32>,
+    pub thr_cut: Option<f64>,
+    pub leave_cut: Option<bool>,
+    pub step_scale: Option<f64>,
 }
 
 pub struct Preset {
@@ -210,7 +237,13 @@ pub struct Preset {
     pub radius: Option<RadiusFn>,
     /// a line of text about the shape as it stands
     pub info: Option<InfoFn>,
+    /// formulas only: a table of numbers worked out from the sliders, which the formula reads (`TableFn`)
+    pub table: Option<TableFn>,
+    /// The curve generator supplies the centre lines for the exact tube equation.
+    pub exact_tubes: bool,
     pub shape: Shape,
+    /// how the tracer follows light through this shape, where it differs from its family's
+    pub budget: Budget,
 }
 impl Preset {
     /// A preset with nothing set but its names and its shape; fill the rest with struct update syntax.
@@ -218,9 +251,20 @@ impl Preset {
         Self {
             id, name, eq: Vec::new(), note: "", params: Vec::new(), rot: None, animate: None,
             tube: None, axes: None, align: None, fit: None, centre: true, fixed_length: false,
-            radius: None, info: None, shape,
+            radius: None, info: None, table: None, exact_tubes: false, shape, budget: Budget::default(),
         }
     }
+    /// The equation used for the volume bake and to refine a ray hit.
+    pub fn formula(&self) -> Option<(&str, &str, &str)> {
+        if self.exact_tubes {
+            return Some((include_str!("tubes.wgsl"), "-1e4", crate::field::SHELL_DEFAULT));
+        }
+        match &self.shape {
+            Shape::Field { wgsl, clip, shell } => Some((wgsl, clip, shell)),
+            _ => None,
+        }
+    }
+    pub fn has_table(&self) -> bool { self.exact_tubes || self.table.is_some() }
     pub fn is_flow(&self) -> bool { matches!(self.shape, Shape::Flow(_)) }
     pub fn defaults(&self) -> Vec<f64> { self.params.iter().map(|p| p.value).collect() }
     pub fn param_index(&self, id: &str) -> Option<usize> { self.params.iter().position(|p| p.id == id) }
@@ -285,10 +329,58 @@ impl Family {
     pub fn preset(&self, id: &str) -> Option<&Preset> { self.presets.iter().find(|p| p.id == id) }
 }
 
+/// A soft rectangular light on the sphere around the shape.
+pub fn light(az: f64, el: f64, w: f64, h: f64, rgb: [f64; 3], soft: f64) -> Light {
+    Light { az, el, w, h, rgb, soft }
+}
+
+/// Broad, soft lights for smooth surfaces: broad faces of glass want broad reflections.
+pub fn surface_lights() -> Vec<Light> {
+    vec![
+        light(38.0, 18.0, 14.0, 32.0, [5.0, 4.9, 4.7], 0.7),
+        light(-55.0, -8.0, 10.0, 42.0, [0.5, 1.4, 4.0], 0.7),
+        light(-140.0, 5.0, 8.0, 42.0, [5.0, 1.6, 0.25], 0.7),
+        light(150.0, 28.0, 24.0, 16.0, [3.2, 3.1, 3.0], 0.8),
+        light(0.0, 85.0, 34.0, 34.0, [0.8, 0.9, 1.1], 0.9),
+        light(0.0, -80.0, 30.0, 30.0, [0.5, 0.22, 0.05], 0.9),
+    ]
+}
+
+/// Broad lights that fade to their edges, so neighbouring flat faces differ, plus two small bright ones for glints.
+pub fn faceted_lights() -> Vec<Light> {
+    vec![
+        light(40.0, 20.0, 30.0, 42.0, [3.0, 2.9, 2.7], 1.0),
+        light(-60.0, -5.0, 26.0, 46.0, [0.4, 1.1, 3.3], 1.0),
+        light(-140.0, 5.0, 22.0, 46.0, [3.9, 1.3, 0.22], 1.0),
+        light(150.0, 30.0, 32.0, 24.0, [2.1, 2.05, 2.0], 1.0),
+        light(0.0, 85.0, 40.0, 40.0, [0.8, 0.9, 1.1], 1.0),
+        light(0.0, -80.0, 36.0, 36.0, [0.5, 0.22, 0.05], 1.0),
+        light(95.0, 46.0, 5.0, 5.0, [7.0, 7.0, 7.0], 0.5),
+        light(-100.0, -36.0, 4.0, 8.0, [5.0, 5.5, 6.5], 0.5),
+    ]
+}
+
+/// Starting orientation (as x-y-z Euler angles in degrees) that shows an upright shape spun by `want[1]`
+/// about its vertical axis, tipped towards the camera by `want[0]`, and rolled by `want[2]`, undoing `solids::TURN`.
+pub(crate) fn view(want: [f64; 3]) -> [f64; 3] {
+    use crate::math::{axis_angle, euler_of, mul, DEG};
+    use solids::TURN;
+    let t = [TURN[0][0], TURN[1][0], TURN[2][0], TURN[0][1], TURN[1][1], TURN[2][1], TURN[0][2], TURN[1][2], TURN[2][2]];
+    let shown = mul(&axis_angle(0.0, 0.0, 1.0, want[2] * DEG), &mul(&axis_angle(1.0, 0.0, 0.0, want[0] * DEG), &axis_angle(0.0, 1.0, 0.0, want[1] * DEG)));
+    let e = euler_of(&mul(&shown, &t));
+    e.map(|a| (a * 10.0).round() / 10.0)
+}
+
 /// Every family: the four the web version has, in the order it shows them, then the newer ones.
 pub fn families() -> Vec<Family> {
-    vec![
+    let mut families = vec![
         attractors::family(), knots::family(), surfaces::family(), algebraic::family(), gems::family(), solids::family(), forms::family(), studio::family(), fractals::family(), topology::family(), orbitals::family(), polyhedra::family(), trees::family(), models::family(),
         links::family(), braids::family(), fieldlines::family(), crystals::family(), foam::family(), branching::family(), snowflakes::family(), text3d::family(), paths::family(),
-    ]
+    ];
+    for family in &mut families {
+        if matches!(family.id, "links" | "braids" | "fieldlines" | "branching" | "knots" | "attractors" | "trees") {
+            for preset in &mut family.presets { preset.exact_tubes = true; }
+        }
+    }
+    families
 }

@@ -23,7 +23,7 @@ struct From {
     /// cells a side of the light volume
     res: u32,
     /// the body as a medium, and the lights' frame in the shape's, as the bits of their numbers
-    medium: [u64; 9],
+    medium: [u64; 10],
     turn: [u32; 9],
     /// which lighting
     lighting: (u64, u64, u64),
@@ -42,10 +42,6 @@ pub(super) struct Kept {
     lighting: Lighting,
     lighting_of: Option<(u64, u64, u64)>,
     from: Option<From>,
-    /// how many times the volume has been worked out, and how long the last time took (milliseconds;
-    /// to the end of the GPU's work only when timings are asked for)
-    pub count: u64,
-    pub ms: f64,
     /// in a scene drawn body by body: each body's light volume and what it was worked out from (made
     /// for a body only once it is milky)
     bodies: Vec<(Scatter, Option<From>)>,
@@ -56,12 +52,6 @@ impl Engine {
     fn traced_volume(&self) -> Option<Volume> {
         let v = if self.bubbles_in.is_some() { self.bubbler.volume() } else { self.scene_volume() }?;
         Some(Volume { tex: v.tex.clone(), view: v.view.clone(), res: v.res })
-    }
-
-    /// How many times the light inside a milky body has been worked out, and the milliseconds the last
-    /// time took.
-    pub fn glow_work(&self) -> (u64, f64) {
-        (self.glow.count, self.glow.ms)
     }
 
     /// The lighting as beams, made again when the lights' map or the picture changes; and what it was made from.
@@ -105,7 +95,7 @@ impl Engine {
         let st = medium.sig_t();
         let from = From {
             shape: self.shape_no, shape_res: vol.res, chan, res,
-            medium: [medium.sig_s[0], medium.sig_s[1], medium.sig_s[2], st[0], st[1], st[2], medium.hold, medium.enters, medium.ior].map(f64::to_bits),
+            medium: [medium.sig_s[0], medium.sig_s[1], medium.sig_s[2], st[0], st[1], st[2], medium.hold, medium.enters, medium.ior, medium.mottle].map(f64::to_bits),
             turn: turn.map(|x| (x as f32).to_bits()),
             lighting: of,
             cast: cast.map_or(Vec::new(), |c| bytemuck::cast_slice::<Shading, u32>(std::slice::from_ref(c)).to_vec()),
@@ -151,8 +141,6 @@ impl Engine {
             self.gpu.wait();
             eprintln!("light volume {} cells a side, {} beams: {:.2} ms", res, self.glow.lighting.beams.len(), t0.elapsed().as_secs_f64() * 1e3);
         }
-        self.glow.ms = t0.elapsed().as_secs_f64() * 1e3;
-        self.glow.count += 1;
         self.glow.from = Some(from);
         true
     }
@@ -163,21 +151,29 @@ impl Engine {
     /// `scales`: what each one's distances are multiplied by. True if any was worked out again.
     pub(super) fn glow_bodies_upkeep(&mut self, mats: &[Settings], scales: &[f64]) -> bool {
         if self.painted_px.is_empty() { return false; }
+        // Only the milky segment of throughB samples an internal light volume. An opaque
+        // lacquer or ceramic finishes its path at the surface, even when its recipe uses SSS.
+        let uses_light_volume = |p: &Settings| material::body_kind(p) == 2.0 && !material::Variant::of(p).walk;
+        if !mats.iter().any(uses_light_volume) {
+            for k in 0..material::MAX_BODIES { self.renderer.set_glow_body(k, None); }
+            return false;
+        }
         let Some(vol) = self.bodies().map(|b| Volume { tex: b.volume.tex.clone(), view: b.volume.view.clone(), res: b.volume.res }) else { return false };
         let of = self.glow_lighting();
         let turn = mul(&transpose(&self.state.view_r()), &self.state.light_m());
         let mut changed = false;
         for (k, p) in mats.iter().enumerate().take(material::MAX_BODIES) {
-            let v = material::Variant::of(p);
-            if !v.sss {
+            if !uses_light_volume(p) {
                 self.renderer.set_glow_body(k, None);
                 continue;
             }
             let casting = self.cast.for_light_volume(Some(k));
             let (from, medium, res) = self.glow_from(p, scales.get(k).copied().unwrap_or(1.0), &vol, k, of, &turn, casting.as_ref().map(|c| &c.numbers));
             while self.glow.bodies.len() <= k { self.glow.bodies.push((Scatter::new(&self.gpu), None)); }
-            if self.glow.bodies[k].1.as_ref() == Some(&from) { continue; }
-            let t0 = std::time::Instant::now();
+            if self.glow.bodies[k].1.as_ref() == Some(&from) {
+                self.renderer.set_glow_body(k, Some(self.glow.bodies[k].0.view()));
+                continue;
+            }
             let (hb, lamps) = (self.state.scene_hb(), self.glow_lamps());
             let (sc, kept) = &mut self.glow.bodies[k];
             sc.hb = hb;
@@ -185,10 +181,40 @@ impl Engine {
             sc.solve(&vol, self.shape_no, &self.glow.lighting, &medium, &turn, res, k, casting.as_ref());
             *kept = Some(from);
             self.renderer.set_glow_body(k, Some(self.glow.bodies[k].0.view()));
-            self.glow.ms = t0.elapsed().as_secs_f64() * 1e3;
-            self.glow.count += 1;
             changed = true;
         }
         changed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gf_core::material;
+    use gf_core::state::{Detail, State};
+    use crate::engine::Engine;
+    use crate::gpu::Gpu;
+
+    #[test]
+    fn mottle_invalidates_light_volume_cache() {
+        let Ok(gpu) = Gpu::headless("vulkan") else { return };
+        let args = [
+            ("scene", "solids"),
+            ("preset", "sphere"),
+            ("sss", "1.0"),
+            ("fit", "0"),
+            ("sssDetail", "64"),
+            ("mottle", "0.0"),
+            ("res", "64"),
+        ]
+        .map(|(k, v)| (k.to_string(), v.to_string()));
+        let mut engine = Engine::new(gpu, State::with_args(&args, true), true);
+        engine.bake(Detail::Full).unwrap();
+        engine.settle_lighting();
+        let v = material::Variant::of(&engine.state.p);
+        let scale = 1.0;
+        assert!(!engine.glow_upkeep(v, scale), "unchanged milky medium should hit light-volume cache");
+        engine.state.p.mottle = 0.55;
+        assert!(engine.glow_upkeep(v, scale), "changing mottle must invalidate light-volume cache");
+        assert!(!engine.glow_upkeep(v, scale), "second upkeep with same mottle should hit cache");
     }
 }

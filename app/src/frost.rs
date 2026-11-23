@@ -73,9 +73,9 @@ fn pipeline(gpu: &Gpu, label: &str, module: &wgpu::ShaderModule, fs: &str, layou
     })
 }
 
-/// Draw one triangle over these targets (whatever was in them is not kept). `second`: a second group
-/// the pipeline reads (a tracer with casting in it), if any.
-pub fn draw(enc: &mut wgpu::CommandEncoder, views: &[&wgpu::TextureView], pipe: &wgpu::RenderPipeline, group: &wgpu::BindGroup, second: Option<&wgpu::BindGroup>) {
+/// Draw one triangle over these targets (whatever was in them is not kept).
+/// A moving frame can occupy a smaller region of its full allocation.
+fn draw(enc: &mut wgpu::CommandEncoder, views: &[&wgpu::TextureView], pipe: &wgpu::RenderPipeline, group: &wgpu::BindGroup, region: Option<(u32, u32)>) {
     let atts: Vec<Option<wgpu::RenderPassColorAttachment>> = views
         .iter()
         .map(|&view| Some(wgpu::RenderPassColorAttachment { view, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store } }))
@@ -83,7 +83,7 @@ pub fn draw(enc: &mut wgpu::CommandEncoder, views: &[&wgpu::TextureView], pipe: 
     let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor { label: None, color_attachments: &atts, depth_stencil_attachment: None, timestamp_writes: None, occlusion_query_set: None, multiview_mask: None });
     rp.set_pipeline(pipe);
     rp.set_bind_group(0, group, &[]);
-    if let Some(g) = second { rp.set_bind_group(1, g, &[]); }
+    if let Some((w, h)) = region { rp.set_viewport(0.0, 0.0, w as f32, h as f32, 0.0, 1.0); }
     rp.draw(0..3, 0..1);
 }
 
@@ -95,7 +95,7 @@ struct FU {
     skirt: f32,
     levels: f32,
     show: f32,
-    pad: [f32; 2],
+    target: [f32; 2],
 }
 
 #[repr(C)]
@@ -217,15 +217,20 @@ impl Frost {
     }
 
     /// Blur the frame just traced. `tan_fov`: the tangent of half the camera's angle of view.
-    pub fn encode(&self, enc: &mut wgpu::CommandEncoder, tan_fov: f32) {
+    pub fn encode(&self, enc: &mut wgpu::CommandEncoder, tan_fov: f32, region: Option<(u32, u32)>) {
         let Some(t) = self.t.as_ref() else { return };
-        let (w, h) = self.size;
-        let fu = FU { res: [w as f32, h as f32], px: 2.0 * tan_fov / h as f32, skirt: SKIRT_SHARE, levels: t.levels.len() as f32, show: self.show, pad: [0.0; 2] };
+        let (w, h) = region.unwrap_or(self.size);
+        let fu = FU { res: [w as f32, h as f32], px: 2.0 * tan_fov / h as f32, skirt: SKIRT_SHARE, levels: t.levels.len() as f32, show: self.show, target: [self.size.0 as f32, self.size.1 as f32] };
         self.gpu.queue.write_buffer(&self.u, 0, bytemuck::bytes_of(&fu));
-        for (view, face, group) in &t.levels {
-            draw(enc, &[view, face], &self.p_down, group, None);
+        for (i, (view, face, group)) in t.levels.iter().enumerate() {
+            let extent = region.map(|(rw, rh)| {
+                let factor = 1 << (i + 1);
+                (rw.div_ceil(factor).min((self.size.0.div_ceil(2) >> i).max(1)),
+                 rh.div_ceil(factor).min((self.size.1.div_ceil(2) >> i).max(1)))
+            });
+            draw(enc, &[view, face], &self.p_down, group, extent);
         }
-        draw(enc, &[&t.out_view], &self.p_out, &t.g_out, None);
+        draw(enc, &[&t.out_view], &self.p_out, &t.g_out, region);
     }
 }
 

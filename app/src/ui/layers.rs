@@ -7,7 +7,7 @@
 //! With one layer there is one row and a "+", and nothing else differs from a single shape.
 
 use eframe::egui::{self, Align2, Color32, CursorIcon, Id, Pos2, Rect, Sense, Stroke, StrokeKind, Ui};
-use gf_core::layers::{mask_of, members, tag, JunctionOpts, Op, PairOpts, Profile, MAX_LAYERS};
+use gf_core::layers::{mask_of, members, tag, JunctionOpts, Mask, Op, PairOpts, Profile, MAX_LAYERS};
 use gf_core::state::State;
 
 use super::theme::*;
@@ -49,6 +49,7 @@ fn body_words(st: &State, body: usize, bodies: &[Vec<usize>]) -> String {
 /// exchanges the two.
 pub fn strip(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     let n = st.layer_count();
+    let selected = st.world_selection();
     let bodies = st.bodies();
     let body: Vec<usize> = (0..n).map(|i| st.body_of(i)).collect();
     let width = ui.available_width();
@@ -64,14 +65,14 @@ pub fn strip(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     let place = |i: usize| Rect::from_min_size(Pos2::new(space.left(), space.top() + tops[i]), egui::vec2(width - PLUS - 6.0, ROW));
 
     // what the pointer asks for, carried out once every row is drawn
-    let (mut select, mut toggle, mut remove, mut exchange, mut lab) = (None, None, None, None, None);
+    let (mut select, mut enter, mut toggle, mut remove, mut exchange, mut lab) = (None, None, None, None, None, None);
     let held = Id::unique("layer row held");
     let dragging: Option<usize> = ui.data(|d| d.get_temp(held));
     let pointer = ui.input(|i| i.pointer.interact_pos());
     for i in 0..n {
         let r = place(i);
         px.note(format!("layer:{}", i + 1), r);
-        let (chosen, shown) = (i == st.stack.sel, st.stack.layers[i].show);
+        let (chosen, shown) = (selected.contains(&gf_core::groups::Item::Object(i)), st.stack.layers[i].show);
         let resp = ui.interact(r, Id::unique(("layer row", i)), Sense::click_and_drag());
         let live = ui.is_enabled();
         let hot = live && resp.hovered();
@@ -85,10 +86,20 @@ pub fn strip(ui: &mut Ui, st: &mut State, px: &mut Panels) {
         text_in(ui, Rect::from_min_max(Pos2::new(r.left() + 9.0, r.top()), Pos2::new(r.left() + 22.0, r.bottom())), Align2::LEFT_CENTER, &format!("{}", i + 1), mono(10.0), if chosen { pal().accent } else { pal().dim });
         let cross = Rect::from_center_size(Pos2::new(r.right() - 12.0, r.center().y), egui::vec2(16.0, 16.0));
         let lid = Rect::from_center_size(Pos2::new(cross.left() - 12.0, r.center().y), egui::vec2(18.0, 18.0));
+        // What kind of object it is, in the tabs' own words, quietly, before the eye: every row says it,
+        // selected or not. (The name stops short of it.)
+        let csg = st.is_csg_object(i);
+        let kind = if csg { "csg" } else { "volume" };
+        let tag_font = mono(9.0);
+        let tag_w = ui.painter().layout_no_wrap(kind.to_string(), tag_font.clone(), pal().dim).size().x;
+        let tag = Rect::from_min_max(Pos2::new(lid.left() - 6.0 - tag_w, r.top()), Pos2::new(lid.left() - 6.0, r.bottom()));
+        text_in(ui, tag, Align2::RIGHT_CENTER, kind, tag_font, if !shown { pal().hint } else if chosen { pal().dim } else { pal().faint });
+        px.note(format!("layer:{}:kind", i + 1), tag);
         // (every name starts clear of the dot that a body's first row carries: see below)
-        text_in(ui, Rect::from_min_max(Pos2::new(r.left() + 37.0, r.top()), Pos2::new(lid.left() - 4.0, r.bottom())), Align2::LEFT_CENTER, &st.layer_title(i), mono(SIZE), ink);
+        text_in(ui, Rect::from_min_max(Pos2::new(r.left() + 37.0, r.top()), Pos2::new(tag.left() - 8.0, r.bottom())), Align2::LEFT_CENTER, &st.layer_title(i), mono(SIZE), ink);
         if live {
-            if resp.clicked() { select = Some(i); }
+            if resp.double_clicked() { enter = Some(i); }
+            else if resp.clicked() { select = Some(i); }
             if resp.drag_started() { ui.data_mut(|d| d.insert_temp(held, i)); }
             if resp.dragged() && n > 1 { ui.ctx().set_cursor_icon(CursorIcon::Grabbing); }
             if resp.drag_stopped() {
@@ -98,7 +109,7 @@ pub fn strip(ui: &mut Ui, st: &mut State, px: &mut Panels) {
                 ui.data_mut(|d| d.remove::<usize>(held));
             }
         }
-        let mut words = format!("layer {}: {} ({})", i + 1, st.layer_title(i), st.layer_family(i).name);
+        let mut words = format!("object {}: {} ({}), a {} object", i + 1, st.layer_title(i), st.layer_family(i).name, kind);
         if n > 1 { words += &format!("\n{}", body_words(st, body[i], &bodies)); }
         if i == 0 { words += "\nthe first layer's family sets the lights and the starting view"; }
         if n > 1 { words += "\ndrag it onto another layer to exchange the two"; }
@@ -112,7 +123,9 @@ pub fn strip(ui: &mut Ui, st: &mut State, px: &mut Panels) {
             let made = ui.interact(spot, Id::unique(("layer material", i)), Sense::click());
             if made.hovered() { ui.ctx().set_cursor_icon(CursorIcon::PointingHand); }
             dot(ui, spot.center(), material::body_colour(st, i), false);
-            let of = if i == 0 || st.body_own(i) { material::body_material(st, i) } else { "the first body's material" };
+            let of = if i == 0 || st.body_own(i) { material::body_material(st, i) } else if body[i] >= gf_core::material::MAX_BODIES {
+                "the first body's material (only the first four bodies can have a material of their own for now)"
+            } else { "the first body's material" };
             if made.on_hover_text(format!("made of {of} · press to show its material")).clicked() { lab = Some(i); }
         }
 
@@ -158,15 +171,24 @@ pub fn strip(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     let plus = Rect::from_min_size(Pos2::new(space.right() - PLUS, space.top()), egui::vec2(PLUS, ROW));
     if n < MAX_LAYERS {
         px.note("layer:add", plus);
-        let words = if n == 1 { "add a layer: a second shape in the same space, joined to this one" } else { "add another layer (four at most)" };
-        if button(ui, plus.shrink2(egui::vec2(0.0, 1.0)), Id::unique("layer add"), "+", false, mono(13.0)).on_hover_text(words).clicked() { add(st, px); }
+        let words = "Add an independent object to the scene";
+        // (it opens the shape picker: the shape picked there is the new object)
+        let open = matches!(px.picker.open, Some(super::picker::Mode::Add { .. }));
+        if button(ui, plus.shrink2(egui::vec2(0.0, 1.0)), Id::unique("layer add"), "+", open, mono(13.0)).on_hover_text(words).clicked() {
+            if open { super::picker::close(px) } else { px.picker.anchor = Some(plus); super::picker::open_add(st, px) }
+        }
     }
 
-    if let Some(i) = select { st.select_layer(i); }
-    // (the material section shows the material of the selected layer's body: it is opened to it)
+    if let Some(i) = enter { st.enter_world_item(gf_core::groups::Item::Object(i)); px.handles.pick(None); }
+    if let Some(i) = select {
+        st.select_world_item(gf_core::groups::Item::Object(i), ui.input(|e| e.modifiers.shift || e.modifiers.command));
+        px.handles.pick(None);
+    }
+    // Open the Materials Lab on the body owning the clicked swatch.
     if let Some(i) = lab {
-        st.select_layer(i);
-        if px.store.is_closed("material") { px.store.fold("material"); }
+        st.select_world_item(gf_core::groups::Item::Object(i), false);
+        px.lab_node = None;
+        px.store.lab_open = true;
     }
     if let Some(i) = toggle { st.set_layer_show(i, !st.stack.layers[i].show); }
     if let Some((a, b)) = exchange {
@@ -206,7 +228,7 @@ fn arrow(ui: &Ui, c: Pos2, open: bool, ink: Color32) {
 /// A combination's options in the fewest words, for the end of its row: "join · 0.12", "2 cuts 1 · 0.05"
 /// (the layers by their numbers: the row has no room for their names twice), "morph · 30%", "apart",
 /// "fill +0.50".
-fn brief(st: &State, mask: u8) -> String {
+fn brief(st: &State, mask: Mask) -> String {
     if mask.count_ones() != 2 { return format!("fill {:+.2}", st.stack.junction(mask).fill); }
     let (p, m) = (st.stack.pair(mask), members(mask));
     match p.op {
@@ -220,7 +242,7 @@ fn brief(st: &State, mask: u8) -> String {
 
 /// A row that opens: a combination's layers by number and by name, and at its end its options in a few
 /// words. Returns true if it was pressed.
-fn combo_title(ui: &mut Ui, id: Id, st: &State, mask: u8, open: bool, dim: bool) -> (bool, Rect) {
+fn combo_title(ui: &mut Ui, id: Id, st: &State, mask: Mask, open: bool, dim: bool) -> (bool, Rect) {
     let r = row(ui, 22.0);
     let resp = ui.interact(r, id, Sense::click());
     let hot = resp.hovered();
@@ -268,7 +290,7 @@ fn words(ui: &mut Ui, text: &str) {
 }
 
 /// What an operation does, for its hover note.
-fn op_words(st: &State, mask: u8, op: Op) -> String {
+fn op_words(st: &State, mask: Mask, op: Op) -> String {
     let m = members(mask);
     let (a, b) = (st.layer_title(m[0]), st.layer_title(m[1]));
     match op {
@@ -282,7 +304,7 @@ fn op_words(st: &State, mask: u8, op: Op) -> String {
 }
 
 /// The controls of a combination that is open, drawn in from the row above with a bar down their left.
-fn combo_body(ui: &mut Ui, st: &mut State, px: &mut Panels, mask: u8) {
+fn combo_body(ui: &mut Ui, st: &mut State, px: &mut Panels, mask: Mask) {
     let (top, left) = (ui.cursor().top(), ui.cursor().left());
     let inner = Rect::from_min_max(Pos2::new(left + 10.0, top), Pos2::new(ui.max_rect().right(), top + 2000.0));
     ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
@@ -296,11 +318,15 @@ fn combo_body(ui: &mut Ui, st: &mut State, px: &mut Panels, mask: u8) {
             // which are named with the layers' own names
             for (line, ops) in [&[Op::Join, Op::Overlap, Op::Morph, Op::Apart][..], &[Op::ACutsB, Op::BCutsA][..]].into_iter().enumerate() {
                 let names: Vec<String> = ops.iter().map(|op| st.op_title(mask, *op)).collect();
-                let items: Vec<Item> = ops.iter().zip(&names).map(|(op, name)| Item::new(name, *op == now.op).tip(op_words(st, mask, *op))).collect();
+                // (a body holds at most COMBINE_WIDTH objects: an operation that would make it larger says so and does nothing)
+                let tip = |op: Op| if st.stack.op_allowed(mask, op) { op_words(st, mask, op) } else {
+                    format!("not possible: a body holds at most {} objects held together by booleans. Keep these two apart, or take one out of its body first", gf_core::layers::COMBINE_WIDTH)
+                };
+                let items: Vec<Item> = ops.iter().zip(&names).map(|(op, name)| Item::new(name, *op == now.op).tip(tip(*op))).collect();
                 let run = filled_run(ui, Id::unique(("join op", mask, line)), &items, egui::vec2(7.0, 2.0), &mono(SIZE));
                 drop(items);
                 for (op, place) in ops.iter().zip(&run.places) { px.note(format!("join:{key}:{}", op.id()), *place); }
-                if let Some(i) = run.clicked { st.set_pair_op(mask, ops[i]); }
+                if let Some(i) = run.clicked { let _ = st.set_pair_op(mask, ops[i]); }
                 gap(ui, 4.0);
             }
 
@@ -356,7 +382,7 @@ fn combo_body(ui: &mut Ui, st: &mut State, px: &mut Panels, mask: u8) {
 }
 
 /// The small button that puts a combination's options back as they start; greyed while they are so.
-fn reset(ui: &mut Ui, st: &mut State, px: &mut Panels, mask: u8, as_new: bool) {
+fn reset(ui: &mut Ui, st: &mut State, px: &mut Panels, mask: Mask, as_new: bool) {
     let font = mono(SIZE);
     let size = button_size(ui, "reset", &font, egui::vec2(8.0, 2.0));
     let r = row(ui, size.y + 2.0);
@@ -378,13 +404,13 @@ pub fn joins(ui: &mut Ui, st: &mut State, px: &mut Panels) {
         return;
     }
     let combos = st.stack.combos();
-    let pairs: Vec<u8> = combos.iter().copied().filter(|m| m.count_ones() == 2).collect();
-    let (joined, apart): (Vec<u8>, Vec<u8>) = pairs.iter().partition(|m| st.stack.pair(**m).op != Op::Apart);
+    let pairs: Vec<Mask> = combos.iter().copied().filter(|m| m.count_ones() == 2).collect();
+    let (joined, apart): (Vec<Mask>, Vec<Mask>) = pairs.iter().partition(|m| st.stack.pair(**m).op != Op::Apart);
     let says = if pairs.len() == 1 { st.combo_summary(pairs[0]) } else { format!("{} combined · {} apart", joined.len(), apart.len()) };
     if !px.group(ui, "joins", "joins", &says) { return; }
     if px.combo_open.is_some_and(|m| !combos.contains(&m)) { px.combo_open = None; }
 
-    let line = |ui: &mut Ui, st: &mut State, px: &mut Panels, mask: u8| {
+    let line = |ui: &mut Ui, st: &mut State, px: &mut Panels, mask: Mask| {
         let open = px.combo_open == Some(mask);
         let dim = mask.count_ones() > 2 && !st.one_body(mask);
         let (pressed, at) = combo_title(ui, Id::unique(("join row", mask)), st, mask, open, dim);
@@ -402,7 +428,7 @@ pub fn joins(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     }
     // threes and the four: their rows are kept under a heading that opens, since there can be five of them
     for (which, size) in [3u32, 4].into_iter().enumerate() {
-        let many: Vec<u8> = combos.iter().copied().filter(|m| m.count_ones() == size).collect();
+        let many: Vec<Mask> = combos.iter().copied().filter(|m| m.count_ones() == size).collect();
         if many.is_empty() { continue; }
         // (the heading is open if it was opened, or if the row that is open is one of its own)
         let open = px.meets_open[which] || px.combo_open.is_some_and(|m| many.contains(&m));
@@ -453,15 +479,12 @@ fn placement_rows(ui: &mut Ui, st: &mut State, px: &mut Panels, i: usize, as_bui
         }
     }
     // the handles over the picture, for moving, turning and sizing this layer by hand
-    let on_layer = px.handles.on && px.handles.lamp.is_none();
+    let on_layer = px.handles.shown_on(st, None);
     let word = if on_layer { "hide handles" } else { "handles" };
     let hsize = button_size(ui, word, &font, egui::vec2(8.0, 2.0));
     let hplace = Rect::from_min_size(Pos2::new(place.left() - 8.0 - hsize.x, place.top()), hsize);
     px.note("placement:handles", hplace);
     if button(ui, hplace, Id::unique("placement handles"), word, on_layer, font).on_hover_text("arrows, squares and rings over the picture to drag this layer about (G). T: all at once, move, turn or size; Ctrl: in steps; Shift: finely; Esc: put them away. While they show, a click on a shape selects its layer").clicked() {
-        if on_layer { px.handles.toggle(); } else {
-            px.handles.lamp = None;
-            if !px.handles.on { px.handles.toggle(); }
-        }
+        if on_layer { px.handles.toggle(); } else { px.handles.show_on(None); }
     }
 }

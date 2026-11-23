@@ -25,11 +25,7 @@ struct B {
 @group(0) @binding(1) var src: texture_3d<f32>;
 @group(0) @binding(2) var lin: sampler;
 
-fn pcg(v: u32) -> u32 {
-  let s = v * 747796405u + 2891336453u;
-  let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
-  return (w >> 22u) ^ w;
-}
+fn pcg(v: u32) -> u32 { return pbr_pcg(v); }   // pbr/hash.wgsl
 fn u01(h: u32) -> f32 { return f32(h >> 8u) / 16777216.0; }
 
 // the field at voxel `id` with the bubbles taken out; d0: the field there as it stands

@@ -53,10 +53,16 @@ pub fn show(ctx: &egui::Context, st: &mut State, px: &mut Panels, full: Rect) {
     px.note("room:close", out.cross);
 }
 
-/// Are the family's lights lit? Always, unless an environment picture lights the shape and they were not
-/// asked to stay on with it.
+/// Are the family's lights lit? Always, unless an environment picture or physical sky lights the shape
+/// and they were not asked to stay on with it.
 pub fn lights_lit(st: &State) -> bool {
-    st.hdri.is_none() || st.p.hdri_lights > 0.5
+    if st.hdri.is_some() {
+        st.p.hdri_lights > 0.5
+    } else if st.p.sky > 0.5 {
+        st.p.sky_lights > 0.5
+    } else {
+        true
+    }
 }
 
 /// A light's colour at full brightness, as the screen shows it.
@@ -155,6 +161,15 @@ fn lights(ui: &mut Ui, st: &mut State, px: &mut Panels) {
         for (place, name) in run.places.iter().zip(["room/lit:off", "room/lit:on"]) { px.note(name, *place); }
         if let Some(i) = run.clicked { st.p.hdri_lights = i as f64; }
         if !lights_lit(st) { return; }
+    } else if st.p.sky > 0.5 {
+        let run = named_run(ui, Id::unique("lights with sky"), "with sky", &[
+            Item::new("off", !lit).tip("the physical sky and sun alone light the shape"),
+            Item::new("lit too", lit).tip("the family's lights stay lit together with the sky"),
+        ]);
+        px.note("room/lit", run.rect);
+        for (place, name) in run.places.iter().zip(["room/lit:off", "room/lit:on"]) { px.note(name, *place); }
+        if let Some(i) = run.clicked { st.p.sky_lights = i as f64; }
+        if !lights_lit(st) { return; }
     }
 
     // one chip for every light
@@ -226,9 +241,9 @@ fn lights(ui: &mut Ui, st: &mut State, px: &mut Panels) {
         let az = (l.az + 180.0).rem_euclid(360.0) - 180.0;
         if let Some(v) = knob::value_row(ui, px, &format!("{key}.az"), "azimuth °", az, -180.0, 180.0, 0.5).value { new.az = v; }
         if let Some(v) = knob::value_row(ui, px, &format!("{key}.el"), "elevation °", l.el, -90.0, 90.0, 0.5).value { new.el = v; }
-        if let Some(v) = knob::value_row(ui, px, &format!("{key}.w"), "width °", l.w, 1.0, 90.0, 0.5).value { new.w = v; }
-        if let Some(v) = knob::value_row(ui, px, &format!("{key}.h"), "height °", l.h, 1.0, 90.0, 0.5).value { new.h = v; }
-        if let Some(v) = knob::value_row(ui, px, &format!("{key}.soft"), "softness", l.soft, 0.0, 1.0, 0.01).value { new.soft = v; }
+        if let Some(v) = knob::value_row(ui, px, &format!("{key}.w"), "width °", l.w, 1.0, 85.0, 0.5).value { new.w = v.clamp(0.5, 85.0); }
+        if let Some(v) = knob::value_row(ui, px, &format!("{key}.h"), "height °", l.h, 1.0, 85.0, 0.5).value { new.h = v.clamp(0.5, 85.0); }
+        if let Some(v) = knob::value_row(ui, px, &format!("{key}.soft"), "softness", l.soft, 0.0, 1.0, 0.01).value { new.soft = v.clamp(0.0, 1.0); }
         if new != l { st.rig_mut().lights[i] = new; }
     }
 
@@ -242,8 +257,8 @@ fn lights(ui: &mut Ui, st: &mut State, px: &mut Panels) {
     gap(ui, 6.0);
     knob::knob_row(ui, st, &State::engine_knob("lightGain"), px);
 
-    // with no picture, what a metal or a milky body mirrors round the lights: a dim studio room, or black
-    if st.hdri.is_none() {
+    // with no picture or sky, what a metal or a milky body mirrors round the lights: a dim studio room, or black
+    if st.hdri.is_none() && st.p.sky <= 0.5 {
         gap(ui, 6.0);
         let on = st.p.env_room > 0.5;
         let run = named_run(ui, Id::unique("room in reflections"), "reflected", &[

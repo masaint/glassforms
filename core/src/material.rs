@@ -23,6 +23,7 @@ pub const NM_STEP: f64 = 10.0;
 pub const NM_N: usize = 31;
 
 /// A metal: its complex index of refraction n + ik across the visible.
+#[derive(Debug, PartialEq)]
 pub struct Metal {
     pub id: &'static str,
     pub name: &'static str,
@@ -167,7 +168,7 @@ pub fn film_reflectance(cosi: f64, lam: f64, d: f64, n1: f64, n2: f64, n3: C) ->
 // ---- what is in use ----------------------------------------------------------------------------------
 
 /// Which parts of the material are in use: the tracer is built for exactly these.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Variant {
     /// an opaque reflecting body (a mirror or a metal) instead of a clear one
     pub metal: bool,
@@ -176,6 +177,8 @@ pub struct Variant {
     /// roughness by sampling alone (for checking)
     pub rough_ref: bool,
     pub film: bool,
+    #[serde(default)]
+    pub grating: bool,
     pub coat: bool,
     /// light scatters inside the body, estimated
     pub sss: bool,
@@ -198,11 +201,14 @@ pub struct Variant {
     /// 0: the scene has one material. Otherwise how many bodies it has, at least one of them of a
     /// material of its own: the tracer is then the one that follows a ray from body to body, which
     /// takes each body's material from numbers. Of the rest each part is then set when any of the bodies
-    /// has it (`walk`, `rough_ref`, `coat`, `glow`, `mono` and `bubbles` never are: a body among several has
-    /// no true scattering, its roughness is drawn the live way, its coat, glow and bubbles need nothing
+    /// has it (`coat`, `glow`, `mono` and `bubbles` need nothing
     /// compiled in); they say which parts are compiled in, and at each surface and along each stretch the
     /// body there chooses among them (`Variant::of_bodies`).
     pub bodies: u8,
+    /// Active bodies have different signed medium priorities. Only this assembly variant replaces the
+    /// legacy index-only ownership paths; equal-priority scenes keep their original generated shader exactly.
+    #[serde(default)]
+    pub medium_priority: bool,
     /// what lies inside the body: a tint that changes, cracks, grains, fibres, a glow (inner.rs)
     pub inner: crate::inner::Parts,
     /// the surface's wear, polishing lines or uneven colour (a material other than plain glass)
@@ -212,6 +218,29 @@ pub struct Variant {
     /// a ceramic (`ceramic`): a milky body lit at its surface by the surface pass (the tracer is the
     /// milky one; only the share of its light inside differs, by numbers)
     pub ceramic: bool,
+    /// An opaque painted body in a scene with separate materials needs its own direct lighting.
+    pub paint_bodies: bool,
+    /// A painted body owns a clear coat. Assembly body flags do not populate the solo `coat` flag.
+    #[serde(default)]
+    pub paint_coat_bodies: bool,
+    /// A painted body owns an optical film. A film on neighbouring glass uses its own tracer.
+    #[serde(default)]
+    pub paint_film_bodies: bool,
+    /// Index of the sole transmitting medium on a shadow path through a painted assembly.
+    pub paint_shadow_medium: Option<u8>,
+    /// At least two diffuse surface treatments can exchange reflected light.
+    #[serde(default)]
+    pub paint_exchange: bool,
+    /// Every participating body stops the ray at its painted first surface.
+    pub paint_only: bool,
+    /// A smooth dielectric can see a separate opaque body in its front reflection.
+    pub scene_reflection: bool,
+    /// An individual conductor in an assembly samples the reflected scene.
+    #[serde(default)]
+    pub sampled_metal: bool,
+    /// At least one conductor uses the live surface finish on secondary rays.
+    #[serde(default)]
+    pub live_conductor_finish: bool,
 }
 
 impl Variant {
@@ -230,6 +259,7 @@ impl Variant {
             rough,
             rough_ref: rough && p.rough_ref >= 1.0,
             film: p.film > 0.0,
+            grating: p.grating > 0.0,
             coat: !hollow && p.coat > 0.0,
             sss,
             walk,
@@ -241,30 +271,56 @@ impl Variant {
             mono: false,
             hollow,
             bodies: 0,
+            medium_priority: false,
             // (met along straight stretches inside a solid body: not with the ways of travelling that wander or curve)
             inner: crate::inner::Parts::of(p, !metal && !hollow && !walk && (biref || p.grin == 0.0)),
             wear: p.brush > 0.0 || p.mottle > 0.0 || (p.age > 0.0 && marks(p).iter().any(|v| *v > 0.0)),
             near: false,
             ceramic: sss && !walk && p.ceramic > 0.5,
+            paint_bodies: false,
+            paint_coat_bodies: false,
+            paint_film_bodies: false,
+            paint_shadow_medium: None,
+            paint_exchange: false,
+            paint_only: false,
+            scene_reflection: false,
+            sampled_metal: false,
+            live_conductor_finish: false,
         };
         // (light that wanders is followed once, whatever its colour; and nothing bends in a thin wall)
-        Self { mono: !v.plain() && !metal && (p.disp == 0.0 || walk || hollow), ..v }
+        Self { mono: !v.plain() && !metal && (p.disp == 0.0 || walk || hollow || (sss && !walk && p.sss_opaque >= 0.99)), ..v }
     }
 
     /// The tracer of several bodies, for bodies made of these materials (in the order of the bodies):
     /// the parts any of them uses (each body's as `body_variant` has them). At each surface and along each
-    /// stretch the body there chooses among the parts compiled in by its own numbers. A body among several
-    /// has no true scattering (its light volume is used, as for the estimate), and its roughness is always
-    /// drawn the live way.
+    /// stretch its material selects the compiled parts, including a light volume or a random walk.
+    /// Selected bare and clear-coated dielectric surfaces can opt into a sampled microsurface.
     pub fn of_bodies(mats: &[&Settings]) -> Self {
-        let mut v = Self { bodies: mats.len().clamp(2, MAX_BODIES) as u8, ..Self::default() };
+        let mut v = Self { bodies: mats.len().clamp(2, MAX_BODIES) as u8, paint_only: !mats.is_empty(), ..Self::default() };
+        let mut smooth_glass = false;
+        let mut diffuse_body = false;
         for p in mats {
             let x = body_variant(p);
+            smooth_glass |= !x.metal && !x.sss && !x.hollow && !x.rough && !x.film;
+            let paint = x.ceramic && p.ceramic_through < 0.3;
+            let walk = Variant::of(p).walk;
+            v.paint_exchange |= diffuse_body && paint && !walk;
+            diffuse_body |= paint && !walk;
+            v.paint_bodies |= paint;
+            v.paint_coat_bodies |= paint && x.coat;
+            v.paint_film_bodies |= paint && x.film;
+            v.paint_only &= paint && !walk;
             v.metal |= x.metal;
             v.rough |= x.rough;
+            v.rough_ref |= x.rough_ref && x.supports_frosted_dielectric();
+            let sampled = x.metal && x.rough_ref && x.supports_scene_sampling();
+            v.sampled_metal |= sampled;
+            v.live_conductor_finish |= x.metal && x.wear && !sampled;
             v.film |= x.film;
+            v.grating |= x.grating;
             v.hollow |= x.hollow;
             v.sss |= x.sss;
+            v.walk |= walk;
             v.spectrum |= x.spectrum;
             v.grin |= x.grin;
             v.biref |= x.biref;
@@ -279,7 +335,25 @@ impl Variant {
             a.silk |= b.silk;
             a.piezo |= b.piezo;
         }
+        if v.paint_bodies && mats.len() <= MAX_BODIES {
+            let mut transmitting = mats.iter().enumerate().filter(|(_, p)| !matches!(body_kind(p) as u8, 1 | 4));
+            if let Some((index, _)) = transmitting.next() {
+                if transmitting.next().is_none() { v.paint_shadow_medium = Some(index as u8); }
+            }
+        }
+        v.scene_reflection = smooth_glass && (v.paint_bodies || v.metal);
         v
+    }
+
+    /// Glass for which the microsurface walk can supply both boundary reflection and transmission.
+    pub fn supports_frosted_dielectric(&self) -> bool {
+        !self.metal && !self.hollow && !self.film && !self.spectrum && !self.sss && !self.glow
+            && !self.grin && !self.biref && !self.wear && !self.inner.any()
+    }
+
+    /// Whether this body's selected reference can be followed through the rest of the scene.
+    pub fn supports_scene_sampling(&self) -> bool {
+        (self.metal && !self.grating) || self.supports_frosted_dielectric()
     }
 
     /// What is left of the material when the shape is drawn as clay: only what lies on top of the clay,
@@ -294,11 +368,11 @@ impl Variant {
         *self == Self { bubbles: self.bubbles, mono: self.mono, ..Self::default() }
     }
 
-    fn flags(&self) -> [(&'static str, bool); 13] {
+    fn flags(&self) -> [(&'static str, bool); 14] {
         [
             ("HOLLOW", self.hollow), ("METAL", self.metal), ("ROUGH", self.rough), ("ROUGH_REF", self.rough_ref), ("FILM", self.film), ("COAT", self.coat),
             ("SSS", self.sss), ("WALK", self.walk), ("SPECTRUM", self.spectrum), ("GLOW", self.glow), ("GRIN", self.grin), ("BIREF", self.biref),
-            ("WEAR", self.wear),
+            ("WEAR", self.wear), ("GRATING", self.grating),
         ]
     }
 
@@ -309,6 +383,8 @@ impl Variant {
         if self.bubbles { k.push_str("+bubbles"); }
         if self.ceramic { k.push_str("+ceramic"); }
         if self.near { k.push_str("+near"); }
+        if self.sampled_metal { k.push_str("+sampled-metal"); }
+        if self.live_conductor_finish { k.push_str("+live-conductor-finish"); }
         k.push_str(&self.inner.key());
         if self.bodies > 0 { k = if k.is_empty() { format!("{} bodies", self.bodies) } else { format!("{} bodies {k}", self.bodies) }; }
         if k.is_empty() { "glass".into() } else { k }
@@ -319,8 +395,12 @@ impl Variant {
         let d = Variant::default();
         let mut v = vec![
             d,
+            Variant { grating: true, ..d },
+            Variant { metal: true, grating: true, ..d },
+            Variant { film: true, grating: true, ..d },
             Variant { rough: true, ..d },
             Variant { rough: true, rough_ref: true, ..d },
+            Variant { rough: true, rough_ref: true, coat: true, mono: true, ..d },
             Variant { film: true, ..d },
             Variant { coat: true, ..d },
             Variant { sss: true, ..d },
@@ -391,11 +471,14 @@ pub struct TracerParts {
 /// `picture`: the light comes from an environment picture (the softened lights are then read from its
 /// softer levels as well). `clay`: the shape is drawn as matte clay, and `v` holds only what lies on top
 /// of it (`Variant::for_clay`).
+/// The coat law switch of decision 5.7 (see 	racer_parts).
+const COAT_SERIES: bool = true;
+
 pub fn tracer_parts(v: &Variant, material_wgsl: &str, picture: bool, clay: bool) -> TracerParts {
     let min_layers = if v.bubbles { 2 } else { 0 };
     if v.plain() {
         return if clay {
-            TracerParts { decl: String::new(), shade: "clay(ro + rd * t, rd)", graze: "clay(p, rd)", min_layers }
+            TracerParts { decl: String::new(), shade: "clay(ro + rd * t, rd)", graze: "col", min_layers }
         } else {
             TracerParts { decl: String::new(), shade: "shade(ro, rd, t, xi, W)", graze: "env(reflect(rd, nrm(p)))", min_layers }
         };
@@ -406,18 +489,39 @@ pub fn tracer_parts(v: &Variant, material_wgsl: &str, picture: bool, clay: bool)
     let mut flags: Vec<(&str, bool)> = v.flags().to_vec();
     // what lies inside the body: its own parts, and the softened lights if they read them
     flags.extend(v.inner.flags());
+    let frosted_dielectric = v.rough_ref && !clay && v.supports_frosted_dielectric();
+    flags.push(("FROST_BOUNDARY", frosted_dielectric));
+    flags.push(("FROST_COAT",v.coat));
+    flags.push(("FROST_TRACK_ORDER",v.mono));
+    flags.push(("PATH_RANDOM",v.walk));
+    flags.push(("FROST_DIELECTRIC", frosted_dielectric));
+    flags.push(("FROST_ROOM_EXIT", !v.near && !picture));
+    flags.push(("FROST_DIRECT", frosted_dielectric && !v.coat && !v.grating));
+    flags.push(("GLOSSY_DISTRIBUTIONS", v.rough_ref));
+    flags.push(("GGX_SAMPLE", v.rough_ref));
+    flags.push(("PAINT_INTERFACE", v.ceramic));
+    flags.push(("PAINT_FILM", v.ceramic && v.film));
+    flags.push(("PAINT_TOP", v.ceramic && !v.film));
+    // Decision 5.7 (2026-11-21): every clear coat over a dielectric body takes the two-interface series
+    // (s and p apart, internal returns: paint_interface.wgsl), as ceramics and assembly paint already did.
+    // COAT_SERIES = false restores the old single-bounce, averaged-polarisation law for other bodies.
+    flags.push(("LAYER_SERIES", v.ceramic || (COAT_SERIES && v.coat)));
+    flags.push(("PAINT_COAT", (v.ceramic || COAT_SERIES) && v.coat && !v.film));
     flags.push(("FINE", fine));
     flags.push(("MONO", v.mono));
     flags.push(("ENVL", v.rough || v.sss || v.wear || v.metal || v.coat || v.inner.soft_lights()));
     flags.push(("PICTURE", picture));
     flags.push(("CLAY", clay));
+    flags.push(("AIR_HIT", v.metal && !clay));
     // a film around air (a soap bubble) has a tracer of its own, in film.wgsl
     flags.push(("BUBBLE", v.hollow && v.film && !clay));
     flags.push(("RANDOM", v.rough || v.walk));
+    flags.push(("WALK_PHASE", v.walk));
     // what everything still travelling along a path adds to red, green and blue
     let decl = preprocess(material_wgsl, &flags).replace("{{WEIGHT}}", if fine { "weigh(i, xi, W, t0, t1, t2)" } else { "(wOf(i, xi, W) * thr)" });
-    if clay { return TracerParts { decl, shade: "clayM(ro + rd * t, rd)", graze: "clayM(p, rd)", min_layers }; }
-    TracerParts { decl, shade: "shadeM(ro, rd, t, xi, W, fc)", graze: "grazeM(p, rd)", min_layers }
+    if clay { return TracerParts { decl, shade: "clayM(ro + rd * t, rd)", graze: "col", min_layers }; }
+    let shade = if frosted_dielectric { "frostDielectric(ro, rd, t, xi, W, fc)" } else { "shadeM(ro, rd, t, xi, W, fc)" };
+    TracerParts { decl, shade, graze: "col", min_layers }
 }
 
 /// Keep the lines of `src` whose conditions hold. A condition line is `//#if NAME`, `//#if !NAME`,
@@ -466,7 +570,11 @@ pub fn preprocess(src: &str, flags: &[(&str, bool)]) -> String {
 /// Numbers in the material's uniform block (`MU` in trace_material.wgsl): 13 groups of four, then one
 /// group of four for each wavelength of the grid (32 groups: the last is a copy of the 31st), then three
 /// groups for a draining film (`film::numbers`).
-pub const MU_FLOATS: usize = (13 + 32 + 3) * 4;
+const MU_GRATING: usize = (13 + 32 + 3) * 4;
+const MU_GGX: usize = MU_GRATING + 16;
+const MU_BRUSH_GGX: usize = MU_GGX + 2 * crate::microfacet::ANGLES;
+pub const MU_LIGHTS: usize = MU_BRUSH_GGX + 6 * crate::microfacet::ANGLES;
+pub const MU_FLOATS: usize = MU_LIGHTS + 20;
 /// Where the draining film's numbers go.
 pub const MU_FILM: usize = (13 + 32) * 4;
 /// Where the environment picture's four numbers go (the engine fills them in: it holds the picture).
@@ -487,6 +595,36 @@ pub fn sun_numbers(glows: &[crate::env::Glow], gain: f64) -> [f32; 7] {
         Some(g) if lum(&g.energy) > 0.0 => [g.dir[0] as f32, g.dir[1] as f32, g.dir[2] as f32, (g.energy[0] * gain) as f32, (g.energy[1] * gain) as f32, (g.energy[2] * gain) as f32, g.sigma.max(0.006) as f32],
         _ => [0.0; 7],
     }
+}
+
+/// A mixture of spherical caps covering the most energetic studio lamps and HDR highlights.
+pub fn glossy_lights(lamps: &[crate::presets::Light], lamp_gain: f64, glows: &[crate::env::Glow], hdri_gain: f64) -> [f32; 20] {
+    let luminance = |rgb: [f64; 3]| 0.2126*rgb[0] + 0.7152*rgb[1] + 0.0722*rgb[2];
+    let mut caps = Vec::new();
+    for l in lamps {
+        let (az, el) = (l.az.to_radians(), l.el.to_radians());
+        let dir = [az.sin()*el.cos(), el.sin(), -az.cos()*el.cos()];
+        let (w, h) = (l.w.to_radians().min(1.55).tan().abs(), l.h.to_radians().min(1.55).tan().abs());
+        let extent = 1.0 - 1.0/(1.0 + w*w + h*h).sqrt();
+        let solid_angle = 4.0*(w*h/(1.0+w*w+h*h).sqrt()).atan();
+        caps.push((luminance(l.rgb) * lamp_gain * solid_angle, dir, extent));
+    }
+    for g in glows {
+        caps.push((luminance(g.energy) * hdri_gain, g.dir, 1.0 - (2.5*g.sigma).clamp(0.006,1.55).cos()));
+    }
+    caps.retain(|c| c.0.is_finite() && c.0 > 0.0 && c.2 > 1e-7);
+    caps.sort_by(|a,b| b.0.total_cmp(&a.0));
+    caps.truncate(4);
+    let total: f64 = caps.iter().map(|c| c.0).sum();
+    let mut data = [0.0; 20];
+    let mut cumulative = 0.0;
+    for (i,(weight, dir, extent)) in caps.into_iter().enumerate() {
+        cumulative += weight / total;
+        data[4*i..4*i+3].copy_from_slice(&dir.map(|v| v as f32));
+        data[4*i+3] = extent as f32;
+        data[16+i] = cumulative.min(1.0) as f32;
+    }
+    data
 }
 
 /// The share of a clear body's roughness that is drawn by sampling (turning each path by a random
@@ -615,12 +753,16 @@ pub fn fit_scale(p: &Settings, thickness: Option<f64>) -> f64 {
     }
 }
 
+/// Effective refractive index of the artist's partial clear coat.
+pub fn coat_index(p: &Settings) -> f64 {
+    1.0 + (p.coat_ior - 1.0) * p.coat.clamp(0.0, 1.0)
+}
+
 /// The material's uniform block as the tracer reads it. `scale`: see `fit_scale`.
 pub fn uniforms(p: &Settings, scale: f64) -> [f32; MU_FLOATS] {
     let mut u = [0f32; MU_FLOATS];
     let mut put = |row: usize, v: [f64; 4]| { for i in 0..4 { u[row * 4 + i] = v[i] as f32; } };
     let rough = p.rough.clamp(0.0, 1.0);
-    let coat = p.coat.clamp(0.0, 1.0);
     // surf: roughness as the spread of the surface's slopes, the share of it that is sampled while the
     // view moves, the index the body sees above it (air with no coat, the coat's own with a full one),
     // the share that is sampled now (the renderer puts the moving share here while the view moves)
@@ -634,7 +776,7 @@ pub fn uniforms(p: &Settings, scale: f64) -> [f32; MU_FLOATS] {
     } else {
         (ROUGH_SAMPLED, ROUGH_SAMPLED.min(ROUGH_SAMPLED_MOVING / alpha.max(1e-9)))
     };
-    put(0, [alpha, moving, 1.0 + (p.coat_ior - 1.0) * coat, still]);
+    put(0, [alpha, moving, coat_index(p), still]);
     put(1, [p.film.max(0.0), p.film_ior, p.film_var.clamp(0.0, 1.0), p.film_scale]);
     put(2, [p.film_flow, p.film_drain, 0.0, 0.0]);
     let metal = p.metal.round().max(0.0);
@@ -679,9 +821,32 @@ pub fn uniforms(p: &Settings, scale: f64) -> [f32; MU_FLOATS] {
         u[o + 1] = m.map_or(0.0, |m| m.k[k]);
         u[o + 2] = s.map_or(0.0, |s| (s.shape[k] as f64 * density * SPECTRUM_SCALE) as f32);
     }
+    u[MU_GRATING..MU_GRATING + 4].copy_from_slice(&[
+        p.grating.clamp(0.0, 1.0) as f32, p.grating_pitch.clamp(300.0, 4500.0) as f32,
+        p.grating_angle.to_radians() as f32, p.grating_radial as f32,
+    ]);
+    // Scene-local grating frame, used directly for a standalone object.
+    for axis in 0..3 { u[MU_GRATING + 4 + axis * 5] = 1.0; }
     for (i, v) in film::numbers(p).iter().enumerate() { u[MU_FILM + i] = *v as f32; }
     // the surface's marks, each times how used it is, and the colour recesses take on
     let mk = marks(p);
+    if p.metal > 0.0 && rough > 0.0 {
+        for (i, [a, b]) in crate::microfacet::energy_row(rough).into_iter().enumerate() {
+            u[MU_GGX + i * 2] = a;
+            u[MU_GGX + i * 2 + 1] = b;
+        }
+    }
+    if p.metal > 0.0 && p.rough_ref > 0.5 && p.brush > 0.0 && rough > 0.0 {
+        for (azimuth, row) in crate::microfacet::brushed_energy(rough, p.brush.clamp(0.0, 1.0)).into_iter().enumerate() {
+            for (angle, ab) in row.into_iter().enumerate() {
+                let offset = MU_BRUSH_GGX + 2*(azimuth*crate::microfacet::ANGLES + angle);
+                u[offset..offset + 2].copy_from_slice(&ab);
+            }
+        }
+    }
+    let (sine, cosine) = (p.brush_angle.rem_euclid(360.0)).to_radians().sin_cos();
+    u[MU_BRUSH_ANGLE[0]] = sine as f32;
+    u[MU_BRUSH_ANGLE[1]] = (cosine - 1.0) as f32;
     for (i, at) in MU_MARKS.iter().enumerate() { u[*at] = (mk[i] * p.age.max(0.0)) as f32; }
     for (i, at) in MU_CAVITY.iter().enumerate() { u[*at] = [p.cavity_r, p.cavity_g, p.cavity_b][i].clamp(0.0, 1.0) as f32; }
     // a ceramic: the glaze's haze, and 1 + the share of the light inside its body that is kept (0: not a
@@ -689,8 +854,12 @@ pub fn uniforms(p: &Settings, scale: f64) -> [f32; MU_FLOATS] {
     let cer = p.sss > 0.0 && p.sss_walk < 0.5 && p.metal < 0.5 && p.hollow < 0.5 && p.ceramic > 0.5;
     u[MU_CERAMIC] = if cer { p.glaze_haze.clamp(0.0, 0.6) as f32 } else { 0.0 };
     u[MU_CERAMIC + 4] = if cer { 1.0 + p.ceramic_through.clamp(0.0, 1.0) as f32 } else { 0.0 };
+    u[MU_SSS_OPAQUE] = if p.sss > 0.0 && p.sss_walk < 0.5 && p.metal < 0.5 && p.hollow < 0.5 { p.sss_opaque.clamp(0.0, 1.0) as f32 } else { 0.0 };
     u
 }
+
+/// Where opaque subsurface blending (replacing sharp ballistic exit paths) rides (`mu.tab[19].w`).
+pub const MU_SSS_OPAQUE: usize = (13 + 19) * 4 + 3;
 
 /// Where a ceramic's glaze haze rides (mu.tab[30].w); 1 + the share of its body's inner light kept rides
 /// four numbers on (mu.tab[31].w).
@@ -703,6 +872,8 @@ pub fn marks(p: &Settings) -> [f64; 7] {
 }
 /// Where the marks (times `age`) and the recesses' colour ride: the unused fourth numbers of rows 7 to
 /// 16 of the tables (trace_material.wgsl reads them as mu.tab[7].w ...).
+/// Sine and cosine minus one of the object-space polishing-axis turn (zeroes for legacy setups).
+pub const MU_BRUSH_ANGLE: [usize; 2] = [(13 + 17) * 4 + 3, (13 + 18) * 4 + 3];
 pub const MU_MARKS: [usize; 7] = [20 * 4 + 3, 21 * 4 + 3, 22 * 4 + 3, 23 * 4 + 3, 24 * 4 + 3, 25 * 4 + 3, 26 * 4 + 3];
 pub const MU_CAVITY: [usize; 3] = [27 * 4 + 3, 28 * 4 + 3, 29 * 4 + 3];
 
@@ -826,10 +997,11 @@ pub struct Named {
 /// The settings a named material may set, and what choosing any material puts them back to first.
 /// (`ior`, `disp`, `nb` and the tint go back to the family's own instead: see `State::set_material`.)
 pub const RESET: &[(&str, f64)] = &[
+    ("grating", 0.0), ("gratingPitch", 1600.0), ("gratingAngle", 0.0), ("gratingRadial", 0.0),
     ("density", 1.0), ("fit", 0.0), ("spectrum", 0.0), ("rough", 0.0), ("roughRef", 0.0),
     ("film", 0.0), ("filmIor", 1.33), ("filmVar", 0.0), ("filmScale", 1.0), ("filmFlow", 0.0), ("filmDrain", 0.0), ("filmSky", 0.5),
     ("coat", 0.0), ("coatIor", 1.5), ("metal", 0.0), ("hollow", 0.0), ("bodyR", 1.0), ("bodyG", 1.0), ("bodyB", 1.0),
-    ("sss", 0.0), ("sssDepth", 0.2), ("sssWalk", 0.0), ("sssSpread", 0.0), ("sssHue", 0.0), ("sssForward", 0.0), ("sssThrough", 0.0), ("ceramic", 0.0), ("ceramicThrough", 0.15), ("glazeHaze", 0.0), ("sharp", 1.0), ("age", 1.0), ("edgeWear", 0.0), ("cavity", 0.0), ("cavityR", 0.35), ("cavityG", 0.27), ("cavityB", 0.2), ("scratches", 0.0), ("swirls", 0.0), ("peel", 0.0), ("smudges", 0.0), ("dust", 0.0), ("brush", 0.0), ("mottle", 0.0),
+    ("sss", 0.0), ("sssDepth", 0.2), ("sssOpaque", 0.0), ("sssWalk", 0.0), ("sssSpread", 0.0), ("sssHue", 0.0), ("sssForward", 0.0), ("sssThrough", 0.0), ("ceramic", 0.0), ("ceramicThrough", 0.15), ("glazeHaze", 0.0), ("sharp", 1.0), ("age", 1.0), ("edgeWear", 0.0), ("cavity", 0.0), ("cavityR", 0.35), ("cavityG", 0.27), ("cavityB", 0.2), ("scratches", 0.0), ("swirls", 0.0), ("peel", 0.0), ("smudges", 0.0), ("dust", 0.0), ("brush", 0.0), ("brushAngle", 0.0), ("mottle", 0.0),
     ("bubbles", 0.0), ("bubbleSize", 0.03), ("bubbleEven", 0.5), ("bubbleShape", 0.0), ("bubbleSeed", 1.0),
     ("glow", 0.0), ("glowR", 1.0), ("glowG", 0.32), ("glowB", 0.08), ("glowCore", 0.5),
     ("grin", 0.0), ("grinDepth", 0.02), ("biref", 0.0), ("birefAz", 0.0), ("birefEl", 90.0),
@@ -934,7 +1106,7 @@ pub static NAMED: &[Named] = &[
     named!("milk", "milk glass", "translucent", "White opal glass: a pale body lit at its surface under its own glossy skin, translucent where it is thin and when lit from behind.", [("sss", 1.0), ("sssDepth", 0.12), ("bodyR", 0.96), ("bodyG", 0.96), ("bodyB", 0.955), ("disp", 0.0), ("sssSpread", 0.6), ("ceramic", 1.0), ("ceramicThrough", 0.4), ("glazeHaze", 0.004), ("peel", 0.2), ("smudges", 0.2), ("dust", 0.12)], absorb CLEAR),
     named!("opal", "opalescent glass", "translucent", "Half clear, half milky, bluish where light scatters.", [("sss", 0.3), ("sssDepth", 0.5), ("bodyR", 0.78), ("bodyG", 0.88), ("bodyB", 1.0)], absorb [0.02, 0.06, 0.16]),
     named!("jade", "jade", "translucent", "Polished green jade: bright and pale where it is thin, deep green in the bulk, glowing when lit from behind.", [("ior", 1.61), ("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.055), ("bodyR", 0.33), ("bodyG", 0.53), ("bodyB", 0.28), ("rough", 0.0), ("mottle", 0.6), ("sssSpread", 0.35), ("edgeWear", 0.3), ("cavity", 0.3), ("cavityR", 0.45), ("cavityG", 0.45), ("cavityB", 0.4), ("dust", 0.1)], absorb CLEAR),
-    named!("wax", "wax", "translucent", "Candle wax: soft, warm, glowing where it is thin.", [("ior", 1.44), ("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.2), ("bodyR", 0.97), ("bodyG", 0.80), ("bodyB", 0.52), ("rough", 0.35), ("mottle", 0.25), ("sssSpread", 0.3), ("smudges", 0.5), ("sssHue", 1.0), ("sssForward", 0.65), ("sssThrough", 1.0)], absorb CLEAR),
+    named!("wax", "wax", "translucent", "Candle wax: soft, warm, glowing where it is thin.", [("ior", 1.44), ("disp", 0.0), ("sss", 1.0), ("sssOpaque", 1.0), ("sssDepth", 0.22), ("bodyR", 0.97), ("bodyG", 0.80), ("bodyB", 0.52), ("rough", 0.42), ("mottle", 0.25), ("sssSpread", 0.3), ("smudges", 0.5), ("sssHue", 1.0), ("sssForward", 0.65), ("sssThrough", 1.0)], absorb CLEAR),
     named!("alabaster", "alabaster", "translucent", "Pale stone with a soft sheen.", [("ior", 1.52), ("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.05), ("bodyR", 0.94), ("bodyG", 0.90), ("bodyB", 0.84), ("rough", 0.22), ("mottle", 0.5), ("sssSpread", 0.4)], absorb CLEAR),
     named!("rosequartz", "rose quartz", "translucent", "Cloudy pink quartz.", [("ior", 1.546), ("disp", 0.0171), ("sss", 0.5), ("sssDepth", 0.35), ("bodyR", 0.98), ("bodyG", 0.74), ("bodyB", 0.78)], absorb [0.02, 0.10, 0.07]),
     named!("honey", "honey", "translucent", "Thick, golden and slightly cloudy.", [("ior", 1.49), ("disp", 0.01), ("sss", 0.2), ("sssDepth", 0.6), ("bodyR", 0.98), ("bodyG", 0.72), ("bodyB", 0.22)], absorb [0.10, 0.75, 3.2]),
@@ -946,6 +1118,7 @@ pub static NAMED: &[Named] = &[
     // ---- metal
     named!("mirror", "perfect mirror", "metal", "Reflects everything, whatever the angle or colour.", [("metal", 1.0)]),
     named!("silver", "silver", "metal", "Measured optical constants (Johnson & Christy).", [("metal", me(0)), ("mottle", 0.15), ("edgeWear", 0.4), ("cavity", 0.55), ("scratches", 0.3), ("smudges", 0.3), ("cavityR", 0.07), ("cavityG", 0.06), ("cavityB", 0.05)]),
+    named!("discgrating", "optical disc", "metal", "An aluminium reflection grating with concentric tracks spaced 1.6 micrometres apart.", [("metal", me(1)), ("grating", 0.72), ("gratingPitch", 1600.0), ("gratingRadial", 1.0)]),
     named!("aluminium", "aluminium", "metal", "Measured optical constants (Rakic).", [("metal", me(1)), ("mottle", 0.15), ("edgeWear", 0.3), ("cavity", 0.3), ("scratches", 0.3), ("smudges", 0.2), ("cavityR", 0.32), ("cavityG", 0.22), ("cavityB", 0.13)]),
     named!("gold", "gold", "metal", "Measured optical constants (Johnson & Christy).", [("metal", me(2)), ("mottle", 0.15), ("edgeWear", 0.5), ("cavity", 0.4), ("scratches", 0.45), ("smudges", 0.2), ("cavityR", 0.32), ("cavityG", 0.22), ("cavityB", 0.13)]),
     named!("copper", "copper", "metal", "Measured optical constants (Johnson & Christy).", [("metal", me(3)), ("mottle", 0.15), ("edgeWear", 0.5), ("cavity", 0.5), ("scratches", 0.3), ("smudges", 0.2), ("cavityR", 0.22), ("cavityG", 0.34), ("cavityB", 0.27)]),
@@ -996,6 +1169,23 @@ pub static NAMED: &[Named] = &[
     named!("twotone", "violet to cyan glass", "coloured glass", "Glass whose tint shades from violet below to cyan above.", [("grad", 1.0), ("gradMode", 0.0), ("gradEl", 90.0), ("gradR", 0.55), ("gradG", 0.85), ("gradB", 1.0), ("gradSoft", 0.6)], absorb [0.29, 0.51, 0.05]),
     named!("stoneware", "glazed stoneware", "ceramic", "A warm grey-brown stoneware body under a glossy clear glaze: opaque, lit at its surface.", [("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.03), ("bodyR", 0.34), ("bodyG", 0.31), ("bodyB", 0.27), ("coat", 1.0), ("coatIor", 1.53), ("ceramic", 1.0), ("ceramicThrough", 0.03), ("glazeHaze", 0.025), ("mottle", 0.35), ("peel", 0.5), ("dust", 0.1), ("cavity", 0.3), ("cavityR", 0.3), ("cavityG", 0.24), ("cavityB", 0.18)], absorb CLEAR),
     named!("bisque", "bisque porcelain", "ceramic", "Unglazed porcelain fired once: a matte, chalky white body with only a faint soft sheen.", [("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.04), ("bodyR", 0.95), ("bodyG", 0.94), ("bodyB", 0.91), ("ceramic", 1.0), ("ceramicThrough", 0.1), ("glazeHaze", 0.6), ("dust", 0.15), ("cavity", 0.2), ("cavityR", 0.5), ("cavityG", 0.48), ("cavityB", 0.45)], absorb CLEAR),
+    // Persisted setups store the index in this list. Add new finishes after existing recipes.
+    named!("modelclay", "modelling clay", "opaque", "Warm terracotta modelling clay with a broad, soft sheen and slight variation from kneading.", [
+        ("ior", 1.46), ("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.025), ("ceramic", 1.0), ("ceramicThrough", 0.0),
+        ("bodyR", 0.46), ("bodyG", 0.175), ("bodyB", 0.105), ("coatIor", 1.46), ("glazeHaze", 0.53),
+        ("mottle", 0.32), ("cavity", 0.07), ("cavityR", 0.38), ("cavityG", 0.27), ("cavityB", 0.21), ("smudges", 0.08)], absorb CLEAR),
+    named!("moulded", "moulded plastic", "opaque", "Teal pigmented plastic with a softly textured mould finish and a slight polish on exposed edges.", [
+        ("ior", 1.49), ("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.025), ("ceramic", 1.0), ("ceramicThrough", 0.0),
+        ("bodyR", 0.043), ("bodyG", 0.28), ("bodyB", 0.22), ("coatIor", 1.49), ("glazeHaze", 0.23),
+        ("peel", 0.11), ("smudges", 0.08), ("edgeWear", 0.09)], absorb CLEAR),
+    named!("satinpaint", "satin paint", "opaque", "Blue satin enamel with a soft highlight and a fine orange-peel finish.", [
+        ("disp", 0.0), ("sss", 1.0), ("sssDepth", 0.025), ("ceramic", 1.0), ("ceramicThrough", 0.0),
+        ("bodyR", 0.055), ("bodyG", 0.16), ("bodyB", 0.37), ("coat", 1.0), ("coatIor", 1.51), ("glazeHaze", 0.095),
+        ("peel", 0.32), ("smudges", 0.06)], absorb CLEAR),
+    named!("candle", "matte candle wax", "translucent", "Soft, matte paraffin candle wax with warm deep subsurface glow and no sharp refractive glass paths.", [
+        ("ior", 1.44), ("disp", 0.0), ("sss", 1.0), ("sssOpaque", 1.0), ("sssDepth", 0.36),
+        ("bodyR", 0.97), ("bodyG", 0.88), ("bodyB", 0.70), ("rough", 0.58), ("mottle", 0.18),
+        ("sssSpread", 0.45), ("sssHue", 0.9), ("sssForward", 0.65), ("sssThrough", 1.0)], absorb CLEAR),
 ];
 
 /// The position of a named material by its id.
@@ -1081,25 +1271,31 @@ pub static CONTROLS: &[Control] = &[
     ctl("tintG", "tint green", Slider, 0.0, 1.0, 0.005, true, Lab("body"), ""),
     ctl("tintB", "tint blue", Slider, 0.0, 1.0, 0.005, true, Lab("body"), ""),
     ctl("fit", "fit to the shape", Switch, 0.0, 1.0, 1.0, false, Lab("body"), "Measure the material's distances (tint depth, how far light travels, glow) against how thick the shape is, so that it looks the same on thin tubes as on a solid. The named materials switch it on."),
-    ctl("rough", "frost", Slider, 0.0, 1.0, 0.01, true, Main, "Roughness of the surface: 0 polished, 0.3 satin, 0.6 frosted, 1 sandblasted."),
-    ctl("sss", "milkiness", Slider, 0.0, 1.0, 0.01, true, Main, "How much light scatters inside the body: 0 clear, 1 fully milky (jade, wax, porcelain)."),
-    ctl("coat", "clear coat", Slider, 0.0, 1.0, 0.01, true, Main, "A glossy clear layer over the body."),
+    ctl("rough", "roughness", Slider, 0.0, 1.0, 0.01, true, Main, "Roughness of the surface: 0 polished, 0.3 satin, 0.6 frosted, 1 sandblasted."),
+    ctl("roughRef", "sample rough surface", Switch, 0.0, 1.0, 1.0, true, Lab("surface"), "Trace individual facets while the picture accumulates. Bare and clear-coated glass use a multiple-scattering reference. Rough metals sample the reflected lights."),
+    ctl("sss", "subsurface", Slider, 0.0, 1.0, 0.01, true, Main, "Subsurface scattering weight: how much light scatters inside the body, from 0 clear to 1 fully scattering (jade, wax, porcelain)."),
+    ctl("coat", "coat weight", Slider, 0.0, 1.0, 0.01, true, Main, "Weight of the glossy clear layer over the body."),
+    ctl("grating", "grating efficiency", Slider, 0.0, 1.0, 0.01, true, Lab("diffraction grating"), "Fraction of reflected light redirected into the two first diffraction orders."),
+    ctl("gratingPitch", "groove spacing nm", Slider, 300.0, 4500.0, 5.0, true, Lab("diffraction grating"), "Distance between adjacent grooves in nanometres. An optical CD has a track spacing of about 1600 nm."),
+    ctl("gratingAngle", "groove angle", Slider, -180.0, 180.0, 1.0, true, Lab("diffraction grating"), "Rotation of the groove pattern within the local surface."),
+    ctl("gratingRadial", "concentric grooves", Switch, 0.0, 1.0, 1.0, false, Lab("diffraction grating"), "Wrap the grooves concentrically about the object's vertical axis."),
     ctl("film", "thin film nm", Slider, 0.0, 1500.0, 1.0, true, Main, "Thickness of an interference film on the surface, in nanometres (0 = none)."),
     ctl("spectrum", "colour by wavelength", Choice, 0.0, 20.0, 1.0, false, Lab("body"), "Absorb light the way a real coloured glass or gem does, wavelength by wavelength, instead of the tint. `tint depth` sets how strongly."),
     ctl("metal", "metal", Choice, 0.0, 11.0, 1.0, false, Lab("body"), "An opaque reflecting body: a perfect mirror, or a metal with its measured colour."),
     ctl("hollow", "thin wall", Switch, 0.0, 1.0, 1.0, false, Lab("body"), "The shape is a thin wall around air, like a soap bubble or a blown ornament, instead of solid: light passes straight through and is reflected by the wall on the way in and on the way out."),
-    ctl("bodyR", "body colour", Colour, 0.0, 1.0, 0.005, true, Lab("body"), "Colour of a milky body (what a thick piece looks like), or a tint on a metal's reflection."),
+    ctl("bodyR", "base colour", Colour, 0.0, 1.0, 0.005, true, Lab("body"), "Base colour of a scattering or opaque body, or a tint on a metal's reflection."),
     ctl("bodyG", "body green", Slider, 0.0, 1.0, 0.005, true, Lab("body"), ""),
     ctl("bodyB", "body blue", Slider, 0.0, 1.0, 0.005, true, Lab("body"), ""),
-    ctl("sssDepth", "light travels", Slider, 0.01, 2.0, 0.005, true, Lab("inside"), "How far light gets inside a milky body between scatterings: small = dense and chalky, large = soft and deep."),
-    costly(ctl("sssWalk", "true scattering", Switch, 0.0, 1.0, 1.0, false, Lab("inside"), "Follow the light as it wanders inside the body instead of estimating it. Grainy until the picture settles: for still views and video.")),
+    ctl("sssDepth", "SSS mean free path", Slider, 0.01, 2.0, 0.005, true, Lab("inside"), "How far light gets inside a scattering body between events: small = dense and chalky, large = soft and deep."),
+    ctl("sssOpaque", "opaque subsurface", Slider, 0.0, 1.0, 0.01, true, Lab("inside"), "Replace sharp transparent glass paths inside a scattering body with soft diffuse subsurface light (like candle wax): 0 cloudy glass, 1 soft matte/opaque wax with no sharp refraction."),
+    costly(ctl("sssWalk", "true SSS random walk", Switch, 0.0, 1.0, 1.0, false, Lab("inside"), "Follow the light as it wanders inside the body instead of estimating it. Grainy until the picture settles: for still views and video.")),
     ctl("sssSpread", "colours travel apart", Slider, 0.0, 1.0, 0.01, true, Lab("inside"), "0: every colour travels as far inside the body. Towards 1 blue is scattered sooner and red goes deeper, as in milk glass and wax: a bluish edge, a warm glow in the shade and where light comes through."),
     ctl("sssForward", "scatters forward", Slider, 0.0, 0.95, 0.01, true, Lab("inside"), "How much the body scatters light onwards rather than every way, as wax does: light gets further in and through thin parts, taking on more of the body's colour on the way (thin wax lit from behind glows amber)."),
     ctl("sssThrough", "colour through it", Slider, 0.0, 1.0, 0.01, true, Lab("inside"), "How far the light that comes straight through the body takes on its colour, deeper the further it travels: towards 1 thin parts and edges lit from behind glow in the body's colour, as a candle glows amber where it is thin."),
     ctl("sssHue", "colour under the skin", Slider, 0.0, 1.0, 0.01, true, Lab("inside"), "How far the light scattered inside takes on the body's colour at every depth, not only deep in it: towards 1 a dyed body glows its colour just under the surface and through thin parts, as wax does."),
     ctl("ceramic", "ceramic", Switch, 0.0, 1.0, 1.0, false, Lab("inside"), "Treat the milky body as fired ceramic: lit at its surface, with shadows and a soft terminator, under the clear coat as its glaze, and only a little of the light inside it showing at thin edges and when lit from behind. The picture is not exposed for it."),
     ctl("ceramicThrough", "light through it", Slider, 0.0, 1.0, 0.01, true, Lab("inside"), "How much of the light inside a ceramic's body shows: 0 opaque stoneware, about 0.15 porcelain, more for milk glass."),
-    ctl("glazeHaze", "glaze haze", Slider, 0.0, 0.6, 0.005, true, Lab("surface"), "How far a ceramic's glaze softens what it mirrors: 0 a mirror-bright glaze, a few hundredths a semi-gloss one."),
+    ctl("glazeHaze", "coat roughness (alpha)", Slider, 0.0, 0.6, 0.005, true, Lab("clear coat"), "GGX alpha of a ceramic's coat or glaze: 0 is mirror-bright and a few hundredths is semi-gloss. The canonical developer editor exposes the equivalent perceptual roughness."),
     ctl("meter", "expose for the body", Switch, 0.0, 1.0, 1.0, false, Lab("inside"), "Expose the picture for a milky body, as a photographer exposes for the subject: a white surface facing the brightest light comes out white. The lights glass is lit by are made to be seen in it, and a body that only gathers them would look grey."),
     ctl("sssDetail", "light detail", Slider, 96.0, 256.0, 32.0, false, Lab("inside"), "How fine the volume is in which a milky body's light is worked out (cells along a side). Finer follows thin pieces better; it is worked out again whenever the lights or the shape move, and costs more the finer it is."),
     ctl("sharp", "sharp reflections", Switch, 0.0, 1.0, 1.0, false, Lab("surface"), "A metal, a milky body or a glaze mirrors an environment picture as sharp as it is, as a photograph shows it; off, it mirrors the picture softened as the glass sees it."),
@@ -1115,6 +1311,7 @@ pub static CONTROLS: &[Control] = &[
     ctl("smudges", "smudges", Slider, 0.0, 1.0, 0.01, true, Lab("surface"), "Duller patches and finger marks where the object is handled, on its exposed parts."),
     ctl("dust", "dust", Slider, 0.0, 1.0, 0.01, true, Lab("surface"), "Fine matte dust on faces that look up, less in the open."),
     ctl("brush", "polishing lines", Slider, 0.0, 1.0, 0.01, true, Lab("surface"), "Fine parallel lines round the shape's vertical, as on brushed metal: highlights are drawn out across them."),
+    ctl("brushAngle", "polishing direction", Slider, -90.0, 90.0, 1.0, true, Lab("surface"), "Turn the polishing lines in the object's own frame; their highlights turn with the finish."),
     ctl("mottle", "uneven colour", Slider, 0.0, 1.0, 0.01, true, Lab("surface"), "Clouds and veins of paler and deeper colour through a milky body (jade, alabaster); a faint unevenness of a metal's colour."),
     ctl("filmIor", "film index", Slider, 1.0, 2.6, 0.01, true, Lab("thin film"), "Index of the film: 1.33 soapy water, 1.4 to 1.5 oils, 2 and up oxide coatings."),
     ctl("filmVar", "film unevenness", Slider, 0.0, 1.0, 0.01, true, Lab("thin film"), "How much the film's thickness varies across the surface: folds of thicker and thinner film, as when a liquid is stirred."),
@@ -1122,7 +1319,7 @@ pub static CONTROLS: &[Control] = &[
     ctl("filmFlow", "film flow", Slider, 0.0, 1.0, 0.005, true, Lab("thin film"), "Where the pattern is in its flow: one whole turn from 0 to 1, so animating it stirs the film and brings it back to where it began."),
     ctl("filmDrain", "film drain", Slider, -1.0, 1.0, 0.01, true, Lab("thin film"), "How far the film has drained, from fresh and even (0) to nothing but black film (1): thinner the higher it is, in level bands; thinnest on every summit, ringed by tight bands; thinning all over as it goes. Up is the lights' up. (Below 0: the same, upside down.)"),
     ctl("filmSky", "film studio", Slider, 0.0, 8.0, 0.05, true, Lab("thin film"), "The brightness of a studio that only the film mirrors: a glow from above, a large soft box overhead, a smaller one beside the camera, two tall panels behind. A film mirrors a few percent of what it faces, so without it the film shows only where a lamp is mirrored. Under an environment picture it is not used: the film mirrors the picture."),
-    ctl("coatIor", "coat index", Slider, 1.2, 2.2, 0.01, true, Lab("clear coat"), "Index of the clear coat: 1.5 lacquer or glaze; higher is glossier."),
+    ctl("coatIor", "coat IOR", Slider, 1.2, 2.2, 0.01, true, Lab("clear coat"), "Index of refraction of the clear coat: 1.5 lacquer or glaze; higher increases its reflectance."),
     ctl("bubbles", "bubbles", Slider, 0.0, 1.0, 0.005, false, Lab("bubbles"), "How many bubbles there are inside the body (0 = none)."),
     ctl("bubbleSize", "bubble size", Slider, 0.004, 0.2, 0.001, false, Lab("bubbles"), "Radius of the largest bubbles. Ones too large to fit inside the body are left out."),
     ctl("bubbleEven", "evenness", Slider, 0.0, 1.0, 0.01, false, Lab("bubbles"), "1: all the same size and evenly spread. 0: every size, gathered in clusters."),
@@ -1181,7 +1378,9 @@ pub static CONTROLS: &[Control] = &[
 pub fn applies(name: &str, p: &Settings) -> bool {
     let v = Variant::of(p);
     let metal = v.metal;
+    let sss_interior = v.sss && !(v.ceramic && p.ceramic_through <= 0.0);
     match name {
+        "roughRef" => v.rough,
         "ior" => !metal,
         "disp" => !metal && !v.hollow,
         "hollow" => !metal,
@@ -1190,18 +1389,20 @@ pub fn applies(name: &str, p: &Settings) -> bool {
         "density" | "tintR" | "tintG" | "tintB" => !metal && (name == "density" || !v.spectrum),
         "spectrum" | "sss" => !metal && !v.hollow,
         "bodyR" | "bodyG" | "bodyB" => metal || v.sss,
-        "sssDepth" | "sssWalk" => v.sss,
-        "sssSpread" | "sssHue" | "sssForward" | "sssThrough" => v.sss && !v.walk,
+        "sssDepth" | "sssSpread" | "sssForward" => sss_interior,
+        "sssWalk" => v.sss,
+        "sssHue" | "sssThrough" | "sssOpaque" => sss_interior && !v.walk,
         "meter" => v.sss && !v.ceramic,
         "ceramic" => v.sss && !v.walk,
         "ceramicThrough" | "glazeHaze" => v.ceramic,
-        "sssDetail" => v.sss && !v.walk,
+        "sssDetail" => sss_interior && !v.walk,
         "filmIor" | "filmVar" | "filmScale" => v.film,
         "filmFlow" => v.film && p.film_var > 0.0,
         "filmDrain" | "filmSky" => v.film,
         "coatIor" => v.coat,
         "sharp" => metal || v.sss || v.coat,
         "brush" => metal || v.coat,
+        "brushAngle" => (metal || v.coat) && p.brush > 0.0,
         "mottle" => metal || v.sss,
         "bubbles" => !metal,
         "bubbleSize" | "bubbleEven" | "bubbleShape" | "bubbleSeed" => !metal && v.bubbles,
@@ -1248,9 +1449,8 @@ pub fn body_names() -> impl Iterator<Item = &'static str> {
     ["mat", "ior", "disp"].into_iter().chain(CONTROLS.iter().map(|c| c.name))
 }
 
-/// A material as a body among several has it: as `Variant::of`, but with no true scattering (a milky
-/// body among several is lit by its light volume, as the estimate is), so that what lies inside it, the
-/// graded index and double refraction are what they would be without the wandering.
+/// The features used by the ordinary interface and interior paths for this body.
+/// The multi-body tracer selects true scattering separately at each flight using `body_bits`.
 pub fn body_variant(p: &Settings) -> Variant {
     if p.sss_walk <= 0.5 { return Variant::of(p); }
     let mut q = p.clone();
@@ -1269,31 +1469,62 @@ pub fn body_kind(p: &Settings) -> f32 {
 
 /// What else a body has, as the tracer of several bodies reads it (bits of `MB.has`, one number a
 /// body): 1 colour by wavelength, 2 a graded index, 4 double refraction, 8 something inside it (inner.rs),
-/// 16 a glow under pressure (given off also where it presses on another body).
+/// 16 a glow under pressure, 32 per-pixel scattering, 64 a sampled rough dielectric interface, 128 a sampled rough conductor, 256 an authored dielectric coat.
 pub fn body_bits(p: &Settings) -> u32 {
     let v = body_variant(p);
-    (v.spectrum as u32) | (v.grin as u32) << 1 | (v.biref as u32) << 2 | (v.inner.any() as u32) << 3 | (v.inner.piezo as u32) << 4
+    (v.spectrum as u32) | (v.grin as u32) << 1 | (v.biref as u32) << 2 | (v.inner.any() as u32) << 3 | (v.inner.piezo as u32) << 4 | (Variant::of(p).walk as u32) << 5
+        | ((v.rough_ref && v.supports_frosted_dielectric()) as u32) << 6
+        | ((v.metal && v.rough_ref && v.supports_scene_sampling()) as u32) << 7
+        | ((v.ceramic && v.coat) as u32) << 8
 }
 
 /// What a body among several does not have, though its material asks for it (for the window to say so).
-pub fn body_lacks(p: &Settings) -> Vec<&'static str> {
-    let v = Variant::of(p);
-    let mut out = Vec::new();
-    if v.walk { out.push("true scattering (the light volume is used)"); }
-    out
+pub fn body_lacks(_p: &Settings) -> Vec<&'static str> { Vec::new() }
+
+/// Attach the grooves and surface wear to the coordinates used to sample this body's geometry.
+pub fn set_grating_frame(uniforms: &mut [f32], world_to_object: &[f64; 12]) {
+    for (slot, value) in uniforms[MU_GRATING + 4..MU_GRATING + 16].iter_mut().zip(world_to_object) {
+        *slot = *value as f32;
+    }
 }
 
 /// Numbers ahead of the bodies' own in the block: kind, index, dispersion and what else each has
-/// (`body_bits`); then what each body's inside absorbs.
-pub const MB_HEAD: usize = 4 * 4 + MAX_BODIES * 4;
+/// (`body_bits`); then what each body's inside absorbs and its raw medium metadata.
+pub const MB_HEAD: usize = 4 * 4 + MAX_BODIES * 4 + MAX_BODIES * 4;
 /// Numbers in the block the tracer of several bodies is given (`MB` in trace_bodies.wgsl).
 pub const MB_FLOATS: usize = MB_HEAD + MAX_BODIES * MU_FLOATS;
 
 /// The numbers of the bodies' materials, in the order of the bodies. `thick`: how thick each body is,
 /// as far as that has been measured (a material that asks to be fitted is fitted to its own body).
 pub fn bodies_uniforms(mats: &[&Settings], thick: &[f64]) -> Vec<f32> {
+    let scene = crate::pbr::MediumDescriptor {
+        id: crate::pbr::legacy_medium_id(&crate::pbr::MaterialId::from("material:scene")),
+        interface_priority: 0,
+    };
+    let descriptors: Vec<_> = mats
+        .iter()
+        .enumerate()
+        .map(|(index, _)| if index == 0 {
+            scene.clone()
+        } else {
+            crate::pbr::MediumDescriptor {
+                id: crate::pbr::legacy_medium_id(&crate::pbr::MaterialId::from(format!("material:body:{}", index + 1))),
+                interface_priority: 0,
+            }
+        })
+        .collect();
+    let media = crate::pbr::CompiledMedia::from_descriptors(&scene, &descriptors);
+    bodies_uniforms_with_media(mats, thick, &media.bodies)
+}
+
+/// The same body block with identities and priorities from one compiled scene mapping.
+pub fn bodies_uniforms_with_media(mats: &[&Settings], thick: &[f64], media: &[crate::pbr::CompiledMedium]) -> Vec<f32> {
     let mut u = vec![0.0f32; MB_FLOATS];
     for k in 0..MAX_BODIES {
+        let medium = media.get(k).copied().or_else(|| media.first().copied()).unwrap_or_default();
+        for (lane, value) in medium.raw().into_iter().enumerate() {
+            u[32 + 4 * k + lane] = f32::from_bits(value as u32);
+        }
         // (a place with no body is never read; it is filled with the first body's so that it holds numbers)
         let p = mats.get(k).copied().unwrap_or(mats[0]);
         let scale = fit_scale(p, thick.get(k).copied().filter(|t| *t > 0.0));
@@ -1334,6 +1565,97 @@ pub fn bodies_inner(mats: &[&Settings], thick: &[f64], pixel: f64) -> Vec<f32> {
     u
 }
 
+/// Replace only the ownership decisions in the body tracer for an assembly with different medium
+/// priorities. Keeping this out of the equal-priority source preserves legacy march order, ties and images.
+/// Every replacement is checked so a later shader edit cannot silently drop part of the specialized path.
+pub fn medium_priority_bodies_wgsl(src: &str) -> String {
+    fn one(src: &mut String, from: &str, to: &str) {
+        assert_eq!(src.matches(from).count(), 1, "medium-priority shader site changed: {from}");
+        *src = src.replacen(from, to, 1);
+    }
+    let mut out = src.replace("\r\n", "\n");
+    one(&mut out,
+r#"// What a place is made of: the highest-numbered body it is inside; -1 for the air.
+fn mediumOf(v: vec4f) -> i32 {
+  var m = -1;
+  for (var k = 0; k < COUNT; k++) { if (v[k] < 0.0) { m = k; } }
+  return m;
+}
+// The body whose surface is nearest (of two as near as each other, the higher).
+fn nearestOf(v: vec4f) -> i32 {
+  var m = 0;
+  var d = v[0];
+  for (var k = 1; k < COUNT; k++) { if (v[k] <= d) { d = v[k]; m = k; } }
+  return m;
+}"#,
+r#"// Priority first, then the legacy higher-index tie break. Air is not a zero-priority competitor.
+fn bodyPrecedesB(k: i32, m: i32) -> bool {
+  if (k == m) { return false; }
+  if (m < 0) { return true; }
+  let a = mb.medium[k].y;
+  let b = mb.medium[m].y;
+  return a > b || (a == b && k > m);
+}
+fn interfaceOwnerB(a: i32, b: i32) -> i32 {
+  if (a < 0) { return b; }
+  if (b < 0) { return a; }
+  if (bodyPrecedesB(b, a)) { return b; }
+  return a;
+}
+fn containingB(v: vec4f, excluding: i32) -> i32 {
+  var owner = -1;
+  for (var k = 0; k < COUNT; k++) {
+    if (k != excluding && v[k] < 0.0 && (owner < 0 || bodyPrecedesB(k, owner))) { owner = k; }
+  }
+  return owner;
+}
+fn mediumOf(v: vec4f) -> i32 { return containingB(v, -1); }
+// The nearest surface, with the same priority and index rule at an exact distance tie.
+fn nearestOf(v: vec4f) -> i32 {
+  var m = 0;
+  var d = v[0];
+  for (var k = 1; k < COUNT; k++) {
+    if (v[k] < d || (v[k] == d && bodyPrecedesB(k, m))) { d = v[k]; m = k; }
+  }
+  return m;
+}"#);
+    one(&mut out, "  let o = max(a, b);", "  let o = interfaceOwnerB(a, b);");
+    one(&mut out,
+r#"    var d = -distances[m];
+    if (COUNT > 1 && m < 1) { d = min(d, distances.y); }
+    if (COUNT > 2 && m < 2) { d = min(d, distances.z); }
+    if (COUNT > 3 && m < 3) { d = min(d, distances.w); }"#,
+r#"    var d = -distances[m];
+    for (var k = 0; k < COUNT; k++) {
+      if (bodyPrecedesB(k, m)) { d = min(d, distances[k]); }
+    }"#);
+    one(&mut out,
+r#"  for (var k = m + 1; k < COUNT; k++) {
+    if (distances[k] < nearest) { nearest = distances[k]; j = k; }
+  }"#,
+r#"  for (var k = 0; k < COUNT; k++) {
+    if (bodyPrecedesB(k, m) && distances[k] < nearest) { nearest = distances[k]; j = k; }
+  }"#);
+    one(&mut out,
+r#"  var lower = -1;
+  if (m > 0) {
+    let v = dist4(p + dir * 0.004);
+    for (var k = 0; k < m; k++) { if (v[k] < 0.0) { lower = k; } }
+  }"#,
+r#"  let lower = containingB(dist4(p + dir * 0.004), m);"#);
+    one(&mut out,
+"    for (var k = m + 1; k < COUNT; k++) { if (v[k] < dh) { dh = v[k]; jh = k; } }",
+"    for (var k = 0; k < COUNT; k++) { if (bodyPrecedesB(k, m) && v[k] < dh) { dh = v[k]; jh = k; } }");
+    one(&mut out,
+"        for(var j=m+1;j<COUNT;j++){safety=min(safety,v[j]);}",
+"        for(var j=0;j<COUNT;j++){if(bodyPrecedesB(j,m)){safety=min(safety,v[j]);}}");
+    one(&mut out, "    let o = max(m, b);", "    let o = interfaceOwnerB(m, b);");
+    one(&mut out, "      let o = max(m, nx);", "      let o = interfaceOwnerB(m, nx);");
+    out = out.replace("max(m,b)", "interfaceOwnerB(m,b)");
+    out = out.replace("max(incident, destination)", "interfaceOwnerB(incident, destination)");
+    out
+}
+
 /// The tracer's parts for a scene of several bodies with materials of their own (`v`: `Variant::of_bodies`).
 /// `material_wgsl` is the same text as `tracer_parts` is given, cut with BODIES on and with the parts
 /// any of the bodies uses, and with what it reads of the scene's one material made to read the numbers of
@@ -1341,16 +1663,24 @@ pub fn bodies_inner(mats: &[&Settings], thick: &[f64], pixel: f64) -> Vec<f32> {
 /// (`u.ior`) and what its inside absorbs (`u.absorb`). `bodies_wgsl` (trace_bodies.wgsl) follows it.
 pub fn bodies_parts(v: &Variant, material_wgsl: &str, bodies_wgsl: &str, picture: bool) -> TracerParts {
     let mut flags = vec![
-        ("BODIES", true), ("ENVL", true), ("PICTURE", picture), ("METAL", v.metal), ("ROUGH", v.rough), ("RANDOM", v.rough),
+        ("GLOSSY_DISTRIBUTIONS", v.rough_ref || v.sampled_metal),
+        ("GGX_SAMPLE", v.sampled_metal), ("BODY_METAL_SAMPLE", v.sampled_metal),
+        ("FROST_ROOM_EXIT", !v.near && !picture), ("FROST_DIRECT", v.rough_ref && !v.coat && !v.grating),
+        ("FROST_BOUNDARY",v.rough_ref), ("FROST_COAT",v.rough_ref), ("FROST_TRACK_ORDER",v.rough_ref), ("BODY_FROST",v.rough_ref),
+        ("BODY_PATH",v.walk || v.rough_ref), ("PATH_RANDOM",v.walk || v.rough_ref),
+        ("GRATING", v.grating), ("BODIES", true), ("ENVL", true), ("PICTURE", picture), ("METAL", v.metal), ("ROUGH", v.rough), ("RANDOM", v.rough || v.walk), ("WALK_PHASE",v.walk), ("BODY_WALK",v.walk),
         ("FILM", v.film), ("HOLLOW", v.hollow), ("SSS", v.sss), ("SPECTRUM", v.spectrum), ("GRIN", v.grin), ("BIREF", v.biref),
-        ("WEAR", v.wear),
+        ("LIVE_CONDUCTOR_FINISH", v.live_conductor_finish), ("WEAR", v.wear), ("PAINT_INTERFACE", v.paint_bodies), ("LAYER_SERIES", v.paint_bodies), ("PAINT_FILM", v.paint_film_bodies), ("PAINT_BODIES", v.paint_bodies),
+        ("PAIRED_PAINT", v.paint_shadow_medium.is_some()), ("PAINT_EXCHANGE", v.paint_exchange), ("AIR_HIT", v.paint_exchange), ("PAINT_ONLY", v.paint_only), ("SCENE_REFLECTION", v.scene_reflection),
     ];
     // (what lies inside the bodies: each part that any of them has; each body is told its own numbers)
     flags.extend(v.inner.flags());
     let shared = per_body(&preprocess(material_wgsl, &flags));
-    let decl = shared + &preprocess(bodies_wgsl, &flags).replace("{{COUNT}}", &v.bodies.clamp(2, MAX_BODIES as u8).to_string());
+    let bodies = if v.medium_priority { medium_priority_bodies_wgsl(bodies_wgsl) } else { bodies_wgsl.to_owned() };
+    let decl = shared + &preprocess(&bodies, &flags).replace("{{COUNT}}", &v.bodies.clamp(1, MAX_BODIES as u8).to_string())
+        .replace("{{PAINT_MEDIUM}}", &v.paint_shadow_medium.unwrap_or_default().to_string());
     // (a ray that has left one body must be able to reach the others, whatever the family allows itself)
-    TracerParts { decl, shade: "shadeB(ro, rd, t, xi, W, fc)", graze: "grazeB(p, rd)", min_layers: 2 }
+    TracerParts { decl, shade: "shadeB(ro, rd, t, xi, W, fc)", graze: "col", min_layers: 2 }
 }
 
 /// The material's text made to read the numbers of the body in hand: `mu.x` becomes `mb.b[cb].x`, what

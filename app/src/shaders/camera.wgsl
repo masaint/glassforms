@@ -139,7 +139,7 @@ fn camDepth(p: vec3f, cm: Cam) -> f32 {
 // How far along a ray the surface of depth e is met.
 fn camReach(ro: vec3f, rd: vec3f, e: f32, cm: Cam) -> f32 {
   if (cm.a.x > 1.5) { return max(cm.a.z + e, 1e-6); }
-  return (e + ro.z + (cm.c.z * ro.x + cm.c.w * ro.y)) / max(-rd.z - (cm.c.z * rd.x + cm.c.w * rd.y), 1e-6);
+  return max((e + ro.z + (cm.c.z * ro.x + cm.c.w * ro.y)) / max(-rd.z - (cm.c.z * rd.x + cm.c.w * rd.y), 1e-6), 1e-6);
 }
 
 // The radius of the blur of glass t along a ray, as an angle (or, for an orthographic lens, a length)
@@ -149,7 +149,7 @@ fn camBlur(ro: vec3f, rd: vec3f, t: f32, lo: f32, hi: f32, cm: Cam) -> f32 {
   let f = camReach(ro, rd, clamp(camDepth(ro + rd * t, cm), lo, hi), cm);
   if (cm.a.x > 0.5 && cm.a.x < 1.5) { return (t - f) / cm.e.w; }
   let across = select(-rd.z, 1.0, cm.a.x > 1.5);
-  return 1.0 / (f * across) - 1.0 / (t * across);
+  return 1.0 / max(f * across, 1e-6) - 1.0 / max(t * across, 1e-6);
 }
 
 // Towards the corners of the picture a real lens's barrel cuts into its opening from both sides, so that

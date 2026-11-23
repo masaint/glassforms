@@ -102,6 +102,39 @@ struct GlareU {
     energy: [f32; 4],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, PartialEq, Debug)]
+struct GlareTempU {
+    alpha: f32,
+    knee: f32,
+    shift: [f32; 2],
+}
+
+/// Frame-to-frame motion and convergence state for temporally stabilising interactive glare without
+/// altering converged still pictures.
+#[derive(Clone, Copy, Debug)]
+pub struct GlareTemporal {
+    pub settled: bool,
+    pub cut: bool,
+    pub accum_n: u32,
+    pub exposure: f32,
+    /// Non-pan highlight motion speed in source pixels per frame.
+    pub motion_px: f32,
+    /// Rigid screen-space translation of the scene centre (current -> previous) in source pixels (right, down).
+    pub shift_px: [f32; 2],
+}
+
+impl GlareTemporal {
+    pub const STATELESS: Self = Self {
+        settled: true,
+        cut: false,
+        accum_n: 1024,
+        exposure: 1.0,
+        motion_px: 0.0,
+        shift_px: [0.0; 2],
+    };
+}
+
 /// The window the shader puts on the spread (1 out to 0.55 R, 0 at R).
 fn win(r: f64, big_r: f64) -> f64 {
     let s = |a: f64, b: f64, x: f64| { let t = ((x - a) / (b - a)).clamp(0.0, 1.0); t * t * (3.0 - 2.0 * t) };
@@ -175,8 +208,11 @@ pub fn keep(lens: &GlareLens, tw: u32, th: u32) -> [f32; 3] {
 
 struct Out {
     tex: wgpu::Texture,
+    hist: wgpu::Texture,
     view: wgpu::TextureView,
     groups: [wgpu::BindGroup; 3],
+    w: u32,
+    h: u32,
     tw: u32,
     th: u32,
 }
@@ -190,12 +226,16 @@ pub struct Glare {
     p_cols: wgpu::ComputePipeline,
     p_rows_inverse: wgpu::ComputePipeline,
     u: wgpu::Buffer,
+    u_temp: wgpu::Buffer,
     spec: wgpu::Buffer,
     kern: wgpu::Buffer,
     smp: wgpu::Sampler,
     out: Option<Out>,
     /// what the kernel's spectrum was last made for
     built: Option<GlareU>,
+    last_temp: Option<GlareTempU>,
+    has_hist: bool,
+    interactive: bool,
     /// the last lens and size worked out, and what came of it (the integrals are not free)
     memo: std::cell::RefCell<Option<(GlareLens, u32, u32, GlareU)>>,
 }
@@ -204,13 +244,16 @@ impl Glare {
     pub fn new(gpu: &Gpu) -> Self {
         let c = wgpu::ShaderStages::COMPUTE;
         let rw = |binding| wgpu::BindGroupLayoutEntry { binding, visibility: c, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None };
+        let tex2d = |binding| wgpu::BindGroupLayoutEntry { binding, visibility: c, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false }, count: None };
         let layout = gpu.bind_layout("glare", &[
             uniform_entry(0, c, false),
             rw(1),
             rw(2),
-            wgpu::BindGroupLayoutEntry { binding: 3, visibility: c, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false }, count: None },
+            tex2d(3),
             wgpu::BindGroupLayoutEntry { binding: 4, visibility: c, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
             wgpu::BindGroupLayoutEntry { binding: 5, visibility: c, ty: wgpu::BindingType::StorageTexture { access: wgpu::StorageTextureAccess::WriteOnly, format: wgpu::TextureFormat::Rgba16Float, view_dimension: wgpu::TextureViewDimension::D2 }, count: None },
+            tex2d(6),
+            uniform_entry(7, c, false),
         ]);
         let module = gpu.shader("glare", WGSL, false);
         let pl = gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("glare"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
@@ -226,13 +269,22 @@ impl Glare {
             p_rows_inverse: pipe("cs_rows_inverse"),
             layout,
             u: gpu.uniform_buffer("glare", std::mem::size_of::<GlareU>() as u64),
+            u_temp: gpu.uniform_buffer("glare temporal", std::mem::size_of::<GlareTempU>() as u64),
             spec: storage("glare: spectrum", n * 8),
             kern: storage("glare: the kernel's spectrum", n * 4),
             smp: gpu.sampler(wgpu::FilterMode::Linear, wgpu::AddressMode::ClampToEdge),
             out: None,
             built: None,
+            last_temp: None,
+            has_hist: false,
+            interactive: false,
             memo: std::cell::RefCell::new(None),
         }
+    }
+
+    pub fn reset(&mut self) {
+        self.has_hist = false;
+        self.interactive = false;
     }
 
     /// Size the glare for a picture `tw` x `th` read from any of `sources` (the two pictures so far and
@@ -249,7 +301,18 @@ impl Glare {
             usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
+        let hist = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("glare history"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
         let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let hist_view = hist.create_view(&wgpu::TextureViewDescriptor::default());
         let groups = sources.map(|src| {
             self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("glare"),
@@ -261,11 +324,15 @@ impl Glare {
                     wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(src) },
                     wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.smp) },
                     wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&view) },
+                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&hist_view) },
+                    wgpu::BindGroupEntry { binding: 7, resource: self.u_temp.as_entire_binding() },
                 ],
             })
         });
-        self.out = Some(Out { tex, view, groups, tw, th });
+        self.out = Some(Out { tex, hist, view, groups, w, h, tw, th });
         self.built = None;
+        self.last_temp = None;
+        self.reset();
     }
 
     /// The share of its light the sharp picture keeps, per colour, at the size the glare is made for.
@@ -288,34 +355,204 @@ impl Glare {
     /// Convolve picture `src` (0, 1: the pictures so far; 2: the focused one) with the lens's spread,
     /// making the kernel's spectrum first when the lens or the size has changed. Returns the share of
     /// light the sharp picture keeps, per colour.
-    pub fn encode(&mut self, enc: &mut wgpu::CommandEncoder, src: usize, lens: &GlareLens) -> [f32; 3] {
-        let Some(o) = self.out.as_ref() else { return [1.0; 3] };
-        let u = self.uniform(lens, o.tw, o.th);
-        let (h, group) = (u.img[1] as u32, &o.groups[src]);
+    pub fn encode(&mut self, enc: &mut wgpu::CommandEncoder, src: usize, lens: &GlareLens, temporal: GlareTemporal) -> [f32; 3] {
+        let (tw, th, w, h) = match self.out.as_ref() {
+            Some(o) => (o.tw, o.th, o.w, o.h),
+            None => return [1.0; 3],
+        };
+        if temporal.cut {
+            self.reset();
+        }
+        let u = self.uniform(lens, tw, th);
         let fresh = self.built != Some(u);
         if fresh {
             self.gpu.queue.write_buffer(&self.u, 0, bytemuck::bytes_of(&u));
             self.built = Some(u);
+            self.has_hist = false;
             if std::env::var_os("GLARE_PRINT").is_some() { eprintln!("glare {u:?}"); }
         }
-        let mut c = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("glare"), timestamp_writes: None });
-        c.set_bind_group(0, group, &[]);
-        if fresh {
-            c.set_pipeline(&self.p_rows_kernel);
-            c.dispatch_workgroups(NY, 1, 1);
-            c.set_pipeline(&self.p_cols_kernel);
-            c.dispatch_workgroups(BINS, 3, 1);
+        let exp = temporal.exposure.max(0.05);
+        let base_knee = 24.0 / exp;
+        let temp = if !self.has_hist {
+            self.interactive = !temporal.settled;
+            GlareTempU {
+                alpha: 1.0,
+                knee: if temporal.settled { 0.0 } else { base_knee },
+                shift: [0.0; 2],
+            }
+        } else if !temporal.settled {
+            self.interactive = true;
+            let sx = w as f32 / tw.max(1) as f32;
+            let sy = h as f32 / th.max(1) as f32;
+            let m_grid = temporal.motion_px * sy;
+            let t = ((m_grid - 0.5) / 4.0).clamp(0.0, 1.0);
+            let s = t * t * (3.0 - 2.0 * t);
+            GlareTempU {
+                alpha: 0.22 + (0.85 - 0.22) * s,
+                knee: base_knee,
+                shift: [temporal.shift_px[0] * sx, temporal.shift_px[1] * sy],
+            }
+        } else if !self.interactive || temporal.accum_n >= 8 {
+            self.interactive = false;
+            GlareTempU { alpha: 1.0, knee: 0.0, shift: [0.0; 2] }
+        } else {
+            let r = (temporal.accum_n as f32 / 8.0).clamp(0.0, 1.0);
+            let kr = (1.0 - temporal.accum_n as f32 / 6.0).clamp(0.0, 1.0);
+            GlareTempU {
+                alpha: 0.28 + 0.72 * r,
+                knee: if kr > 0.0 { base_knee / kr.max(0.15) } else { 0.0 },
+                shift: [0.0; 2],
+            }
+        };
+        if self.last_temp != Some(temp) {
+            self.gpu.queue.write_buffer(&self.u_temp, 0, bytemuck::bytes_of(&temp));
+            self.last_temp = Some(temp);
         }
-        // (GLARE_REPEAT=n: the convolution done n times, to time it)
-        let repeat = std::env::var("GLARE_REPEAT").ok().and_then(|v| v.parse().ok()).unwrap_or(1u32).max(1);
-        for _ in 0..repeat {
-            c.set_pipeline(&self.p_rows);
-            c.dispatch_workgroups(h, 1, 1);
-            c.set_pipeline(&self.p_cols);
-            c.dispatch_workgroups(BINS, 3, 1);
-            c.set_pipeline(&self.p_rows_inverse);
-            c.dispatch_workgroups(h, 1, 1);
+        let o = self.out.as_ref().expect("checked");
+        {
+            let mut c = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("glare"), timestamp_writes: None });
+            c.set_bind_group(0, &o.groups[src], &[]);
+            if fresh {
+                c.set_pipeline(&self.p_rows_kernel);
+                c.dispatch_workgroups(NY, 1, 1);
+                c.set_pipeline(&self.p_cols_kernel);
+                c.dispatch_workgroups(BINS, 3, 1);
+            }
+            // (GLARE_REPEAT=n: the convolution done n times, to time it)
+            let repeat = std::env::var("GLARE_REPEAT").ok().and_then(|v| v.parse().ok()).unwrap_or(1u32).max(1);
+            for _ in 0..repeat {
+                c.set_pipeline(&self.p_rows);
+                c.dispatch_workgroups(h, 1, 1);
+                c.set_pipeline(&self.p_cols);
+                c.dispatch_workgroups(BINS, 3, 1);
+                c.set_pipeline(&self.p_rows_inverse);
+                c.dispatch_workgroups(h, 1, 1);
+            }
         }
+        enc.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo { texture: &o.tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyTextureInfo { texture: &o.hist, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        self.has_hist = true;
         [1.0 - u.energy[0], 1.0 - u.energy[1], 1.0 - u.energy[2]]
     }
+}
+
+#[cfg(test)]
+#[test]
+fn subpixel_highlight_energy_and_temporal_stability() {
+    let Ok(gpu) = Gpu::headless("auto") else { return };
+    let (tw, th) = (1920u32, 1080u32); // 1.5x ratio onto 1280 x 720 glare grid
+    let src_tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("glare test src"),
+        size: wgpu::Extent3d { width: tw, height: th, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let src_view = src_tex.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut glare = Glare::new(&gpu);
+    glare.resize(tw, th, [&src_view, &src_view, &src_view]);
+
+    let mut p = Settings::default();
+    p.blades = 6.0;
+    p.bloom = 0.5;
+    let lens = GlareLens::of(&p);
+
+    let paint_point = |px: u32, py: u32, val: f32| {
+        let mut clear = vec![[0.0f32; 4]; 16 * 16];
+        clear[((py % 4) * 16 + (px % 4)) as usize] = [val, val, val, 1.0];
+        gpu.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &src_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: px - (px % 4), y: py - (py % 4), z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&clear),
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(16 * 16), rows_per_image: Some(16) },
+            wgpu::Extent3d { width: 16, height: 16, depth_or_array_layers: 1 },
+        );
+    };
+
+    let read_sum_and_peak = |g: &Glare| -> (f64, f32) {
+        let tex = g.texture().unwrap();
+        let (w, h) = (tex.width(), tex.height());
+        let bytes = gpu.read(tex, 0, 0, 0, w, h, 8).unwrap();
+        let halves: &[half::f16] = bytemuck::cast_slice(&bytes);
+        let mut sum = 0.0f64;
+        let mut peak = 0.0f32;
+        for px in halves.chunks_exact(4) {
+            let y = px[1].to_f32();
+            sum += y as f64;
+            peak = peak.max(y);
+        }
+        (sum, peak)
+    };
+
+    // 1. Sub-grid shift invariance: a 1-pixel highlight shifted across a 3x3 source block (covering all
+    //    phases relative to the 1.5x glare grid) must conserve total glare energy within 1%.
+    let mut sums = Vec::new();
+    for dy in 0..3 {
+        for dx in 0..3 {
+            paint_point(960 + dx, 540 + dy, 40.0);
+            let mut enc = gpu.device.create_command_encoder(&Default::default());
+            glare.encode(&mut enc, 0, &lens, GlareTemporal::STATELESS);
+            gpu.queue.submit([enc.finish()]);
+            sums.push(read_sum_and_peak(&glare).0);
+        }
+    }
+    let min_s = sums.iter().cloned().fold(f64::INFINITY, f64::min);
+    let max_s = sums.iter().cloned().fold(0.0, f64::max);
+    assert!((max_s - min_s) / max_s < 0.015, "glare energy varied across sub-grid phases: {sums:?}");
+
+    // 2. Temporal stabilisation during interaction: an alternating [20, 0, 20, 0] strobe is damped >3x
+    //    while moving, then converges back to the exact stateless result once settled (accum_n >= 8).
+    glare.reset();
+    let mut moving_peaks = Vec::new();
+    for f in 0..10 {
+        paint_point(960, 540, if f % 2 == 0 { 20.0 } else { 0.0 });
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        glare.encode(&mut enc, 0, &lens, GlareTemporal {
+            settled: false,
+            cut: f == 0,
+            accum_n: 9,
+            exposure: 1.0,
+            motion_px: 0.8,
+            shift_px: [0.0; 2],
+        });
+        gpu.queue.submit([enc.finish()]);
+        if f >= 6 {
+            moving_peaks.push(read_sum_and_peak(&glare).1);
+        }
+    }
+    let min_p = moving_peaks.iter().cloned().fold(f32::INFINITY, f32::min);
+    let max_p = moving_peaks.iter().cloned().fold(0.0f32, f32::max);
+    assert!(min_p > 0.45 * max_p, "expected temporal smoothing to hold strobe above 45% of peak, got {moving_peaks:?}");
+
+    paint_point(960, 540, 20.0);
+    let mut enc = gpu.device.create_command_encoder(&Default::default());
+    glare.encode(&mut enc, 0, &lens, GlareTemporal {
+        settled: true,
+        cut: false,
+        accum_n: 8,
+        exposure: 1.0,
+        motion_px: 0.0,
+        shift_px: [0.0; 2],
+    });
+    gpu.queue.submit([enc.finish()]);
+    let settled_after_move = read_sum_and_peak(&glare);
+
+    let mut fresh_glare = Glare::new(&gpu);
+    fresh_glare.resize(tw, th, [&src_view, &src_view, &src_view]);
+    let mut enc2 = gpu.device.create_command_encoder(&Default::default());
+    fresh_glare.encode(&mut enc2, 0, &lens, GlareTemporal::STATELESS);
+    gpu.queue.submit([enc2.finish()]);
+    let stateless_ref = read_sum_and_peak(&fresh_glare);
+    assert!((settled_after_move.0 - stateless_ref.0).abs() < 1e-3 && (settled_after_move.1 - stateless_ref.1).abs() < 1e-4,
+        "settled glare must match stateless reference: {settled_after_move:?} vs {stateless_ref:?}");
 }

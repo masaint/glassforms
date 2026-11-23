@@ -1754,7 +1754,9 @@ pub fn piece_len(pts: &[f32], i: usize) -> usize {
 ///     6 outline    tag (6, edges, depth, round)  (o, scale), (ux), (uy), (band y0, y1, margin), then
 ///                  (x0, y0, x1, y1) per edge
 ///     7 sweep      tag (7, round)     (a, half-width at a), (c, half-width at c), (side at a, half-height
-///                  at a), (side at c, half-height at c), (cut at a, 1 if an end), (cut at c, 1 if an end)
+///                  at a), (side at c, half-height at c), (cut at a, 0 a joint, 1 a flat end, 2 a rounded end), (cut at c, the same)
+///     8 sweep of an outline   tag (8, round, edges)   as 7, then (x0, y0, x1, y1) per edge
+///     9 a path's primitive    tag (9, edges)   its record's six groups (`path_formula::record`), then edges
 /// The piece is everything inside all of its terms. The baker draws only the segment from its first
 /// point to its second (`bake_curve.wgsl` `piece_dist`), into its box.
 /// `thick` (the thickness slider) scales the walls of shells and slabs; `ds` is the curve's step: no wall
@@ -1822,18 +1824,36 @@ pub fn add_pieces(c: &mut Curve, pieces: &[crate::presets::Piece], thick: f64, d
                     put(band[0], band[1], band[2], 0.0);
                     for e in edges { put(e[0], e[1], e[2], e[3]); }
                 }
-                Term::Sweep { a, c, side_a, side_c, size_a, size_c, round, n0, n1, ends } => {
+                Term::Path { rec, outline } => {
+                    let r = rec;
+                    let (p0, d1, d2) = (place(&[r[0], r[1], r[2]]), dir(&[r[4], r[5], r[6]]), dir(&[r[8], r[9], r[10]]));
+                    let arc = r[3] > 0.5;
+                    let s = |v: f64| (v * sc * thick).max(thin);
+                    let edges = outline.as_deref().map_or(0, |e| e.len());
+                    put(9.0, edges as f64, 0.0, 0.0);
+                    // (a segment's length and an arc's radius and climb are lengths; angles and twists are not)
+                    put(p0[0], p0[1], p0[2], r[3]);
+                    put(d1[0], d1[1], d1[2], if arc { r[7] } else { r[7] * sc });
+                    put(d2[0], d2[1], d2[2], if arc { r[11] * sc } else { r[11] });
+                    put(r[12], r[13], r[14] * sc, r[15]);
+                    put(s(r[16]), s(r[17]), r[18] * sc * thick, r[19]);
+                    put(s(r[20]), s(r[21]), r[22] * sc * thick, r[23]);
+                    for e in outline.iter().flat_map(|o| o.iter()) { put(e[0], e[1], e[2], e[3]); }
+                }
+                Term::Sweep { a, c, side_a, side_c, size_a, size_c, round, n0, n1, ends, outline } => {
                     // (the sizes are the thickness slider's to scale, and never thinner than a wall holds)
                     let k = sc * thick;
                     let s = |v: f64| (v * k).max(thin);
                     let (qa, qc, sa, scd, m0, m1) = (place(a), place(c), dir(side_a), dir(side_c), dir(n0), dir(n1));
-                    put(7.0, round * k, 0.0, 0.0);
+                    let edges = outline.as_deref().map_or(0, |e| e.len());
+                    put(if edges > 0 { 8.0 } else { 7.0 }, round * k, edges as f64, 0.0);
                     put(qa[0], qa[1], qa[2], s(size_a[0]));
                     put(qc[0], qc[1], qc[2], s(size_c[0]));
                     put(sa[0], sa[1], sa[2], s(size_a[1]));
                     put(scd[0], scd[1], scd[2], s(size_c[1]));
-                    put(m0[0], m0[1], m0[2], if ends[0] { 1.0 } else { 0.0 });
-                    put(m1[0], m1[1], m1[2], if ends[1] { 1.0 } else { 0.0 });
+                    put(m0[0], m0[1], m0[2], ends[0] as f64);
+                    put(m1[0], m1[1], m1[2], ends[1] as f64);
+                    for e in outline.iter().flat_map(|o| o.iter()) { put(e[0], e[1], e[2], e[3]); }
                 }
             }
         }
@@ -1906,8 +1926,20 @@ impl Curve {
                         set(&mut self.pts[at..], moved(w));
                         j += 2;
                     }
-                    7 => {
-                        // a swept stretch: two positions, then four directions
+                    9 => {
+                        // a path's primitive: its point, then two directions (its outline's edges are in its
+                        // section's own frame)
+                        let w = rot(&self.pts[at..]);
+                        set(&mut self.pts[at..], moved(w));
+                        for k in [2, 3] {
+                            let w = rot(&self.pts[(j + k) * 4..]);
+                            set(&mut self.pts[(j + k) * 4..], w);
+                        }
+                        j += 7 + self.pts[j * 4 + 1].round() as usize;
+                    }
+                    7 | 8 => {
+                        // a swept stretch: two positions, then four directions (an outline's edges after
+                        // them stay as they are: they are in the stretch's own frame)
                         for k in [1, 2] {
                             let w = rot(&self.pts[(j + k) * 4..]);
                             set(&mut self.pts[(j + k) * 4..], moved(w));
@@ -1916,7 +1948,7 @@ impl Curve {
                             let w = rot(&self.pts[(j + k) * 4..]);
                             set(&mut self.pts[(j + k) * 4..], w);
                         }
-                        j += 7;
+                        j += 7 + if kind == 8 { self.pts[j * 4 + 2].round() as usize } else { 0 };
                     }
                     _ => {
                         // a hex column or an outline: a position, then two directions

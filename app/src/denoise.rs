@@ -32,7 +32,7 @@ use bytemuck::{Pod, Zeroable};
 
 use crate::gpu::*;
 
-const FILTER_WGSL: &str = include_str!("shaders/denoise.wgsl");
+const FILTER_WGSL: &str = concat!(include_str!("shaders/pbr/hash.wgsl"), include_str!("shaders/denoise.wgsl"));
 /// What the tracer writes beside the picture: the noisy part, with the distance in alpha. 32-bit: the
 /// facing of the surface is worked out from the distances of neighbouring pixels, and a 16-bit distance
 /// (steps of 0.004 at the usual distances, about a pixel's width) would make it grain.
@@ -60,12 +60,12 @@ pub const MARK: &str = "var<private> dnIn: vec3f;";
 /// wavelengths a ray). Clear glass is not on by default: while the view moves it keeps the light the
 /// antialiasing would throw away (a turning brilliant at 0.99 of its settled level instead of 0.78) but
 /// shows more coloured grain and some smearing of what is seen through the facets, a trade the eye has
-/// to judge; a still view is the same either way. Not clay, not the tracer of several bodies (none of its
-/// materials is drawn by chance, and its shading has no such split).
+/// to judge. A mixed scene splits light transmitted by a surface with a random-walk interior.
+/// Other primary surfaces retain their own unfiltered shading.
 pub fn wanted(mat: &gf_core::material::Variant, clay: bool, setting: f64) -> bool {
-    let chance = !mat.metal && !mat.hollow && (mat.walk || mat.rough_ref);
+    let chance = mat.walk || (mat.bodies == 0 && !mat.metal && !mat.hollow && mat.rough_ref);
     let clear = mat.plain() && setting >= 1.5;
-    setting >= 0.5 && !clay && mat.bodies == 0 && (chance || clear) && !off()
+    setting >= 0.5 && !clay && (chance || clear) && !off()
 }
 
 /// While moving, the most frames the mean of what is seen through clear glass stands for.
@@ -98,7 +98,10 @@ pub fn with_split(src: &str, whole: bool) -> String {
     let end = "  return acc / (wsum * f32(MODES));\n";
     // plain glass (trace.wgsl's shade): what came through the glass is `one`, or `acc / wsum`
     let plain = "  if (alike) { return envR * F0 + one; }\n  return envR * (racc / wsum) + acc / wsum;\n";
-    let s = if src.matches(top).count() == 1 && src.matches(end).count() == 1 {
+    let mixed = "// The random-walk body's transmitted radiance is available here.";
+    let s = if src.contains(mixed) {
+        src.replace(mixed, "if (hasB(k, 32u)) { dnIn += res - envR * top; }")
+    } else if src.matches(top).count() == 1 && src.matches(end).count() == 1 {
         let keep = if whole { "  let dnTop = vec3f(0.0);\n" } else { "  let dnTop = acc;                          // (what the paths inside add is told apart from this)\n" };
         src.replace(top, &format!("{top}{keep}")).replace(end, &format!("  dnIn += (acc - dnTop) / (wsum * f32(MODES));\n{end}"))
     } else {
@@ -153,7 +156,7 @@ pub fn temporal_source(accum: &str) -> String {
     assert!(accum.matches(head).count() == 1 && accum.matches(still).count() == 1 && accum.matches(cut).count() == 1, "accum.wgsl is not as it was");
     let kept = &accum[..accum.find(cut).expect("checked")];
     let kept = kept.replace(head, "fn fs(@builtin(position) pos: vec4f) -> DnT {").replace(still, "");
-    format!("{kept}{TEMPORAL_TAIL}{TEMPORAL_DECL}")
+    format!("{kept}{TEMPORAL_TAIL}{TEMPORAL_DECL}{}", include_str!("shaders/pbr/hash.wgsl")).replace("\r\n", "\n")
 }
 
 /// What the pass over time does once the old picture has been found (see `temporal_source`).
@@ -186,7 +189,8 @@ const TEMPORAL_TAIL: &str = r#"  // (from here on: the noisy part's own running 
   // axis the side whose distance is nearer this pixel's, so that an outline does not bend it)
   var dnG = vec4f(0.0, 0.0, 1.0, cur.a);
   if (cur.a > 0.0) {
-    let p0 = dnPos(fc, cur.a);
+    var rd0 = vec3f(0.0, 0.0, -1.0);
+    let p0 = dnPosRay(fc, cur.a, &rd0);
     let tl = textureLoad(curTex, clamp(c - vec2i(1, 0), vec2i(0), top), 0).a;
     let tr = textureLoad(curTex, clamp(c + vec2i(1, 0), vec2i(0), top), 0).a;
     let tu = textureLoad(curTex, clamp(c - vec2i(0, 1), vec2i(0), top), 0).a;
@@ -198,9 +202,9 @@ const TEMPORAL_TAIL: &str = r#"  // (from here on: the noisy part's own running 
     let useU = tu > 0.0 && (td <= 0.0 || abs(tu - cur.a) <= abs(td - cur.a));
     if (useU) { ey = dnPos(fc + vec2f(0.0, 1.0), tu) - p0; } else if (td > 0.0) { ey = p0 - dnPos(fc - vec2f(0.0, 1.0), td); }
     var nn = cross(ex, ey);
-    if (dot(nn, nn) < 1e-20) { nn = -p0; }
+    if (dot(nn, nn) < 1e-20) { nn = -rd0; }
     nn = normalize(nn);
-    if (dot(nn, p0) > 0.0) { nn = -nn; }
+    if (dot(nn, rd0) > 0.0) { nn = -nn; }
     dnG = vec4f(nn, cur.a);
   }
   return DnT(vec4f(dnMean, cur.a), vec4f(dnM2, dnN, 0.0, 0.0), dnG);
@@ -231,11 +235,17 @@ fn dnLum(c: vec3f) -> f32 { return dot(c, vec3f(0.2126, 0.7152, 0.0722)); }
 // distance: along the ray the tracer sent through that pixel this frame, which went through the point
 // trace.wgsl's fs chose (its first sample: a shift of the pixel's own and the frame's jitter), so that
 // the distances of neighbouring pixels give the surface's facing without the grain of the jitter
-fn dnIgn(p: vec2f) -> f32 { return fract(52.9829189 * fract(dot(p, vec2f(0.06711056, 0.00583715)))); }
-fn dnPos(fc: vec2f, t: f32) -> vec3f {
+fn dnIgn(p: vec2f) -> f32 { return pbr_ign(p); }   // pbr/hash.wgsl
+fn dnPosRay(fc: vec2f, t: f32, rdOut: ptr<function, vec3f>) -> vec3f {
   let o = fract(vec2f(dnIgn(fc + 19.19), dnIgn(fc.yx + 47.3)) + dn.jitter) - 0.5;
   let uv = (2.0 * (fc + o) - dn.res) / dn.res.y + dn.shift;
-  return normalize(vec3f(uv * dn.tan_fov, -1.0)) * t;
+  let rd = normalize(vec3f(uv * dn.tan_fov, -1.0));
+  *rdOut = rd;
+  return rd * t;
+}
+fn dnPos(fc: vec2f, t: f32) -> vec3f {
+  var rd: vec3f;
+  return dnPosRay(fc, t, &rd);
 }
 "#;
 
@@ -336,8 +346,10 @@ struct Targets {
     g_time: [wgpu::BindGroup; 2],
     /// the first filter pass, reading hist[i], mom[i] (and writing work[0])
     g_var: [wgpu::BindGroup; 2],
+    g_var_lens: [wgpu::BindGroup; 2],
     /// the filter passes: pass k reads work[k % 2] and writes the other
     g_pass: Vec<wgpu::BindGroup>,
+    g_pass_lens: Vec<wgpu::BindGroup>,
     /// putting the picture together: reading the picture so far i and the filtered noisy part (and the
     /// unfiltered mean hist[j], for looking at), writing into the other picture so far
     g_out: [[[wgpu::BindGroup; 2]; 2]; 2],
@@ -349,13 +361,17 @@ pub struct Denoise {
     pass_u: Vec<wgpu::Buffer>,
     l_time: wgpu::BindGroupLayout,
     l_var: wgpu::BindGroupLayout,
+    l_var_lens: wgpu::BindGroupLayout,
     l_pass: wgpu::BindGroupLayout,
+    l_pass_lens: wgpu::BindGroupLayout,
     l_out: wgpu::BindGroupLayout,
     /// the pass over time for the plain lens, and for the camera's other lenses (made when first wanted)
     p_time: Option<wgpu::RenderPipeline>,
     p_time_lens: Option<wgpu::RenderPipeline>,
     p_var: wgpu::RenderPipeline,
     p_pass: wgpu::RenderPipeline,
+    /// spatial filter passes built for lenses other than the plain one (made when first wanted)
+    p_filter_lens: std::cell::OnceCell<(wgpu::RenderPipeline, wgpu::RenderPipeline)>,
     p_out: wgpu::RenderPipeline,
     size: (u32, u32),
     /// the pictures it is given: the picture so far (both), and the uniform block of the pass that folds
@@ -366,6 +382,7 @@ pub struct Denoise {
     hi: usize,
     /// the running mean has been carried on since the last start afresh
     pub live: bool,
+    lens_active: bool,
     show: f32,
     /// passes of the filter over space the last frame's tuning asks for
     passes: usize,
@@ -377,7 +394,9 @@ impl Denoise {
         let d2 = wgpu::TextureViewDimension::D2;
         let l_time = gpu.bind_layout("denoise: over time", &[uniform_entry(0, frag, false), texture_entry(1, d2, true), texture_entry(2, d2, true), sampler_entry(3), texture_entry(8, d2, false), uniform_entry(9, frag, false)]);
         let l_var = gpu.bind_layout("denoise: uncertainty", &[uniform_entry(0, frag, false), texture_entry(2, d2, false), texture_entry(3, d2, false), texture_entry(4, d2, false)]);
+        let l_var_lens = gpu.bind_layout("denoise: uncertainty (lens)", &[uniform_entry(0, frag, false), texture_entry(2, d2, false), texture_entry(3, d2, false), texture_entry(4, d2, false), uniform_entry(8, frag, false)]);
         let l_pass = gpu.bind_layout("denoise: filter", &[uniform_entry(0, frag, false), uniform_entry(1, frag, false), texture_entry(2, d2, false), texture_entry(4, d2, false)]);
+        let l_pass_lens = gpu.bind_layout("denoise: filter (lens)", &[uniform_entry(0, frag, false), uniform_entry(1, frag, false), texture_entry(2, d2, false), texture_entry(4, d2, false), uniform_entry(8, frag, false)]);
         let l_out = gpu.bind_layout("denoise: put together", &[uniform_entry(0, frag, false), texture_entry(5, d2, false), texture_entry(6, d2, false), texture_entry(7, d2, false), texture_entry(4, d2, false), texture_entry(3, d2, false)]);
         let module = gpu.shader("denoise", FILTER_WGSL, true);
         let mk = |label, fs, l: &wgpu::BindGroupLayout, f| pipeline(gpu, label, &module, fs, &[l], &[f]);
@@ -394,8 +413,9 @@ impl Denoise {
             pass_u,
             p_var: mk("denoise: uncertainty", "fs_var", &l_var, WORK),
             p_pass: mk("denoise: filter", "fs_pass", &l_pass, WORK),
+            p_filter_lens: std::cell::OnceCell::new(),
             p_out: mk("denoise: put together", "fs_out", &l_out, ACC),
-            l_time, l_var, l_pass, l_out,
+            l_time, l_var, l_var_lens, l_pass, l_pass_lens, l_out,
             p_time: None,
             p_time_lens: None,
             size: (0, 0),
@@ -403,6 +423,7 @@ impl Denoise {
             t: None,
             hi: 0,
             live: false,
+            lens_active: false,
             passes: PASSES,
             show: match env() { "raw" => 1.0, "noisy" => 2.0, "certain" => 3.0, "guide" => 4.0, _ => 0.0 },
         }
@@ -436,9 +457,11 @@ impl Denoise {
         let group = |label: &str, layout: &wgpu::BindGroupLayout, entries: &[wgpu::BindGroupEntry]| gpu.device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some(label), layout, entries });
         let g_time = [0, 1].map(|i| group("denoise: over time", &self.l_time, &[uni(0, accum_u), tex(1, &hist[i]), tex(2, &frame_view), wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(lin) }, tex(8, &mom[i]), uni(9, &self.u)]));
         let g_var = [0, 1].map(|i| group("denoise: uncertainty", &self.l_var, &[uni(0, &self.u), tex(2, &hist[i]), tex(3, &mom[i]), tex(4, &guide)]));
+        let g_var_lens = [0, 1].map(|i| group("denoise: uncertainty (lens)", &self.l_var_lens, &[uni(0, &self.u), tex(2, &hist[i]), tex(3, &mom[i]), tex(4, &guide), uni(8, accum_u)]));
         let g_pass = (0..PASSES).map(|k| group("denoise: filter", &self.l_pass, &[uni(0, &self.u), uni(1, &self.pass_u[k]), tex(2, &work[k % 2]), tex(4, &guide)])).collect();
+        let g_pass_lens = (0..PASSES).map(|k| group("denoise: filter (lens)", &self.l_pass_lens, &[uni(0, &self.u), uni(1, &self.pass_u[k]), tex(2, &work[k % 2]), tex(4, &guide), uni(8, accum_u)])).collect();
         let g_out = [0, 1].map(|i| [0, 1].map(|j| [0, 1].map(|k| group("denoise: put together", &self.l_out, &[uni(0, &self.u), tex(5, &pic[i]), tex(6, &work[k]), tex(7, &hist[j]), tex(4, &guide), tex(3, &mom[j])]))));
-        Some(Targets { frame_view, hist, mom, guide, work, g_time, g_var, g_pass, g_out })
+        Some(Targets { frame_view, hist, mom, guide, work, g_time, g_var, g_var_lens, g_pass, g_pass_lens, g_out })
     }
 
     /// Where the tracer writes the noisy part (made now if it is not yet).
@@ -462,6 +485,7 @@ impl Denoise {
             jitter, young: tune.young, chroma: if tune.chroma { 1.0 } else { 0.0 },
         };
         self.gpu.queue.write_buffer(&self.u, 0, bytemuck::bytes_of(&u));
+        self.lens_active = lens_src.is_some();
         let pipe = match lens_src {
             Some(src) => {
                 if self.p_time_lens.is_none() { self.p_time_lens = Some(self.time_pipeline(&src())); }
@@ -504,9 +528,23 @@ impl Denoise {
         };
         // (unfiltered: the putting together reads the running mean itself)
         let passes = self.passes;
-        if passes > 0 { draw(enc, &t.work[0], &self.p_var, &t.g_var[self.hi]); }
-        for k in 0..passes {
-            draw(enc, &t.work[1 - k % 2], &self.p_pass, &t.g_pass[k]);
+        if self.lens_active {
+            let (p_var, p_pass) = self.p_filter_lens.get_or_init(|| {
+                let module = self.gpu.shader("denoise (lens)", &crate::camera::denoise(FILTER_WGSL), true);
+                (
+                    pipeline(&self.gpu, "denoise: uncertainty (lens)", &module, "fs_var", &[&self.l_var_lens], &[WORK]),
+                    pipeline(&self.gpu, "denoise: filter (lens)", &module, "fs_pass", &[&self.l_pass_lens], &[WORK]),
+                )
+            });
+            if passes > 0 { draw(enc, &t.work[0], p_var, &t.g_var_lens[self.hi]); }
+            for k in 0..passes {
+                draw(enc, &t.work[1 - k % 2], p_pass, &t.g_pass_lens[k]);
+            }
+        } else {
+            if passes > 0 { draw(enc, &t.work[0], &self.p_var, &t.g_var[self.hi]); }
+            for k in 0..passes {
+                draw(enc, &t.work[1 - k % 2], &self.p_pass, &t.g_pass[k]);
+            }
         }
         // (the last pass wrote work[passes % 2])
         draw(enc, out, &self.p_out, &t.g_out[cur][self.hi][passes % 2]);
@@ -524,10 +562,11 @@ mod tests {
         let module = naga::front::wgsl::parse_str(src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(src)));
         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&module).unwrap_or_else(|e| panic!("{}", e.emit_to_string(src)));
     }
-    /// The filter's shader parses and passes the validator.
+    /// The filter's shader parses and passes the validator, both for the plain lens and for any lens.
     #[test]
     fn the_filter_is_valid() {
         valid(super::FILTER_WGSL);
+        valid(&crate::camera::denoise(super::FILTER_WGSL));
     }
     /// The pass over time, made from the picture's own pass for the plain lens and the camera's, is valid.
     #[test]

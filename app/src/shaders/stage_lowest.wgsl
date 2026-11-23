@@ -3,9 +3,8 @@
 // A sample of the volume at place p, with distance s to the surface, says that the surface comes at
 // least as far along d as p . d - s: inside the glass a ball of radius |s| about p is all glass, and
 // outside it a ball of radius s just touches the glass. The largest of that over the samples near the
-// surface is how far the shape reaches. Three passes, each fragment of each a short loop (one long loop
-// in one fragment would run on a single core of the GPU): a fragment for each column of samples, then
-// the largest of each block of 16 x 16 columns, then the largest of the blocks.
+// surface is how far the shape reaches. A subset of the columns gives an initial maximum, letting the
+// full-grid search end columns early. Blocks of 16 x 16 columns are reduced to one maximum.
 
 struct M {
   down: vec4f,            // xyz: the direction, in the shape's own frame;  w: samples along a side
@@ -24,17 +23,37 @@ fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
   return vec4f(p * 2.0 - 1.0, 0.0, 1.0);
 }
 
-@fragment
-fn fs_rows(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+fn column(xy: vec2f, bound: f32) -> f32 {
   let n = m.down.w;
-  var best = -1e9;
+  let axis = u32(m.k.w);
+  var best = bound;
   for (var k = 0; k < 256; k++) {
     if (f32(k) >= n) { break; }
-    let c = vec3f(pos.xy, f32(k) + 0.5) / n;
+    let z = select(f32(k) + 0.5, n - f32(k) - 0.5, m.down[axis] > 0.0);
+    var c = vec3f(xy, z);
+    if (axis == 0u) { c = c.zxy; }
+    if (axis == 1u) { c = c.yzx; }
+    c /= n;
+    let projection = dot((c - 0.5) * m.k.z, m.down.xyz);
+    // Later samples have smaller projections. Every accepted distance is greater than k.y.
+    if (projection - m.k.y + 1e-6 * m.k.z < best) { break; }
     let s = textureSampleLevel(volTex, smp, c, 0.0).r;
-    if (s < m.k.x && s > m.k.y) { best = max(best, dot((c - 0.5) * m.k.z, m.down.xyz) - s); }
+    if (s < m.k.x && s > m.k.y) { best = max(best, projection - s); }
   }
-  return vec4f(best, 0.0, 0.0, 1.0);
+  return best;
+}
+
+// A few columns from the actual grid supply a lower bound for its maximum.
+@fragment
+fn fs_seed(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let width = ceil(m.down.w / f32(BLOCK));
+  let xy = floor(pos.xy * m.down.w / width) + 0.5;
+  return vec4f(column(xy, -1e9), 0.0, 0.0, 1.0);
+}
+
+@fragment
+fn fs_rows(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  return vec4f(column(pos.xy, textureLoad(prior, vec2i(0), 0).r), 0.0, 0.0, 1.0);
 }
 
 // the largest of one block of columns (a block that runs past the last column takes the columns there are)

@@ -212,8 +212,9 @@ mod tests {
         let gpu = Gpu::headless("vulkan").expect("a GPU");
         let src = gpu.target("picture", 3840, 2160, wgpu::TextureFormat::Rgba8Unorm, &[]);
         let mut b = Backdrop::new(&gpu);
-        for levels in [3, 4, 5] {
-            let l = Look { levels, ..look(levels) };
+        // 5 levels spread 1 is the default at 4K; 6 levels spread 1 the blur slider's top
+        for (levels, spread) in [(3, 1.0), (4, 1.0), (5, 1.0), (6, 0.71), (6, 1.0)] {
+            let l = Look { levels, spread, ..look(levels) };
             for _ in 0..20 { b.make(&src, &l); }
             gpu.wait();
             let n = 400;
@@ -222,7 +223,7 @@ mod tests {
             for _ in 0..n { b.encode(&mut enc, &src, &l); }
             gpu.queue.submit([enc.finish()]);
             gpu.wait();
-            println!("backdrop at 3840x2160, {levels} levels: {:.4} ms a copy", t.elapsed().as_secs_f64() * 1e3 / n as f64);
+            println!("backdrop at 3840x2160, {levels} levels, spread {spread}: {:.4} ms a copy", t.elapsed().as_secs_f64() * 1e3 / n as f64);
         }
     }
 }

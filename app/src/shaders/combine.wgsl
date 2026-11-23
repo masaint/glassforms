@@ -30,6 +30,7 @@ struct C {
                             // layer's when the layers are placed far out); how many bodies
   wide: array<vec4f, 4>,    // per layer with a wide volume: its own volume is read up to x, the wide one
                             // beyond y, a mix between; z = voxels per side of the wide volume (0 = it has none)
+  dispatch_offset: vec4u,   // start of the writable slice range in a staged volume
 }
 
 @group(0) @binding(0) var<uniform> c: C;
@@ -184,15 +185,17 @@ fn cubic(tex: texture_3d<f32>, t: vec3f, res: f32) -> f32 {
 // placement, times its size. Beyond the few voxels in which a tube's own volume is exact, its wide volume
 // takes over. Outside its box: the value on the nearest point of the box with the distance to the box
 // added on, squared and summed (the shape lies inside the box, so it is at least that far).
-fn layer(t: texture_3d<f32>, tw: texture_3d<f32>, i: u32, p: vec3f) -> f32 {
-  let r0 = c.rows[3u * i];
-  let r1 = c.rows[3u * i + 1u];
-  let r2 = c.rows[3u * i + 2u];
-  let q = vec3f(dot(r0.xyz, p) + r0.w, dot(r1.xyz, p) + r1.w, dot(r2.xyz, p) + r2.w);
+@group(0) @binding(10) var<storage, read> occurrences: array<vec4f>;
+
+fn layerLocal(t: texture_3d<f32>, tw: texture_3d<f32>, i: u32, q: vec3f) -> f32 {
   let lim = c.info[i].y;
   let qc = clamp(q, vec3f(-lim), vec3f(lim));
   let at = qc / (2.0 * LAYER_HB) + 0.5;
   var d = textureSampleLevel(t, smp, at, 0.0).r;
+  let lres = f32(textureDimensions(t).x);
+  if (abs(d) < 18.0 * LAYER_HB / lres) {
+    d = cubic(t, at, lres);
+  }
   let w = c.wide[i];
   if (w.z > 0.0 && d > w.x) {
     let s = clamp((d - w.x) / (w.y - w.x), 0.0, 1.0);
@@ -204,7 +207,34 @@ fn layer(t: texture_3d<f32>, tw: texture_3d<f32>, i: u32, p: vec3f) -> f32 {
     let m = max(d, 0.0);
     d = sqrt(o2 + m * m);
   }
-  return c.info[i].x * d;
+  return d;
+}
+
+fn layer(t: texture_3d<f32>, tw: texture_3d<f32>, i: u32, p: vec3f) -> f32 {
+  if (c.wide[i].w > 0.0) {
+    let range = occurrences[i];
+    let h = vec4f(p, 1.0);
+    var best = 1e6;
+    var node = u32(range.x);
+    while (node < u32(range.y)) {
+      let lo = occurrences[node]; let hi = occurrences[node + 1u];
+      let outside = max(max(lo.xyz - p, p - hi.xyz), vec3f(0.0));
+      if (dot(outside, outside) > max(best, 0.0) * max(best, 0.0)) {
+        node = u32(lo.w); continue;
+      }
+      if (hi.w > 0.0) {
+        let q = vec3f(dot(occurrences[node+2u],h), dot(occurrences[node+3u],h), dot(occurrences[node+4u],h));
+        best = min(best, hi.w * layerLocal(t, tw, i, q));
+      }
+      node += 5u;
+    }
+    return best;
+  }
+  let r0 = c.rows[3u * i];
+  let r1 = c.rows[3u * i + 1u];
+  let r2 = c.rows[3u * i + 2u];
+  let q = vec3f(dot(r0.xyz, p) + r0.w, dot(r1.xyz, p) + r1.w, dot(r2.xyz, p) + r2.w);
+  return c.info[i].x * layerLocal(t, tw, i, q);
 }
 
 // each body's distance at the world point p (a body that does not exist: ABSENT)
@@ -305,12 +335,14 @@ fn fs_bodies(in: VOut) -> @location(0) vec4f {
 
 // computed: the whole volume in one dispatch
 @compute @workgroup_size(8, 8, 4)
-fn cs(@builtin(global_invocation_id) id: vec3u) {
+fn cs(@builtin(global_invocation_id) dispatch_id: vec3u) {
+  let id = dispatch_id + c.dispatch_offset.xyz;
   textureStore(outVol, id, vec4f(nearest(combine(point(vec2f(id.xy) + 0.5, (f32(id.z) + 0.5) / c.q.w))), 0.0, 0.0, 1.0));
 }
 // the scene's volume and the bodies' at once
 @compute @workgroup_size(8, 8, 4)
-fn cs_bodies(@builtin(global_invocation_id) id: vec3u) {
+fn cs_bodies(@builtin(global_invocation_id) dispatch_id: vec3u) {
+  let id = dispatch_id + c.dispatch_offset.xyz;
   let b = combine(point(vec2f(id.xy) + 0.5, (f32(id.z) + 0.5) / c.q.w));
   textureStore(outVol, id, vec4f(nearest(b), 0.0, 0.0, 1.0));
   textureStore(outBodies, id, b);
@@ -321,7 +353,8 @@ fn cs_bodies(@builtin(global_invocation_id) id: vec3u) {
 
 // the same for two bodies: the bodies' volume has two channels and is half the size
 @compute @workgroup_size(8, 8, 4)
-fn cs_bodies2(@builtin(global_invocation_id) id: vec3u) {
+fn cs_bodies2(@builtin(global_invocation_id) dispatch_id: vec3u) {
+  let id = dispatch_id + c.dispatch_offset.xyz;
   let b = combine(point(vec2f(id.xy) + 0.5, (f32(id.z) + 0.5) / c.q.w));
   textureStore(outVol, id, vec4f(nearest(b), 0.0, 0.0, 1.0));
   textureStore(outBodies2, id, vec4f(b.x, b.y, 0.0, 1.0));

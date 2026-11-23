@@ -1,0 +1,181 @@
+{
+ "boaty512": {
+  "about": "Boaty McBoatface (rev 3): a curvy glass boat of 512 parts (8 objects): ellipsoid hull with a sheer cut, cabin, rigging, rails, anchor, propeller; more N = more detail on the same boat",
+  "form": "Layers",
+  "setup": "boaty512.setup.json",
+  "in_setup": true,
+  "drag": {
+   "Part": {
+    "from": -1.17,
+    "index": 5,
+    "to": -1.29
+   }
+  },
+  "group": [
+   56,
+   7
+  ],
+  "app_cap": null,
+  "n_parts": 512
+ },
+ "obj8": {
+  "about": "8 separate studio shapes, set apart",
+  "form": "Layers",
+  "setup": null,
+  "in_setup": false,
+  "drag": {
+   "Object": {
+    "from": 0.0,
+    "index": 0,
+    "to": 0.15
+   }
+  },
+  "group": null,
+  "app_cap": null,
+  "n_parts": 0
+ },
+ "wide8": {
+  "about": "8 separate objects at nearly full size, set well apart (stage grown)",
+  "form": "Layers",
+  "setup": null,
+  "in_setup": false,
+  "drag": {
+   "Object": {
+    "from": 0.0,
+    "index": 0,
+    "to": 0.15
+   }
+  },
+  "group": null,
+  "app_cap": null,
+  "n_parts": 0
+ },
+ "owner_volume": {
+  "about": "the owner's 5 attractors as placed, traced from their volumes (no trace=csg): the owner-like scene while the app draws owner.toml empty (verify_owner)",
+  "form": "Layers",
+  "setup": "owner_volume.setup.json",
+  "in_setup": false,
+  "drag": {
+   "Object": {
+    "from": 0.0,
+    "index": 4,
+    "to": 0.4
+   }
+  },
+  "group": null,
+  "app_cap": null,
+  "n_parts": 0
+ },
+ "objtree8": {
+  "about": "8 separate objects, each a tree of three formula parts",
+  "form": "Layers",
+  "setup": null,
+  "in_setup": false,
+  "drag": {
+   "Object": {
+    "from": 0.0,
+    "index": 0,
+    "to": 0.15
+   }
+  },
+  "group": null,
+  "app_cap": null,
+  "n_parts": 0
+ },
+ "lib_chamfer": {
+  "about": "chamfer join between two separate objects (layers joined, bevel profile)",
+  "form": "Layers",
+  "setup": null,
+  "in_setup": false,
+  "drag": {
+   "Object": {
+    "from": 0.0,
+    "index": 1,
+    "to": 0.2
+   }
+  },
+  "group": null,
+  "app_cap": null,
+  "n_parts": 0
+ },
+ "lib_array": {
+  "about": "array repeat: eight balls in a ring (one shape repeated)",
+  "form": "Shape",
+  "setup": null,
+  "in_setup": false,
+  "drag": {
+   "Slider": {
+    "from": 0.95,
+    "name": "p.radius",
+    "to": 0.8
+   }
+  },
+  "group": null,
+  "app_cap": null,
+  "n_parts": 0
+ },
+ "lib_array_grid": {
+  "about": "array repeat in a grid: 3 x 2 x 2 balls, rows staggered",
+  "form": "Shape",
+  "setup": null,
+  "in_setup": false,
+  "drag": {
+   "Slider": {
+    "from": 0.95,
+    "name": "p.radius",
+    "to": 0.8
+   }
+  },
+  "group": null,
+  "app_cap": null,
+  "n_parts": 0
+ },
+ "lib_bend": {
+  "about": "bend domain warp: a capsule curled 140 degrees",
+  "form": "Shape",
+  "setup": null,
+  "in_setup": false,
+  "drag": {
+   "Slider": {
+    "from": 0.38,
+    "name": "p.radius",
+    "to": 0.3
+   }
+  },
+  "group": null,
+  "app_cap": null,
+  "n_parts": 0
+ },
+ "lib_twist": {
+  "about": "twist domain warp: a tall block twisted 180 degrees",
+  "form": "Shape",
+  "setup": null,
+  "in_setup": false,
+  "drag": {
+   "Slider": {
+    "from": 0.75,
+    "name": "p.width",
+    "to": 0.6
+   }
+  },
+  "group": null,
+  "app_cap": null,
+  "n_parts": 0
+ },
+ "tree1": {
+  "about": "one object: a tree of 1 formula parts",
+  "form": "Tree",
+  "setup": null,
+  "in_setup": false,
+  "drag": {
+   "Slider": {
+    "from": 1.1,
+    "name": "p.width",
+    "to": 0.9
+   }
+  },
+  "group": null,
+  "app_cap": null,
+  "n_parts": 0
+ }
+}

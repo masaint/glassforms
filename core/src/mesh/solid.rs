@@ -380,6 +380,14 @@ impl Tree {
         Tree { nodes, tris }
     }
 
+    /// Bounds and child/triangle ranges in the same order used by the CPU nearest-point query.
+    pub fn node_words(&self) -> impl Iterator<Item = [u32; 8]> + '_ {
+        self.nodes.iter().map(|n| [
+            n.lo[0].to_bits(), n.lo[1].to_bits(), n.lo[2].to_bits(), n.first,
+            n.hi[0].to_bits(), n.hi[1].to_bits(), n.hi[2].to_bits(), n.count,
+        ])
+    }
+
     fn box_dist2(n: &Node, p: V3) -> f32 {
         let mut d = 0.0;
         for a in 0..3 {

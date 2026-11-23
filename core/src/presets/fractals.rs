@@ -25,21 +25,7 @@ use super::solids::{FINE, TURN};
 const FIT: f64 = 1.22;
 
 type V = [f64; 3];
-fn dot(a: V, b: V) -> f64 { a[0] * b[0] + a[1] * b[1] + a[2] * b[2] }
-fn sub(a: V, b: V) -> V { [a[0] - b[0], a[1] - b[1], a[2] - b[2]] }
-fn scale(a: V, s: f64) -> V { [a[0] * s, a[1] * s, a[2] * s] }
-fn unit(a: V) -> V { scale(a, 1.0 / dot(a, a).sqrt()) }
-
-/// The starting orientation that shows a shape, upright in its own frame, turned by `want` (degrees about
-/// x, y, z), when the shape is drawn turned by TURN inside its formula (as the cube-aligned ones are, to
-/// keep their edges off the planes x = y and the like, which run through the centres of voxels).
-fn view(want: [f64; 3]) -> [f64; 3] {
-    use crate::math::{axis_angle, euler_of, mul, DEG};
-    let t = [TURN[0][0], TURN[1][0], TURN[2][0], TURN[0][1], TURN[1][1], TURN[2][1], TURN[0][2], TURN[1][2], TURN[2][2]];
-    let shown = mul(&axis_angle(0.0, 0.0, 1.0, want[2] * DEG), &mul(&axis_angle(1.0, 0.0, 0.0, want[0] * DEG), &axis_angle(0.0, 1.0, 0.0, want[1] * DEG)));
-    let e = euler_of(&mul(&shown, &t));
-    e.map(|a| (a * 10.0).round() / 10.0)
-}
+use crate::math::{dot, scale, sub, unit};
 
 /// WGSL taking a point of the volume into the shape's upright frame (TURN undone).
 fn unturn() -> String {
@@ -134,19 +120,20 @@ fn raw(p: vec3f) -> f32 {
   let c = vec4f(pr.cr, pr.ci, pr.cj, pr.ck);
   let dp = depth(pr.depth, 11.0);
   var z = vec4f(p / JULIA_S, pr.slice);
+  // Only the last two levels contribute, and an integral depth needs only its own.
   var dz = vec4f(1.0, 0.0, 0.0, 0.0);
   var r = length(z);
-  var d0 = julia_est(r, 1.0, p / JULIA_S);
-  var d1 = d0;
-  for (var i = 0; i < 12; i++) {
-    if (i > dp.k) { break; }
-    if (r > 256.0) { break; }                // gone: the estimate no longer changes
+  for (var i = 0; i < dp.k && r <= 256.0; i++) {
     dz = 2.0 * qmul(z, dz);
     z = qmul(z, z) + c;
     r = length(z);
-    let d = julia_est(r, length(dz), p / JULIA_S);
-    if (i + 1 <= dp.k) { d0 = d; }
-    d1 = d;
+  }
+  let d0 = julia_est(r, length(dz), p / JULIA_S);
+  var d1 = d0;
+  if (dp.t > 0.0 && r <= 256.0) {
+    dz = 2.0 * qmul(z, dz);
+    z = qmul(z, z) + c;
+    d1 = julia_est(length(z), length(dz), p / JULIA_S);
   }
   // the glass is the set with a skin about it: detail finer than the skin is filled
   return mix(d0, d1, dp.t) * JULIA_S - pr.skin;
@@ -167,24 +154,19 @@ fn raw(p0: vec3f) -> f32 {
   let m2 = pr.inner * pr.inner;
   var z = c;
   var dr = 1.0;
-  var d0 = length(z) - reach;
-  var d1 = d0;
-  for (var i = 0; i < 12; i++) {
-    if (i > dp.k) { break; }
-    // fold at the faces of the cube |x| = f, then turn inside out in the ball of radius 1, keeping the
-    // innermost ball (radius `inner`) as it is
-    z = clamp(z, vec3f(-f), vec3f(f)) * 2.0 - z;
-    let r2 = dot(z, z);
-    let k = select(select(1.0, 1.0 / r2, r2 < 1.0), 1.0 / m2, r2 < m2);
+  // Only the last complete orbit and the optional fractional step have any weight.
+  let last = dp.k + select(0, 1, dp.t > 0.0);
+  var d0 = 0.0;
+  for (var i = 0; i < last; i++) {
+    z = 2.0 * clamp(z, vec3f(-f), vec3f(f)) - z;
+    let k = 1.0 / clamp(dot(z, z), m2, 1.0);
     z *= k;
     dr *= k;
     z = s * z + c;
     dr = dr * abs(s) + 1.0;
-    // the distance estimate |z| / |dz| (a point whose orbit stays near is at almost 0)
-    let d = length(z) / abs(dr);
-    if (i + 1 <= dp.k) { d0 = d; }
-    d1 = d;
+    if (i + 1 == dp.k) { d0 = length(z) / dr; }
   }
+  let d1 = length(z) / dr;
   // the glass is the set with a skin about it: detail finer than the skin is filled
   return mix(d0, d1, dp.t) * (BOX_FIT / reach) - pr.skin;
 }";
@@ -338,14 +320,19 @@ fn ap_sphere(s: vec4f, d: vec4f) -> vec4f {
   return vec4f(d.xyz + e * k, s.w * k);
 }
 // signed distance from p to the glass of the sphere s, made smaller (or the hole larger) by the gap
-fn ap_dist(p: vec3f, s: vec4f) -> f32 {
-  let l = length(p - s.xyz);
-  return select(abs(s.w) * (1.0 + pr.gap) - l, l - s.w * (1.0 - pr.gap), s.w > 0.0);
+fn ap_distance(p: vec3f, s: vec4f) -> vec4f {
+  let delta = p - s.xyz;
+  let l = length(delta);
+  let d = select(abs(s.w) * (1.0 + pr.gap) - l, l - s.w * (1.0 - pr.gap), s.w > 0.0);
+  return vec4f(delta * (sign(s.w) / max(l, 1e-12)), d);
 }
-// how far the region (a sphere, signed radius: below 0 = all outside it) is from p; 0 inside it
-fn ap_near(p: vec3f, s: vec4f) -> f32 {
-  let l = length(p - s.xyz);
-  return max(select(-s.w - l, l - s.w, s.w > 0.0), 0.0);
+// A signed sphere bounds every ball below this gap. Reject it before constructing the ball.
+fn ap_outside(p: vec3f, s: vec4f, best: f32) -> bool {
+  let delta = p - s.xyz;
+  let d2 = dot(delta, delta);
+  if (s.w > 0.0) { let r = s.w + best; return d2 >= r*r; }
+  let r = -s.w - best;
+  return r >= 0.0 && d2 <= r*r;
 }
 // the ball a node of the tree adds: the sphere its last turn moves (s_m, or for the middle sphere the unit
 // sphere, whose outside then becomes a ball), turned, and taken back through the turns before it
@@ -358,7 +345,35 @@ fn ap_ball(m: i32) -> vec4f {
     default: { return vec4f(0.0, 0.0, 0.0, -1.0); }
   }
 }
-fn raw(p: vec3f) -> f32 {
+struct ApNearest { full: vec4f, extra: vec4f }
+";
+    // The maximum is five generations. Give each level its own register for each ancestor
+    // inversion; tracing a sample no longer maintains a dynamically indexed private stack.
+    for level in (1..=5).rev() {
+        let ancestors = (1..level).map(|i| format!(", d{i}: vec4f")).collect::<String>();
+        writeln!(w, "fn ap_level{level}(q: vec3f, whole: i32, depth: i32, previous: i32, best: ptr<function, ApNearest>{ancestors}) {{").unwrap();
+        w += "  for (var m = 0; m < 5; m++) {
+    if ((*best).full.w <= 0.0) { return; }
+    if (m == previous) { continue; }
+    let dm = ap_dual(m);
+    var gap = vec4f(dm.xyz, sqrt(dm.w));
+";
+        for i in (1..level).rev() { writeln!(w, "    gap = ap_sphere(gap, d{i});").unwrap(); }
+        w += "    if (ap_outside(q, gap, (*best).full.w)) { continue; }
+    var ball = ap_sphere(ap_ball(m), dm);
+";
+        for i in (1..level).rev() { writeln!(w, "    ball = ap_sphere(ball, d{i});").unwrap(); }
+        writeln!(w, "    let hit = ap_distance(q, ball);
+    if (hit.w < (*best).extra.w) {{ (*best).extra = hit; }}
+    if ({level} <= whole && hit.w < (*best).full.w) {{ (*best).full = hit; }}").unwrap();
+        if level < 5 {
+            let args = (1..level).map(|i| format!(", d{i}")).collect::<String>();
+            writeln!(w, "    if (depth > {level}) {{ ap_level{}(q, whole, depth, m, best{args}, dm); }}", level + 1).unwrap();
+        }
+        w += "  }\n}\n";
+    }
+    w += "
+fn ap_result(p: vec3f) -> vec4f {
   // raw: a distance
   // The packing is a tree: the first four balls; under them five gaps, each filled by a ball (the fifth
   // sphere turned inside out in the sphere over the gap); each new ball leaves four gaps, filled the same
@@ -369,46 +384,22 @@ fn raw(p: vec3f) -> f32 {
   let lv = clamp(pr.depth, 0.0, 5.0);
   let kk = i32(floor(lv));
   let t = lv - f32(kk);
-  // (far from every ball the distance need not be exact: held to a bound, which keeps the search short)
-  var bestK = min(min(ap_dist(q, AP_B0), ap_dist(q, AP_B1)), min(ap_dist(q, AP_B2), ap_dist(q, AP_B3)));
-  bestK = min(bestK, 0.1);
-  var best1 = bestK;
-  var chain: array<i32, 8>;
-  var next: array<i32, 8>;
-  var n = 0;
-  next[0] = 0;
-  for (var guard = 0; guard < 2048; guard++) {
-    let m = next[n];
-    if (m >= 5) {
-      if (n == 0) { break; }
-      n--;
-      continue;
-    }
-    next[n] = m + 1;
-    if (n > 0 && m == chain[n - 1]) { continue; }         // back the way it came
-    if (n > kk) { continue; }                              // deeper than the depth asked for (and one more)
-    // the gap's sphere, where it really is: a bound on all below it
-    let dm = ap_dual(m);
-    var reg = vec4f(dm.xyz, sqrt(dm.w));
-    var ball = ap_sphere(ap_ball(m), dm);
-    for (var c = n - 1; c >= 0; c--) {
-      let dc = ap_dual(chain[c]);
-      reg = ap_sphere(reg, dc);
-      ball = ap_sphere(ball, dc);
-    }
-    if (ap_near(q, reg) >= bestK) { continue; }
-    let d = ap_dist(q, ball);
-    best1 = min(best1, d);
-    if (n < kk) { bestK = min(bestK, d); }
-    // down into its gaps
-    if (n < kk) {
-      chain[n] = m;
-      n++;
-      next[n] = 0;
-    }
+  // (far from every ball the distance need not be exact: held to a bound, which keeps the search short;
+  // the tracer's copy, told of a voxel four times finer, reads only right by the surface, and holds it shorter)
+  let cap = select(0.1, 0.02, u.res > 1600.0);
+  var bestK = vec4f(0.0, 1.0, 0.0, cap);
+  for (var i = 0; i < 4; i++) {
+    let hit = ap_distance(q, ap_ball(i));
+    bestK = select(bestK, hit, hit.w < bestK.w);
   }
-  return mix(bestK, best1, t) * AP_S;
-}";
+  var best = ApNearest(bestK, bestK);
+  let deepest = i32(ceil(lv));
+  if (deepest > 0) { ap_level1(q, kk, deepest, -1, &best); }
+  let hit = mix(best.full, best.extra, t);
+  return vec4f(hit.xyz, hit.w * AP_S);
+}
+fn raw(p: vec3f) -> f32 { return ap_result(p).w; }
+fn rawGrad(p: vec3f) -> vec4f { return ap_result(p); }";
     w
 }
 
@@ -416,7 +407,14 @@ fn raw(p: vec3f) -> f32 {
 
 fn presets() -> Vec<Preset> {
     vec![
-        frac(Frac {
+        // The Mandelbulb puts many glass surfaces in a ray's path, and following faint light through all of them
+        // took most of the frame (18.1 ms p80 at 4K): paths inside end below a tenth, light leaving faintly sees
+        // the lights at once, light leaving is followed through one further piece, not two, and rays step 0.95
+        // of the distance, as most families' do: the same by eye (_r17_gensfix/shots/look). The Apollonian
+        // packing and the sponge, through whose pieces one sees further pieces, keep the family's.
+        Preset {
+            budget: Budget { layers: Some(1), thr_cut: Some(0.1), leave_cut: Some(true), step_scale: Some(0.95) },
+            ..frac(Frac {
             id: "mandelbulb", name: "Mandelbulb",
             eq: &["z ↦ zⁿ + c,  z = (r, θ, φ) ↦ (rⁿ, nθ, nφ)", "the level |z_N| = 2 after N steps"],
             note: "White and Nylander’s three-dimensional Mandelbrot set (2009): raising a point to a power multiplies its angles and powers its distance. Each step adds a ring of buds to the buds before. The glass is the set with a skin about it: thin, every bud shows; thick, they melt into a ball.",
@@ -427,9 +425,10 @@ fn presets() -> Vec<Preset> {
             ],
             rot: [-75.0, 20.0, 0.0],
             animate: "skin",
-            wgsl: format!("const BULB_S: f32 = {:.4};\n{DEPTH}{MANDELBULB}", FIT / 1.14),
+            wgsl: format!("// csg: the formula at the first surface only\nconst BULB_S: f32 = {:.4};\n{DEPTH}{MANDELBULB}", FIT / 1.14),
             clip: "length(p) - 1.38",
-        }),
+        })
+        },
         frac(Frac {
             id: "mandelbox", name: "Mandelbox",
             eq: &["z ↦ s·ball(box(z)) + c", "box: fold at |x| = f;  ball: z ↦ z ⁄ |z|² inside |z| = 1"],
@@ -482,7 +481,7 @@ fn presets() -> Vec<Preset> {
             ],
             rot: [20.0, 28.0, 0.0],
             animate: "depth",
-            wgsl: format!("const AP_S: f32 = {FIT:.4};\n{}", apollonian()),
+            wgsl: format!("// csg: the formula at the first surface only\nconst AP_S: f32 = {FIT:.4};\n{}", apollonian()),
             clip: "-1.0",
         }),
         frac(Frac {
@@ -506,10 +505,6 @@ fn presets() -> Vec<Preset> {
     ]
 }
 
-fn light(az: f64, el: f64, w: f64, h: f64, rgb: [f64; 3], soft: f64) -> Light {
-    Light { az, el, w, h, rgb, soft }
-}
-
 pub fn family() -> Family {
     Family {
         step_scale: 0.85,
@@ -524,14 +519,7 @@ pub fn family() -> Family {
             ("spin", Setting::Num(0.25)), ("bloom", Setting::Num(0.35)), ("exposure", Setting::Num(1.0)),
         ],
         // the minimal surfaces' lights: broad and soft, with the cold and warm ones either side
-        lights: vec![
-            light(38.0, 18.0, 14.0, 32.0, [5.0, 4.9, 4.7], 0.7),
-            light(-55.0, -8.0, 10.0, 42.0, [0.5, 1.4, 4.0], 0.7),
-            light(-140.0, 5.0, 8.0, 42.0, [5.0, 1.6, 0.25], 0.7),
-            light(150.0, 28.0, 24.0, 16.0, [3.2, 3.1, 3.0], 0.8),
-            light(0.0, 85.0, 34.0, 34.0, [0.8, 0.9, 1.1], 0.9),
-            light(0.0, -80.0, 30.0, 30.0, [0.5, 0.22, 0.05], 0.9),
-        ],
+        lights: surface_lights(),
         ..Family::new("fractals", "Fractals", Kind::Field)
     }
 }

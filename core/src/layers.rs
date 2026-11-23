@@ -38,8 +38,22 @@ use serde::{Deserialize, Serialize};
 use crate::math::{euler, transpose};
 use crate::HB;
 
-/// The most generators that can be up at once.
-pub const MAX_LAYERS: usize = 4;
+/// The most layers (scene objects) a scene can have. Past COMBINE_WIDTH the combining step runs in passes
+/// (`Stack::pass_plan`); see docs/project-notes/plans/layer_limit.md for what each one costs.
+pub const MAX_LAYERS: usize = 8;
+/// The most layers the scene's description can hold: masks, combination tags, knob keys and the
+/// combining passes (`Stack::passes`). Setups are read up to MAX_LAYERS layers.
+pub const MAX_SCENE_LAYERS: usize = 16;
+/// A set of layers, one bit each.
+pub type Mask = u16;
+/// How many layers one combining pass works on, and the most layers booleans may hold in one body: the
+/// arithmetic below (u2, u3, u4), the shader's vec4 distances, the bodies' four channels and the
+/// per-body material slots are all this wide. Bodies are packed into passes; passes do not interact.
+pub const COMBINE_WIDTH: usize = 4;
+const W: usize = COMBINE_WIDTH;
+const _: () = assert!(COMBINE_WIDTH <= MAX_LAYERS && MAX_LAYERS <= MAX_SCENE_LAYERS);
+const _: () = assert!(MAX_SCENE_LAYERS <= Mask::BITS as usize);
+const _: () = assert!(COMBINE_WIDTH == crate::material::MAX_BODIES && COMBINE_WIDTH == crate::cast::MAX_BODIES);
 /// A combined scene is cut to a ball of this radius (the tracer looks no further than 1.47 from the
 /// centre), with an edge rounded over this distance. Shapes are fitted within 1.4, so one that has not
 /// been moved is not touched by it.
@@ -104,12 +118,20 @@ impl Placement {
 #[serde(default)]
 pub struct Layer {
     pub place: Placement,
+    #[serde(default, skip_serializing_if = "zero_origin")]
+    pub local_origin: [f64; 3],
+    /// Point used to place this member in World arrangements. Older scenes
+    /// used the fixed local origin for both the gizmo and the arrangement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arrangement_anchor: Option<[f64; 3]>,
     /// it shows as a solid itself (a hidden layer still cuts and masks the others)
     pub show: bool,
 }
+fn zero_origin(p: &[f64; 3]) -> bool { *p == [0.0; 3] }
+
 impl Default for Layer {
     fn default() -> Self {
-        Self { place: Placement::default(), show: true }
+        Self { place: Placement::default(), local_origin: [0.0; 3], arrangement_anchor: None, show: true }
     }
 }
 
@@ -267,23 +289,32 @@ impl Opt {
 // ---- combinations: sets of two, three or four layers, as a mask of their places in the list -----------
 
 /// The layers of a combination, lowest first.
-pub fn members(mask: u8) -> Vec<usize> {
-    (0..MAX_LAYERS).filter(|i| mask & (1 << i) != 0).collect()
+pub fn members(mask: Mask) -> Vec<usize> {
+    (0..MAX_SCENE_LAYERS).filter(|i| mask & (1 << i) != 0).collect()
 }
-pub fn mask_of(layers: &[usize]) -> u8 {
+pub fn mask_of(layers: &[usize]) -> Mask {
     layers.iter().fold(0, |m, i| m | (1 << i))
 }
 /// A combination as it is written in knob keys, setups and on the command line: its layers' numbers,
-/// counted from 1 ("12", "134", "1234").
-pub fn tag(mask: u8) -> String {
-    members(mask).iter().map(|i| char::from(b'1' + *i as u8)).collect()
+/// counted from 1 ("12", "134", "1234"). One digit a layer while every layer is below 10, as every
+/// scene of up to nine layers always was; otherwise the numbers with commas between ("3,12").
+pub fn tag(mask: Mask) -> String {
+    let m = members(mask);
+    if m.iter().all(|i| *i < 9) {
+        m.iter().map(|i| char::from(b'1' + *i as u8)).collect()
+    } else {
+        m.iter().map(|i| (i + 1).to_string()).collect::<Vec<_>>().join(",")
+    }
 }
-pub fn parse_tag(s: &str) -> Option<u8> {
-    let mut mask = 0u8;
-    let mut last = 0;
-    for ch in s.chars() {
-        let d = ch.to_digit(10)? as usize;
-        if d < 1 || d > MAX_LAYERS || d <= last { return None; }
+pub fn parse_tag(s: &str) -> Option<Mask> {
+    let numbers: Vec<usize> = if s.contains(',') {
+        s.split(',').map(|t| t.parse::<usize>().ok()).collect::<Option<_>>()?
+    } else {
+        s.chars().map(|ch| ch.to_digit(10).map(|d| d as usize)).collect::<Option<_>>()?
+    };
+    let (mut mask, mut last) = (0 as Mask, 0);
+    for d in numbers {
+        if d < 1 || d > MAX_SCENE_LAYERS || d <= last { return None; }
         mask |= 1 << (d - 1);
         last = d;
     }
@@ -293,12 +324,25 @@ pub fn parse_tag(s: &str) -> Option<u8> {
 /// The layers and every combination's options.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Stack {
+    pub names: BTreeMap<usize, String>,
+    /// Transient measured World pivots, in true scene coordinates.
+    pub world_pivots: std::collections::HashMap<(crate::groups::Item, usize), [f64; 3]>,
+    /// Intrinsic source extents for sizing World deformation workspaces.
+    pub world_source_bounds: [Option<crate::mods::Box3>; MAX_LAYERS],
+    /// How far from its origin each object's shape is known to reach (`State::fit_world_sources`): a
+    /// shape with no modifiers of its own is fitted within `world_mods::FIT_REACH`. None: not known
+    /// (then only its box bounds it).
+    pub world_source_reach: [Option<f64>; MAX_LAYERS],
+    pub world_field_bounds: crate::world_mods::FieldBounds,
+    pub world_mass_points: std::collections::HashMap<crate::world_mods::MassQuery,[f64;3]>,
+    pub world_mods: BTreeMap<usize, crate::mods::Mods>,
+    pub hierarchy: Option<crate::groups::Hierarchy>,
     pub layers: Vec<Layer>,
     /// the layer the shape picker and its sliders act on
     pub sel: usize,
     /// options are kept from the moment they are first changed; until then a combination has the defaults
-    pairs: BTreeMap<u8, PairOpts>,
-    junctions: BTreeMap<u8, JunctionOpts>,
+    pairs: BTreeMap<Mask, PairOpts>,
+    junctions: BTreeMap<Mask, JunctionOpts>,
     /// The stage's size the volumes are built for, while it lags the size the layers ask for (`box_k`):
     /// a live view keeps the old size until the tracer for the new one is ready, then changes both
     /// together. None: the size asked for, at once (stills and videos, which wait for every tracer).
@@ -314,6 +358,12 @@ impl Default for Stack {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StackSetup {
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub names: BTreeMap<usize, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub world_mods: BTreeMap<usize, crate::mods::Mods>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hierarchy: Option<crate::groups::Hierarchy>,
     pub layers: Vec<Layer>,
     pub selected: usize,
     /// by tag: "12", "13", ...
@@ -325,7 +375,7 @@ pub struct StackSetup {
 impl Stack {
     /// One layer, placed as it is built.
     pub fn new() -> Self {
-        Self { layers: vec![Layer::default()], sel: 0, pairs: BTreeMap::new(), junctions: BTreeMap::new(), box_held: None }
+        Self { names: BTreeMap::new(), world_mass_points: Default::default(), world_field_bounds: Default::default(), world_source_bounds: Default::default(), world_source_reach: Default::default(), world_pivots: Default::default(), world_mods: BTreeMap::new(), hierarchy: None, layers: vec![Layer::default()], sel: 0, pairs: BTreeMap::new(), junctions: BTreeMap::new(), box_held: None }
     }
     pub fn len(&self) -> usize {
         self.layers.len()
@@ -335,12 +385,15 @@ impl Stack {
     }
     /// One layer that shows, where it was built: nothing to combine, the layer's own volume is the scene.
     pub fn plain(&self) -> bool {
-        self.layers.len() == 1 && self.layers[0].show && self.layers[0].place.is_identity()
+        !self.has_world_modifiers() && self.layers.len() == 1 && self.layers[0].show && self.layers[0].place.is_identity()
     }
     /// Add a layer at the end. None if there are four already.
     pub fn add(&mut self) -> Option<usize> {
         if self.layers.len() >= MAX_LAYERS { return None; }
+        if let Some(h) = &mut self.hierarchy { h.0.push(crate::groups::Node::Object(self.layers.len())); }
         self.layers.push(Layer::default());
+        // (past COMBINE_WIDTH a new layer joins only what leaves no body wider than that)
+        self.keep_bodies_narrow();
         Some(self.layers.len() - 1)
     }
     /// Every combination the present layers make: the pairs, then the triples, then the quad.
@@ -353,6 +406,32 @@ impl Stack {
     }
     /// How many times larger than ever the stage would have to be, exactly (not yet in steps).
     pub fn box_need(&self) -> f64 {
+        if self.has_world_modifiers() {
+            let plan = self.world_plan();
+            let domains: Vec<_> = plan.fields.iter().enumerate().map(|(id, field)| {
+                field.mods.any_live().then(|| plan.field_domain(id,
+                    self.world_source_bounds[field.source].unwrap_or_else(crate::mods::whole_box)
+                ))
+            }).collect();
+            let mut need = 1.0_f64;
+            let radius = |p: [f64; 3]| p.iter().map(|v| v*v).sum::<f64>().sqrt();
+            for (source, places) in plan.placements.iter().enumerate() {
+                for (ordinal, &placement) in places.iter().enumerate() {
+                    need = need.max((radius(placement.pos) + 1.4 * placement.size.abs()) / STAGE_R);
+                    let id = plan.field_ids.get(source).and_then(|ids| ids.get(ordinal));
+                    if let Some((b, _, reach)) = id.and_then(|&id| domains[id]) {
+                        // Find the farthest corner from the stage centre in the local
+                        // frame. The placement's uniform scale preserves radial distance.
+                        // (no farther than the field's reach from its origin, wherever that stands)
+                        let inv = placement.inverse();
+                        let origin = [inv[3], inv[7], inv[11]];
+                        let extent = std::array::from_fn(|k| (b[k] - origin[k]).abs().max((b[k+3] - origin[k]).abs()));
+                        need = need.max(placement.size.abs() * radius(extent).min(reach + radius(origin)) / STAGE_R);
+                    }
+                }
+            }
+            return need;
+        }
         self
             .layers
             .iter()
@@ -366,30 +445,34 @@ impl Stack {
     pub fn box_now(&self) -> f64 {
         self.box_held.unwrap_or_else(|| self.box_k())
     }
-    pub fn combos(&self) -> Vec<u8> {
-        let all = (1u8 << self.layers.len()) - 1;
-        let mut v: Vec<u8> = (1..=all).filter(|m| m.count_ones() >= 2).collect();
+    pub fn combos(&self) -> Vec<Mask> {
+        let all = ((1u32 << self.layers.len()) - 1) as Mask;
+        // (past COMBINE_WIDTH layers: every pair, but triples and quads only within one body, where the
+        // arithmetic joins them; up to COMBINE_WIDTH every set is offered, as always)
+        let bodies = (self.layers.len() > W).then(|| self.bodies());
+        let within = |m: Mask| m.count_ones() == 2 || bodies.as_ref().is_none_or(|b| b.iter().any(|g| m & !g == 0));
+        let mut v: Vec<Mask> = (1..=all).filter(|m| m.count_ones() >= 2 && within(*m)).collect();
         v.sort_by_key(|m| (m.count_ones(), members(*m)));
         v
     }
-    fn valid(&self, mask: u8) -> bool {
+    fn valid(&self, mask: Mask) -> bool {
         mask.count_ones() >= 2 && (mask as usize) < (1usize << self.layers.len())
     }
-    pub fn pair(&self, mask: u8) -> PairOpts {
+    pub fn pair(&self, mask: Mask) -> PairOpts {
         self.pairs.get(&mask).copied().unwrap_or_default()
     }
     /// A pair's options, to change. None unless `mask` names two of the present layers.
-    pub fn pair_mut(&mut self, mask: u8) -> Option<&mut PairOpts> {
+    pub fn pair_mut(&mut self, mask: Mask) -> Option<&mut PairOpts> {
         (self.valid(mask) && mask.count_ones() == 2).then(|| self.pairs.entry(mask).or_default())
     }
-    pub fn junction(&self, mask: u8) -> JunctionOpts {
+    pub fn junction(&self, mask: Mask) -> JunctionOpts {
         self.junctions.get(&mask).copied().unwrap_or_default()
     }
-    pub fn junction_mut(&mut self, mask: u8) -> Option<&mut JunctionOpts> {
+    pub fn junction_mut(&mut self, mask: Mask) -> Option<&mut JunctionOpts> {
         (self.valid(mask) && mask.count_ones() >= 3).then(|| self.junctions.entry(mask).or_default())
     }
     /// A numeric option of a combination, by name. None if the combination has no such option.
-    pub fn opt(&self, mask: u8, o: Opt) -> Option<f64> {
+    pub fn opt(&self, mask: Mask, o: Opt) -> Option<f64> {
         match (mask.count_ones(), o) {
             (2, Opt::Radius) => Some(self.pair(mask).radius),
             (2, Opt::Gap) => Some(self.pair(mask).gap),
@@ -399,7 +482,7 @@ impl Stack {
             _ => None,
         }
     }
-    pub fn set_opt(&mut self, mask: u8, o: Opt, v: f64) -> bool {
+    pub fn set_opt(&mut self, mask: Mask, o: Opt, v: f64) -> bool {
         match o {
             Opt::Radius | Opt::Gap | Opt::Amount => match self.pair_mut(mask) {
                 Some(p) => {
@@ -431,13 +514,21 @@ impl Stack {
     /// Every combination's options go with its layers; a pair whose two layers change order is the same
     /// relation named the other way round.
     pub fn remap(&mut self, to: &[Option<usize>]) {
+        self.names = std::mem::take(&mut self.names).into_iter()
+            .filter_map(|(i, name)| Some(((*to.get(i)?)?, name))).collect();
+        self.world_pivots.clear();
+        self.world_field_bounds.clear();
+        self.world_source_bounds = Default::default();
+        self.world_mass_points.clear();
+        self.world_mods = std::mem::take(&mut self.world_mods).into_iter()
+            .filter_map(|(i, mods)| Some(((*to.get(i)?)?, mods))).collect();
         let n = to.iter().flatten().count();
         let mut layers = vec![Layer::default(); n];
         for (i, l) in self.layers.iter().enumerate() {
             if let Some(Some(j)) = to.get(i) { layers[*j] = *l; }
         }
-        let moved = |mask: u8| -> Option<u8> {
-            let mut m = 0u8;
+        let moved = |mask: Mask| -> Option<Mask> {
+            let mut m = 0 as Mask;
             for i in members(mask) {
                 m |= 1 << (*to.get(i)?)?;
             }
@@ -456,6 +547,7 @@ impl Stack {
         }
         let junctions = self.junctions.iter().filter_map(|(mask, o)| moved(*mask).map(|m| (m, *o))).collect();
         self.sel = to.get(self.sel).copied().flatten().unwrap_or_else(|| self.sel.min(n.saturating_sub(1)));
+        if let Some(h) = &mut self.hierarchy { h.remap(to); }
         self.layers = layers;
         self.pairs = pairs;
         self.junctions = junctions;
@@ -476,6 +568,9 @@ impl Stack {
 
     pub fn to_setup(&self) -> StackSetup {
         StackSetup {
+            names: self.names.clone(),
+            world_mods: self.world_mods.iter().filter(|(_, s)| !s.is_empty()).map(|(i, s)| (*i, s.clone())).collect(),
+            hierarchy: self.hierarchy.clone(),
             layers: self.layers.clone(),
             selected: self.sel,
             pairs: self.pairs.iter().map(|(m, o)| (tag(*m), *o)).collect(),
@@ -485,7 +580,12 @@ impl Stack {
     /// The stack a setup describes; combinations that name layers it does not have are dropped.
     pub fn from_setup(s: &StackSetup) -> Stack {
         let mut st = Stack::new();
+        st.hierarchy = s.hierarchy.clone();
+        st.world_mods = s.world_mods.clone();
+        st.world_mods.retain(|i, m| *i < s.layers.len().min(MAX_LAYERS) && !m.is_empty());
         st.layers = s.layers.iter().take(MAX_LAYERS).copied().collect();
+        st.names = s.names.iter().filter(|(i, name)| **i < st.layers.len() && !name.is_empty())
+            .map(|(&i, name)| (i, name.clone())).collect();
         if st.layers.is_empty() { st.layers.push(Layer::default()); }
         st.sel = s.selected.min(st.layers.len() - 1);
         for (t, o) in &s.pairs {
@@ -494,15 +594,101 @@ impl Stack {
         for (t, o) in &s.junctions {
             if let Some(j) = parse_tag(t).and_then(|m| st.junction_mut(m)) { *j = *o; }
         }
+        st.keep_bodies_narrow();
         st
+    }
+
+    /// Whether a pair's operation may be set: not when it would join a body of more than COMBINE_WIDTH
+    /// layers (the combining arithmetic joins at most that many; bodies beyond are kept apart).
+    pub fn op_allowed(&self, mask: Mask, op: Op) -> bool {
+        if op == Op::Apart || mask.count_ones() != 2 { return true; }
+        let mut s = self.clone();
+        let Some(p) = s.pair_mut(mask) else { return true };
+        p.op = op;
+        s.bodies().iter().all(|b| b.count_ones() as usize <= W)
+    }
+    /// Set apart every pair whose operation (taken in order) would make a body wider than COMBINE_WIDTH (a setup
+    /// written by hand or by a later version). A stack of COMBINE_WIDTH layers or fewer is never touched.
+    pub fn keep_bodies_narrow(&mut self) {
+        if self.layers.len() <= W { return; }
+        let n = self.layers.len();
+        let pairs: Vec<Mask> = (0..n).flat_map(|a| (a + 1..n).map(move |b| mask_of(&[a, b]))).collect();
+        // (every pair apart first, then each given its operation back, in order, while that is allowed)
+        let ops: Vec<Op> = pairs.iter().map(|&m| self.pair(m).op).collect();
+        for &m in &pairs {
+            if let Some(p) = self.pair_mut(m) { p.op = Op::Apart; }
+        }
+        for (&m, &op) in pairs.iter().zip(&ops) {
+            if self.op_allowed(m, op) { if let Some(p) = self.pair_mut(m) { p.op = op; } }
+        }
+    }
+
+    /// The combining passes: the bodies in order of their lowest layer, packed into passes of at most
+    /// COMBINE_WIDTH layers, each pass its layers in order. Passes do not interact: the scene is the
+    /// nearest of them. Up to COMBINE_WIDTH layers there is one pass of every layer.
+    pub fn passes(&self) -> Vec<Vec<usize>> {
+        let mut out: Vec<Vec<usize>> = Vec::new();
+        for b in self.bodies() {
+            let m = members(b);
+            match out.last_mut() {
+                Some(p) if p.len() + m.len() <= W => p.extend(m),
+                _ => out.push(m),
+            }
+        }
+        for p in &mut out { p.sort_unstable(); }
+        out
+    }
+    /// The stack of one pass: those layers alone, in order, with their own combinations' options.
+    pub fn pass_stack(&self, layers: &[usize]) -> Stack {
+        let mut to = vec![None; self.layers.len()];
+        for (k, &i) in layers.iter().enumerate() { to[i] = Some(k); }
+        let mut s = self.clone();
+        s.remap(&to);
+        s
+    }
+    /// Each pass as the combining step is given it: its layers, its numbers (on the whole stack's stage),
+    /// and the channel of the bodies' volume each of its bodies goes to. A body keeps its own channel
+    /// while it is one of the first COMBINE_WIDTH; later bodies share the first body's (they wear its
+    /// material). `authored`: the stack whose bodies say the channels (the stack itself, or the one an
+    /// isolated view was made from).
+    pub fn pass_plan(&self, authored: &Stack) -> Vec<Pass> {
+        let global = authored.bodies();
+        let channel_of = |layer: usize| {
+            let g = global.iter().position(|b| b & (1 << layer) != 0).unwrap_or(0);
+            if g < W { g as u32 } else { 0 }
+        };
+        self.passes().into_iter().map(|layers| {
+            let own = self.pass_stack(&layers);
+            let mut combine = own.combine();
+            combine.box_k = self.box_now();
+            let mut chan = [u32::MAX; W];
+            for (k, b) in own.bodies().iter().enumerate().take(W) {
+                chan[k] = channel_of(layers[members(*b)[0]]);
+            }
+            Pass { layers, combine, chan }
+        }).collect()
+    }
+    /// How many bodies have a channel of their own in the bodies' volume (the rest share the first's).
+    pub fn body_channels(&self) -> usize {
+        self.bodies().len().min(W)
+    }
+    /// The combined distance of a stack of any number of layers, before the cut to the stage: each pass
+    /// combined as `Combine::eval` does, and the nearest taken. `d[i]`: layer i's own distance.
+    pub fn eval_passes(&self, d: &[f64]) -> f64 {
+        self.passes().iter().map(|p| {
+            let c = self.pass_stack(p).combine();
+            let mut v = [0.0; W];
+            for (k, &i) in p.iter().enumerate() { v[k] = d[i]; }
+            c.eval(&v)
+        }).fold(f64::MAX, f64::min)
     }
 
     /// The bodies, each as a mask of its layers, in order of their lowest layer: layers held together by
     /// booleans (any operation but "apart"), directly or through other layers. A layer that does not show
     /// still holds its body together (a hidden cutter belongs to what it cuts).
-    pub fn bodies(&self) -> Vec<u8> {
-        let n = self.layers.len().min(MAX_LAYERS);
-        let mut group: Vec<u8> = (0..n).map(|i| 1u8 << i).collect();
+    pub fn bodies(&self) -> Vec<Mask> {
+        let n = self.layers.len().min(MAX_SCENE_LAYERS);
+        let mut group: Vec<Mask> = (0..n).map(|i| 1 << i).collect();
         // (four layers at most: merging until nothing changes is quick enough)
         loop {
             let mut changed = false;
@@ -519,7 +705,7 @@ impl Stack {
             }
             if !changed { break; }
         }
-        let mut out: Vec<u8> = Vec::new();
+        let mut out: Vec<Mask> = Vec::new();
         for g in group {
             if !out.contains(&g) { out.push(g); }
         }
@@ -528,20 +714,23 @@ impl Stack {
 
     /// Everything the combining step needs, worked out from the options.
     pub fn combine(&self) -> Combine {
-        let n = self.layers.len().min(MAX_LAYERS);
+        let n = self.layers.len().min(W);
         let mut c = Combine {
-            n, inv: [[0.0; 12]; 4], scale: [1.0; 4], show: [false; 4], morph: [[0.0; 4]; 4], term: [[0.0; 4]; 4], gap: [[0.0; 4]; 4],
-            kc: [[0.0; 4]; 4], ku: [[0.0; 4]; 4], prof: [[3; 4]; 4], tfill: [0.0; 4], treach: [0.0; 4], qfill: 0.0, qreach: 0.0,
-            body: [0; 4], bodies: 1, box_k: self.box_now(),
+            occurrences: if self.has_world_modifiers() { self.world_plan().placements } else { Default::default() },
+            n, inv: [[0.0; 12]; W], scale: [1.0; W], show: [false; W], morph: [[0.0; W]; W], term: [[0.0; W]; W], gap: [[0.0; W]; W],
+            kc: [[0.0; W]; W], ku: [[0.0; W]; W], prof: [[3; W]; W], tfill: [0.0; W], treach: [0.0; W], qfill: 0.0, qreach: 0.0,
+            body: [0; W], bodies: 1, box_k: self.box_now(),
         };
         let bodies = self.bodies();
-        c.bodies = bodies.len().max(1);
+        // (past COMBINE_WIDTH layers this is the first COMBINE_WIDTH of them, for what reads a layer's
+        // placement or a body's first layer; the combining step itself then runs in passes)
+        c.bodies = bodies.len().clamp(1, W);
         for (k, mask) in bodies.iter().enumerate() {
-            for i in members(*mask) {
-                c.body[i] = k;
+            for i in members(*mask).into_iter().filter(|i| *i < W) {
+                c.body[i] = k.min(W - 1);
             }
         }
-        for i in 0..4 {
+        for i in 0..W {
             let l = self.layers.get(i).copied().unwrap_or_default();
             c.inv[i] = l.place.inverse();
             c.scale[i] = if l.place.size != 0.0 { l.place.size } else { 1.0 };
@@ -549,8 +738,8 @@ impl Stack {
             c.morph[i][i] = 1.0;
         }
         // how many layers each one morphs with, and towards which by how much
-        let mut partners = [0usize; 4];
-        let mut pull = [[0.0f64; 4]; 4];
+        let mut partners = [0usize; W];
+        let mut pull = [[0.0f64; W]; W];
         for a in 0..n {
             for b in a + 1..n {
                 let o = self.pair(mask_of(&[a, b]));
@@ -605,7 +794,7 @@ impl Stack {
             let j = self.junction(m);
             match m.count_ones() {
                 3 => {
-                    let out = (0..4).find(|i| m & (1 << i) == 0).unwrap_or(3);
+                    let out = (0..W).find(|i| m & (1 << i) == 0).unwrap_or(3);
                     c.tfill[out] = j.fill.clamp(-1.0, 1.0) * FILL_DEPTH * j.reach.max(0.0);
                     c.treach[out] = j.reach.max(0.0);
                 }
@@ -666,34 +855,55 @@ const TINY: f64 = 1e-6;
 /// The combining step's numbers, as the shader is given them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Combine {
+    pub occurrences: Vec<Vec<Placement>>,
     /// how many layers there are
     pub n: usize,
     /// world -> each layer's own space, three rows of four
-    pub inv: [[f64; 12]; 4],
+    pub inv: [[f64; 12]; W],
     /// each layer's size: distances read in its space are multiplied by it
-    pub scale: [f64; 4],
-    pub show: [bool; 4],
+    pub scale: [f64; W],
+    pub show: [bool; W],
     /// morph: b_i = sum over j of morph[i][j] d_j
-    pub morph: [[f64; 4]; 4],
+    pub morph: [[f64; W]; W],
     /// carve of layer i by layer j: +1 = j cuts i, -1 = i keeps only what j contains, 0 = neither
-    pub term: [[f64; 4]; 4],
+    pub term: [[f64; W]; W],
     /// the clearance of the cut of layer i by layer j
-    pub gap: [[f64; 4]; 4],
+    pub gap: [[f64; W]; W],
     /// seam radius between two layers' surfaces where one is carved by others, and where layers join
-    pub kc: [[f64; 4]; 4],
-    pub ku: [[f64; 4]; 4],
+    pub kc: [[f64; W]; W],
+    pub ku: [[f64; W]; W],
     /// each pair's profile, as its power
-    pub prof: [[u8; 4]; 4],
+    pub prof: [[u8; W]; W],
     /// a triple's fill (as a distance) and reach, kept under the layer it leaves out
-    pub tfill: [f64; 4],
-    pub treach: [f64; 4],
+    pub tfill: [f64; W],
+    pub treach: [f64; W],
     pub qfill: f64,
     pub qreach: f64,
     /// which body each layer belongs to, and how many bodies there are
-    pub body: [usize; 4],
+    pub body: [usize; W],
     pub bodies: usize,
     /// how many times larger than ever the stage is (`Stack::box_k`)
     pub box_k: f64,
+}
+
+/// One combining pass (`Stack::pass_plan`): at most COMBINE_WIDTH layers (their places in the stack), the
+/// numbers the shader is given for them, and for each of the pass's bodies the channel of the bodies'
+/// volume it is written to (u32::MAX: no such body).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pass {
+    pub layers: Vec<usize>,
+    pub combine: Combine,
+    pub chan: [u32; COMBINE_WIDTH],
+}
+
+/// Voxels per side of every layer's volume and of the scene's, the bytes they hold together, and whether
+/// the memory budget (`crate::budget`) held them below what was asked.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DetailPlan {
+    pub layers: Vec<u32>,
+    pub scene: u32,
+    pub bytes: u64,
+    pub lowered: bool,
 }
 
 /// What a body that does not exist reads everywhere (the most a volume stores).
@@ -723,14 +933,14 @@ impl Combine {
         [0, 1, 2].map(|r| m[r * 4] * p[0] + m[r * 4 + 1] * p[1] + m[r * 4 + 2] * p[2] + m[r * 4 + 3])
     }
 
-    fn u2(&self, k: &[[f64; 4]; 4], v: &[f64; 4], a: usize, b: usize) -> f64 {
+    fn u2(&self, k: &[[f64; W]; W], v: &[f64; W], a: usize, b: usize) -> f64 {
         v[a].min(v[b]) - dip(k[a][b], self.prof[a][b], (v[a] - v[b]).abs())
     }
 
     /// Three: each in turn is joined to the join of the other two, and the three results averaged. The
     /// one left out meets a seam that belongs partly to each of the two; its own seam with each is used
     /// in that share.
-    fn u3(&self, k: &[[f64; 4]; 4], v: &[f64; 4], ids: [usize; 3], sign: f64) -> f64 {
+    fn u3(&self, k: &[[f64; W]; W], v: &[f64; W], ids: [usize; 3], sign: f64) -> f64 {
         let [a, b, c] = ids;
         let kap = (SHARE_WIDTH * k[a][b].max(k[a][c]).max(k[b][c])).max(TINY);
         let mut t = [0.0; 3];
@@ -748,16 +958,16 @@ impl Combine {
     }
 
     /// Four: the same, one step up.
-    fn u4(&self, k: &[[f64; 4]; 4], v: &[f64; 4], sign: f64) -> f64 {
+    fn u4(&self, k: &[[f64; W]; W], v: &[f64; W], sign: f64) -> f64 {
         let mut kap = TINY;
-        for a in 0..4 {
+        for a in 0..W {
             for b in a + 1..4 {
                 kap = kap.max(SHARE_WIDTH * k[a][b]);
             }
         }
-        let mut terms = [0.0; 4];
-        for l in 0..4 {
-            let t: Vec<usize> = (0..4).filter(|i| *i != l).collect();
+        let mut terms = [0.0; W];
+        for l in 0..W {
+            let t: Vec<usize> = (0..W).filter(|i| *i != l).collect();
             let u = self.u3(k, v, [t[0], t[1], t[2]], sign);
             // how much of that seam belongs to each of the three: most to the nearest
             let mut w = [0.0; 3];
@@ -779,7 +989,7 @@ impl Combine {
     /// The smooth union of the values of the layers `ids` (one to four of them), with seam radii `k`.
     /// `sign`: +1 where a junction's fill lowers the result (a union), -1 where it raises it (the same
     /// arithmetic doing an intersection of negated distances).
-    pub fn union(&self, k: &[[f64; 4]; 4], v: &[f64; 4], ids: &[usize], sign: f64) -> f64 {
+    pub fn union(&self, k: &[[f64; W]; W], v: &[f64; W], ids: &[usize], sign: f64) -> f64 {
         match ids.len() {
             0 => EMPTY,
             1 => v[ids[0]],
@@ -790,8 +1000,8 @@ impl Combine {
     }
 
     /// The layers after morphing, from their distances at one point.
-    pub fn morphed(&self, d: &[f64; 4]) -> [f64; 4] {
-        let mut b = [0.0; 4];
+    pub fn morphed(&self, d: &[f64; W]) -> [f64; W] {
+        let mut b = [0.0; W];
         for i in 0..self.n {
             for j in 0..self.n {
                 b[i] += self.morph[i][j] * d[j];
@@ -801,9 +1011,9 @@ impl Combine {
     }
 
     /// Layer i (after morphing) once the others have cut and masked it.
-    pub fn carved(&self, b: &[f64; 4], i: usize) -> f64 {
+    pub fn carved(&self, b: &[f64; W], i: usize) -> f64 {
         // an intersection is the union of the negated distances, negated
-        let mut w = [0.0; 4];
+        let mut w = [0.0; W];
         let mut ids = vec![i];
         w[i] = -b[i];
         for j in 0..self.n {
@@ -820,13 +1030,13 @@ impl Combine {
     /// Each body's distance at a point where the layers' own distances (each already multiplied by its
     /// layer's size) are `d`: morph, carve, and the join of the body's layers that show. Before the cut
     /// to the stage. A body none of whose layers shows reads `EMPTY`; places beyond the last body, `ABSENT`.
-    pub fn eval_bodies(&self, d: &[f64; 4]) -> [f64; 4] {
+    pub fn eval_bodies(&self, d: &[f64; W]) -> [f64; W] {
         let b = self.morphed(d);
-        let mut c = [0.0; 4];
+        let mut c = [0.0; W];
         for i in 0..self.n {
             if self.show[i] { c[i] = self.carved(&b, i); }
         }
-        let mut out = [ABSENT; 4];
+        let mut out = [ABSENT; W];
         for (k, o) in out.iter_mut().enumerate().take(self.bodies) {
             let shown: Vec<usize> = (0..self.n).filter(|i| self.show[*i] && self.body[*i] == k).collect();
             *o = self.union(&self.ku, &c, &shown, 1.0);
@@ -835,13 +1045,13 @@ impl Combine {
     }
 
     /// The combined distance: the nearest of the bodies. Before the cut to the stage.
-    pub fn eval(&self, d: &[f64; 4]) -> f64 {
+    pub fn eval(&self, d: &[f64; W]) -> f64 {
         self.eval_bodies(d).iter().take(self.bodies).fold(f64::MAX, |m, v| m.min(*v))
     }
 
     /// Each body's distance at the point `p` of the world, cut to the stage and held in the range a
     /// volume stores: what the bodies volume holds.
-    pub fn eval_bodies_at(&self, d: &[f64; 4], p: [f64; 3]) -> [f64; 4] {
+    pub fn eval_bodies_at(&self, d: &[f64; W], p: [f64; 3]) -> [f64; W] {
         let mut out = self.eval_bodies(d);
         for o in out.iter_mut().take(self.bodies) {
             // (the stage grows with the layers: combine.wgsl cuts to STAGE_R x box_k, `stage.x`)
@@ -852,7 +1062,7 @@ impl Combine {
 
     /// The combined distance at the point `p` of the world, as the scene's volume holds it: the nearest
     /// of the bodies as the bodies volume holds them.
-    pub fn eval_at(&self, d: &[f64; 4], p: [f64; 3]) -> f64 {
+    pub fn eval_at(&self, d: &[f64; W], p: [f64; 3]) -> f64 {
         self.eval_bodies_at(d, p).iter().fold(f64::MAX, |m, v| m.min(*v))
     }
 
@@ -861,9 +1071,15 @@ impl Combine {
         (0..self.bodies).filter(|k| (0..self.n).any(|i| self.show[i] && self.body[i] == *k)).count()
     }
 
+    /// A visible non-primary body must retain its authored material, including
+    /// when its siblings are hidden by isolation or by the visibility controls.
+    pub fn needs_body_channels(&self) -> bool {
+        (0..self.n).any(|i| self.show[i] && self.body[i] != 0)
+    }
+
     /// How steep three joined values can be: 1, plus what sharing a seam between two different radii
     /// adds, plus what the triple's fill adds.
-    fn steep3(&self, k: &[[f64; 4]; 4], ids: [usize; 3]) -> f64 {
+    fn steep3(&self, k: &[[f64; W]; W], ids: [usize; 3]) -> f64 {
         let [a, b, c] = ids;
         let kmax = k[a][b].max(k[a][c]).max(k[b][c]);
         let mut l = 1.0;
@@ -876,16 +1092,16 @@ impl Combine {
         if self.tfill[out] != 0.0 && self.treach[out] > 0.0 { l += BUMP3 * self.tfill[out].abs() / self.treach[out]; }
         l
     }
-    fn steep4(&self, k: &[[f64; 4]; 4]) -> f64 {
+    fn steep4(&self, k: &[[f64; W]; W]) -> f64 {
         let mut kmax = 0.0f64;
-        for a in 0..4 {
+        for a in 0..W {
             for b in a + 1..4 {
                 kmax = kmax.max(k[a][b]);
             }
         }
         let mut l = 0.0;
-        for z in 0..4 {
-            let t: Vec<usize> = (0..4).filter(|i| *i != z).collect();
+        for z in 0..W {
+            let t: Vec<usize> = (0..W).filter(|i| *i != z).collect();
             let mut gap = 0.0f64;
             for (x, y) in [(t[0], t[1]), (t[0], t[2]), (t[1], t[2])] {
                 gap = gap.max(dip_gap(k[z][x], self.prof[z][x], k[z][y], self.prof[z][y]));
@@ -903,7 +1119,7 @@ impl Combine {
     /// for each (the change from one to the other has a slope of its own), and a junction's fill.
     /// (`core/tests/layers_maths.rs` looks for a case steeper than this allows, and finds none.)
     pub fn slope_bound(&self) -> f64 {
-        let group = |k: &[[f64; 4]; 4], ids: &[usize]| -> f64 {
+        let group = |k: &[[f64; W]; W], ids: &[usize]| -> f64 {
             match ids.len() {
                 3 => self.steep3(k, [ids[0], ids[1], ids[2]]),
                 4 => self.steep4(k),
@@ -938,7 +1154,7 @@ impl Combine {
             if self.morph[i][j] != 0.0 || self.morph[j][i] != 0.0 { r = r.max(MORPH_REACH); }
         }
         if self.n >= 3 {
-            for out in 0..4 {
+            for out in 0..W {
                 // the triple that leaves `out` out (with three layers: the fourth, which is not there)
                 if out != i && (out >= self.n || self.n == 4) && self.tfill[out] != 0.0 { r = r.max(1.5 * self.treach[out]); }
             }
@@ -950,14 +1166,14 @@ impl Combine {
     /// The uniform block: 48 vectors of four (see the struct in combine.wgsl). `res`: voxels per side of
     /// the volume written. `lim[i]`: how far from the centre layer i's volume holds values (its box, less
     /// half a voxel). `wide[i]`: layer i's wide volume, if it has one.
-    pub fn uniform(&self, res: u32, lim: [f64; 4], wide: [Option<WideUse>; 4]) -> [f32; UNIFORM_FLOATS] {
+    pub fn uniform(&self, res: u32, lim: [f64; W], wide: [Option<WideUse>; W]) -> [f32; UNIFORM_FLOATS] {
         let mut u = [0.0f32; UNIFORM_FLOATS];
-        let mut put = |at: usize, v: [f64; 4]| {
-            for i in 0..4 {
+        let mut put = |at: usize, v: [f64; W]| {
+            for i in 0..W {
                 u[at * 4 + i] = v[i] as f32;
             }
         };
-        for i in 0..4 {
+        for i in 0..W {
             for r in 0..3 {
                 let m = &self.inv[i];
                 put(i * 3 + r, [m[r * 4], m[r * 4 + 1], m[r * 4 + 2], m[r * 4 + 3]]);
@@ -974,8 +1190,10 @@ impl Combine {
         put(41, self.treach);
         put(42, [self.qfill, self.qreach, self.n as f64, res as f64]);
         put(43, [STAGE_R * self.box_k, STAGE_SOFT, HB * self.box_k, self.bodies as f64]);
-        for i in 0..4 {
-            if let Some(w) = wide[i] { put(44 + i, [w.from, w.to, w.res as f64, 0.0]); }
+        for i in 0..W {
+            let has_instances = self.occurrences.get(i).is_some_and(|v| !v.is_empty()) as u8 as f64;
+            let (from, to, n) = wide[i].map_or((0.,0.,0.), |w| (w.from,w.to,w.res as f64));
+            put(44 + i, [from,to,n,has_instances]);
         }
         u
     }
@@ -1026,7 +1244,9 @@ pub fn read_box(vol: &dyn Fn(usize, usize, usize) -> f64, res: usize, q: [f64; 3
 
 /// The same for a layer that has a wide volume as well: `wide` is that volume's voxels and how it is
 /// used. The wide volume is read more smoothly (a cubic B-spline through its samples): it is small, and
-/// what is read from it shapes seams.
+/// what is read from it shapes seams. Near the surface (within 18 voxels) the layer's own volume is read
+/// through the same B-spline, as the combining shader has done since close-up glass was smoothed: read
+/// linearly, every voxel's kink shows in a close-up's refraction.
 pub fn read_layer(vol: &dyn Fn(usize, usize, usize) -> f64, res: usize, wide: Option<(&dyn Fn(usize, usize, usize) -> f64, WideUse)>, q: [f64; 3]) -> f64 {
     let lim = HB - HB / res as f64;
     let c = q.map(|v| v.clamp(-lim, lim));
@@ -1045,6 +1265,7 @@ pub fn read_layer(vol: &dyn Fn(usize, usize, usize) -> f64, res: usize, wide: Op
             }
         }
     }
+    if d.abs() < 18.0 * HB / res as f64 { d = read_cubic(vol, res, c); }
     if let Some((wvol, w)) = wide {
         if d > w.from {
             let t = ((d - w.from) / (w.to - w.from)).clamp(0.0, 1.0);
@@ -1087,7 +1308,7 @@ pub fn read_cubic(vol: &dyn Fn(usize, usize, usize) -> f64, res: usize, q: [f64;
 
 use crate::presets::{Family, Kind, Preset};
 use crate::setup::ShapeSetup;
-use crate::state::{valid_res, Detail, Job, Knob, KnobRef, Parked, ShapeState, State, RES_DRAG};
+use crate::state::{valid_res, Detail, Job, Knob, KnobRef, Parked, ShapeState, State};
 
 /// A layer after the first, as a setup file holds it.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -1100,6 +1321,8 @@ pub struct LayerShape {
     /// its tree of parts, when it is a csg object (or a volume object made from one): each absent while unused
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub csg: Vec<crate::csg::Part>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub construction: Option<crate::construction::Construction>,
     #[serde(skip_serializing_if = "Placement::is_identity")]
     pub csg_place: Placement,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -1127,16 +1350,25 @@ enum KeyKind<'a> {
     /// a placement slider of this layer: its id
     Place(usize, &'a str),
     /// an option of this combination: its id
-    Combo(u8, &'a str),
+    Combo(Mask, &'a str),
+}
+
+/// A layer's own key: "L<n>/..." (a shape slider) or "L<n>." (a placement slider), n from 1 to
+/// MAX_SCENE_LAYERS: the layer's place, the separator and the rest.
+fn layer_key(key: &str) -> Option<(usize, u8, &str)> {
+    let digits = key.strip_prefix('L')?;
+    let len = digits.bytes().take_while(u8::is_ascii_digit).count();
+    let n: usize = digits[..len].parse().ok()?;
+    let sep = *digits.as_bytes().get(len)?;
+    ((1..=MAX_SCENE_LAYERS).contains(&n) && (sep == b'/' || sep == b'.') && !digits.starts_with('0'))
+        .then(|| (n - 1, sep, &digits[len + 1..]))
 }
 
 fn key_kind(key: &str) -> KeyKind<'_> {
     let b = key.as_bytes();
     if key.starts_with("P.") || key.starts_with("R.") { return KeyKind::Plain; }
-    if b.len() > 2 && b[0] == b'L' && (b'1'..=b'4').contains(&b[1]) {
-        let layer = (b[1] - b'1') as usize;
-        if b[2] == b'/' { return KeyKind::Shape(layer, &key[3..]); }
-        if b[2] == b'.' { return KeyKind::Place(layer, &key[3..]); }
+    if let Some((layer, sep, rest)) = layer_key(key) {
+        return if sep == b'/' { KeyKind::Shape(layer, rest) } else { KeyKind::Place(layer, rest) };
     }
     if b.first() == Some(&b'J') {
         if let Some((t, id)) = key[1..].split_once('.') {
@@ -1144,6 +1376,11 @@ fn key_kind(key: &str) -> KeyKind<'_> {
         }
     }
     if key.contains('/') { KeyKind::Shape(0, key) } else { KeyKind::Plain }
+}
+
+/// Voxels a side, rounded down to a multiple of 8 (at least 64): a detail lowered to fit the budget.
+fn floor_res(v: f64) -> u32 {
+    ((v.max(64.0) as u32) / 8 * 8).clamp(64, crate::state::RES_MAX)
 }
 
 impl State {
@@ -1182,18 +1419,19 @@ impl State {
     }
     /// A layer's name for the window: its shape's name, with its number when another layer has the same shape.
     pub fn layer_title(&self, layer: usize) -> String {
+        if let Some(name) = self.stack.names.get(&layer) { return name.clone(); }
         // (a model file of the user's goes by the file's own name)
         let name = self.shape_name(layer);
         let twice = (0..self.layer_count()).any(|j| j != layer && self.shape_name(j) == name);
         if twice { format!("{name} {}", layer + 1) } else { name }
     }
     /// A combination's name for the window: "Thomas + Gyroid".
-    pub fn combo_title(&self, mask: u8) -> String {
+    pub fn combo_title(&self, mask: Mask) -> String {
         members(mask).iter().map(|i| self.layer_title(*i)).collect::<Vec<_>>().join(" + ")
     }
     /// An operation's name for the window, with the pair's own names in it: "join", "Thomas cuts Gyroid",
     /// "Gyroid cuts Thomas", "overlap", "morph", "apart".
-    pub fn op_title(&self, mask: u8, op: Op) -> String {
+    pub fn op_title(&self, mask: Mask, op: Op) -> String {
         let m = members(mask);
         if m.len() != 2 { return op.id().to_string(); }
         match op {
@@ -1204,7 +1442,7 @@ impl State {
     }
     /// A combination's options in a few words, to show beside its name while it is folded away:
     /// "join · 0.12", "Thomas cuts Gyroid · 0.05", "morph · 30%", "apart", "fill +0.50".
-    pub fn combo_summary(&self, mask: u8) -> String {
+    pub fn combo_summary(&self, mask: Mask) -> String {
         if mask.count_ones() == 2 {
             let p = self.stack.pair(mask);
             match p.op {
@@ -1238,7 +1476,7 @@ impl State {
     }
     /// Are all the layers of this combination in one body? (A triple's or the quad's fill acts only then;
     /// a pair's layers are in one body unless they are kept apart and nothing else links them.)
-    pub fn one_body(&self, mask: u8) -> bool {
+    pub fn one_body(&self, mask: Mask) -> bool {
         self.stack.bodies().iter().any(|b| b & mask == mask)
     }
     /// The bead periods of every layer whose beads are travelling.
@@ -1265,11 +1503,12 @@ impl State {
     }
     /// Select a layer: the shape picker and the shape's sliders now act on it.
     pub fn select_layer(&mut self, layer: usize) {
+        self.selected_group = None;
         self.swap_to(layer);
     }
     /// The layers or the way they combine changed: the volume must be made again.
     fn layers_changed(&mut self) {
-        if !(self.playing && self.shape_moving()) { self.want = Some(Detail::Full); }
+        if !(self.playing && self.shape_moving()) { self.request(crate::build::BuildRequest::edit()); }
     }
     /// Add a layer and select it: a compact solid if the first layer is a tube and a tube if it is a
     /// solid, at a size that sits well inside the first, joined to every other layer with the default
@@ -1298,6 +1537,16 @@ impl State {
         if fam >= self.families.len() || preset >= self.families[fam].presets.len() { return None; }
         if self.playing { self.set_playing(false); }
         let i = self.stack.add()?;
+        let shapes = self.new_layer_shapes(fam, preset);
+        self.parked.push(Some(Parked { fam, shapes, csg: Default::default() }));
+        self.swap_to(i);
+        self.default_tracks();
+        self.material_owners_changed();
+        self.cut = true;
+        self.request(crate::build::BuildRequest::edit());
+        Some(i)
+    }
+    pub(crate) fn new_layer_shapes(&self, fam: usize, preset: usize) -> Vec<ShapeState> {
         // The new layer's shapes start as any do, at the detail the first layer has. In motion each
         // family keeps its own detail, unless the first layer's has been changed from its family's own:
         // then that choice goes for the new layer too.
@@ -1310,25 +1559,25 @@ impl State {
         }
         shapes[fam].preset = preset;
         shapes[fam].vals = self.families[fam].presets[preset].defaults();
-        self.parked.push(Some(Parked { fam, shapes, csg: Default::default() }));
-        self.swap_to(i);
-        self.default_tracks();
-        self.cut = true;
-        self.want = Some(Detail::Full);
-        Some(i)
+        shapes
+    }
+    pub(crate) fn preserve_rig_for_first_family(&mut self, next_family: usize) {
+        let current = self.rig_family_index();
+        self.rig_family = (current != next_family).then_some(current);
     }
     /// Take a layer away (the last one stays). Its tracks and its combinations' options go with it; the
     /// layers after it move up, taking theirs with them.
     pub fn remove_layer(&mut self, layer: usize) -> bool {
         let n = self.stack.len();
         if n < 2 || layer >= n { return false; }
+        if layer == 0 { self.preserve_rig_for_first_family(self.layer_fam(1)); }
         if self.stack.sel == layer { self.swap_to(if layer == 0 { 1 } else { layer - 1 }); }
         let to: Vec<Option<usize>> = (0..n).map(|j| if j == layer { None } else { Some(if j > layer { j - 1 } else { j }) }).collect();
         self.parked.remove(layer);
         self.stack.remove(layer);
         self.rekey_tracks(&to);
         self.cut = true;
-        self.want = Some(Detail::Full);
+        self.request(crate::build::BuildRequest::edit());
         true
     }
     /// Exchange two layers' places in the list. The picture does not change (unless one of them is the
@@ -1341,20 +1590,62 @@ impl State {
         self.stack.swap(a, b);
         self.rekey_tracks(&to);
         self.cut = true;
-        self.want = Some(Detail::Full);
+        self.request(crate::build::BuildRequest::edit());
     }
     /// Back to a single layer: the first.
     pub(crate) fn one_layer(&mut self) {
         self.swap_to(0);
         self.parked.truncate(1);
         self.stack = Stack::new();
+        self.edit_scope = Default::default();
+        self.selected_group = None;
+        self.world_modifier_target = None;
+        self.modifier_pivots.clear();
+        self.construction_pivots.clear();
         self.body_mats = Default::default();
     }
     /// Carry every track's key over to where its layer has gone (`to[i]`: the new place of the layer
     /// that was at i, or None if it was taken away).
-    fn rekey_tracks(&mut self, to: &[Option<usize>]) {
-        self.move_bodies(to);
+    pub(crate) fn rekey_tracks(&mut self, to: &[Option<usize>]) {
         let place = |i: usize| to.get(i).copied().flatten();
+        self.edit_scope.selection.retain_mut(|item| match item {
+            crate::groups::Item::Group(_) => true,
+            crate::groups::Item::Object(i) => match place(*i) {
+                Some(mapped) => { *i = mapped; true }, None => false,
+            },
+        });
+        // the object being edited follows its layer; deleted, its scope goes with it
+        let lost = match &mut self.edit_scope.inside {
+            Some(o) => match place(o.index) { Some(mapped) => { o.index = mapped; false } None => true },
+            None => false,
+        };
+        if lost {
+            let tree = &self.stack.hierarchy;
+            self.edit_scope.drop_object(|id| tree.as_ref().is_some_and(|h| h.group(id).is_some()));
+        }
+        self.world_modifier_target = match self.world_modifier_target {
+            Some(crate::groups::Item::Object(i)) => place(i).map(crate::groups::Item::Object),
+            Some(crate::groups::Item::Group(id)) if self.stack.hierarchy.as_ref().is_some_and(|h| h.group(id).is_some()) => Some(crate::groups::Item::Group(id)),
+            _ => None,
+        };
+        self.modifier_pivots = std::mem::take(&mut self.modifier_pivots)
+            .into_iter()
+            .filter_map(|((item, stage), pos)| {
+                let mapped = match item {
+                    crate::groups::Item::Object(i) => crate::groups::Item::Object(place(i)?),
+                    crate::groups::Item::Group(id) => {
+                        self.stack.hierarchy.as_ref()?.group(id)?;
+                        crate::groups::Item::Group(id)
+                    }
+                };
+                Some(((mapped, stage), pos))
+            })
+            .collect();
+        self.construction_pivots = std::mem::take(&mut self.construction_pivots)
+            .into_iter()
+            .filter_map(|((layer, key, stage), pos)| Some(((place(layer)?, key, stage), pos)))
+            .collect();
+        self.move_bodies(to);
         let old = std::mem::take(&mut self.tracks);
         for (key, mut tr) in old {
             let new = match key_kind(&key) {
@@ -1390,22 +1681,27 @@ impl State {
             self.layers_changed();
         }
     }
-    pub fn set_pair_op(&mut self, mask: u8, op: Op) {
+    /// Set a pair's operation. Refused (false) when it would join more than COMBINE_WIDTH layers in one body.
+    pub fn set_pair_op(&mut self, mask: Mask, op: Op) -> bool {
+        if !self.stack.op_allowed(mask, op) { return false; }
         if let Some(p) = self.stack.pair_mut(mask) {
             p.op = op;
+            self.material_owners_changed();
             self.layers_changed();
         }
+        true
     }
-    pub fn set_pair_profile(&mut self, mask: u8, profile: Profile) {
+    pub fn set_pair_profile(&mut self, mask: Mask, profile: Profile) {
         if let Some(p) = self.stack.pair_mut(mask) {
             p.profile = profile;
             self.layers_changed();
         }
     }
     /// A combination's options back to what they start as.
-    pub fn reset_combo(&mut self, mask: u8) {
+    pub fn reset_combo(&mut self, mask: Mask) {
         if let Some(p) = self.stack.pair_mut(mask) { *p = PairOpts::default(); }
         if let Some(j) = self.stack.junction_mut(mask) { *j = JunctionOpts::default(); }
+        self.material_owners_changed();
         self.layers_changed();
     }
 
@@ -1419,14 +1715,14 @@ impl State {
             .collect()
     }
     /// One numeric option of a combination as a slider, whether or not its operation uses it.
-    pub fn combo_knob(&self, mask: u8, o: Opt) -> Knob {
+    pub fn combo_knob(&self, mask: Mask, o: Opt) -> Knob {
         let s = o.slider();
         Knob { key: format!("J{}.{}", tag(mask), s.id), id: s.id.into(), label: s.label.into(), lo: s.lo, hi: s.hi, step: s.step, shape: true, wave: true, r: KnobRef::Combo(mask, o) }
     }
     /// The sliders of a combination that mean something as it stands: a pair's depend on its operation
     /// (a join has a radius, a cut a radius and a clearance, a morph an amount, layers kept apart none);
     /// a triple and the quad have a fill and a reach.
-    pub fn combo_knobs(&self, mask: u8) -> Vec<Knob> {
+    pub fn combo_knobs(&self, mask: Mask) -> Vec<Knob> {
         if mask.count_ones() == 2 {
             let op = self.stack.pair(mask).op;
             Opt::PAIR.into_iter().filter(|o| op.uses(*o)).map(|o| self.combo_knob(mask, o)).collect()
@@ -1452,7 +1748,7 @@ impl State {
     // ---- what the GPU side asks ------------------------------------------------------------------
     /// One layer, showing, where it is built: its own volume is the scene and nothing is combined.
     pub fn plain(&self) -> bool {
-        self.stack.plain()
+        self.stack.plain() && (self.edit_scope.object().is_some() || !self.stack.hierarchy.as_ref().is_some_and(|h| h.changes_geometry()) || self.single_group_tree_mods().is_some())
     }
     /// Everything a layer's volume depends on, as text: two builds with the same key give the same
     /// volume (at the same size and care), so a layer whose key has not changed need not be built again.
@@ -1471,16 +1767,136 @@ impl State {
         }
         key
     }
-    /// Voxels per side a layer is built at, this carefully.
+    /// Voxels per side a layer is built at, this carefully: as asked within the memory budget
+    /// (`requested_res`), and past COMBINE_WIDTH layers no finer than the scene's volume is where the
+    /// layer is placed (`detail_plan`).
     pub fn layer_res(&self, layer: usize, mode: Detail) -> u32 {
+        self.detail_plan(mode).layers.get(layer).copied().unwrap_or_else(|| self.requested_res(layer, mode))
+    }
+    /// Voxels per side a layer's own volume (and its tree's) is built at, this carefully: what `layer_job`
+    /// builds with no size given (`requested_res`).
+    pub fn layer_build_res(&self, layer: usize, mode: Detail) -> u32 {
+        self.requested_res(layer, mode)
+    }
+    /// `layer_build_res` of every layer, the budget worked out once.
+    pub fn layer_build_sizes(&self, mode: Detail) -> Vec<u32> {
+        let scene = self.memory_scene();
+        let scale = self.budget_scale_of(mode, &scene);
+        (0..self.layer_count()).map(|i| self.requested_res_of(i, mode, &scene, scale)).collect()
+    }
+    /// What each volume is built at and what they hold together: every layer as asked, within the budget
+    /// (`requested_res`, `budget_scale`). (Past COMBINE_WIDTH layers an object's own volume could be made
+    /// as fine as the scene's volume is where it is placed, a 27th of the memory at size 0.3; tried and
+    /// left, since the picture softens: plans/many_objects.md step 3b.) `lowered`: the budget held the
+    /// detail below what was asked (`memory_note` says how).
+    pub fn detail_plan(&self, mode: Detail) -> DetailPlan {
+        let n = self.layer_count();
+        let budget = self.memory_scene();
+        let scale = self.budget_scale_of(mode, &budget);
+        let layers: Vec<u32> = (0..n).map(|i| self.requested_res_of(i, mode, &budget, scale)).collect();
+        let scene = self.scene_res_of(&layers, mode, &budget, scale);
+        let plain = self.plain();
+        let channels = u64::from(budget.body_channels);
+        let vox = |r: u32| (r as u64).pow(3) * 2;
+        // (as built: an object's own volume unless its tree stands for it, its tree's volume)
+        let own = |i: usize| if plain || !self.layer_volume_unread(i) { vox(layers[i]) } else { 0 };
+        let tree = |i: usize| if !plain && self.has_tree(i) { vox(layers[i]) } else { 0 };
+        let bytes = (0..n).map(|i| own(i) + tree(i)).sum::<u64>() + if plain { 0 } else { vox(scene) * (1 + channels) };
+        // (as `memory_note` says it, without working the budget out again)
+        let lowered = scale < 1.0 || (0..n).filter_map(|i| self.layer_shape(i)).map(|st| mode.asked_res(st)).max().is_some_and(|a| budget.fit(a) < a);
+        DetailPlan { bytes, lowered, layers, scene }
+    }
+    /// A layer's placed size (how much of the stage its own volume spans).
+    fn layer_size(&self, i: usize) -> f64 {
+        self.stack.layers.get(i).map_or(1.0, |l| l.place.size.abs())
+    }
+    /// Voxels per side a layer is asked to be built at, this carefully, within the budget.
+    pub fn requested_res(&self, layer: usize, mode: Detail) -> u32 {
+        let scene = self.memory_scene();
+        self.requested_res_of(layer, mode, &scene, self.budget_scale_of(mode, &scene))
+    }
+    /// `requested_res` with the budget's model of the scene and its scale worked out already.
+    fn requested_res_of(&self, layer: usize, mode: Detail, scene: &crate::budget::Scene, scale: f64) -> u32 {
         let Some(st) = self.layer_shape(layer) else { return crate::state::RES_FULL };
-        let res = valid_res(match mode {
-            Detail::Anim => st.anim_res.min(st.res),
-            Detail::Quick => RES_DRAG.min(st.res),
-            _ => st.res,
-        } as f64);
-        // (the surface studio works on volumes up to its own largest)
-        if st.sculpt.is_empty() { res } else { res.min(crate::sculpt::RES_MAX) }
+        // (and every volume within what the card is given: crate::budget)
+        let asked = mode.res(st, self.anim_cap);
+        let res = scene.fit(asked);
+        if scale < 1.0 { res.min(floor_res(asked as f64 * scale)) } else { res }
+    }
+    /// The voxels a side each layer and the combined volume are asked for, this carefully, before the budget.
+    fn asked_sizes(&self, mode: Detail) -> (Vec<u32>, u32) {
+        let asked: Vec<u32> = (0..self.layer_count()).map(|i| self.layer_shape(i).map_or(crate::state::RES_FULL, |st| mode.res(st, self.anim_cap))).collect();
+        let top = asked.iter().copied().max().unwrap_or(crate::state::RES_FULL);
+        let k = self.stack.box_now();
+        let scene = if k == 1.0 { top } else { valid_res((top as f64 * k).min(mode.box_cap().max(top as f64))) };
+        (asked, scene)
+    }
+    /// The share of the asked detail (a side) a scene of several objects is built at, so that what its settled
+    /// build holds stays within `budget::TOTAL_MAX` less `budget::HEADROOM` (kept for the draft-size volumes
+    /// kept beside them and the picture's own targets): 1 when it fits as asked. Counted as built: each
+    /// object's own volume (not when its tree stands for it: `layer_volume_unread`), each object's tree's at
+    /// the object's size, the combined volume and the bodies' at the scene's. (`budget::Scene::fit` counts
+    /// what it always did besides: the studio's and the world fields' volumes, the largest single one.)
+    pub fn budget_scale(&self, mode: Detail) -> f64 {
+        self.budget_scale_of(mode, &self.memory_scene())
+    }
+    fn budget_scale_of(&self, mode: Detail, model: &crate::budget::Scene) -> f64 {
+        if self.plain() { return 1.0; }
+        let (asked, scene) = self.asked_sizes(mode);
+        let vox = |r: u32| 2.0 * f64::from(r).powi(3);
+        let mut bytes = 0.0;
+        for (i, &r) in asked.iter().enumerate() {
+            if !self.layer_volume_unread(i) { bytes += vox(r); }
+            if self.has_tree(i) { bytes += vox(r); }
+        }
+        bytes += vox(scene) * (1.0 + f64::from(model.body_channels));
+        let room = crate::budget::TOTAL_MAX as f64 * (1.0 - crate::budget::HEADROOM);
+        if bytes <= room { 1.0 } else { (room / bytes).cbrt() }
+    }
+    /// Note how far each object's shape reaches from its origin, for the world modifiers' bounds
+    /// (`Stack::world_source_reach`): within `world_mods::FIT_REACH` when it has no modifiers of its own
+    /// (every shape is fitted so); unknown otherwise. Called before the stage's size is worked out.
+    pub fn fit_world_sources(&mut self) {
+        for i in 0..self.layer_count().min(MAX_LAYERS) {
+            let own = self.layer_shape(i).is_none_or(|s| s.mods.any_live());
+            self.stack.world_source_reach[i] = (!own).then_some(crate::world_mods::FIT_REACH);
+        }
+    }
+    /// The volumes the scene is built with, for the memory budget (`crate::budget`).
+    pub fn memory_scene(&self) -> crate::budget::Scene {
+        let n = self.layer_count();
+        let shown = self.stack.combine().bodies_shown();
+        let bodies = if shown > 1 && self.body_materials().is_some() { self.stack.bodies().len() } else { 1 };
+        let studio_layers = (0..n).filter(|&i| self.layer_shape(i).is_some_and(|s| s.mods.any_live())).count();
+        let world_fields = if self.stack.has_world_modifiers() {
+            let plan = self.stack.world_plan();
+            (0..n).filter(|&i| plan.projects_source(i, self.stack.world_source_bounds.get(i).copied().flatten().unwrap_or_else(crate::mods::whole_box))).count()
+        } else { 0 };
+        // (past COMBINE_WIDTH a layer is built at its placed size times the scene's detail: it counts for
+        // that share of a full volume)
+        let k = self.stack.box_now();
+        let layers = if n > COMBINE_WIDTH {
+            ((0..n).map(|i| (self.layer_size(i) / k).min(1.0).powi(3)).sum::<f64>().ceil() as usize).max(1)
+        } else { n };
+        crate::budget::Scene {
+            layers,
+            combined: !self.plain(),
+            body_channels: if self.plain() { 0 } else { match bodies { 0 | 1 => 0, 2 => 2, _ => 4 } },
+            studio_layers,
+            world_fields,
+            parts_volumes: 0,
+        }
+    }
+    /// What the memory budget lowered for a build this careful, if anything (for the window to say).
+    pub fn memory_note(&self, mode: Detail) -> Option<String> {
+        let scene = self.memory_scene();
+        let asked = (0..self.layer_count()).filter_map(|i| self.layer_shape(i)).map(|st| mode.asked_res(st)).max()?;
+        let scale = self.budget_scale(mode);
+        if scale < 1.0 {
+            let held = scene.fit(asked).min(floor_res(asked as f64 * scale));
+            return Some(format!("detail held to {held}³ (asked {asked}³): this scene's volumes, its objects' trees among them, would take more than the graphics card is given ({} GB in all)", crate::budget::TOTAL_MAX / 1_000_000_000));
+        }
+        crate::budget::note(asked, scene.fit(asked), &scene)
     }
     /// Set the detail of every layer at once (each layer has its own, as each shape always had; the
     /// combined volume is as fine as the finest): voxels per side when still.
@@ -1489,7 +1905,7 @@ impl State {
         for st in self.shapes.iter_mut().chain(self.parked.iter_mut().flatten().flat_map(|p| p.shapes.iter_mut())) {
             st.res = res;
         }
-        if !(self.playing && self.shape_moving()) { self.want = Some(Detail::Full); }
+        if !(self.playing && self.shape_moving()) { self.request(crate::build::BuildRequest::edit()); }
     }
     /// The same for the detail while a shape animates.
     pub fn set_anim_detail(&mut self, res: u32) {
@@ -1505,14 +1921,20 @@ impl State {
         // (the bodies' volume is made only while a body has a material of its own)
         volumes_bytes(res, self.layer_count(), if shown > 1 && self.body_materials().is_some() { self.stack.bodies().len() } else { 1 }, self.plain())
     }
-    /// Voxels per side of the combined volume: the finest of the layers'.
+    /// Voxels per side of the combined volume: the finest of the layers' as asked (within the budget:
+    /// `detail_plan`).
     pub fn scene_res(&self, mode: Detail) -> u32 {
-        let res = (0..self.layer_count()).map(|i| self.layer_res(i, mode)).max().unwrap_or(crate::state::RES_FULL);
+        self.detail_plan(mode).scene
+    }
+    fn scene_res_of(&self, req: &[u32], mode: Detail, model: &crate::budget::Scene, scale: f64) -> u32 {
+        let res = req.iter().copied().max().unwrap_or(crate::state::RES_FULL);
         // a grown stage at the same detail, as far as memory allows
         let k = self.stack.box_now();
         if k == 1.0 { return res; }
-        let cap = if matches!(mode, Detail::Full) { BOX_RES_FULL } else { BOX_RES_ANIM };
-        valid_res((res as f64 * k).min(cap.max(res as f64)))
+        let cap = mode.box_cap();
+        let fit = model.fit(valid_res((res as f64 * k).min(cap.max(res as f64))));
+        // (within the budget as a whole: `budget_scale`)
+        if scale < 1.0 { fit.min(floor_res(self.asked_sizes(mode).1 as f64 * scale)) } else { fit }
     }
     /// How many times larger than ever the stage is, as the volumes are built now: 1 unless layers are
     /// placed far out (`Stack::box_k`, `Stack::box_held`).
@@ -1525,11 +1947,40 @@ impl State {
     }
     /// What the GPU has to build for one layer's shape (see `shape_job`).
     pub fn layer_job(&mut self, layer: usize, mode: Detail, res_override: Option<u32>) -> Result<Job, String> {
+        // (at the size the budget allows: `layer_build_res`)
+        let res_override = res_override.or_else(|| Some(self.layer_build_res(layer, mode)));
         let was = self.stack.sel;
         self.swap_to(layer);
         let job = self.shape_job(mode, res_override);
         self.swap_to(was);
         job
+    }
+    /// The jobs of these layers, as `layer_job` makes them with no size given, each made ready to build
+    /// (`Job::prepare_formula`), worked out side by side: each reads and keeps only its own layer's shape.
+    pub fn layer_jobs(&mut self, layers: &[usize], mode: Detail) -> Vec<Result<Job, String>> {
+        use rayon::prelude::*;
+        let n = self.stack.len();
+        let phases: Vec<f64> = layers.iter().map(|&i| self.layer_shape(i).map_or(0.0, |st| self.cycles(st.bead_period))).collect();
+        let all = self.layer_build_sizes(mode);
+        let sizes: Vec<u32> = layers.iter().map(|&i| all.get(i).copied().unwrap_or(crate::state::RES_FULL)).collect();
+        let anim_cap = self.anim_cap;
+        // each layer's own shape state, by place (the selected one's is not parked)
+        let mut own: Vec<Option<(usize, &mut ShapeState)>> = (0..n).map(|_| None).collect();
+        for (i, p) in self.parked.iter_mut().enumerate().take(n) {
+            if let Some(p) = p.as_mut() {
+                let f = p.fam;
+                own[i] = Some((f, &mut p.shapes[f]));
+            }
+        }
+        if self.stack.sel < n { own[self.stack.sel] = Some((self.fam, &mut self.shapes[self.fam])); }
+        let work: Vec<_> = layers.iter().zip(phases).zip(sizes).map(|((&i, phase), res)| (i, own.get_mut(i).and_then(Option::take), phase, res)).collect();
+        let families = &self.families;
+        work.into_par_iter().map(|(i, own, phase, res)| {
+            let (fam, st) = own.ok_or_else(|| format!("layer {} has no shape", i + 1))?;
+            let mut job = State::shape_job_of(families, fam, st, phase, anim_cap, mode, Some(res))?;
+            job.prepare_formula(families)?;
+            Ok(job)
+        }).collect()
     }
     /// How the tracer marches through the scene: stride as a share of the distance read, strides tried
     /// outside and inside the glass, and how many further pieces of glass a ray leaving one may enter.
@@ -1555,7 +2006,8 @@ impl State {
                 }
             }
         }
-        let steep = self.stack.combine().slope_bound();
+        // (in passes: the steepest pass; up to COMBINE_WIDTH layers the one combination as always)
+        let steep = if self.stack.len() > W { self.stack.pass_plan(&self.stack).iter().map(|p| p.combine.slope_bound()).fold(1.0, f64::max) } else { self.stack.combine().slope_bound() };
         // (in twentieths, so that a slider that changes the bound a little does not ask for a new tracer each time)
         let step = (((m.0 / steep) * 20.0 + 1e-9).floor() / 20.0).max(0.3);
         let more = m.0 / step;
@@ -1614,10 +2066,8 @@ impl State {
             return Some(ok);
         }
         let b = name.as_bytes();
-        if b.len() > 3 && b[0] == b'L' && (b'1'..=b'4').contains(&b[1]) && b[2] == b'.' {
-            let layer = (b[1] - b'1') as usize;
+        if let Some((layer, b'.', rest)) = layer_key(name).filter(|k| !k.2.is_empty()) {
             if layer >= self.layer_count() { return Some(false); }
-            let rest = &name[3..];
             if let Some(c) = PLACE.iter().position(|s| s.id == rest) {
                 let Some(v) = num else { return Some(false) };
                 self.stack.set_place(layer, c, v);
@@ -1650,9 +2100,10 @@ impl State {
                         if m.len() != 2 { return None; }
                         if (x, y) == (m[0] + 1, m[1] + 1) { Some(Op::ACutsB) } else if (x, y) == (m[1] + 1, m[0] + 1) { Some(Op::BCutsA) } else { None }
                     });
-                    match (op, self.stack.pair_mut(mask)) {
-                        (Some(op), Some(p)) => { p.op = op; true }
-                        _ => false,
+                    // (refused where it would make a body wider than COMBINE_WIDTH)
+                    match op.filter(|op| self.stack.op_allowed(mask, *op)).and_then(|op| Some((op, self.stack.pair_mut(mask)?))) {
+                        Some((op, p)) => { p.op = op; true }
+                        None => false,
                     }
                 }
                 "profile" => match (Profile::from_id(value), self.stack.pair_mut(mask)) {
@@ -1664,7 +2115,10 @@ impl State {
                     _ => false,
                 },
             };
-            if ok { self.layers_changed(); }
+            if ok {
+                if rest == "op" { self.material_owners_changed(); }
+                self.layers_changed();
+            }
             return Some(ok);
         }
         None
@@ -1679,7 +2133,8 @@ impl State {
             family: f.id.to_string(),
             preset: p.id.to_string(),
             values: p.params.iter().zip(&st.vals).map(|(d, v)| (d.id.to_string(), *v)).collect(),
-            shape: ShapeSetup { thick: st.thick, len: st.len, melt: st.melt, puff: st.puff, travel: st.travel, beads: st.beads, bead_period: st.bead_period, res: st.res, anim_res: st.anim_res, model: st.model.clone(), trace: st.trace, sculpt: (!st.sculpt.is_empty() || !st.sculpt.layers.is_empty()).then(|| st.sculpt.clone()) },
+            shape: ShapeSetup { thick: st.thick, len: st.len, melt: st.melt, puff: st.puff, travel: st.travel, beads: st.beads, bead_period: st.bead_period, res: st.res, anim_res: st.anim_res, model: st.model.clone(), trace: st.trace, sculpt: None, mods: (!st.mods.is_empty()).then(|| st.mods.clone()), strokes: st.strokes },
+            construction: self.layer_csg(layer).construction.clone(),
             csg: self.layer_csg(layer).parts.clone(),
             csg_place: self.layer_csg(layer).place,
             csg_coarse: self.layer_csg(layer).coarse,
@@ -1689,7 +2144,9 @@ impl State {
     /// What a setup holds about the layers, beyond the first shape. None for one plain layer, so that a
     /// setup of a single shape is the file it always was.
     pub fn layers_setup(&self) -> Option<LayersSetup> {
-        if self.plain() { return None; }
+        if self.plain() && self.stack.hierarchy.is_none() && self.stack.names.is_empty()
+            && self.stack.world_mods.values().all(|m| m.is_empty()) && zero_origin(&self.stack.layers[0].local_origin)
+            && self.stack.layers[0].arrangement_anchor.is_none() { return None; }
         Some(LayersSetup { stack: self.stack.to_setup(), more: (1..self.layer_count()).map(|i| self.layer_shape_setup(i)).collect() })
     }
     /// Can these layers be put up? Says why not, changing nothing.
@@ -1723,7 +2180,8 @@ impl State {
         st.anim_res = valid_res(sh.anim_res as f64);
         st.model = sh.model.clone();
         st.trace = sh.trace;
-        st.sculpt = sh.sculpt.clone().unwrap_or_default();
+        st.mods = sh.mods_or_lab();
+        st.strokes = sh.strokes;
     }
     /// Put a setup's layers up on top of its first shape (which is already up, alone). Checked beforehand.
     pub(crate) fn apply_layers_setup(&mut self, l: &LayersSetup) {
@@ -1732,7 +2190,7 @@ impl State {
             let Some(preset) = self.families[fam].presets.iter().position(|p| p.id == m.preset) else { continue };
             if self.add_layer_of(fam, preset).is_some() {
                 self.apply_shape_setup(&m.values, &m.shape);
-                self.csg = crate::csg::Csg { parts: m.csg.iter().take(crate::csg::MAX_PARTS).cloned().collect(), place: m.csg_place, coarse: m.csg_coarse, baked: m.csg_baked, ..Default::default() };
+                self.csg = crate::csg::Csg { construction: m.construction.clone(), parts: m.csg.iter().take(crate::csg::MAX_PARTS).cloned().collect(), place: m.csg_place, coarse: m.csg_coarse, baked: m.csg_baked, ..Default::default() };
             }
         }
         let mut st = Stack::from_setup(&l.stack);
@@ -1754,7 +2212,9 @@ mod tests {
         assert_eq!(tag(0b1101), "134");
         assert_eq!(parse_tag("134"), Some(0b1101));
         assert_eq!(parse_tag("1234"), Some(0b1111));
-        for bad in ["", "1", "21", "11", "15", "1x"] {
+        // (objects past the fourth are numbered too: up to MAX_SCENE_LAYERS)
+        assert_eq!(parse_tag("15"), Some(0b10001));
+        for bad in ["", "1", "21", "11", "10", "1x", "1,17"] {
             assert_eq!(parse_tag(bad), None, "{bad}");
         }
     }
@@ -1769,6 +2229,8 @@ mod tests {
         assert_eq!(s.combos().iter().map(|m| tag(*m)).collect::<Vec<_>>(), ["12", "13", "23", "123"]);
         s.add();
         assert_eq!(s.combos().len(), 11);
+        // (past four the stack keeps taking objects, up to MAX_LAYERS)
+        for n in 4..MAX_LAYERS { assert_eq!(s.add(), Some(n)); }
         assert_eq!(s.add(), None);
         assert!(!s.plain());
     }

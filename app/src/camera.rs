@@ -13,6 +13,7 @@ use gf_core::camera::{Camera, BOUND};
 use gf_core::settings::Settings;
 
 use crate::gpu::*;
+use crate::weave::Woven;
 
 /// The lens's arithmetic as the shaders have it.
 pub const LENS_WGSL: &str = include_str!("shaders/camera.wgsl");
@@ -63,14 +64,18 @@ pub fn tracer(template: &str) -> String {
 /// another lens that is the wrong pixel, or (orthographic: every ray has the same direction) no pixel
 /// at all.
 const PIXEL_FROM_RAY: &str = "  let uv = rd0.xy / (-rd0.z * u.tan_fov) - u.shift;\n";
+const STAGE_GI_PIXEL_FROM_RAY: &str = "  let px = floor((rd.xy / max(abs(rd.z) * max(u.tan_fov, 1e-3), 1e-4) - u.shift) * (0.5 * u.res.y) + 0.5 * u.res);\n";
 
 /// The last touch to a tracer built for any lens, once every part of it is filled in. Where a part
 /// works a pixel back from a ray (see above), the first ray leaves a note of where on the picture it
 /// started (`lensAt`: across and up from the picture's middle, in half-heights) and that part reads the
 /// note instead. A tracer with no such part gets no note: nothing more for it to carry.
 pub fn finish(src: String) -> String {
-    if src.contains(PIXEL_FROM_RAY) {
-        let s = src.replace(PIXEL_FROM_RAY, "  let uv = lensAt;\n").replace("{{LENS_AT}}", "lensAt = (2.0 * fc - u.res) / u.res.y;\n  ");
+    if src.contains(PIXEL_FROM_RAY) || src.contains(STAGE_GI_PIXEL_FROM_RAY) {
+        let s = src
+            .woven("camera.pixel_from_ray", PIXEL_FROM_RAY, "  let uv = lensAt;\n")
+            .woven("camera.stage_gi_pixel", STAGE_GI_PIXEL_FROM_RAY, "  let px = floor(lensAt * (0.5 * u.res.y) + 0.5 * u.res);\n")
+            .replace("{{LENS_AT}}", "lensAt = (2.0 * fc - u.res) / u.res.y;\n  ");
         format!("{s}\n// where on the picture the ray being followed started (see sampleAt)\nvar<private> lensAt: vec2f;\n")
     } else {
         src.replace("{{LENS_AT}}", "")
@@ -127,7 +132,115 @@ pub fn accum(src: &str) -> String {
       at = select(vec2f(-1.0), ((f.xy - a.shift_p) * a.res.y + a.res) * 0.5, f.z > 0.5);
     }
 ");
+    let s = swap(&s,
+        "      let corner = fc + vec2f(f32(k & 1), f32(k >> 1)) - 0.5;
+      let uvk = (2.0 * corner - a.res) / a.res.y + a.shift;
+      let dn = dot(n, normalize(vec3f(uvk * a.cam.y, -1.0)));
+      let t = select(-1.0, drop / dn, dn < -1e-5);       // (a level or rising ray meets no floor)
+",
+        "      let corner = fc + vec2f(f32(k & 1), f32(k >> 1)) - 0.5;
+      let uvk = (2.0 * corner - a.res) / a.res.y + a.shift;
+      var ro_k: vec3f;
+      var dir_k: vec3f;
+      var t = -1.0;
+      if (camRay(uvk, a.lens, &ro_k, &dir_k)) {
+        let dn = dot(n, dir_k);
+        if (dn < -1e-5) { t = (a.floor.y - dot(n, ro_k + vec3f(a.eye.xy, 0.0))) / dn; }
+      }
+");
+    let s = swap(&s,
+        "      let uv = (2.0 * fc - a.res) / a.res.y + a.shift;
+      let dir = normalize(vec3f(uv * a.cam.y, -1.0));
+      let dn = dot(n, dir);
+      let tf = select(-1.0, drop / dn, dn < -1e-5);
+      if (tf > 0.0) {
+        let p = eye + dir * tf;
+        var q = p.x * a.room0.xyz + p.y * a.room1.xyz + p.z * a.room2.xyz;    // what the camera sees -> the room
+        q.y = a.floor.z;                                                      // the same spot, at the height the floor had then
+        let v = vec3f(dot(a.roomp0.xyz, q), dot(a.roomp1.xyz, q), dot(a.roomp2.xyz, q)) - vec3f(a.eye.zw, a.cam_p.x);
+        at = select(vec2f(-1.0), ((v.xy / (-v.z * a.cam_p.y) - a.shift_p) * a.res.y + a.res) * 0.5, v.z < -1e-4);
+        if (roughFloor) { nearest = length(v); }
+      }
+",
+        "      let uv = (2.0 * fc - a.res) / a.res.y + a.shift;
+      var ro: vec3f;
+      var dir: vec3f;
+      if (camRay(uv, a.lens, &ro, &dir)) {
+        let roEye = ro + vec3f(a.eye.xy, 0.0);
+        let dn = dot(n, dir);
+        let tf = select(-1.0, (a.floor.y - dot(n, roEye)) / dn, dn < -1e-5);
+        if (tf > 0.0) {
+          let p = roEye + dir * tf;
+          var q = p.x * a.room0.xyz + p.y * a.room1.xyz + p.z * a.room2.xyz;    // what the camera sees -> the room
+          q.y = a.floor.z;                                                      // the same spot, at the height the floor had then
+          let v = vec3f(dot(a.roomp0.xyz, q), dot(a.roomp1.xyz, q), dot(a.roomp2.xyz, q)) - vec3f(a.eye.zw, 0.0);
+          let f = camFilm(v, a.lens_p);
+          at = select(vec2f(-1.0), ((f.xy - a.shift_p) * a.res.y + a.res) * 0.5, f.z > 0.5);
+          if (roughFloor) { nearest = camAlong(v, a.lens_p); }
+        }
+      } else {
+        at = vec2f(-1.0);
+      }
+");
+    let dn_ray_plain = "  let rd = normalize(vec3f(uv * dn.tan_fov, -1.0));\n  *rdOut = rd;\n  return rd * t;\n";
+    let dn_ray_lens = "  var ro = vec3f(0.0, 0.0, a.lens.a.z);\n  var rd = vec3f(0.0, 0.0, -1.0);\n  _ = camRay(uv, a.lens, &ro, &rd);\n  *rdOut = rd;\n  return (ro - vec3f(0.0, 0.0, a.lens.a.z)) + rd * t;\n";
+    let s = if s.contains(dn_ray_plain) { swap(&s, dn_ray_plain, dn_ray_lens) } else { s };
     format!("{s}{LENS_WGSL}")
+}
+
+/// The denoiser's spatial filter (`denoise.wgsl`), reconstructing 3D surface positions, normals and
+/// tangent-plane footprints through whatever lens is on (`da.lens` from `accum_u`).
+pub fn denoise(src: &str) -> String {
+    let clean = src.replace("\r\n", "\n");
+    let s = swap(&clean,
+        "fn place(c: vec2i, t: f32) -> vec3f {
+  let fc = vec2f(f32(c.x) + 0.5, dn.res.y - f32(c.y) - 0.5);
+  let o = fract(vec2f(ign(fc + 19.19), ign(fc.yx + 47.3)) + dn.jitter) - 0.5;
+  let uv = (2.0 * (fc + o) - dn.res) / dn.res.y + dn.shift;
+  return normalize(vec3f(uv * dn.tan_fov, -1.0)) * t;
+}
+
+// How much a neighbour q (its guide gq) is on the same surface as the pixel p (guide g): it must face the
+// same way, and lie near p's tangent plane, measured against the size of a pixel there times how far away
+// the neighbour is in pixels (so a gently curved surface passes at any reach, a step does not).
+fn sameSurface(c: vec2i, g: vec4f, q: vec2i, gq: vec4f) -> f32 {
+  if (gq.w <= 0.0) { return 0.0; }
+  let wn = pow(max(dot(g.xyz, gq.xyz), 0.0), dn.sigma_n);
+  let pc = place(c, g.w);
+  let off = place(q, gq.w) - pc;
+  // (a pixel's width on the surface: wider where the surface is seen edge on)
+  let foot = g.w * 2.0 * dn.tan_fov / dn.res.y / max(abs(dot(g.xyz, normalize(pc))), 0.1);
+  let reach = length(vec2f(q - c));
+  let wz = exp(-abs(dot(g.xyz, off)) / (dn.sigma_z * foot * max(reach, 1.0) + 1e-6));
+  return wn * wz;
+}",
+        "fn placeRay(c: vec2i, t: f32, rdOut: ptr<function, vec3f>) -> vec3f {
+  let fc = vec2f(f32(c.x) + 0.5, dn.res.y - f32(c.y) - 0.5);
+  let o = fract(vec2f(ign(fc + 19.19), ign(fc.yx + 47.3)) + dn.jitter) - 0.5;
+  let uv = (2.0 * (fc + o) - dn.res) / dn.res.y + dn.shift;
+  var ro = vec3f(0.0, 0.0, da.lens.a.z);
+  var rd = vec3f(0.0, 0.0, -1.0);
+  _ = camRay(uv, da.lens, &ro, &rd);
+  *rdOut = rd;
+  return (ro - vec3f(0.0, 0.0, da.lens.a.z)) + rd * t;
+}
+fn place(c: vec2i, t: f32) -> vec3f {
+  var rd: vec3f;
+  return placeRay(c, t, &rd);
+}
+
+fn sameSurface(c: vec2i, g: vec4f, q: vec2i, gq: vec4f) -> f32 {
+  if (gq.w <= 0.0) { return 0.0; }
+  let wn = pow(max(dot(g.xyz, gq.xyz), 0.0), dn.sigma_n);
+  var rdc = vec3f(0.0, 0.0, -1.0);
+  let pc = placeRay(c, g.w, &rdc);
+  let off = place(q, gq.w) - pc;
+  let foot = (da.lens.c.x * g.w + da.lens.c.y) * da.lens.b.w / dn.res.y / max(abs(dot(g.xyz, rdc)), 0.1);
+  let reach = length(vec2f(q - c));
+  let wz = exp(-abs(dot(g.xyz, off)) / (dn.sigma_z * foot * max(reach, 1.0) + 1e-6));
+  return wn * wz;
+}");
+    format!("{s}\nstruct DnA {{ head: array<vec4f, 24>, lens: Cam, lens_p: Cam }}\n@group(0) @binding(8) var<uniform> da: DnA;\n{LENS_WGSL}")
 }
 
 /// The focus stage with every pixel's blur worked out through any lens, and with highlights that may
@@ -288,23 +401,40 @@ pub struct FocusNumbers {
 /// Those numbers for a picture `w` x `h`. The most blur there can be is looked for where rays enter and
 /// leave the sphere the object fits in, over a spread of pixels.
 pub fn focus_numbers(c: &Camera, w: u32, h: u32) -> FocusNumbers {
+    focus_numbers_in(c, w, h, BOUND, 0.0)
+}
+
+/// The same for a scene whose objects fit in a ball of radius `bound` and whose floor comes as near as
+/// `floor` along the line of sight (`0.0` = no floor).
+pub fn focus_numbers_in(c: &Camera, w: u32, h: u32, bound: f64, floor: f64) -> FocusNumbers {
     let (hf, aspect) = (h as f64, w as f64 / h as f64);
+    let r2 = bound.max(BOUND).powi(2);
     let (mut near, mut far) = (0.0f64, 0.0f64);
     for j in 0..=8 {
         for i in 0..=12 {
             let uv = [(i as f64 / 6.0 - 1.0) * aspect, j as f64 / 4.0 - 1.0];
             let Some((o, d)) = c.ray(uv) else { continue };
             let b = o[0] * d[0] + o[1] * d[1] + o[2] * d[2];
-            let disc = b * b - (o[0] * o[0] + o[1] * o[1] + o[2] * o[2] - BOUND * BOUND);
-            if disc <= 0.0 { continue; }
-            let (t0, t1) = ((-b - disc.sqrt()).max(0.02), -b + disc.sqrt());
-            if let Some(r) = c.blur(uv, t0, hf) { near = near.max(-r); }
-            if let Some(r) = c.blur(uv, t1, hf) { far = far.max(r); }
+            let disc = b * b - (o[0] * o[0] + o[1] * o[1] + o[2] * o[2] - r2);
+            if disc > 0.0 {
+                let (t0, t1) = ((-b - disc.sqrt()).max(0.02), -b + disc.sqrt());
+                if let Some(r) = c.blur(uv, t0, hf) { near = near.max(-r); }
+                if let Some(r) = c.blur(uv, t1, hf) { far = far.max(r); }
+            }
+            if floor > 0.0 {
+                let tf = floor.max(0.02);
+                if let Some(r) = c.blur(uv, tf, hf) { near = near.max(-r); }
+                if c.proj == gf_core::camera::Projection::Orthographic {
+                    let tf_low = (tf - 2.0 * c.half_height()).max(0.02);
+                    if let Some(r) = c.blur(uv, tf_low, hf) { near = near.max(-r); }
+                }
+            }
         }
     }
     // (rays between the ones tried may find a little more)
     let more = |x: f64| if x > 0.0 { x * 1.1 + 1.0 } else { 0.0 };
     let bg = c.blur([-c.shift[0], -c.shift[1]], 1e9, hf).unwrap_or(0.0).max(0.0);
+    if floor > 0.0 { far = far.max(bg); }
     FocusNumbers { k: (c.lens / c.pixel(hf)) as f32, near: more(near) as f32, far: more(far) as f32, bg: bg as f32 }
 }
 
