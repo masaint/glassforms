@@ -268,9 +268,8 @@ mod imp {
             self.sized = None;
             self.live = false;
             let mode = if scale <= 0.34 { DlssPerfQualityMode::UltraPerformance } else { DlssPerfQualityMode::Performance };
-            let mut flags = DlssFeatureFlags::HighDynamicRange | DlssFeatureFlags::LowResolutionMotionVectors;
-            // (the app's pictures are scene-linear before the exposure: let NVIDIA work the exposure out, as Super Resolution here does)
-            if std::env::var_os("GLASSFORMS_DRAFT_NOAUTOEXP").is_none() { flags |= DlssFeatureFlags::AutoExposure; }
+            // (not AutoExposure, which dlss_wgpu refuses for Ray Reconstruction outright: `UnsupportedParameter`, "Not supported by ray reconstruction")
+            let flags = DlssFeatureFlags::HighDynamicRange | DlssFeatureFlags::LowResolutionMotionVectors;
             let ctx = DlssRayReconstruction::new([w, h], mode, flags, DlssRayReconstructionRoughnessMode::Unpacked, DlssRayReconstructionDepthMode::Linear, self.sdk.clone(), &gpu.device, &gpu.queue)
                 .map_err(|e| format!("could not make Ray Reconstruction for {w}x{h}: {e}"))?;
             // (dlss_wgpu 6.0.0 has no range for RR; `render_resolution` is the least it takes at this mode)
